@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<head>
+  <script src="/js/jquery-3.3.1.min.js"></script>
+  <script src="/js/popper.min.js"></script>
+  <link rel="stylesheet" href="/css/bootstrap.min.css"> 
+  <script src="/js/bootstrap.min.js"></script>
+  <meta charset='utf-8'>
+  <title>uniqnode</title>
+</head>
+<body>
+  <div class="container">
+    <h1>uniqnode</h1>
+    <div class="row">
+      <% nodes.forEach((item) => { %>
+      <div class="col-sm-12">
+        <div class="card">
+          <div class="card-body">
+            <h5 class="card-title"><%= item.id %></h5>
+          </div>
+        </div>
+      </div>
+      <% }); %>
+    </div>
+  </div>
+</body>

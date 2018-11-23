@@ -1,5 +1,6 @@
 import express = require('express');
 import * as MongoDb from 'mongodb';
+import {KnownNodeId} from '../knownids';
 require('dotenv').config();
 const assert = require('assert');
 const bodyParser = require('body-parser')
@@ -21,6 +22,7 @@ function generateId() {
 app.set('view engine', 'ejs');
 
 app.use(express.static('static'));
+app.use(express.static('out/client'));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({extended: true}));
 
@@ -40,8 +42,32 @@ app.get('/init', (req, res) => {
 })
 
 app.get('/uniqnode/v0/node/:id', (req, res) => {
-  res.json({
-    id: req.params.id,
+  nodes.findOne({id: req.params.id}).then((result) => {
+    console.log(result);
+    res.json({
+      id: result.id,
+      content_type: result.content_type,
+      content: result.content
+    });
+  });
+})
+
+app.post('/uniqnode/v0/node', (req, res) => {
+  const insertData = {
+    id: generateId(),
+    content_type: req.body.content_type,
+    content: req.body.content
+  };
+  nodes.insertOne(insertData, (db_err, db_res) => {
+    if (db_err) {
+      res.status(500).json({err: db_err}).end();
+    } else {
+      res.json({
+        id: insertData.id,
+        content_type: insertData.content_type,
+        content: insertData.content
+      });
+    }
   });
 })
 

@@ -4,6 +4,10 @@
   <script src="/js/popper.min.js"></script>
   <link rel="stylesheet" href="/css/bootstrap.min.css"> 
   <script src="/js/bootstrap.min.js"></script>
+  <script type="module">
+    import {GetNodeDataAndPrintToJQueryNode} from "/client/client.js";
+    window.GetNodeDataAndPrintToJQueryNode = GetNodeDataAndPrintToJQueryNode;
+  </script>
   <meta charset='utf-8'>
   <title>uniqnode</title>
 </head>
@@ -11,15 +15,41 @@
   <div class="container">
     <h1>uniqnode</h1>
     <div class="row">
+      <div class="col-sm-12">
+        <h2>Add</h2>
+      </div>
+      <div class="col-sm-12 text-right">
+        <input type="text" class="form-control" id="textInput" placeholder="Content">
+        <button id="addTextButton" class="btn btn-primary">Add a text</button>
+      </div>
+      <div class="col-sm-12">
+        <h2>Nodes</h2>
+      </div>
       <% nodes.forEach((item) => { %>
       <div class="col-sm-12">
         <div class="card">
           <div class="card-body">
-            <h5 class="card-title"><%= item.id %></h5>
+            <h5 class="card-title uniqnode-id"><%= item.id %></h5>
+            <div class="uniqnode-result"></div>
+            <button class="btn btn-primary uniqnode-get-button">Get</button>
           </div>
         </div>
       </div>
       <% }); %>
     </div>
   </div>
+  <script>
+$("#addTextButton").click((event) =>
+  {
+    $.post("/uniqnode/v0/node", {
+      content_type: "e11708cd4bdf45c28732e47153dda9a9",
+      content: encodeURIComponent($("#textInput").val()),
+    });
+  })
+$(".uniqnode-get-button").click((event) =>
+  {
+    var id = $(event.target).siblings(".uniqnode-id").text();
+    GetNodeDataAndPrintToJQueryNode(id, $(event.target).siblings(".uniqnode-result"));
+  })
+  </script>
 </body>

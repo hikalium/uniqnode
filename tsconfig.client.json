@@ -1,13 +1,14 @@
 {
   "compilerOptions": {
-    "target": "es5",
-    "module": "commonjs",
-    "outDir": "./out",
+    "target": "ES6",
+    "module": "ES6",
+    "outDir": "./out/client",
     "rootDir": "./src",
     "strict": true,
+    //"noResolve": true,
     "esModuleInterop": true
   },
   "exclude": [
-    "src/client/*"  
+    "src/server/*"  
   ]
 }

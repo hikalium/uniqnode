@@ -5,8 +5,9 @@
   <link rel="stylesheet" href="/css/bootstrap.min.css"> 
   <script src="/js/bootstrap.min.js"></script>
   <script type="module">
-    import {GetNodeDataAndPrintToJQueryNode} from "/client/client.js";
-    window.GetNodeDataAndPrintToJQueryNode = GetNodeDataAndPrintToJQueryNode;
+    import {} from "/client/client.js";
+    //import {GetNodeDataAndPrintToJQueryNode} from "/client/client.js";
+    //window.GetNodeDataAndPrintToJQueryNode = GetNodeDataAndPrintToJQueryNode;
   </script>
   <meta charset='utf-8'>
   <title>uniqnode</title>
@@ -22,34 +23,17 @@
         <input type="text" class="form-control" id="textInput" placeholder="Content">
         <button id="addTextButton" class="btn btn-primary">Add a text</button>
       </div>
+      <div class="col-sm-12 text-right">
+        <input type="text" class="form-control" id="fromInput" placeholder="From ID">
+        <input type="text" class="form-control" id="relInput" placeholder="Relation ID">
+        <input type="text" class="form-control" id="toInput" placeholder="To ID">
+        <button id="addRelButton" class="btn btn-primary">Add a relation</button>
+      </div>
       <div class="col-sm-12">
         <h2>Nodes</h2>
+        <button id="syncButton" class="btn btn-primary">Sync</button>
+        <div id="nodeListDiv" class="row"></div>
       </div>
-      <% nodes.forEach((item) => { %>
-      <div class="col-sm-12">
-        <div class="card">
-          <div class="card-body">
-            <h5 class="card-title uniqnode-id"><%= item.id %></h5>
-            <div class="uniqnode-result"></div>
-            <button class="btn btn-primary uniqnode-get-button">Get</button>
-          </div>
-        </div>
-      </div>
-      <% }); %>
     </div>
   </div>
-  <script>
-$("#addTextButton").click((event) =>
-  {
-    $.post("/uniqnode/v0/node", {
-      content_type: "e11708cd4bdf45c28732e47153dda9a9",
-      content: encodeURIComponent($("#textInput").val()),
-    });
-  })
-$(".uniqnode-get-button").click((event) =>
-  {
-    var id = $(event.target).siblings(".uniqnode-id").text();
-    GetNodeDataAndPrintToJQueryNode(id, $(event.target).siblings(".uniqnode-result"));
-  })
-  </script>
 </body>

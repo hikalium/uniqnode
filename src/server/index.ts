@@ -42,13 +42,14 @@ app.get('/init', (req, res) => {
 })
 
 app.get('/uniqnode/v0/node/:id', (req, res) => {
-  nodes.findOne({id: req.params.id}).then((result) => {
-    console.log(result);
-    res.json({
-      id: result.id,
-      content_type: result.content_type,
-      content: result.content
-    });
+  nodes.findOne({id: req.params.id}, {projection: {_id: false}}).then((result) => {
+    res.json(result);
+  });
+})
+
+app.get('/uniqnode/v0/node', (req, res) => {
+  nodes.find({}, {projection: {_id: false, id: true}}).toArray().then((result) => {
+    res.json(result.map((e) => e.id));
   });
 })
 

@@ -34,7 +34,7 @@ impl Rng {
         let state = splitmix64(seed) | 1;
         Rng(state)
     }
-    fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x >> 12;
         x ^= x << 25;
@@ -42,11 +42,11 @@ impl Rng {
         self.0 = x;
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
-    fn range_inclusive(&mut self, low: u64, high: u64) -> u64 {
+    pub fn range_inclusive(&mut self, low: u64, high: u64) -> u64 {
         if high <= low {
             return low;
         }
-        low + self.next() % (high - low + 1)
+        low + self.next_u64() % (high - low + 1)
     }
 }
 
@@ -752,7 +752,7 @@ impl Sim {
             if !node.alive {
                 continue;
             }
-            if (self.now + index as u64) % period != 0 {
+            if !(self.now + index as u64).is_multiple_of(period) {
                 continue;
             }
             let attestations: Vec<AttestationRecord> = node
@@ -785,7 +785,7 @@ impl Sim {
                 .range_inclusive(self.params.gossip_delay_min, self.params.gossip_delay_max);
             self.messages
                 .entry(self.now + delay)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(message);
         }
     }
@@ -814,7 +814,7 @@ impl Sim {
                 if self.nodes.iter().all(|n| n.alive) {
                     *self.min_breach_ticks_all_alive.entry(object).or_insert(0) += 1;
                 }
-                let episodes = self.breach_episodes.entry(object).or_insert_with(Vec::new);
+                let episodes = self.breach_episodes.entry(object).or_default();
                 match episodes.last_mut() {
                     Some(last) if last.end + 1 == self.now => last.end = self.now,
                     _ => episodes.push(BreachEpisode { start: self.now, end: self.now }),

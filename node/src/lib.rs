@@ -8,3 +8,4 @@ pub mod ed25519;
 pub mod http;
 pub mod sha2;
 pub mod store;
+pub mod sync;

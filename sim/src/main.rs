@@ -27,10 +27,12 @@ fn breach_stats(sim: &Sim, object: ObjectId) -> (u64, usize, u64) {
 }
 
 fn partition_sweep(seed: u64) -> SweepOutcome {
-    let mut params = Params::default();
     // 種ごとに遅延条件を振って、観測ゆらぎの幅を広げる。
-    params.gossip_delay_max = 1 + seed % 6;
-    params.demotion_grace = 5 + (seed / 7) % 30;
+    let params = Params {
+        gossip_delay_max: 1 + seed % 6,
+        demotion_grace: 5 + (seed / 7) % 30,
+        ..Params::default()
+    };
     let mut sim = Sim::new(params, &[10; 6], seed);
     sim.add_object(
         ObjectSpec { id: 42, size: 1, min_replicas: 2, references: Vec::new() },
@@ -64,8 +66,7 @@ fn partition_sweep(seed: u64) -> SweepOutcome {
 
 /// 反復故障: 保持者を周期的に落として復帰させ続ける。修復が追従し続けるかを見る。
 fn repeated_failure_sweep(seed: u64) -> SweepOutcome {
-    let mut params = Params::default();
-    params.gossip_delay_max = 1 + seed % 6;
+    let params = Params { gossip_delay_max: 1 + seed % 6, ..Params::default() };
     let mut sim = Sim::new(params, &[10; 8], seed ^ 0xDEAD);
     sim.add_object(
         ObjectSpec { id: 9, size: 1, min_replicas: 3, references: Vec::new() },

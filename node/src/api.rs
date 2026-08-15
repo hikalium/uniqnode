@@ -48,6 +48,26 @@ pub fn handle(store: &Mutex<Store>, request: &Request) -> Response {
                 ]),
             )
         }
+        ("POST", "/v1/sync") => {
+            // 相手からの pull。ネットワーク往復の間ロックを握る(L1 では許容し、
+            // 長時間化が観測されたら分割する)。
+            let mut store = store.lock().expect("lock");
+            crate::sync::handle_sync_request(&mut store, request)
+        }
+        ("GET", "/v1/replication/signers") => {
+            let store = store.lock().expect("lock");
+            let signers: Vec<c1::Value> = store
+                .signers()
+                .into_iter()
+                .map(|(signer, last_seq)| {
+                    let mut map = BTreeMap::new();
+                    map.insert("signer".to_string(), c1::Value::Text(signer));
+                    map.insert("last_seq".to_string(), c1::Value::Integer(last_seq as i64));
+                    c1::Value::Object(map)
+                })
+                .collect();
+            Response::json(200, json_object(vec![("signers", c1::Value::Array(signers))]))
+        }
         ("POST", "/v1/objects") => {
             let mut store = store.lock().expect("lock");
             match store.put_object(&request.body) {
@@ -68,6 +88,45 @@ pub fn handle(store: &Mutex<Store>, request: &Request) -> Response {
 fn handle_with_path_argument(store: &Mutex<Store>, request: &Request) -> Response {
     let path = request.path.as_str();
     let method = request.method.as_str();
+
+    if let Some(query) = path.strip_prefix("/v1/replication/refs?") {
+        if method != "GET" {
+            return error_response(405, "GET のみ");
+        }
+        let mut signer = None;
+        let mut since = None;
+        for pair in query.split('&') {
+            match pair.split_once('=') {
+                Some(("signer", value)) => signer = Some(value.to_string()),
+                Some(("since", value)) => since = value.parse::<u64>().ok(),
+                _ => {}
+            }
+        }
+        let (signer, since) = match (signer, since) {
+            (Some(s), Some(n)) => (s, n),
+            _ => return error_response(400, "signer と since が必要"),
+        };
+        let store = store.lock().expect("lock");
+        return match store.export_ref_records(&signer, since) {
+            Ok(payloads) => {
+                let mut records = Vec::new();
+                for payload in payloads {
+                    let text = match std::str::from_utf8(&payload) {
+                        Ok(t) => t,
+                        Err(_) => return error_response(500, "レコードが UTF-8 でない"),
+                    };
+                    match c1::parse(text) {
+                        Ok(value) => records.push(value),
+                        Err(e) => {
+                            return error_response(500, &format!("レコードが c1 でない: {e}"))
+                        }
+                    }
+                }
+                Response::json(200, json_object(vec![("records", c1::Value::Array(records))]))
+            }
+            Err(e) => store_error_response(e),
+        };
+    }
 
     if let Some(id) = path.strip_prefix("/v1/objects/") {
         if method != "GET" {

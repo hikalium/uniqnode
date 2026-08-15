@@ -15,6 +15,8 @@ fn usage() -> ! {
            refs <dir>                 ref を一覧する\n\
            fsck <dir>                 全再ハッシュ検査(異常があれば非0で終了)\n\
            serve <dir> <addr>         HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)\n\
+           sync <dir> <peer_addr>     相手から pull で同期する(serve 停止中のストア用。\n\
+                                      serve 中は POST /v1/sync を使う)\n\
            flood <dir>                書き込み続ける(クラッシュ試験用の内部コマンド)"
     );
     std::process::exit(2);
@@ -102,6 +104,31 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             }
             if !report.errors.is_empty() {
                 std::process::exit(3);
+            }
+        }
+        "sync" => {
+            let peer_address = rest.first().map(String::as_str).unwrap_or_else(|| usage());
+            let mut store = open(dir);
+            let peer = uniqnode::sync::HttpPeer { address: peer_address.to_string() };
+            match uniqnode::sync::sync_from_peer(&mut store, &peer) {
+                Ok(report) => {
+                    println!(
+                        "signers: {} ingested: {} known: {} fetched: {} absent: {} mismatches: {}",
+                        report.signers_seen,
+                        report.records_ingested,
+                        report.records_already_known,
+                        report.objects_fetched,
+                        report.objects_absent,
+                        report.hash_mismatches
+                    );
+                    if report.hash_mismatches > 0 {
+                        std::process::exit(5);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("uniqnode: sync failed: {e}");
+                    std::process::exit(1);
+                }
             }
         }
         "serve" => {

@@ -5,3 +5,7 @@ edition = "2021"
 
 # 依存なし(should/0101)。暗号も含め自前実装(操作者裁定 2026-08-15)。
 [dependencies]
+
+[dev-dependencies]
+# ランダム化モデルテストの決定論的乱数(sim と同一実装を使う。should/0135)
+uniqnode-sim = { path = "../sim" }

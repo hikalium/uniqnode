@@ -77,6 +77,20 @@ pub struct RefState {
     pub at: i64,
 }
 
+/// 検証済み ref レコードの内容。
+struct VerifiedRef {
+    name: String,
+    target: Option<String>,
+    seq: u64,
+    at: i64,
+    signer: String,
+}
+
+enum Verified {
+    New(VerifiedRef),
+    AlreadyKnown,
+}
+
 pub struct Store {
     config: StoreConfig,
     secret_seed: [u8; 32],
@@ -84,12 +98,16 @@ pub struct Store {
     /// オブジェクトID → 位置。導出データ(起動時に pack 走査で再構築)。
     object_index: BTreeMap<String, ObjectLocation>,
     refs: BTreeMap<String, RefState>,
-    next_seq: u64,
+    /// 署名者(DBノード)ごとの適用済み最終 seq。レプリケーションのカーソル(I5)。
+    signer_last_seq: BTreeMap<String, u64>,
     sealed_packs: Vec<u64>,
     sealed_reflogs: Vec<u64>,
     active_pack_number: u64,
     active_pack_length: u64,
     active_reflog_number: u64,
+    /// 同一データディレクトリの二重オープン防止(プロセス終了で自動解放される
+    /// Linux 抽象名前空間ソケットを錠として使う)。
+    _lock: std::os::unix::net::UnixListener,
 }
 
 fn pack_path(dir: &Path, number: u64) -> PathBuf {
@@ -187,6 +205,7 @@ impl Store {
         std::fs::create_dir_all(dir.join("packs"))?;
         std::fs::create_dir_all(dir.join("reflog"))?;
         std::fs::create_dir_all(dir.join("tmp"))?;
+        let lock = Self::acquire_lock(&dir)?;
 
         let secret_seed = Self::load_or_create_key(&dir)?;
         let node_id_hex = sha2::hex(&ed25519::public_key(&secret_seed));
@@ -199,15 +218,35 @@ impl Store {
             node_id_hex,
             object_index: BTreeMap::new(),
             refs: BTreeMap::new(),
-            next_seq: 1,
+            signer_last_seq: BTreeMap::new(),
             sealed_packs,
             sealed_reflogs,
             active_pack_number: 1,
             active_pack_length: 0,
             active_reflog_number: 1,
+            _lock: lock,
         };
         store.recover()?;
         Ok(store)
+    }
+
+    /// 二重オープンの防止。抽象名前空間ソケットはプロセス終了(kill -9 を含む)で
+    /// カーネルが解放するため、クラッシュ後に錠が残らない。
+    fn acquire_lock(dir: &Path) -> Result<std::os::unix::net::UnixListener> {
+        use std::os::linux::net::SocketAddrExt;
+        let canonical = std::fs::canonicalize(dir)?;
+        let name = format!(
+            "uniqnode-lock-{}",
+            sha2::hex(&sha2::sha256(canonical.as_os_str().as_encoded_bytes()))
+        );
+        let address = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())?;
+        match std::os::unix::net::UnixListener::bind_addr(&address) {
+            Ok(listener) => Ok(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(StoreError::Invalid(
+                format!("{} は別プロセスが開いている", dir.display()),
+            )),
+            Err(e) => Err(e.into()),
+        }
     }
 
     fn load_or_create_key(dir: &Path) -> Result<[u8; 32]> {
@@ -367,7 +406,10 @@ impl Store {
                 file.sync_all()?;
             }
             for (_, payload) in &scan.records {
-                self.apply_ref_record(payload)?;
+                match self.verify_ref_record(payload)? {
+                    Verified::New(verified) => self.apply_verified(verified),
+                    Verified::AlreadyKnown => {}
+                }
             }
             if !sealed && is_last {
                 self.active_reflog_number = *number;
@@ -381,8 +423,8 @@ impl Store {
         Ok(())
     }
 
-    /// reflog レコード(c1 JSON)を検証してメモリ状態に適用する。
-    fn apply_ref_record(&mut self, payload: &[u8]) -> Result<()> {
+    /// reflog レコード(c1 JSON)を検証する。メモリ状態は変更しない。
+    fn verify_ref_record(&self, payload: &[u8]) -> Result<Verified> {
         let text = std::str::from_utf8(payload)
             .map_err(|_| StoreError::Corruption("reflog レコードが UTF-8 でない".into()))?;
         let value = c1::parse(text)
@@ -414,6 +456,13 @@ impl Store {
             _ => return Err(StoreError::Corruption("reflog レコードの target が不正".into())),
         };
 
+        // 既知の seq は署名検証の前に冪等スキップする(状態を変えないので危険がなく、
+        // 再同期のたびに全レコードを検証し直すコストを避ける)。
+        let last = self.signer_last_seq.get(&signer).copied().unwrap_or(0);
+        if seq <= last {
+            return Ok(Verified::AlreadyKnown);
+        }
+
         // 署名検証: sig を除いた正規形に対する署名(SPEC §4.4)。
         let mut unsigned = map.clone();
         unsigned.remove("sig");
@@ -439,15 +488,35 @@ impl Store {
                 "ref {name} は signer の名前空間でない(single writer 違反)"
             )));
         }
-        if seq != self.next_seq {
+        if seq != last + 1 {
             return Err(StoreError::Corruption(format!(
-                "seq が飛んでいる: 期待 {} 実際 {seq}",
-                self.next_seq
+                "signer {signer} の seq が飛んでいる: 期待 {} 実際 {seq}",
+                last + 1
             )));
         }
-        self.next_seq = seq + 1;
-        self.refs.insert(name, RefState { target, seq, at });
-        Ok(())
+        Ok(Verified::New(VerifiedRef { name, target, seq, at, signer }))
+    }
+
+    fn apply_verified(&mut self, verified: VerifiedRef) {
+        self.signer_last_seq.insert(verified.signer, verified.seq);
+        self.refs.insert(
+            verified.name,
+            RefState { target: verified.target, seq: verified.seq, at: verified.at },
+        );
+    }
+
+    /// 他DBノード由来の署名済み ref レコードを取り込む(レプリケーションの受け側)。
+    /// 永続化(reflog 追記)してからメモリに適用する。既知の seq は冪等にスキップする。
+    pub fn ingest_ref_record(&mut self, payload: &[u8]) -> Result<bool> {
+        match self.verify_ref_record(payload)? {
+            Verified::AlreadyKnown => Ok(false),
+            Verified::New(verified) => {
+                let log_path = reflog_path(&self.config.data_dir, self.active_reflog_number);
+                append_record(&log_path, payload)?;
+                self.apply_verified(verified);
+                Ok(true)
+            }
+        }
     }
 
     // ---- 書き込み ----
@@ -503,7 +572,7 @@ impl Store {
             }
         }
         let name = format!("{}/{}", self.node_id_hex, path);
-        let seq = self.next_seq;
+        let seq = self.signer_last_seq.get(&self.node_id_hex).copied().unwrap_or(0) + 1;
         let at = unix_now();
 
         let mut map = BTreeMap::new();
@@ -525,9 +594,16 @@ impl Store {
         map.insert("sig".to_string(), c1::Value::Text(sha2::hex(&signature)));
         let payload = c1::to_canonical_bytes(&c1::Value::Object(map));
 
+        // 自作のレコードも取り込み側と同じ検証を通す(判定の一本化)。
+        let verified = match self.verify_ref_record(&payload)? {
+            Verified::New(v) => v,
+            Verified::AlreadyKnown => {
+                return Err(StoreError::Corruption("自レコードの seq が既知になっている".into()))
+            }
+        };
         let log_path = reflog_path(&self.config.data_dir, self.active_reflog_number);
         append_record(&log_path, &payload)?;
-        self.apply_ref_record(&payload)?;
+        self.apply_verified(verified);
         Ok(seq)
     }
 
@@ -567,8 +643,68 @@ impl Store {
         self.object_index.len()
     }
 
+    /// 自分の名前空間の最終 seq。
     pub fn last_seq(&self) -> u64 {
-        self.next_seq - 1
+        self.signer_last_seq.get(&self.node_id_hex).copied().unwrap_or(0)
+    }
+
+    /// 知っている署名者と、その適用済み最終 seq(レプリケーションのカーソル)。
+    pub fn signers(&self) -> Vec<(String, u64)> {
+        self.signer_last_seq
+            .iter()
+            .map(|(signer, seq)| (signer.clone(), *seq))
+            .collect()
+    }
+
+    /// signer の since より後の署名済み ref レコード(生ペイロード)を seq 順で返す。
+    /// reflog への追記は署名者ごとに seq 昇順なので、走査順がそのまま seq 順になる。
+    pub fn export_ref_records(&self, signer: &str, since: u64) -> Result<Vec<Vec<u8>>> {
+        let dir = &self.config.data_dir;
+        let mut numbers = Vec::new();
+        for entry in std::fs::read_dir(dir.join("reflog"))? {
+            let name = entry?.file_name().to_string_lossy().to_string();
+            if let Some(rest) = name.strip_prefix("reflog-") {
+                if let Some(number_text) = rest.strip_suffix(".log") {
+                    if let Ok(n) = number_text.parse::<u64>() {
+                        numbers.push(n);
+                    }
+                }
+            }
+        }
+        numbers.sort_unstable();
+        let mut out = Vec::new();
+        let signer_prefix = format!("\"signer\":\"{signer}\"");
+        for number in numbers {
+            let scan = scan_records(&reflog_path(dir, number), self.config.max_record_bytes)?;
+            for (_, payload) in scan.records {
+                // 高速な事前フィルタ(正規形なので部分文字列が安定)の後、seq を正確に読む。
+                let text = match std::str::from_utf8(&payload) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                if !text.contains(&signer_prefix) {
+                    continue;
+                }
+                let value = match c1::parse(text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if let c1::Value::Object(map) = &value {
+                    let seq = match map.get("seq") {
+                        Some(c1::Value::Integer(n)) => *n as u64,
+                        _ => continue,
+                    };
+                    let record_signer = match map.get("signer") {
+                        Some(c1::Value::Text(t)) => t.as_str(),
+                        _ => continue,
+                    };
+                    if record_signer == signer && seq > since {
+                        out.push(payload);
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// root から c1 参照(SPEC §4.3)を辿って到達可能な閉包を返す。
@@ -627,7 +763,16 @@ impl Store {
             report.refs_checked += 1;
             if let Some(target) = &state.target {
                 if !self.object_index.contains_key(target) {
-                    report.errors.push(format!("ref {name} の target {target} が存在しない"));
+                    if name.starts_with(&self.node_id_hex) {
+                        // 自分の ref は書き込み時に存在を強制しているので、欠けは破損。
+                        report
+                            .errors
+                            .push(format!("ref {name} の target {target} が存在しない"));
+                    } else {
+                        // 他DBノードの ref の対象は未取得であり得る(レプリケーション未完了
+                        // または開世界の忘却)。エラーではなく事実として数える。
+                        report.foreign_targets_absent += 1;
+                    }
                 }
             }
         }
@@ -639,6 +784,7 @@ impl Store {
 pub struct FsckReport {
     pub objects_checked: usize,
     pub refs_checked: usize,
+    pub foreign_targets_absent: usize,
     pub errors: Vec<String>,
 }
 
@@ -813,6 +959,99 @@ mod tests {
             Err(other) => panic!("改竄は Corruption になるべき: {other}"),
             Ok(_) => panic!("改竄を見逃して開けてしまった"),
         }
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    fn tamper_at_field(payload: &mut [u8]) {
+        let position = payload
+            .windows(5)
+            .position(|w| w == b"\"at\":")
+            .map(|p| p + 5)
+            .expect("at フィールドがある");
+        payload[position] = if payload[position] == b'1' { b'2' } else { b'1' };
+    }
+
+    #[test]
+    fn replication_records_ingest_export_and_survive_reopen() {
+        let dir_a = temp_dir("repl-a");
+        let dir_b = temp_dir("repl-b");
+        let a_id;
+        let records;
+        {
+            let mut a = Store::open(small_config(&dir_a)).expect("open a");
+            a_id = a.node_id_hex().to_string();
+            let (leaf, _) = a.put_object(b"\"leaf\"").expect("put");
+            a.set_ref("x", Some(&leaf)).expect("set x");
+            a.set_ref("y", Some(&leaf)).expect("set y");
+            a.set_ref("y", None).expect("tombstone y");
+            records = a.export_ref_records(&a_id, 0).expect("export");
+            assert_eq!(records.len(), 3);
+            assert_eq!(a.export_ref_records(&a_id, 2).expect("export since").len(), 1);
+        }
+        {
+            let mut b = Store::open(small_config(&dir_b)).expect("open b");
+            for record in &records {
+                assert!(b.ingest_ref_record(record).expect("ingest"), "新規として入る");
+            }
+            assert!(!b.ingest_ref_record(&records[0]).expect("replay"), "再取り込みは冪等");
+            // 対象オブジェクト未取得でも ref は立ち、fsck はエラーではなく欠け数として出す。
+            let report = b.fsck().expect("fsck");
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            assert_eq!(report.foreign_targets_absent, 1, "x のみ(y は tombstone)");
+            // レプリカは受け取ったレコードをそのまま再輸出できる(中継)。
+            assert_eq!(b.export_ref_records(&a_id, 0).expect("re-export"), records);
+        }
+        {
+            let b = Store::open(small_config(&dir_b)).expect("reopen b");
+            assert_eq!(b.signers(), vec![(a_id.clone(), 3)], "reopen 後も署名者カーソルが残る");
+            assert_eq!(b.last_seq(), 0, "自分の名前空間は未使用のまま");
+        }
+        std::fs::remove_dir_all(&dir_a).expect("cleanup");
+        std::fs::remove_dir_all(&dir_b).expect("cleanup");
+    }
+
+    #[test]
+    fn ingest_rejects_gaps_and_tampering() {
+        let dir_a = temp_dir("gap-a");
+        let dir_b = temp_dir("gap-b");
+        let records;
+        {
+            let mut a = Store::open(small_config(&dir_a)).expect("open a");
+            let (leaf, _) = a.put_object(b"\"leaf\"").expect("put");
+            for i in 0..3 {
+                a.set_ref(&format!("k{i}"), Some(&leaf)).expect("set");
+            }
+            records = a.export_ref_records(a.node_id_hex(), 0).expect("export");
+        }
+        let mut b = Store::open(small_config(&dir_b)).expect("open b");
+        assert!(b.ingest_ref_record(&records[0]).expect("seq 1"));
+        match b.ingest_ref_record(&records[2]) {
+            Err(StoreError::Corruption(message)) => {
+                assert!(message.contains("飛んでいる"), "{message}")
+            }
+            other => panic!("seq の飛びは Corruption になるべき: {other:?}"),
+        }
+        let mut tampered = records[1].clone();
+        tamper_at_field(&mut tampered);
+        match b.ingest_ref_record(&tampered) {
+            Err(StoreError::Corruption(message)) => assert!(message.contains("署名"), "{message}"),
+            other => panic!("改竄は Corruption になるべき: {other:?}"),
+        }
+        std::fs::remove_dir_all(&dir_a).expect("cleanup");
+        std::fs::remove_dir_all(&dir_b).expect("cleanup");
+    }
+
+    #[test]
+    fn double_open_of_the_same_directory_is_rejected() {
+        let dir = temp_dir("lock");
+        let first = Store::open(small_config(&dir)).expect("open");
+        match Store::open(small_config(&dir)) {
+            Err(StoreError::Invalid(message)) => assert!(message.contains("開いている"), "{message}"),
+            Err(other) => panic!("二重オープンは Invalid になるべき: {other}"),
+            Ok(_) => panic!("二重オープンできてしまった"),
+        }
+        drop(first);
+        Store::open(small_config(&dir)).expect("解放後は開ける");
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

@@ -14,7 +14,17 @@
 
 ## 状態
 
-仕様策定と理論検証の段階。実装はシミュレータ(sim/)から始まっている。
+適合レベル L0(単一DBノードのストア。SPEC §11)を実装済み。依存クレートなし。
 
-このリポジトリには 2019 年の同名プロトタイプ(TypeScript + Express + MongoDB の graph based CMS)が
-含まれている(src/, views/, static/ ほか)。新実装への移行が進むにつれて旧コードは順次削除される。
+- node/: 実装本体。SHA-256/512、Ed25519(RFC 8032、openssl と相互検証済み)、
+  正規化 JSON(c1)、pack セグメント+MANIFEST+署名付き reflog のストア、fsck、
+  CLI(`uniqnode init|status|put|get|set-ref|refs|fsck|serve`)、HTTP API。
+- sim/: レプリカ・健全性モデル(SPEC §8)の離散イベントシミュレータ。
+
+試す:
+
+```
+cargo run -p uniqnode -- serve /tmp/uniqnode-data 127.0.0.1:7440
+curl -X POST --data-binary '{"v":1,"kind":"node","contents":"hello"}' http://127.0.0.1:7440/v1/objects
+curl http://127.0.0.1:7440/v1/status
+```

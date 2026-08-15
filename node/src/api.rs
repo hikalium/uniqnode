@@ -36,6 +36,12 @@ pub fn handle(store: &Mutex<Store>, request: &Request) -> Response {
     let method = request.method.as_str();
     match (method, path) {
         ("GET", "/healthz") => Response::text(200, "ok\n"),
+        ("POST", "/v1/admin/shutdown") => {
+            // 正常終了。ストアは全書き込みを fsync 済みなので flush は不要。
+            let mut response = Response::text(200, "shutting down\n");
+            response.shutdown_after = true;
+            response
+        }
         ("GET", "/v1/status") => {
             let store = store.lock().expect("lock");
             Response::json(

@@ -359,6 +359,7 @@ uniqnode コアの上に、次の応用層が載る予定である。仕様化�
 | `GET /v1/replication/signers` | 署名者と最終 seq の一覧(レプリケーションのカーソル) |
 | `GET /v1/replication/refs?signer&since` | 署名済み ref レコードの取り出し(§7.3) |
 | `POST /v1/sync` | `{peer}` からの pull 同期を実行し、結果の集計を返す |
+| `POST /v1/admin/shutdown` | 応答後に正常終了する(運用とテストの停止用) |
 
 404 の意味に注意: ローカル API の 404 は「このDBノードは持っていない」というローカルな事実で
 あり、ネットワークに対する不存在の言明ではない(§7.2)。

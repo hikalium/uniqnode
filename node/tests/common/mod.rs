@@ -16,6 +16,29 @@ pub struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
+        // まず正常終了を頼む(カバレッジのプロファイル書き出しは正常終了でのみ起きる)。
+        // 応答を読み切ってから閉じる(書いた直後に閉じるとサーバ側の応答書き込みと
+        // 競合する)。期限内に終わらなければ kill に切り替える。
+        let asked = TcpStream::connect(&self.address).ok().and_then(|mut stream| {
+            stream
+                .write_all(
+                    b"POST /v1/admin/shutdown HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .ok()?;
+            let mut response = Vec::new();
+            let _ = stream.read_to_end(&mut response);
+            Some(())
+        });
+        if asked.is_some() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                match self.child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => std::thread::yield_now(),
+                    Err(_) => break,
+                }
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
         if self.remove_dir_on_drop {

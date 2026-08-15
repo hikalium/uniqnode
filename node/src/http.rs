@@ -34,17 +34,30 @@ pub struct Response {
     pub status: u16,
     pub content_type: &'static str,
     pub body: Vec<u8>,
+    /// 応答を書き切った後にプロセスを正常終了する(POST /v1/admin/shutdown 用。
+    /// 正常終了はカバレッジのプロファイル書き出しも保証する)。
+    pub shutdown_after: bool,
 }
 
 impl Response {
     pub fn json(status: u16, body: Vec<u8>) -> Response {
-        Response { status, content_type: "application/json", body }
+        Response { status, content_type: "application/json", body, shutdown_after: false }
     }
     pub fn text(status: u16, text: &str) -> Response {
-        Response { status, content_type: "text/plain; charset=utf-8", body: text.into() }
+        Response {
+            status,
+            content_type: "text/plain; charset=utf-8",
+            body: text.into(),
+            shutdown_after: false,
+        }
     }
     pub fn bytes(status: u16, body: Vec<u8>) -> Response {
-        Response { status, content_type: "application/octet-stream", body }
+        Response {
+            status,
+            content_type: "application/octet-stream",
+            body,
+            shutdown_after: false,
+        }
     }
 }
 
@@ -111,7 +124,12 @@ fn handle_connection(stream: TcpStream, handler: Arc<Handler>) -> std::io::Resul
         };
         let close = matches!(request.header("connection"), Some(v) if v.eq_ignore_ascii_case("close"));
         let response = handler(&request);
-        write_response(&mut writer, &response, close)?;
+        let write_result = write_response(&mut writer, &response, close);
+        if response.shutdown_after {
+            // 応答の書き込みに失敗しても(クライアントが先に切っても)終了は実行する。
+            std::process::exit(0);
+        }
+        write_result?;
         if close {
             return Ok(());
         }

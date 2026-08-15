@@ -90,7 +90,7 @@ pub fn sync_from_peer(
     Ok(report)
 }
 
-/// 署名済みレコードだけを取り寄せる(gossip の pull 版)。健全性エンジンの周期処理は
+/// 署名済みレコードだけを取り寄せる(伝播交換の pull 実装)。健全性エンジンの周期処理は
 /// これで pin・保持表明・ref を運び、オブジェクト本体は pin の修復時にだけ取る。
 pub fn sync_records(
     store: &std::sync::Mutex<Store>,
@@ -199,7 +199,7 @@ impl<'a> PeerSource for LocalPeer<'a> {
 /// HTTP のノードローカル API(SPEC §10)を取り寄せ元にする。
 pub struct HttpPeer {
     pub address: String,
-    /// 接続・読み取りの期限。gossip の生存確認は短く(沈黙の確定を速く)、
+    /// 接続・読み取りの期限。伝播交換の生存確認は短く(沈黙の確定を速く)、
     /// 大きな取り寄せは長めに設定する。
     pub timeout: std::time::Duration,
 }

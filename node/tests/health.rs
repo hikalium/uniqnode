@@ -7,7 +7,7 @@ mod common;
 use common::*;
 use std::path::Path;
 
-/// テスト用の健全性設定(gossip 300ms / T_hb 1.5s / T_prop 1s / T_heal 60s / 猶予 60s)。
+/// テスト用の健全性設定(交換周期 300ms / T_hb 1.5s / T_prop 1s / T_heal 60s / 猶予 60s)。
 /// T_heal と猶予を長くして、テスト中に unknown ALERT や降格の雑音が出ないようにする。
 fn write_node_config(dir: &Path, capacity_bytes: Option<u64>) {
     std::fs::create_dir_all(dir).expect("mkdir");
@@ -18,7 +18,7 @@ fn write_node_config(dir: &Path, capacity_bytes: Option<u64>) {
     std::fs::write(
         dir.join("node.json"),
         format!(
-            "{{{capacity}\"health\":{{\"gossip_period_ms\":300,\"t_hb_ms\":1500,\
+            "{{{capacity}\"health\":{{\"exchange_period_ms\":300,\"t_hb_ms\":1500,\
              \"t_prop_ms\":1000,\"t_heal_ms\":60000,\"demotion_grace_ms\":60000}}}}"
         ),
     )
@@ -184,7 +184,7 @@ fn capacity_shortage_raises_a_capacity_alert() {
     }
 
     // 遷移でのみ: 状態が変わらない限り2件目の alert は積まれない。
-    // 数 gossip 周期分、イベント数が安定することを確認する。
+    // 数交換周期分、イベント数が安定することを確認する。
     let count_alerts = |text: &str| text.matches("\"reason\":\"capacity\"").count();
     let first = count_alerts(&body_text(&simple(&a.address, "GET", "/v1/health/events", b"")));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);

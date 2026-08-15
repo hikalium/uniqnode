@@ -2,10 +2,10 @@
 //!
 //! 構造は sim と同じく「観測を組み立てる → 純関数で判断する → 実行する」。判断部
 //! (assess)は入出力が値だけの純関数で、sim のシナリオと同じ規則を時刻を偽装して
-//! 単体テストできる。周期処理(tick)は gossip(レコードのみ同期)・生存確認・
+//! 単体テストできる。周期処理(tick)は伝播交換(レコードのみの同期)・生存確認・
 //! 修復と降格の実行・遷移イベントの記録を行う。
 //!
-//! sim で確認した既定値の対応: gossip_period 5 / T_hb 15 / T_prop 20 / T_heal 100 /
+//! sim で確認した既定値の対応: exchange_period 5 / T_hb 15 / T_prop 20 / T_heal 100 /
 //! 降格猶予 20(単位は sim が tick、実装は秒)。
 
 use crate::store::Store;
@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub struct HealthParams {
-    pub gossip_period: Duration,
+    pub exchange_period: Duration,
     /// 生存信号タイムアウト。これより古い接触しかない相手は生存とみなさない(SPEC §8.2)。
     pub t_hb: Duration,
     pub t_prop: Duration,
@@ -28,7 +28,7 @@ pub struct HealthParams {
 impl Default for HealthParams {
     fn default() -> Self {
         HealthParams {
-            gossip_period: Duration::from_secs(5),
+            exchange_period: Duration::from_secs(5),
             t_hb: Duration::from_secs(15),
             t_prop: Duration::from_secs(20),
             t_heal: Duration::from_secs(100),
@@ -234,7 +234,7 @@ impl HealthEngine {
         loop {
             self.tick();
             // 制御ループの周期(should/0104 の許容: 条件を再確認する cadence)。
-            std::thread::sleep(self.params.gossip_period);
+            std::thread::sleep(self.params.exchange_period);
         }
     }
 
@@ -281,11 +281,11 @@ impl HealthEngine {
             .collect()
     }
 
-    /// 1周期: 生存確認と gossip → 判断 → 修復・降格の実行 → 遷移の記録。
+    /// 1周期: 生存確認と伝播交換 → 判断 → 修復・降格の実行 → 遷移の記録。
     pub fn tick(&self) {
         let peer_addresses = crate::query::read_peer_addresses(&self.data_dir);
 
-        // 生存確認(status)と署名レコードの gossip。期限は短く(沈黙の確定を速く)。
+        // 生存確認(status)と署名レコードの伝播交換。期限は短く(沈黙の確定を速く)。
         for address in &peer_addresses {
             let peer = HttpPeer::with_timeout(address.clone(), Duration::from_secs(2));
             let status = peer.fetch_status();
@@ -312,7 +312,7 @@ impl HealthEngine {
             if status.is_ok() {
                 let mut report = SyncReport::default();
                 if let Err(e) = sync::sync_records(&self.store, &peer, &mut report) {
-                    eprintln!("uniqnode: health gossip({address}): {e}");
+                    eprintln!("uniqnode: 伝播交換({address}): {e}");
                 }
             }
         }
@@ -495,7 +495,7 @@ impl HealthEngine {
 }
 
 /// data_dir/node.json から容量と健全性パラメータを読む。
-/// `{"capacity_bytes": N, "health": {"gossip_period_ms": …, "t_hb_ms": …,
+/// `{"capacity_bytes": N, "health": {"exchange_period_ms": …, "t_hb_ms": …,
 ///   "t_prop_ms": …, "t_heal_ms": …, "demotion_grace_ms": …}}`(すべて任意)。
 pub fn read_node_config(data_dir: &std::path::Path) -> (Option<u64>, HealthParams) {
     let mut params = HealthParams::default();
@@ -528,7 +528,7 @@ pub fn read_node_config(data_dir: &std::path::Path) -> (Option<u64>, HealthParam
                 _ => default,
             }
         };
-        params.gossip_period = ms("gossip_period_ms", params.gossip_period);
+        params.exchange_period = ms("exchange_period_ms", params.exchange_period);
         params.t_hb = ms("t_hb_ms", params.t_hb);
         params.t_prop = ms("t_prop_ms", params.t_prop);
         params.t_heal = ms("t_heal_ms", params.t_heal);
@@ -543,7 +543,7 @@ mod tests {
 
     fn params() -> HealthParams {
         HealthParams {
-            gossip_period: Duration::from_secs(5),
+            exchange_period: Duration::from_secs(5),
             t_hb: Duration::from_secs(15),
             t_prop: Duration::from_secs(20),
             t_heal: Duration::from_secs(100),

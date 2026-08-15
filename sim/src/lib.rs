@@ -1,7 +1,7 @@
 //! uniqnode のレプリカ・健全性モデル(SPEC.md §8)の離散イベントシミュレータ。
 //!
 //! 1 tick = 1 単位時間。各 tick で「メッセージ配送 → 各DBノードの判断(読み取り) →
-//! 適用(書き込み) → evict → gossip 送信 → 計測」を行う。判断は tick 開始時点の
+//! 適用(書き込み) → evict → レコード交換の送信 → 計測」を行う。判断は tick 開始時点の
 //! 状態だけを見て行われるため、複数DBノードの同時判断による競合(同時修復・同時降格)が
 //! 現実と同じ形で発生する。
 //!
@@ -52,11 +52,11 @@ impl Rng {
 
 #[derive(Clone, Debug)]
 pub struct Params {
-    /// gossip 送信間隔(DBノードごとに位相をずらして送る)。
-    pub gossip_period: Tick,
-    /// gossip 配送遅延の範囲。
-    pub gossip_delay_min: Tick,
-    pub gossip_delay_max: Tick,
+    /// レコード交換の送信間隔(DBノードごとに位相をずらして送る)。
+    pub exchange_period: Tick,
+    /// レコード交換の配送遅延の範囲。
+    pub exchange_delay_min: Tick,
+    pub exchange_delay_max: Tick,
     /// これより古い heartbeat の保持者は生存とみなさない。
     pub heartbeat_timeout: Tick,
     /// 伝播時間スレッショルド。不足がこれを超えて持続したら修復開始(SPEC §8.2)。
@@ -72,9 +72,9 @@ pub struct Params {
 impl Default for Params {
     fn default() -> Self {
         Params {
-            gossip_period: 5,
-            gossip_delay_min: 1,
-            gossip_delay_max: 3,
+            exchange_period: 5,
+            exchange_delay_min: 1,
+            exchange_delay_max: 3,
             heartbeat_timeout: 15,
             t_prop: 20,
             t_heal: 100,
@@ -443,7 +443,7 @@ impl Sim {
         let actions = self.decide();
         self.apply(&actions);
         self.evict_all();
-        self.send_gossip();
+        self.send_record_exchange();
         self.measure();
     }
 
@@ -745,8 +745,8 @@ impl Sim {
         referenced
     }
 
-    fn send_gossip(&mut self) {
-        let period = self.params.gossip_period;
+    fn send_record_exchange(&mut self) {
+        let period = self.params.exchange_period;
         let mut outgoing = Vec::new();
         for (index, node) in self.nodes.iter().enumerate() {
             if !node.alive {
@@ -782,7 +782,7 @@ impl Sim {
         for message in outgoing {
             let delay = self
                 .rng
-                .range_inclusive(self.params.gossip_delay_min, self.params.gossip_delay_max);
+                .range_inclusive(self.params.exchange_delay_min, self.params.exchange_delay_max);
             self.messages
                 .entry(self.now + delay)
                 .or_default()

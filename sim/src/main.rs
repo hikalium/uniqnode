@@ -1,5 +1,5 @@
 //! シナリオ掃引。分断合流と反復故障を多数の種で回し、SPEC.md §8 の規則が
-//! 観測ゆらぎ(gossip 遅延・判断タイミングの競合)の下でも安全か測定する。
+//! 観測ゆらぎ(配送遅延・判断タイミングの競合)の下でも安全か測定する。
 //! 結果の分析は docs/analysis/ に記録する。
 
 use uniqnode_sim::*;
@@ -29,7 +29,7 @@ fn breach_stats(sim: &Sim, object: ObjectId) -> (u64, usize, u64) {
 fn partition_sweep(seed: u64) -> SweepOutcome {
     // 種ごとに遅延条件を振って、観測ゆらぎの幅を広げる。
     let params = Params {
-        gossip_delay_max: 1 + seed % 6,
+        exchange_delay_max: 1 + seed % 6,
         demotion_grace: 5 + (seed / 7) % 30,
         ..Params::default()
     };
@@ -66,7 +66,7 @@ fn partition_sweep(seed: u64) -> SweepOutcome {
 
 /// 反復故障: 保持者を周期的に落として復帰させ続ける。修復が追従し続けるかを見る。
 fn repeated_failure_sweep(seed: u64) -> SweepOutcome {
-    let params = Params { gossip_delay_max: 1 + seed % 6, ..Params::default() };
+    let params = Params { exchange_delay_max: 1 + seed % 6, ..Params::default() };
     let mut sim = Sim::new(params, &[10; 8], seed ^ 0xDEAD);
     sim.add_object(
         ObjectSpec { id: 9, size: 1, min_replicas: 3, references: Vec::new() },

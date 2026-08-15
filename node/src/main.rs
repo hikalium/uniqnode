@@ -14,6 +14,7 @@ fn usage() -> ! {
            set-ref <dir> <path> <id>  自名前空間の ref を設定する(id が '-' なら tombstone)\n\
            refs <dir>                 ref を一覧する\n\
            fsck <dir>                 全再ハッシュ検査(異常があれば非0で終了)\n\
+           serve <dir> <addr>         HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)\n\
            flood <dir>                書き込み続ける(クラッシュ試験用の内部コマンド)"
     );
     std::process::exit(2);
@@ -102,6 +103,18 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             if !report.errors.is_empty() {
                 std::process::exit(3);
             }
+        }
+        "serve" => {
+            let address = rest.first().map(String::as_str).unwrap_or_else(|| usage());
+            let listener = std::net::TcpListener::bind(address)?;
+            // テストや起動スクリプトが実際のポートを知れるように、束縛先を必ず表示する。
+            println!("listening on {}", listener.local_addr()?);
+            use std::io::Write as _;
+            std::io::stdout().flush()?;
+            let store = std::sync::Arc::new(std::sync::Mutex::new(open(dir)));
+            let handler: std::sync::Arc<uniqnode::http::Handler> =
+                std::sync::Arc::new(move |request| uniqnode::api::handle(&store, request));
+            uniqnode::http::serve(listener, handler);
         }
         "flood" => {
             // クラッシュ試験用: kill されるまで最速で書き続ける(fsync 済み書き込みの

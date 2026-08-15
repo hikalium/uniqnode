@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 pub struct ApiContext {
     pub store: Arc<Mutex<Store>>,
     pub engine: Arc<QueryEngine>,
+    /// serve でのみ Some(健全性エンジン。SPEC §8)。
+    pub health: Option<Arc<crate::health::HealthEngine>>,
 }
 
 fn json_object(entries: Vec<(&str, c1::Value)>) -> Vec<u8> {
@@ -66,23 +68,146 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
             response
         }
         ("GET", "/v1/status") => {
-            let store = store.lock().expect("lock");
-            Response::json(
-                200,
-                json_object(vec![
+            let mut fields = {
+                let store = store.lock().expect("lock");
+                vec![
                     ("v", c1::Value::Integer(1)),
                     ("node_id", c1::Value::Text(store.node_id_hex().to_string())),
                     ("objects", c1::Value::Integer(store.object_count() as i64)),
                     ("last_seq", c1::Value::Integer(store.last_seq() as i64)),
-                ]),
-            )
+                    ("used_bytes", c1::Value::Integer(store.used_bytes() as i64)),
+                    (
+                        "capacity_bytes",
+                        match store.capacity_bytes() {
+                            Some(c) => c1::Value::Integer(c as i64),
+                            None => c1::Value::Null,
+                        },
+                    ),
+                    (
+                        "free_bytes",
+                        match store.free_bytes() {
+                            Some(f) => c1::Value::Integer(f as i64),
+                            None => c1::Value::Null,
+                        },
+                    ),
+                ]
+            };
+            if let Some(health) = &context.health {
+                let roots: Vec<c1::Value> = health
+                    .roots_snapshot()
+                    .into_iter()
+                    .map(|root| {
+                        let mut map = BTreeMap::new();
+                        map.insert("root".to_string(), c1::Value::Text(root.root));
+                        map.insert(
+                            "required".to_string(),
+                            c1::Value::Integer(root.required as i64),
+                        );
+                        map.insert(
+                            "observed".to_string(),
+                            c1::Value::Integer(root.observed as i64),
+                        );
+                        map.insert("state".to_string(), c1::Value::Text(root.state));
+                        map.insert(
+                            "reason".to_string(),
+                            match root.reason {
+                                Some(r) => c1::Value::Text(r),
+                                None => c1::Value::Null,
+                            },
+                        );
+                        c1::Value::Object(map)
+                    })
+                    .collect();
+                fields.push(("health", c1::Value::Array(roots)));
+            }
+            Response::json(200, json_object(fields))
         }
-        ("POST", "/v1/sync") => {
-            // 相手からの pull。ネットワーク往復の間ロックを握る(L1 では許容し、
-            // 長時間化が観測されたら分割する)。
+        ("GET", "/v1/health/events") => {
+            let events: Vec<c1::Value> = match &context.health {
+                None => Vec::new(),
+                Some(health) => health
+                    .events_snapshot()
+                    .into_iter()
+                    .map(|event| {
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            "elapsed_ms".to_string(),
+                            c1::Value::Integer(event.elapsed_ms as i64),
+                        );
+                        map.insert("root".to_string(), c1::Value::Text(event.root));
+                        map.insert("state".to_string(), c1::Value::Text(event.state));
+                        map.insert(
+                            "reason".to_string(),
+                            match event.reason {
+                                Some(r) => c1::Value::Text(r),
+                                None => c1::Value::Null,
+                            },
+                        );
+                        c1::Value::Object(map)
+                    })
+                    .collect(),
+            };
+            Response::json(200, json_object(vec![("events", c1::Value::Array(events))]))
+        }
+        ("POST", "/v1/pins") => {
+            let body_text = match std::str::from_utf8(&request.body) {
+                Ok(t) => t,
+                Err(_) => return error_response(400, "ボディが UTF-8 でない"),
+            };
+            let value = match c1::parse(body_text) {
+                Ok(v) => v,
+                Err(e) => return error_response(400, &format!("JSON が不正: {e}")),
+            };
+            let (root, min_replicas) = match &value {
+                c1::Value::Object(map) => {
+                    let root = match map.get("root") {
+                        Some(c1::Value::Text(t)) => t.clone(),
+                        _ => return error_response(400, "root がない"),
+                    };
+                    let min = match map.get("min_replicas") {
+                        Some(c1::Value::Integer(n)) if (0..=1024).contains(n) => *n as u32,
+                        _ => return error_response(400, "min_replicas は 0..=1024 の整数"),
+                    };
+                    (root, min)
+                }
+                _ => return error_response(400, "ボディはオブジェクトであるべき"),
+            };
             let mut store = store.lock().expect("lock");
-            crate::sync::handle_sync_request(&mut store, request)
+            match store.set_pin(&root, min_replicas) {
+                Ok(seq) => {
+                    // pin の発行者は root を保持しているので、最初の保持者として表明する
+                    // (これが修復の取り寄せ元の種になる)。
+                    if min_replicas > 0 && !store.own_attested_roots().contains(&root) {
+                        if let Err(e) = store.set_attest(&root, true) {
+                            return store_error_response(e);
+                        }
+                    }
+                    Response::json(200, json_object(vec![("seq", c1::Value::Integer(seq as i64))]))
+                }
+                Err(e) => store_error_response(e),
+            }
         }
+        ("GET", "/v1/pins") => {
+            let store = store.lock().expect("lock");
+            let pins: Vec<c1::Value> = store
+                .effective_pins()
+                .into_iter()
+                .map(|(root, min)| {
+                    let holders: Vec<c1::Value> = store
+                        .attest_holders(&root)
+                        .into_iter()
+                        .map(c1::Value::Text)
+                        .collect();
+                    let mut map = BTreeMap::new();
+                    map.insert("root".to_string(), c1::Value::Text(root));
+                    map.insert("min_replicas".to_string(), c1::Value::Integer(min as i64));
+                    map.insert("holders".to_string(), c1::Value::Array(holders));
+                    c1::Value::Object(map)
+                })
+                .collect();
+            Response::json(200, json_object(vec![("pins", c1::Value::Array(pins))]))
+        }
+        ("POST", "/v1/sync") => crate::sync::handle_sync_request(store, request),
         ("GET", "/v1/replication/signers") => {
             let store = store.lock().expect("lock");
             let signers: Vec<c1::Value> = store

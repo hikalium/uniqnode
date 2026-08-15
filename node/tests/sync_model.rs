@@ -111,10 +111,10 @@ fn run_model(seed: u64) {
                     continue;
                 }
                 let source = nodes[j].store.take().expect("open");
-                let mut destination = nodes[i].store.take().expect("open");
-                sync_from_peer(&mut destination, &LocalPeer(&source)).expect("sync");
+                let destination = std::sync::Mutex::new(nodes[i].store.take().expect("open"));
+                sync_from_peer(&destination, &LocalPeer(&source)).expect("sync");
                 nodes[j].store = Some(source);
-                nodes[i].store = Some(destination);
+                nodes[i].store = Some(destination.into_inner().expect("mutex"));
             }
             // 再起動(drop → open で回復経路を通す)。
             _ => {
@@ -133,10 +133,10 @@ fn run_model(seed: u64) {
                     continue;
                 }
                 let source = nodes[j].store.take().expect("open");
-                let mut destination = nodes[i].store.take().expect("open");
-                sync_from_peer(&mut destination, &LocalPeer(&source)).expect("sync");
+                let destination = std::sync::Mutex::new(nodes[i].store.take().expect("open"));
+                sync_from_peer(&destination, &LocalPeer(&source)).expect("sync");
                 nodes[j].store = Some(source);
-                nodes[i].store = Some(destination);
+                nodes[i].store = Some(destination.into_inner().expect("mutex"));
             }
         }
     }

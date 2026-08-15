@@ -14,6 +14,7 @@ fn usage() -> ! {
            set-ref <dir> <path> <id>  自名前空間の ref を設定する(id が '-' なら tombstone)\n\
            refs <dir>                 ref を一覧する\n\
            fsck <dir>                 全再ハッシュ検査(異常があれば非0で終了)\n\
+           pin <dir> <root> <min>     root の到達閉包に min_replicas を要求する(0 で解除)\n\
            serve <dir> <addr>         HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)\n\
            sync <dir> <peer_addr>     相手から pull で同期する(serve 停止中のストア用。\n\
                                       serve 中は POST /v1/sync を使う)\n\
@@ -108,9 +109,9 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
         }
         "sync" => {
             let peer_address = rest.first().map(String::as_str).unwrap_or_else(|| usage());
-            let mut store = open(dir);
-            let peer = uniqnode::sync::HttpPeer { address: peer_address.to_string() };
-            match uniqnode::sync::sync_from_peer(&mut store, &peer) {
+            let store = std::sync::Mutex::new(open(dir));
+            let peer = uniqnode::sync::HttpPeer::new(peer_address);
+            match uniqnode::sync::sync_from_peer(&store, &peer) {
                 Ok(report) => {
                     println!(
                         "signers: {} ingested: {} known: {} fetched: {} absent: {} mismatches: {}",
@@ -138,15 +139,50 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             println!("listening on {}", listener.local_addr()?);
             use std::io::Write as _;
             std::io::stdout().flush()?;
-            let store = std::sync::Arc::new(std::sync::Mutex::new(open(dir)));
+            let data_dir = std::path::PathBuf::from(dir);
+            let (capacity_bytes, health_params) = uniqnode::health::read_node_config(&data_dir);
+            let mut store_config = uniqnode::store::StoreConfig::new(&data_dir);
+            store_config.capacity_bytes = capacity_bytes;
+            let store = match uniqnode::store::Store::open(store_config) {
+                Ok(s) => std::sync::Arc::new(std::sync::Mutex::new(s)),
+                Err(e) => {
+                    eprintln!("uniqnode: ストアを開けない: {e}");
+                    std::process::exit(1);
+                }
+            };
             let engine = std::sync::Arc::new(uniqnode::query::QueryEngine::new(
                 store.clone(),
-                std::path::PathBuf::from(dir),
+                data_dir.clone(),
             ));
-            let context = uniqnode::api::ApiContext { store, engine };
+            let health = std::sync::Arc::new(uniqnode::health::HealthEngine::new(
+                store.clone(),
+                data_dir,
+                health_params,
+            ));
+            {
+                let health = health.clone();
+                std::thread::spawn(move || health.run());
+            }
+            let context =
+                uniqnode::api::ApiContext { store, engine, health: Some(health) };
             let handler: std::sync::Arc<uniqnode::http::Handler> =
                 std::sync::Arc::new(move |request| uniqnode::api::handle(&context, request));
             uniqnode::http::serve(listener, handler);
+        }
+        "pin" => {
+            if rest.len() < 2 {
+                usage();
+            }
+            let mut store = open(dir);
+            let root = rest[0].as_str();
+            let min_replicas: u32 = rest[1].parse().map_err(|_| {
+                StoreError::Invalid("min_replicas は非負整数".into())
+            })?;
+            let seq = store.set_pin(root, min_replicas)?;
+            if min_replicas > 0 && !store.own_attested_roots().contains(&root.to_string()) {
+                store.set_attest(root, true)?;
+            }
+            println!("seq: {seq}");
         }
         "flood" => {
             // クラッシュ試験用: kill されるまで最速で書き続ける(fsync 済み書き込みの

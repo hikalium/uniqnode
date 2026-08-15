@@ -163,7 +163,7 @@ impl QueryEngine {
             data_dir,
             registry: Mutex::new(VecDeque::new()),
             peer_factory: Arc::new(|address| {
-                Box::new(HttpPeer { address: address.to_string() })
+                Box::new(HttpPeer::with_timeout(address, Duration::from_secs(5)))
             }),
         }
     }

@@ -68,56 +68,90 @@ pub struct SyncReport {
 
 /// 相手から ref レコードとオブジェクト閉包を取り寄せる。何度実行しても安全(べき等)で、
 /// 前回途中で失敗していても続きから埋まる。
-pub fn sync_from_peer(store: &mut Store, peer: &dyn PeerSource) -> Result<SyncReport, SyncError> {
+///
+/// ロックの規律: ネットワーク待ちの間は store のロックを持たない。ロックは読み書きの
+/// 瞬間だけ短く取る。これを破ると、相互に同期し合うノード群で「相手の API が相手の
+/// エンジンのロック待ちで塞がる」連鎖が起きる(実測でメッシュ全体が30秒タイムアウトの
+/// 連鎖に陥った)。
+pub fn sync_from_peer(
+    store: &std::sync::Mutex<Store>,
+    peer: &dyn PeerSource,
+) -> Result<SyncReport, SyncError> {
     let mut report = SyncReport::default();
+    sync_records(store, peer, &mut report)?;
 
-    // 1. ref レコードの取り寄せ(gossip の pull 版)。
+    // have/want: すべての ref の対象から到達閉包を歩き、欠けているオブジェクトを
+    // 取り寄せる。過去の同期が途中で死んでいても、ここで穴が埋まる。
+    let targets: Vec<String> = {
+        let guard = store.lock().expect("store lock");
+        guard.list_refs().filter_map(|(_, state)| state.target.clone()).collect()
+    };
+    fetch_closures(store, peer, targets, &mut report)?;
+    Ok(report)
+}
+
+/// 署名済みレコードだけを取り寄せる(gossip の pull 版)。健全性エンジンの周期処理は
+/// これで pin・保持表明・ref を運び、オブジェクト本体は pin の修復時にだけ取る。
+pub fn sync_records(
+    store: &std::sync::Mutex<Store>,
+    peer: &dyn PeerSource,
+    report: &mut SyncReport,
+) -> Result<(), SyncError> {
+    let local: std::collections::BTreeMap<String, u64> = {
+        let guard = store.lock().expect("store lock");
+        guard.signers().into_iter().collect()
+    };
     for (signer, peer_last_seq) in peer.signers()? {
         report.signers_seen += 1;
-        let local_last = store
-            .signers()
-            .into_iter()
-            .find(|(s, _)| *s == signer)
-            .map(|(_, seq)| seq)
-            .unwrap_or(0);
+        let local_last = local.get(&signer).copied().unwrap_or(0);
         if peer_last_seq <= local_last {
             continue;
         }
-        for payload in peer.refs_since(&signer, local_last)? {
-            if store.ingest_ref_record(&payload)? {
+        let payloads = peer.refs_since(&signer, local_last)?; // ネットワーク(ロック外)
+        let mut guard = store.lock().expect("store lock");
+        for payload in payloads {
+            if guard.ingest_ref_record(&payload)? {
                 report.records_ingested += 1;
             } else {
                 report.records_already_known += 1;
             }
         }
     }
+    Ok(())
+}
 
-    // 2. have/want: すべての ref の対象から到達閉包を歩き、欠けているオブジェクトを
-    //    取り寄せる。過去の同期が途中で死んでいても、ここで穴が埋まる。
-    let mut queue: Vec<String> = store
-        .list_refs()
-        .filter_map(|(_, state)| state.target.clone())
-        .collect();
+/// 起点集合から到達閉包を歩き、欠けているオブジェクトを相手から取り寄せる。
+/// 応答は content-addressing で検証し、一致しないものは数えて捨てる(SPEC §7.1)。
+pub fn fetch_closures(
+    store: &std::sync::Mutex<Store>,
+    peer: &dyn PeerSource,
+    roots: Vec<String>,
+    report: &mut SyncReport,
+) -> Result<(), SyncError> {
+    let mut queue = roots;
     let mut seen: BTreeSet<String> = BTreeSet::new();
     while let Some(id) = queue.pop() {
         if !seen.insert(id.clone()) {
             continue;
         }
-        let bytes = match store.get_object(&id)? {
+        let local = {
+            let guard = store.lock().expect("store lock");
+            guard.get_object(&id)?
+        };
+        let bytes = match local {
             Some(bytes) => bytes,
             None => match peer.fetch_object(&id)? {
+                // ネットワーク(ロック外)
                 None => {
                     report.objects_absent += 1;
                     continue;
                 }
                 Some(bytes) => {
-                    // content-addressing による検証: 受信バイト列が要求 ID と一致しない
-                    // 応答は保存しない(SPEC §7.1)。
                     if c1::id_for_bytes(&bytes) != id {
                         report.hash_mismatches += 1;
                         continue;
                     }
-                    store.put_object(&bytes)?;
+                    store.lock().expect("store lock").put_object(&bytes)?;
                     report.objects_fetched += 1;
                     bytes
                 }
@@ -135,7 +169,7 @@ pub fn sync_from_peer(store: &mut Store, peer: &dyn PeerSource) -> Result<SyncRe
             }
         }
     }
-    Ok(report)
+    Ok(())
 }
 
 /// プロセス内の別ストアを取り寄せ元にする(モデルテスト・将来のツール用)。
@@ -165,16 +199,43 @@ impl<'a> PeerSource for LocalPeer<'a> {
 /// HTTP のノードローカル API(SPEC §10)を取り寄せ元にする。
 pub struct HttpPeer {
     pub address: String,
+    /// 接続・読み取りの期限。gossip の生存確認は短く(沈黙の確定を速く)、
+    /// 大きな取り寄せは長めに設定する。
+    pub timeout: std::time::Duration,
+}
+
+impl HttpPeer {
+    pub fn new(address: impl Into<String>) -> HttpPeer {
+        HttpPeer { address: address.into(), timeout: std::time::Duration::from_secs(30) }
+    }
+    pub fn with_timeout(address: impl Into<String>, timeout: std::time::Duration) -> HttpPeer {
+        HttpPeer { address: address.into(), timeout }
+    }
+}
+
+/// 相手の status の要約(生存確認と容量広告)。
+#[derive(Clone, Debug)]
+pub struct PeerStatusView {
+    pub node_id: String,
+    /// None = 容量無制限。
+    pub free_bytes: Option<u64>,
 }
 
 impl HttpPeer {
     /// 1リクエスト1接続の最小 HTTP/1.1 クライアント。
     fn get(&self, path: &str) -> Result<(u16, Vec<u8>), SyncError> {
         use std::io::{BufRead, BufReader, Read, Write};
-        let stream = std::net::TcpStream::connect(&self.address)
+        use std::net::ToSocketAddrs;
+        let resolved = self
+            .address
+            .to_socket_addrs()
+            .map_err(|e| SyncError::Peer(format!("{} を解決できない: {e}", self.address)))?
+            .next()
+            .ok_or_else(|| SyncError::Peer(format!("{} を解決できない", self.address)))?;
+        let stream = std::net::TcpStream::connect_timeout(&resolved, self.timeout)
             .map_err(|e| SyncError::Peer(format!("{} に接続できない: {e}", self.address)))?;
         stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+            .set_read_timeout(Some(self.timeout))
             .map_err(|e| SyncError::Peer(format!("timeout 設定: {e}")))?;
         let mut writer = stream.try_clone().map_err(|e| SyncError::Peer(e.to_string()))?;
         writer
@@ -216,6 +277,24 @@ impl HttpPeer {
             .read_exact(&mut body)
             .map_err(|e| SyncError::Peer(format!("ボディ読み取り: {e}")))?;
         Ok((status, body))
+    }
+
+    /// 相手の /v1/status から生存確認と容量広告を得る(SPEC §8.2 の生存割引の情報源)。
+    pub fn fetch_status(&self) -> Result<PeerStatusView, SyncError> {
+        let value = self.get_json("/v1/status")?;
+        let map = match &value {
+            c1::Value::Object(m) => m,
+            _ => return Err(SyncError::Peer("status 応答がオブジェクトでない".into())),
+        };
+        let node_id = match map.get("node_id") {
+            Some(c1::Value::Text(t)) => t.clone(),
+            _ => return Err(SyncError::Peer("status に node_id がない".into())),
+        };
+        let free_bytes = match map.get("free_bytes") {
+            Some(c1::Value::Integer(n)) if *n >= 0 => Some(*n as u64),
+            _ => None, // 無制限(容量未設定)
+        };
+        Ok(PeerStatusView { node_id, free_bytes })
     }
 
     fn get_json(&self, path: &str) -> Result<c1::Value, SyncError> {
@@ -318,8 +397,9 @@ impl PeerSource for HttpPeer {
     }
 }
 
-/// POST /v1/sync のハンドラ本体(api.rs から呼ばれる)。
-pub fn handle_sync_request(store: &mut Store, request: &Request) -> Response {
+/// POST /v1/sync のハンドラ本体(api.rs から呼ばれる)。ネットワーク待ちの間は
+/// ロックを持たないので、同期中も他の API は応答できる。
+pub fn handle_sync_request(store: &std::sync::Mutex<Store>, request: &Request) -> Response {
     let body_text = match std::str::from_utf8(&request.body) {
         Ok(t) => t,
         Err(_) => return error_json(400, "ボディが UTF-8 でない"),
@@ -331,7 +411,7 @@ pub fn handle_sync_request(store: &mut Store, request: &Request) -> Response {
         },
         _ => return error_json(400, "JSON オブジェクトを期待した"),
     };
-    let peer = HttpPeer { address: peer_address };
+    let peer = HttpPeer::new(peer_address);
     match sync_from_peer(store, &peer) {
         Ok(report) => {
             let mut map = std::collections::BTreeMap::new();
@@ -389,18 +469,22 @@ mod tests {
     #[test]
     fn local_peer_sync_replicates_and_is_idempotent() {
         let (mut origin, dir_a) = temp_store("local-origin");
-        let (mut replica, dir_b) = temp_store("local-replica");
+        let (replica, dir_b) = temp_store("local-replica");
+        let replica = std::sync::Mutex::new(replica);
         let (leaf, _) = origin.put_object(b"\"leaf\"").expect("put");
         let edge = format!("{{\"kind\":\"edge\",\"members\":[\"{leaf}\"],\"v\":1}}");
         let (edge_id, _) = origin.put_object(edge.as_bytes()).expect("put");
         origin.set_ref("graph", Some(&edge_id)).expect("set");
 
-        let first = sync_from_peer(&mut replica, &LocalPeer(&origin)).expect("sync");
+        let first = sync_from_peer(&replica, &LocalPeer(&origin)).expect("sync");
         assert_eq!(first.records_ingested, 1);
         assert_eq!(first.objects_fetched, 2, "辺と葉の閉包が届く");
-        assert!(replica.has_object(&leaf) && replica.has_object(&edge_id));
+        {
+            let guard = replica.lock().expect("lock");
+            assert!(guard.has_object(&leaf) && guard.has_object(&edge_id));
+        }
 
-        let second = sync_from_peer(&mut replica, &LocalPeer(&origin)).expect("resync");
+        let second = sync_from_peer(&replica, &LocalPeer(&origin)).expect("resync");
         assert_eq!(second.records_ingested, 0);
         assert_eq!(second.objects_fetched, 0);
 
@@ -434,19 +518,22 @@ mod tests {
     #[test]
     fn mislabeled_object_bytes_are_discarded() {
         let (mut origin, dir_a) = temp_store("evil-origin");
-        let (mut replica, dir_b) = temp_store("evil-replica");
+        let (replica, dir_b) = temp_store("evil-replica");
+        let replica = std::sync::Mutex::new(replica);
         let (id, _) = origin.put_object(b"\"the real object\"").expect("put");
         origin.set_ref("x", Some(&id)).expect("set");
         let origin_id = origin.node_id_hex().to_string();
         let records = origin.export_ref_records(&origin_id, 0).expect("export");
 
         let evil = EvilPeer { signer: origin_id, last_seq: 1, records };
-        let report = sync_from_peer(&mut replica, &evil).expect("sync");
+        let report = sync_from_peer(&replica, &evil).expect("sync");
         assert_eq!(report.records_ingested, 1, "署名済みレコード自体は本物なので入る");
         assert_eq!(report.hash_mismatches, 1, "偽のバイト列は数えられて捨てられる");
         assert_eq!(report.objects_fetched, 0);
-        assert!(!replica.has_object(&id), "偽の内容は保存されない");
-        assert!(replica.fsck().expect("fsck").errors.is_empty());
+        let guard = replica.lock().expect("lock");
+        assert!(!guard.has_object(&id), "偽の内容は保存されない");
+        assert!(guard.fsck().expect("fsck").errors.is_empty());
+        drop(guard);
 
         std::fs::remove_dir_all(&dir_a).expect("cleanup");
         std::fs::remove_dir_all(&dir_b).expect("cleanup");

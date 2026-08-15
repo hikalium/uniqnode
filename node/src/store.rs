@@ -50,6 +50,9 @@ pub struct StoreConfig {
     pub pack_seal_bytes: u64,
     /// 1レコードの上限(len フィールドの暴走値からの防御)。
     pub max_record_bytes: u32,
+    /// オブジェクト合計の容量上限。None = 無制限。超える put は拒否される
+    /// (機会層の evict と pack の物理回収は後続マイルストーン。docs/plan/M1.md)。
+    pub capacity_bytes: Option<u64>,
 }
 
 impl StoreConfig {
@@ -58,6 +61,7 @@ impl StoreConfig {
             data_dir: data_dir.into(),
             pack_seal_bytes: 256 * 1024 * 1024,
             max_record_bytes: 64 * 1024 * 1024,
+            capacity_bytes: None,
         }
     }
 }
@@ -77,17 +81,24 @@ pub struct RefState {
     pub at: i64,
 }
 
-/// 検証済み ref レコードの内容。
-struct VerifiedRef {
-    name: String,
-    target: Option<String>,
+/// 署名済みレコードの本体(SPEC §4.4, §4.5)。reflog は3種のレコードを同じ
+/// per-signer seq の流れで運ぶため、pin と保持表明も L1 の同期でそのまま複製される。
+enum RecordBody {
+    SetRef { name: String, target: Option<String> },
+    Pin { root: String, min_replicas: u32 },
+    Attest { root: String, held: bool },
+}
+
+/// 検証済みレコード。
+struct VerifiedRecord {
+    body: RecordBody,
     seq: u64,
     at: i64,
     signer: String,
 }
 
 enum Verified {
-    New(VerifiedRef),
+    New(VerifiedRecord),
     AlreadyKnown,
 }
 
@@ -98,6 +109,12 @@ pub struct Store {
     /// オブジェクトID → 位置。導出データ(起動時に pack 走査で再構築)。
     object_index: BTreeMap<String, ObjectLocation>,
     refs: BTreeMap<String, RefState>,
+    /// pin: root → (署名者 → min_replicas)。実効値は最大値(SPEC §4.5)。
+    pins: BTreeMap<String, BTreeMap<String, u32>>,
+    /// 保持表明: root → (保持者 → held)。false は撤回の記録。
+    attests: BTreeMap<String, BTreeMap<String, bool>>,
+    /// 全オブジェクトの合計バイト数(容量会計)。
+    used_bytes: u64,
     /// 署名者(DBノード)ごとの適用済み最終 seq。レプリケーションのカーソル(I5)。
     signer_last_seq: BTreeMap<String, u64>,
     sealed_packs: Vec<u64>,
@@ -218,6 +235,9 @@ impl Store {
             node_id_hex,
             object_index: BTreeMap::new(),
             refs: BTreeMap::new(),
+            pins: BTreeMap::new(),
+            attests: BTreeMap::new(),
+            used_bytes: 0,
             signer_last_seq: BTreeMap::new(),
             sealed_packs,
             sealed_reflogs,
@@ -369,12 +389,18 @@ impl Store {
             }
             for (offset, payload) in &scan.records {
                 let id = c1::id_for_bytes(payload);
-                // 重複追記(クラッシュ再送)は最初の1つだけ索引に載せる。
-                self.object_index.entry(id).or_insert(ObjectLocation {
-                    pack_number: *number,
-                    payload_offset: *offset,
-                    payload_length: payload.len() as u32,
-                });
+                // 重複追記(クラッシュ再送)は最初の1つだけ索引と容量に数える。
+                if !self.object_index.contains_key(&id) {
+                    self.used_bytes += payload.len() as u64;
+                    self.object_index.insert(
+                        id,
+                        ObjectLocation {
+                            pack_number: *number,
+                            payload_offset: *offset,
+                            payload_length: payload.len() as u32,
+                        },
+                    );
+                }
             }
             if !sealed && is_last {
                 self.active_pack_number = *number;
@@ -445,16 +471,11 @@ impl Store {
                 _ => Err(StoreError::Corruption(format!("reflog レコードに {key} がない"))),
             }
         };
-        let name = text_field("name")?;
+        let record_type = text_field("type")?;
         let seq = integer_field("seq")? as u64;
         let at = integer_field("at")?;
         let signer = text_field("signer")?;
         let signature_hex = text_field("sig")?;
-        let target = match map.get("target") {
-            Some(c1::Value::Text(t)) => Some(t.clone()),
-            Some(c1::Value::Null) => None,
-            _ => return Err(StoreError::Corruption("reflog レコードの target が不正".into())),
-        };
 
         // 既知の seq は署名検証の前に冪等スキップする(状態を変えないので危険がなく、
         // 再同期のたびに全レコードを検証し直すコストを避ける)。
@@ -483,26 +504,76 @@ impl Store {
                 "reflog レコード(seq={seq})の署名が不正"
             )));
         }
-        if !name.starts_with(&format!("{signer}/")) {
-            return Err(StoreError::Corruption(format!(
-                "ref {name} は signer の名前空間でない(single writer 違反)"
-            )));
-        }
+        let body = match record_type.as_str() {
+            "set_ref" => {
+                let name = text_field("name")?;
+                if !name.starts_with(&format!("{signer}/")) {
+                    return Err(StoreError::Corruption(format!(
+                        "ref {name} は signer の名前空間でない(single writer 違反)"
+                    )));
+                }
+                let target = match map.get("target") {
+                    Some(c1::Value::Text(t)) => Some(t.clone()),
+                    Some(c1::Value::Null) => None,
+                    _ => {
+                        return Err(StoreError::Corruption("レコードの target が不正".into()))
+                    }
+                };
+                RecordBody::SetRef { name, target }
+            }
+            "pin" => {
+                let min_replicas = integer_field("min_replicas")?;
+                if !(0..=1024).contains(&min_replicas) {
+                    return Err(StoreError::Corruption("min_replicas が範囲外".into()));
+                }
+                RecordBody::Pin {
+                    root: text_field("root")?,
+                    min_replicas: min_replicas as u32,
+                }
+            }
+            "attest" => {
+                let held = match map.get("held") {
+                    Some(c1::Value::Bool(b)) => *b,
+                    _ => return Err(StoreError::Corruption("attest の held が不正".into())),
+                };
+                RecordBody::Attest { root: text_field("root")?, held }
+            }
+            other => {
+                return Err(StoreError::Corruption(format!("未知のレコード種別 {other}")))
+            }
+        };
         if seq != last + 1 {
             return Err(StoreError::Corruption(format!(
                 "signer {signer} の seq が飛んでいる: 期待 {} 実際 {seq}",
                 last + 1
             )));
         }
-        Ok(Verified::New(VerifiedRef { name, target, seq, at, signer }))
+        Ok(Verified::New(VerifiedRecord { body, seq, at, signer }))
     }
 
-    fn apply_verified(&mut self, verified: VerifiedRef) {
-        self.signer_last_seq.insert(verified.signer, verified.seq);
-        self.refs.insert(
-            verified.name,
-            RefState { target: verified.target, seq: verified.seq, at: verified.at },
-        );
+    fn apply_verified(&mut self, verified: VerifiedRecord) {
+        self.signer_last_seq.insert(verified.signer.clone(), verified.seq);
+        match verified.body {
+            RecordBody::SetRef { name, target } => {
+                self.refs
+                    .insert(name, RefState { target, seq: verified.seq, at: verified.at });
+            }
+            RecordBody::Pin { root, min_replicas } => {
+                if min_replicas == 0 {
+                    if let Some(entry) = self.pins.get_mut(&root) {
+                        entry.remove(&verified.signer);
+                        if entry.is_empty() {
+                            self.pins.remove(&root);
+                        }
+                    }
+                } else {
+                    self.pins.entry(root).or_default().insert(verified.signer, min_replicas);
+                }
+            }
+            RecordBody::Attest { root, held } => {
+                self.attests.entry(root).or_default().insert(verified.signer, held);
+            }
+        }
     }
 
     /// 他DBノード由来の署名済み ref レコードを取り込む(レプリケーションの受け側)。
@@ -533,6 +604,15 @@ impl Store {
         if self.object_index.contains_key(&id) {
             return Ok((id, false));
         }
+        if let Some(capacity) = self.config.capacity_bytes {
+            if self.used_bytes + bytes.len() as u64 > capacity {
+                return Err(StoreError::Invalid(format!(
+                    "容量超過: used {} + {} > {capacity}",
+                    self.used_bytes,
+                    bytes.len()
+                )));
+            }
+        }
         if self.active_pack_length >= self.config.pack_seal_bytes {
             self.seal_active_pack()?;
         }
@@ -548,6 +628,7 @@ impl Store {
                 payload_length: bytes.len() as u32,
             },
         );
+        self.used_bytes += bytes.len() as u64;
         Ok((id, true))
     }
 
@@ -572,13 +653,10 @@ impl Store {
             }
         }
         let name = format!("{}/{}", self.node_id_hex, path);
-        let seq = self.signer_last_seq.get(&self.node_id_hex).copied().unwrap_or(0) + 1;
-        let at = unix_now();
-
         let mut map = BTreeMap::new();
         map.insert("v".to_string(), c1::Value::Integer(1));
         map.insert("type".to_string(), c1::Value::Text("set_ref".to_string()));
-        map.insert("name".to_string(), c1::Value::Text(name.clone()));
+        map.insert("name".to_string(), c1::Value::Text(name));
         map.insert(
             "target".to_string(),
             match target {
@@ -586,15 +664,49 @@ impl Store {
                 None => c1::Value::Null,
             },
         );
+        self.append_own_record(map)
+    }
+
+    /// pin(root の到達閉包に min_replicas を要求する。0 で解除。SPEC §4.5)。
+    pub fn set_pin(&mut self, root: &str, min_replicas: u32) -> Result<u64> {
+        if min_replicas > 0 && !self.object_index.contains_key(root) {
+            return Err(StoreError::Invalid(format!("root {root} が存在しない")));
+        }
+        let mut map = BTreeMap::new();
+        map.insert("v".to_string(), c1::Value::Integer(1));
+        map.insert("type".to_string(), c1::Value::Text("pin".to_string()));
+        map.insert("root".to_string(), c1::Value::Text(root.to_string()));
+        map.insert("min_replicas".to_string(), c1::Value::Integer(min_replicas as i64));
+        self.append_own_record(map)
+    }
+
+    /// 保持表明(SPEC §4.5)。held=true は root の閉包を確約層で保持していることの表明。
+    pub fn set_attest(&mut self, root: &str, held: bool) -> Result<u64> {
+        if held && !self.object_index.contains_key(root) {
+            return Err(StoreError::Invalid(format!(
+                "保持していない root {root} に held=true は表明できない"
+            )));
+        }
+        let mut map = BTreeMap::new();
+        map.insert("v".to_string(), c1::Value::Integer(1));
+        map.insert("type".to_string(), c1::Value::Text("attest".to_string()));
+        map.insert("root".to_string(), c1::Value::Text(root.to_string()));
+        map.insert("held".to_string(), c1::Value::Bool(held));
+        self.append_own_record(map)
+    }
+
+    /// 自分の署名でレコードを1件発行する(seq/at/signer/sig を埋め、取り込み側と同じ
+    /// 検証を通してから永続化・適用する。判定の一本化 = should/0135)。
+    fn append_own_record(&mut self, mut map: BTreeMap<String, c1::Value>) -> Result<u64> {
+        let seq = self.signer_last_seq.get(&self.node_id_hex).copied().unwrap_or(0) + 1;
         map.insert("seq".to_string(), c1::Value::Integer(seq as i64));
-        map.insert("at".to_string(), c1::Value::Integer(at));
+        map.insert("at".to_string(), c1::Value::Integer(unix_now()));
         map.insert("signer".to_string(), c1::Value::Text(self.node_id_hex.clone()));
         let message = c1::to_canonical_bytes(&c1::Value::Object(map.clone()));
         let signature = ed25519::sign(&self.secret_seed, &message);
         map.insert("sig".to_string(), c1::Value::Text(sha2::hex(&signature)));
         let payload = c1::to_canonical_bytes(&c1::Value::Object(map));
 
-        // 自作のレコードも取り込み側と同じ検証を通す(判定の一本化)。
         let verified = match self.verify_ref_record(&payload)? {
             Verified::New(v) => v,
             Verified::AlreadyKnown => {
@@ -605,6 +717,66 @@ impl Store {
         append_record(&log_path, &payload)?;
         self.apply_verified(verified);
         Ok(seq)
+    }
+
+    // ---- pin / 保持表明 / 容量の読み取り ----
+
+    /// 実効 pin: root → min_replicas の最大値(0 は除去済み)。
+    pub fn effective_pins(&self) -> BTreeMap<String, u32> {
+        self.pins
+            .iter()
+            .filter_map(|(root, by_signer)| {
+                by_signer.values().max().map(|min| (root.clone(), *min))
+            })
+            .collect()
+    }
+
+    /// root の保持を表明している(held=true)DBノードの一覧。
+    pub fn attest_holders(&self, root: &str) -> Vec<String> {
+        self.attests
+            .get(root)
+            .map(|by_holder| {
+                by_holder
+                    .iter()
+                    .filter(|(_, held)| **held)
+                    .map(|(holder, _)| holder.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 自分が held=true を表明している root(確約層)。
+    pub fn own_attested_roots(&self) -> Vec<String> {
+        self.attests
+            .iter()
+            .filter(|(_, by_holder)| {
+                by_holder.get(&self.node_id_hex).copied().unwrap_or(false)
+            })
+            .map(|(root, _)| root.clone())
+            .collect()
+    }
+
+    pub fn used_bytes(&self) -> u64 {
+        self.used_bytes
+    }
+
+    pub fn capacity_bytes(&self) -> Option<u64> {
+        self.config.capacity_bytes
+    }
+
+    pub fn free_bytes(&self) -> Option<u64> {
+        self.config.capacity_bytes.map(|c| c.saturating_sub(self.used_bytes))
+    }
+
+    /// root の到達閉包(ローカルに在る分)の合計バイト数。
+    pub fn closure_bytes(&self, root: &str) -> Result<u64> {
+        let mut total = 0u64;
+        for id in self.reachable_closure(root)? {
+            if let Some(location) = self.object_index.get(&id) {
+                total += location.payload_length as u64;
+            }
+        }
+        Ok(total)
     }
 
     // ---- 読み取り ----

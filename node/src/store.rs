@@ -260,12 +260,27 @@ impl Store {
             sha2::hex(&sha2::sha256(canonical.as_os_str().as_encoded_bytes()))
         );
         let address = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())?;
-        match std::os::unix::net::UnixListener::bind_addr(&address) {
-            Ok(listener) => Ok(listener),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(StoreError::Invalid(
-                format!("{} は別プロセスが開いている", dir.display()),
-            )),
-            Err(e) => Err(e.into()),
+        // AddrInUse は短い有界の再試行で判別する。子プロセス生成(Command)は fork→exec の
+        // 窓の間、親の全FD(CLOEXEC 付きを含む)の複製を子に持たせるため(CLOEXEC が閉じるのは
+        // exec の瞬間)、同プロセスの別スレッドが spawn 中だと、直前に解放した錠の抽象
+        // ソケットが一瞬 AddrInUse に見える。実測: spawn 並行下の drop→即 bind で 1.4%、
+        // 複製の解放まで最悪 3.6ms(docs/analysis/20260816-lock-inheritance-race.md)。
+        // 本物の保持者は解放しないので、250ms 待っても塞がっていれば二重オープンと確定する。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        loop {
+            match std::os::unix::net::UnixListener::bind_addr(&address) {
+                Ok(listener) => return Ok(listener),
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(StoreError::Invalid(format!(
+                            "{} は別プロセスが開いている",
+                            dir.display()
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
     }
 

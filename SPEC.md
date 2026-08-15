@@ -219,6 +219,14 @@ GC が回収する。
   適用する(MUST)。自動適用してはならない(MUST NOT)。
 - 詰みの回避: いかなる場合も各DBノードのローカル設定の手動編集が最終権威であり(MUST)、
   鍵の喪失は「全DBノードの設定を手で書き換える手間」以上の被害にならない。
+- L4 の具体化: グループは data_dir/groups.json(`{"groups":[{group_id, keys, thresholds,
+  revocations}]}`)で定義され、編集に再起動は要らない。証明書と失効文は c1 JSON で、
+  `sigs` を除いた正規形が署名対象。発行のセレモニーは CLI(`admin-keygen` → `cert-make` →
+  `cert-sign` ×k → `cert-verify`)で行い、署名の収集はファイル渡しでよい。
+  peers.json のエントリは `certificate` を持てる: 統一検証規則を通ったものだけが
+  スコープに入り、健全性エンジンは接触時に実際の node_id と証明書の主張を照合して
+  一致しない相手を受け入れない。失効文は当面 groups.json 内に手動配置する
+  (伝播交換への載せ替えは残件。docs/plan/M1.md)。
 
 ### 6.5 採用しないもの
 

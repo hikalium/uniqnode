@@ -108,9 +108,19 @@ pub struct QueryEngine {
     peer_factory: PeerFactory,
 }
 
-/// data_dir/peers.json(`{"peers":[{"address":"host:port"}, …]}`)から既定スコープを読む。
+/// 受け入れ済みのピア。手動エントリ(証明書なし)は信頼の根としてそのまま、
+/// 証明書付きエントリは groups.json の統一検証規則(SPEC §6.4)を通ったものだけ。
+#[derive(Clone, Debug)]
+pub struct PeerEntry {
+    pub address: String,
+    /// 証明書が主張する node_id(証明書付きエントリのみ)。実際の接触で照合される。
+    pub certified_node_id: Option<String>,
+}
+
+/// data_dir/peers.json から受け入れ済みピアを読む。
+/// `{"peers":[{"address":"host:port"}, {"address":"…","certificate":{…}}, …]}`
 /// ファイルがなければ空。毎回読み直すので、編集に再起動は要らない(should/0118)。
-pub fn read_peer_addresses(data_dir: &Path) -> Vec<String> {
+pub fn read_peer_entries(data_dir: &Path) -> Vec<PeerEntry> {
     let path = data_dir.join("peers.json");
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
@@ -123,19 +133,54 @@ pub fn read_peer_addresses(data_dir: &Path) -> Vec<String> {
             return Vec::new();
         }
     };
+    let groups = crate::groups::read_groups(data_dir);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let mut out = Vec::new();
     if let c1::Value::Object(map) = &value {
         if let Some(c1::Value::Array(items)) = map.get("peers") {
             for item in items {
-                if let c1::Value::Object(peer) = item {
-                    if let Some(c1::Value::Text(address)) = peer.get("address") {
-                        out.push(address.clone());
+                let c1::Value::Object(peer) = item else { continue };
+                let Some(c1::Value::Text(address)) = peer.get("address") else { continue };
+                match peer.get("certificate") {
+                    None => out.push(PeerEntry {
+                        address: address.clone(),
+                        certified_node_id: None,
+                    }),
+                    Some(certificate) => {
+                        match crate::groups::verify_membership(certificate, &groups, now) {
+                            Ok(_) => {
+                                let certified_node_id = match certificate {
+                                    c1::Value::Object(c) => match c.get("node_id") {
+                                        Some(c1::Value::Text(id)) => Some(id.clone()),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                                out.push(PeerEntry {
+                                    address: address.clone(),
+                                    certified_node_id,
+                                });
+                            }
+                            Err(reason) => {
+                                eprintln!(
+                                    "uniqnode: ピア {address} の証明書を受け入れない: {reason}"
+                                );
+                            }
+                        }
                     }
                 }
             }
         }
     }
     out
+}
+
+/// 既定スコープ(受け入れ済みピアのアドレス)。
+pub fn read_peer_addresses(data_dir: &Path) -> Vec<String> {
+    read_peer_entries(data_dir).into_iter().map(|entry| entry.address).collect()
 }
 
 fn random_hex_id() -> String {

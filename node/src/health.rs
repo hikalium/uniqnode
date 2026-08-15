@@ -283,12 +283,17 @@ impl HealthEngine {
 
     /// 1周期: 生存確認と伝播交換 → 判断 → 修復・降格の実行 → 遷移の記録。
     pub fn tick(&self) {
-        let peer_addresses = crate::query::read_peer_addresses(&self.data_dir);
+        let peer_entries = crate::query::read_peer_entries(&self.data_dir);
+        let peer_addresses: Vec<String> =
+            peer_entries.iter().map(|entry| entry.address.clone()).collect();
 
         // 生存確認(status)と署名レコードの伝播交換。期限は短く(沈黙の確定を速く)。
-        for address in &peer_addresses {
+        // 証明書付きエントリは、実際の node_id が証明書の主張と一致するときだけ受け入れる。
+        for entry_config in &peer_entries {
+            let address = &entry_config.address;
             let peer = HttpPeer::with_timeout(address.clone(), Duration::from_secs(2));
             let status = peer.fetch_status();
+            let mut accepted = false;
             {
                 let mut contacts = self.contacts.lock().expect("contacts lock");
                 let entry = contacts.entry(address.clone()).or_insert(PeerContact {
@@ -299,17 +304,32 @@ impl HealthEngine {
                 });
                 match &status {
                     Ok(view) => {
-                        entry.node_id = Some(view.node_id.clone());
-                        entry.last_seen = Some(Instant::now());
-                        entry.free_bytes = view.free_bytes;
-                        entry.unlimited = view.free_bytes.is_none();
+                        let identity_matches = match &entry_config.certified_node_id {
+                            None => true,
+                            Some(expected) if *expected == view.node_id => true,
+                            Some(expected) => {
+                                eprintln!(
+                                    "uniqnode: ピア {address} の node_id が証明書と一致しない\
+                                     (証明書 {expected}, 実際 {})",
+                                    view.node_id
+                                );
+                                false
+                            }
+                        };
+                        if identity_matches {
+                            entry.node_id = Some(view.node_id.clone());
+                            entry.last_seen = Some(Instant::now());
+                            entry.free_bytes = view.free_bytes;
+                            entry.unlimited = view.free_bytes.is_none();
+                            accepted = true;
+                        }
                     }
                     Err(_) => {
                         // 接触失敗 = 沈黙。last_seen を進めないだけで、消しはしない。
                     }
                 }
             }
-            if status.is_ok() {
+            if accepted {
                 let mut report = SyncReport::default();
                 if let Err(e) = sync::sync_records(&self.store, &peer, &mut report) {
                     eprintln!("uniqnode: 伝播交換({address}): {e}");

@@ -3,6 +3,13 @@
 use std::io::{Read, Write};
 use uniqnode::store::{Store, StoreConfig, StoreError};
 
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn usage() -> ! {
     eprintln!(
         "usage: uniqnode <command> <data_dir> [args]\n\
@@ -15,6 +22,13 @@ fn usage() -> ! {
            refs <dir>                 ref を一覧する\n\
            fsck <dir>                 全再ハッシュ検査(異常があれば非0で終了)\n\
            pin <dir> <root> <min>     root の到達閉包に min_replicas を要求する(0 で解除)\n\
+           admin-keygen <keyfile>     グループ管理者鍵を生成する(公開鍵を表示)\n\
+           cert-make <node_id> <group_id> <days>\n\
+                                      メンバーシップ証明書の本体を標準出力へ(署名なし)\n\
+           cert-sign <keyfile>        標準入力の証明書/失効文に管理者署名を1つ追記する\n\
+           cert-verify <dir>          標準入力の証明書を <dir>/groups.json で検証する\n\
+           revoke-make <node_id> <group_id>\n\
+                                      失効文の本体を標準出力へ(署名なし)\n\
            serve <dir> <addr>         HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)\n\
            sync <dir> <peer_addr>     相手から pull で同期する(serve 停止中のストア用。\n\
                                       serve 中は POST /v1/sync を使う)\n\
@@ -129,6 +143,75 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 Err(e) => {
                     eprintln!("uniqnode: sync failed: {e}");
                     std::process::exit(1);
+                }
+            }
+        }
+        // ---- グループ鍵のセレモニー(SPEC §6.4)。第1引数はコマンドごとの意味を持つ ----
+        "admin-keygen" => {
+            let path = std::path::Path::new(dir);
+            if path.exists() {
+                return Err(StoreError::Invalid(format!("{dir} は既に存在する")));
+            }
+            let seed = uniqnode::ed25519::generate_secret_seed()?;
+            std::fs::write(path, uniqnode::sha2::hex(&seed))?;
+            let mut permissions = std::fs::metadata(path)?.permissions();
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(path, permissions)?;
+            println!(
+                "public_key: {}",
+                uniqnode::sha2::hex(&uniqnode::ed25519::public_key(&seed))
+            );
+        }
+        "cert-make" | "revoke-make" => {
+            let node_id = dir;
+            let group_id = rest.first().map(String::as_str).unwrap_or_else(|| usage());
+            let now = unix_now();
+            let statement = if command == "cert-make" {
+                let days: i64 = rest
+                    .get(1)
+                    .and_then(|d| d.parse().ok())
+                    .filter(|d| (1..=3650).contains(d))
+                    .ok_or_else(|| StoreError::Invalid("days は 1..=3650".into()))?;
+                uniqnode::groups::make_statement(
+                    "membership",
+                    node_id,
+                    group_id,
+                    now,
+                    Some(now + days * 86_400),
+                )
+            } else {
+                uniqnode::groups::make_statement("revocation", node_id, group_id, now, None)
+            };
+            let bytes = uniqnode::c1::to_canonical_bytes(&statement);
+            println!("{}", String::from_utf8(bytes).expect("c1 は UTF-8"));
+        }
+        "cert-sign" => {
+            let seed_hex = std::fs::read_to_string(dir)?;
+            let seed_bytes = uniqnode::sha2::from_hex(seed_hex.trim())
+                .filter(|b| b.len() == 32)
+                .ok_or_else(|| StoreError::Invalid("鍵ファイルが32バイトの16進でない".into()))?;
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(&seed_bytes);
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            let mut statement = uniqnode::c1::parse(&input)
+                .map_err(|e| StoreError::Invalid(format!("入力が JSON でない: {e}")))?;
+            uniqnode::groups::add_signature(&mut statement, &seed);
+            let bytes = uniqnode::c1::to_canonical_bytes(&statement);
+            println!("{}", String::from_utf8(bytes).expect("c1 は UTF-8"));
+        }
+        "cert-verify" => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            let certificate = uniqnode::c1::parse(&input)
+                .map_err(|e| StoreError::Invalid(format!("入力が JSON でない: {e}")))?;
+            let groups = uniqnode::groups::read_groups(std::path::Path::new(dir));
+            match uniqnode::groups::verify_membership(&certificate, &groups, unix_now()) {
+                Ok(group_id) => println!("ok: group {group_id}"),
+                Err(reason) => {
+                    eprintln!("reject: {reason}");
+                    std::process::exit(6);
                 }
             }
         }

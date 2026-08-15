@@ -1,0 +1,7 @@
+[package]
+name = "uniqnode"
+version = "0.1.0"
+edition = "2021"
+
+# 依存なし(should/0101)。暗号も含め自前実装(操作者裁定 2026-08-15)。
+[dependencies]

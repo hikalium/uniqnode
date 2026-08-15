@@ -3,5 +3,9 @@
 version = 4
 
 [[package]]
+name = "uniqnode"
+version = "0.1.0"
+
+[[package]]
 name = "uniqnode-sim"
 version = "0.1.0"

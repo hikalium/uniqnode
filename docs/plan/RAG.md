@@ -9,17 +9,23 @@
 
 ## 1. 取り込み(チャンキングと文書モデル)
 
+<a id="2e00cbd1-45df-4b4f-8b47-c0b57c298f9e"></a>
+
 SPEC §9 の chunk / doc_rev を具体化し、Markdown・プレーンテキスト・PDF を投入できるように
 する。データモデル・チャンキング規則・PDF 対応・注釈索引の検証取り込み・作業手順・
 完了条件は [docs/plan/INGEST.md](#11ff6fec-cf85-4ae9-a24c-6098964f6cce) に確定した。
 
 ## 1b. リンクデータの訂正のグラフ表現(項目1と同時に実装する)
 
+<a id="bf3ef713-3971-403a-88e7-93bc647db29c"></a>
+
 不変オブジェクトの誤りは「直す」のではなく、corrects 型・supersedes 型の辺という追加の
 言明で表す。設計・作業手順・完了条件は同じく
 [docs/plan/INGEST.md](#11ff6fec-cf85-4ae9-a24c-6098964f6cce) にある。
 
 ## 2. BM25 検索(外部依存ゼロで検索可能にする)
+
+<a id="35a888f7-5ac6-4333-831c-dd7753b82315"></a>
 
 文字 bigram の転置索引(導出データ。起動時にチャンク走査で再構築)+ BM25 +
 `POST /v1/search`(snippet + ID + score + citation + score_semantics を返す)。
@@ -28,6 +34,8 @@ fetch 側は既存の `GET /v1/objects/{id}`。これだけでキーワード RA
 完全一致検索が効く。
 
 ## 3. 評価ハーネス
+
+<a id="8912f7c0-05fd-464d-9cba-4db8a5d30527"></a>
 
 固定の小コーパスと「クエリ → 正解チャンク」対で Recall@k / MRR を `cargo test` の
 回帰テストにする。以後の改善(埋め込み・融合・チャンク境界)の判断基準線。
@@ -62,6 +70,8 @@ systemd unit の例、バックアップ手順(封印セグメントの rsync + 
 完了条件: 常用ノードが systemd で動き、バックアップからの復元手順が一度実証されている。
 
 ## 8. pack GC(機会層 evict の物理回収)
+
+<a id="4ed764d8-a570-4809-bd0c-80de0d4b5545"></a>
 
 pack の書き直しで evict 済みオブジェクトのディスクを回収し、その上で min_replicas=0 の
 LRU+参照カウント evict(SPEC §5.4)を有効化する。容量の小さいノードを本格運用する前提。

@@ -262,30 +262,32 @@ fn docs_anchors_are_defined_unique_and_resolvable() {
     let mut docs_files = Vec::new();
     markdown_files_under(&root.join("docs"), &mut docs_files);
 
-    // 定義: docs/ の各文書は H1 の直後に <a id="uuid"></a> を持つ。
+    // 定義: docs/ の各文書は H1 の直後に <a id="uuid"></a> を持つ。加えて、参照される
+    // 節見出しの直下にも節アンカーを置ける(must/0013)。定義表は両方を集める。
     for path in &docs_files {
         let text = std::fs::read_to_string(path).expect("read doc");
-        let anchor = text
-            .lines()
-            .take(5)
-            .find_map(|l| {
-                let l = l.trim();
-                l.strip_prefix("<a id=\"").and_then(|rest| rest.split('"').next())
-            })
-            .map(|s| s.to_string());
-        match anchor {
-            None => failures.push(format!(
+        let mut head_anchor_found = false;
+        for (line_index, line) in text.lines().enumerate() {
+            let Some(id) =
+                line.trim().strip_prefix("<a id=\"").and_then(|rest| rest.split('"').next())
+            else {
+                continue;
+            };
+            if line_index < 5 {
+                head_anchor_found = true;
+            }
+            if let Some(previous) = defined.insert(id.to_string(), display(path)) {
+                failures.push(format!(
+                    "アンカー {id} が {previous} と {} で重複",
+                    display(path)
+                ));
+            }
+        }
+        if !head_anchor_found {
+            failures.push(format!(
                 "{}: H1 直下に <a id=\"uuid\"></a> がない(must/0013)",
                 display(path)
-            )),
-            Some(id) => {
-                if let Some(previous) = defined.insert(id.clone(), display(path)) {
-                    failures.push(format!(
-                        "アンカー {id} が {previous} と {} で重複",
-                        display(path)
-                    ));
-                }
-            }
+            ));
         }
     }
 

@@ -1,3 +1,8 @@
 [workspace]
 members = ["node", "sim"]
 resolver = "2"
+
+# debug ビルドでも自前 Ed25519(ビット単位実装)が実用速度になるようにする。
+# これがないと ref 書き込み1件ごとの署名が数十ms級になり、テストが分単位に伸びる。
+[profile.dev.package.uniqnode]
+opt-level = 2

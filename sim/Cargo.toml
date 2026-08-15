@@ -1,0 +1,7 @@
+[package]
+name = "uniqnode-sim"
+version = "0.1.0"
+edition = "2021"
+
+# 依存なし(should/0101)。決定論のため乱数も自前実装。
+[dependencies]

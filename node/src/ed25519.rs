@@ -581,13 +581,17 @@ mod tests {
     }
 
     /// openssl との相互検証。鍵生成と署名を openssl で行い、決定論的署名がバイト一致する
-    /// ことと、相互に検証が通ることを確かめる。openssl が無い環境では何もせず成功する。
+    /// ことと、相互に検証が通ることを確かめる。openssl が無い環境では黙って飛ばさず、
+    /// 導入手順を示して失敗する(緑が相互検証の実施を意味することを保証する)。
     #[test]
     fn openssl_interop() {
         use std::process::Command;
         let probe = Command::new("openssl").arg("version").output();
-        if probe.is_err() {
-            return;
+        if let Err(error) = probe {
+            panic!(
+                "相互検証には openssl コマンドが必要({error})。\
+                 導入例: apt-get install openssl(sudo なしなら apt-get download + dpkg -x)"
+            );
         }
         let dir = std::env::temp_dir().join(format!("uniqnode-ed25519-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");

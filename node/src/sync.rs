@@ -32,13 +32,26 @@ impl From<StoreError> for SyncError {
     }
 }
 
-/// 同期の取り寄せ元。HTTP 越し(HttpPeer)とプロセス内(LocalPeer)が同じ核を使う
+/// 相手から見た ref の像(分散クエリの応答)。署名付きレコードそのものではないため、
+/// これを ref として取り込んではならない(取り込みは sync の署名済みレコード経由のみ)。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefRecordView {
+    pub name: String,
+    pub target: Option<String>,
+    pub seq: u64,
+    pub at: i64,
+    pub signer: String,
+}
+
+/// 同期・クエリの取り寄せ元。HTTP 越し(HttpPeer)とプロセス内(LocalPeer)が同じ核を使う
 /// (should/0135: 判定は一箇所)。
 pub trait PeerSource {
     fn signers(&self) -> Result<Vec<(String, u64)>, SyncError>;
     fn refs_since(&self, signer: &str, since: u64) -> Result<Vec<Vec<u8>>, SyncError>;
     /// None = 相手も持っていない(開世界: 不存在の言明ではない)。
     fn fetch_object(&self, id: &str) -> Result<Option<Vec<u8>>, SyncError>;
+    /// None = 相手はその ref を知らない(同上)。
+    fn fetch_ref(&self, name: &str) -> Result<Option<RefRecordView>, SyncError>;
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -137,6 +150,15 @@ impl<'a> PeerSource for LocalPeer<'a> {
     }
     fn fetch_object(&self, id: &str) -> Result<Option<Vec<u8>>, SyncError> {
         Ok(self.0.get_object(id)?)
+    }
+    fn fetch_ref(&self, name: &str) -> Result<Option<RefRecordView>, SyncError> {
+        Ok(self.0.get_ref(name).map(|state| RefRecordView {
+            name: name.to_string(),
+            target: state.target.clone(),
+            seq: state.seq,
+            at: state.at,
+            signer: name.split('/').next().unwrap_or("").to_string(),
+        }))
     }
 }
 
@@ -256,6 +278,44 @@ impl PeerSource for HttpPeer {
             other => Err(SyncError::Peer(format!("objects/{id} が {other} を返した"))),
         }
     }
+
+    fn fetch_ref(&self, name: &str) -> Result<Option<RefRecordView>, SyncError> {
+        let (status, body) = self.get(&format!("/v1/refs/{name}"))?;
+        match status {
+            404 => Ok(None),
+            200 => {
+                let text = std::str::from_utf8(&body)
+                    .map_err(|_| SyncError::Peer("refs 応答が UTF-8 でない".into()))?;
+                let value = c1::parse(text)
+                    .map_err(|e| SyncError::Peer(format!("refs 応答が JSON でない: {e}")))?;
+                let map = match &value {
+                    c1::Value::Object(m) => m,
+                    _ => return Err(SyncError::Peer("refs 応答がオブジェクトでない".into())),
+                };
+                let target = match map.get("target") {
+                    Some(c1::Value::Text(t)) => Some(t.clone()),
+                    Some(c1::Value::Null) => None,
+                    _ => return Err(SyncError::Peer("refs 応答の target が不正".into())),
+                };
+                let seq = match map.get("seq") {
+                    Some(c1::Value::Integer(n)) => *n as u64,
+                    _ => return Err(SyncError::Peer("refs 応答の seq が不正".into())),
+                };
+                let at = match map.get("at") {
+                    Some(c1::Value::Integer(n)) => *n,
+                    _ => 0,
+                };
+                Ok(Some(RefRecordView {
+                    name: name.to_string(),
+                    target,
+                    seq,
+                    at,
+                    signer: name.split('/').next().unwrap_or("").to_string(),
+                }))
+            }
+            other => Err(SyncError::Peer(format!("refs/{name} が {other} を返した"))),
+        }
+    }
 }
 
 /// POST /v1/sync のハンドラ本体(api.rs から呼ばれる)。
@@ -365,6 +425,9 @@ mod tests {
         }
         fn fetch_object(&self, _id: &str) -> Result<Option<Vec<u8>>, SyncError> {
             Ok(Some(b"WRONG BYTES".to_vec()))
+        }
+        fn fetch_ref(&self, _name: &str) -> Result<Option<RefRecordView>, SyncError> {
+            Ok(None)
         }
     }
 

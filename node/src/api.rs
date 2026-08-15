@@ -4,9 +4,17 @@
 
 use crate::c1;
 use crate::http::{Request, Response};
+use crate::query::{QueryEngine, QueryKind};
 use crate::store::{Store, StoreError};
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+/// ハンドラが使うサーバ状態。クエリはネットワーク待ちを伴うため、store のロックとは
+/// 独立に engine が内部で短くロックする(クエリ中に API 全体を塞がない)。
+pub struct ApiContext {
+    pub store: Arc<Mutex<Store>>,
+    pub engine: Arc<QueryEngine>,
+}
 
 fn json_object(entries: Vec<(&str, c1::Value)>) -> Vec<u8> {
     let mut map = BTreeMap::new();
@@ -31,11 +39,26 @@ fn store_error_response(error: StoreError) -> Response {
     }
 }
 
-pub fn handle(store: &Mutex<Store>, request: &Request) -> Response {
+pub fn handle(context: &ApiContext, request: &Request) -> Response {
+    let store = &*context.store;
     let path = request.path.as_str();
     let method = request.method.as_str();
     match (method, path) {
         ("GET", "/healthz") => Response::text(200, "ok\n"),
+        ("POST", "/v1/query") => handle_query(context, request),
+        ("GET", "/v1/peers") => {
+            let peers: Vec<c1::Value> = context
+                .engine
+                .default_scope()
+                .into_iter()
+                .map(|address| {
+                    let mut map = BTreeMap::new();
+                    map.insert("address".to_string(), c1::Value::Text(address));
+                    c1::Value::Object(map)
+                })
+                .collect();
+            Response::json(200, json_object(vec![("peers", c1::Value::Array(peers))]))
+        }
         ("POST", "/v1/admin/shutdown") => {
             // 正常終了。ストアは全書き込みを fsync 済みなので flush は不要。
             let mut response = Response::text(200, "shutting down\n");
@@ -87,13 +110,86 @@ pub fn handle(store: &Mutex<Store>, request: &Request) -> Response {
                 Err(e) => store_error_response(e),
             }
         }
-        _ => handle_with_path_argument(store, request),
+        _ => handle_with_path_argument(context, request),
     }
 }
 
-fn handle_with_path_argument(store: &Mutex<Store>, request: &Request) -> Response {
+/// POST /v1/query。ボディ: {kind, target, budget_ms?, scope?, wait?}。
+/// budget は観測の打ち切りであり、wait:false ならハンドルを即返す(SPEC §7.2)。
+fn handle_query(context: &ApiContext, request: &Request) -> Response {
+    let body_text = match std::str::from_utf8(&request.body) {
+        Ok(t) => t,
+        Err(_) => return error_response(400, "ボディが UTF-8 でない"),
+    };
+    let value = match c1::parse(body_text) {
+        Ok(v) => v,
+        Err(e) => return error_response(400, &format!("JSON が不正: {e}")),
+    };
+    let map = match &value {
+        c1::Value::Object(m) => m,
+        _ => return error_response(400, "ボディはオブジェクトであるべき"),
+    };
+    let kind = match map.get("kind") {
+        Some(c1::Value::Text(t)) if t == "object" => QueryKind::Object,
+        Some(c1::Value::Text(t)) if t == "ref" => QueryKind::Ref,
+        _ => return error_response(400, "kind は \"object\" か \"ref\""),
+    };
+    let target = match map.get("target") {
+        Some(c1::Value::Text(t)) => t.clone(),
+        _ => return error_response(400, "target がない"),
+    };
+    match kind {
+        QueryKind::Object if !c1::is_object_id(&target) => {
+            return error_response(400, "オブジェクトIDの形式が不正")
+        }
+        QueryKind::Ref if !target.contains('/') => {
+            return error_response(400, "ref は完全名(<node_id>/<path>)で指定する")
+        }
+        _ => {}
+    }
+    let budget_ms = match map.get("budget_ms") {
+        None => 2_000,
+        Some(c1::Value::Integer(n)) if (0..=60_000).contains(n) => *n as u64,
+        Some(_) => return error_response(400, "budget_ms は 0..=60000 の整数"),
+    };
+    let scope = match map.get("scope") {
+        None => context.engine.default_scope(),
+        Some(c1::Value::Array(items)) => {
+            let mut scope = Vec::new();
+            for item in items {
+                match item {
+                    c1::Value::Text(address) => scope.push(address.clone()),
+                    _ => return error_response(400, "scope はアドレス文字列の配列"),
+                }
+            }
+            scope
+        }
+        Some(_) => return error_response(400, "scope はアドレス文字列の配列"),
+    };
+    let wait = match map.get("wait") {
+        None => true,
+        Some(c1::Value::Bool(b)) => *b,
+        Some(_) => return error_response(400, "wait は真偽値"),
+    };
+    let shared = context.engine.start(kind, &target, budget_ms, scope);
+    let state = if wait { shared.wait_settled() } else { shared.snapshot() };
+    Response::json(200, crate::query::state_to_json(&state))
+}
+
+fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Response {
+    let store = &*context.store;
     let path = request.path.as_str();
     let method = request.method.as_str();
+
+    if let Some(id) = path.strip_prefix("/v1/queries/") {
+        if method != "GET" {
+            return error_response(405, "GET のみ");
+        }
+        return match context.engine.lookup(id) {
+            Some(shared) => Response::json(200, crate::query::state_to_json(&shared.snapshot())),
+            None => error_response(404, "unknown query handle"),
+        };
+    }
 
     if let Some(query) = path.strip_prefix("/v1/replication/refs?") {
         if method != "GET" {

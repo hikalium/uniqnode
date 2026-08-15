@@ -6,6 +6,7 @@ pub mod c1;
 pub mod crc32;
 pub mod ed25519;
 pub mod http;
+pub mod query;
 pub mod sha2;
 pub mod store;
 pub mod sync;

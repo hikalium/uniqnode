@@ -1,5 +1,7 @@
 //! 統合テスト共通ヘルパ: serve プロセスの起動と、curl が組み立てる形の
 //! 生 HTTP/1.1 クライアント(should/0138)。
+// 統合テストクレートごとに個別コンパイルされ、どのクレートも全ヘルパは使わないため。
+#![allow(dead_code)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;

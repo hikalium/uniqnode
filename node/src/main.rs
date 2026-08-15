@@ -139,8 +139,13 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             use std::io::Write as _;
             std::io::stdout().flush()?;
             let store = std::sync::Arc::new(std::sync::Mutex::new(open(dir)));
+            let engine = std::sync::Arc::new(uniqnode::query::QueryEngine::new(
+                store.clone(),
+                std::path::PathBuf::from(dir),
+            ));
+            let context = uniqnode::api::ApiContext { store, engine };
             let handler: std::sync::Arc<uniqnode::http::Handler> =
-                std::sync::Arc::new(move |request| uniqnode::api::handle(&store, request));
+                std::sync::Arc::new(move |request| uniqnode::api::handle(&context, request));
             uniqnode::http::serve(listener, handler);
         }
         "flood" => {

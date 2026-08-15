@@ -1,0 +1,667 @@
+//! 分散クエリ(SPEC §7.1, §7.2)。登録ピアへの1ホップ scatter-gather。
+//!
+//! 開世界セマンティクスの実装点:
+//! - ピアの応答は「そのピアの知識についての肯定的言明」。404 は「私は持っていない」という
+//!   言明(empty)であり、到達不能・無応答は情報ゼロ(silent)として区別する。
+//! - 「存在しない」という結果は存在しない。決着は found / scope_empty(スコープ内の全員が
+//!   肯定的に「持っていない」と言明) / timed_out(予算切れ。沈黙者が残っている)の3値。
+//! - budget はクエリの属性ではなく観測の打ち切りであり、クエリハンドル
+//!   (`GET /v1/queries/{id}`)は回答の単調増加集合を返す。
+//! - object の回答は content-addressing で検証してからローカルに保存する。ref の回答は
+//!   署名付きレコードではないため報告のみ(取り込みは sync 経由のみ)。
+
+use crate::c1;
+use crate::store::Store;
+use crate::sync::{HttpPeer, PeerSource, RefRecordView};
+use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+/// 沈黙ピアへの問い直しの周期。沈黙は終端ではない(開世界)ため、予算内は再試行する。
+const RETRY_INTERVAL: Duration = Duration::from_millis(250);
+/// 保持するクエリハンドルの上限(超えた分は古いものから忘れる)。
+const REGISTRY_LIMIT: usize = 100;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryKind {
+    Object,
+    Ref,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerState {
+    Pending,
+    Silent,
+    Empty,
+    Answered,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryOutcome {
+    Running,
+    Found,
+    ScopeEmpty,
+    TimedOut,
+}
+
+#[derive(Clone, Debug)]
+pub enum QueryAnswer {
+    /// オブジェクトは検証の上ローカルに保存済み。source はどこから来たか。
+    Object { source: String },
+    Ref { source: String, view: RefRecordView },
+}
+
+#[derive(Clone, Debug)]
+pub struct PeerProgress {
+    pub address: String,
+    pub state: PeerState,
+}
+
+#[derive(Clone, Debug)]
+pub struct QueryState {
+    pub id: String,
+    pub kind: QueryKind,
+    pub target: String,
+    pub budget_ms: u64,
+    pub outcome: QueryOutcome,
+    pub answers: Vec<QueryAnswer>,
+    pub peers: Vec<PeerProgress>,
+}
+
+pub struct QueryShared {
+    state: Mutex<QueryState>,
+    settled: Condvar,
+    deadline: Instant,
+}
+
+impl QueryShared {
+    pub fn snapshot(&self) -> QueryState {
+        self.state.lock().expect("query state lock").clone()
+    }
+
+    /// 決着(outcome != Running)まで待つ。finalizer が期限で必ず決着させるので有界。
+    pub fn wait_settled(&self) -> QueryState {
+        let mut guard = self.state.lock().expect("query state lock");
+        while guard.outcome == QueryOutcome::Running {
+            let remaining = self
+                .deadline
+                .saturating_duration_since(Instant::now())
+                .checked_add(Duration::from_millis(200))
+                .expect("duration add");
+            let (next, _) = self
+                .settled
+                .wait_timeout(guard, remaining)
+                .expect("condvar wait");
+            guard = next;
+        }
+        guard.clone()
+    }
+}
+
+pub type PeerFactory = Arc<dyn Fn(&str) -> Box<dyn PeerSource + Send + Sync> + Send + Sync>;
+
+pub struct QueryEngine {
+    store: Arc<Mutex<Store>>,
+    data_dir: PathBuf,
+    registry: Mutex<VecDeque<(String, Arc<QueryShared>)>>,
+    peer_factory: PeerFactory,
+}
+
+/// data_dir/peers.json(`{"peers":[{"address":"host:port"}, …]}`)から既定スコープを読む。
+/// ファイルがなければ空。毎回読み直すので、編集に再起動は要らない(should/0118)。
+pub fn read_peer_addresses(data_dir: &Path) -> Vec<String> {
+    let path = data_dir.join("peers.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let value = match c1::parse(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("uniqnode: peers.json が読めない(無視して空扱い): {e}");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    if let c1::Value::Object(map) = &value {
+        if let Some(c1::Value::Array(items)) = map.get("peers") {
+            for item in items {
+                if let c1::Value::Object(peer) = item {
+                    if let Some(c1::Value::Text(address)) = peer.get("address") {
+                        out.push(address.clone());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn random_hex_id() -> String {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    match std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)) {
+        Ok(()) => {}
+        Err(e) => {
+            // ID はセキュリティ境界ではない(ハンドルの識別子)ので、失敗は時刻で代用する。
+            eprintln!("uniqnode: /dev/urandom が読めない({e})。時刻で代用する");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            bytes[..16].copy_from_slice(&now.to_le_bytes());
+        }
+    }
+    crate::sha2::hex(&bytes)
+}
+
+impl QueryEngine {
+    pub fn new(store: Arc<Mutex<Store>>, data_dir: PathBuf) -> QueryEngine {
+        QueryEngine {
+            store,
+            data_dir,
+            registry: Mutex::new(VecDeque::new()),
+            peer_factory: Arc::new(|address| {
+                Box::new(HttpPeer { address: address.to_string() })
+            }),
+        }
+    }
+
+    /// テストがモックのピアを注入するための差し替え口。
+    pub fn with_peer_factory(mut self, factory: PeerFactory) -> QueryEngine {
+        self.peer_factory = factory;
+        self
+    }
+
+    pub fn lookup(&self, id: &str) -> Option<Arc<QueryShared>> {
+        self.registry
+            .lock()
+            .expect("registry lock")
+            .iter()
+            .find(|(known, _)| known == id)
+            .map(|(_, shared)| shared.clone())
+    }
+
+    pub fn default_scope(&self) -> Vec<String> {
+        read_peer_addresses(&self.data_dir)
+    }
+
+    /// クエリを開始する。返ったハンドルは即座に観測でき、期限までに必ず決着する。
+    pub fn start(
+        &self,
+        kind: QueryKind,
+        target: &str,
+        budget_ms: u64,
+        scope: Vec<String>,
+    ) -> Arc<QueryShared> {
+        let deadline = Instant::now() + Duration::from_millis(budget_ms);
+        let mut state = QueryState {
+            id: random_hex_id(),
+            kind,
+            target: target.to_string(),
+            budget_ms,
+            outcome: QueryOutcome::Running,
+            answers: Vec::new(),
+            peers: scope
+                .iter()
+                .map(|address| PeerProgress { address: address.clone(), state: PeerState::Pending })
+                .collect(),
+        };
+
+        // 自分自身も参加者(ローカルの知識は即答)。
+        let local_object_hit = {
+            let store = self.store.lock().expect("store lock");
+            match kind {
+                QueryKind::Object => {
+                    if store.has_object(target) {
+                        state.answers.push(QueryAnswer::Object { source: "local".into() });
+                        true
+                    } else {
+                        false
+                    }
+                }
+                QueryKind::Ref => {
+                    if let Some(found) = store.get_ref(target) {
+                        state.answers.push(QueryAnswer::Ref {
+                            source: "local".into(),
+                            view: RefRecordView {
+                                name: target.to_string(),
+                                target: found.target.clone(),
+                                seq: found.seq,
+                                at: found.at,
+                                signer: target.split('/').next().unwrap_or("").to_string(),
+                            },
+                        });
+                    }
+                    false
+                }
+            }
+        };
+
+        let shared = Arc::new(QueryShared {
+            state: Mutex::new(state),
+            settled: Condvar::new(),
+            deadline,
+        });
+        {
+            let mut registry = self.registry.lock().expect("registry lock");
+            registry.push_back((shared.snapshot().id, shared.clone()));
+            while registry.len() > REGISTRY_LIMIT {
+                registry.pop_front();
+            }
+        }
+
+        // object がローカルで見つかったら散布は不要。
+        if local_object_hit {
+            let mut guard = shared.state.lock().expect("query state lock");
+            guard.outcome = QueryOutcome::Found;
+            drop(guard);
+            shared.settled.notify_all();
+            return shared;
+        }
+
+        for peer_index in 0..shared.snapshot().peers.len() {
+            let shared = shared.clone();
+            let store = self.store.clone();
+            let factory = self.peer_factory.clone();
+            std::thread::spawn(move || {
+                peer_worker(shared, store, factory, peer_index);
+            });
+        }
+        {
+            let shared = shared.clone();
+            std::thread::spawn(move || finalizer(shared));
+        }
+        shared
+    }
+}
+
+fn peer_worker(
+    shared: Arc<QueryShared>,
+    store: Arc<Mutex<Store>>,
+    factory: PeerFactory,
+    peer_index: usize,
+) {
+    let (kind, target, address) = {
+        let guard = shared.state.lock().expect("query state lock");
+        (guard.kind, guard.target.clone(), guard.peers[peer_index].address.clone())
+    };
+    let peer = factory(&address);
+    loop {
+        if shared.snapshot().outcome != QueryOutcome::Running {
+            return;
+        }
+        let attempt: Result<Option<QueryAnswer>, ()> = match kind {
+            QueryKind::Object => match peer.fetch_object(&target) {
+                Ok(Some(bytes)) => {
+                    // content-addressing の検証(SPEC §7.1)。不一致は沈黙と同じ扱いで捨てる。
+                    if c1::id_for_bytes(&bytes) == target {
+                        let put = store.lock().expect("store lock").put_object(&bytes);
+                        match put {
+                            Ok(_) => Ok(Some(QueryAnswer::Object { source: address.clone() })),
+                            Err(e) => {
+                                eprintln!("uniqnode: query の保存に失敗: {e}");
+                                Err(())
+                            }
+                        }
+                    } else {
+                        eprintln!("uniqnode: {address} が {target} と異なる内容を返した(破棄)");
+                        Err(())
+                    }
+                }
+                Ok(None) => Ok(None),
+                Err(_) => Err(()),
+            },
+            QueryKind::Ref => match peer.fetch_ref(&target) {
+                Ok(Some(view)) => {
+                    Ok(Some(QueryAnswer::Ref { source: address.clone(), view }))
+                }
+                Ok(None) => Ok(None),
+                Err(_) => Err(()),
+            },
+        };
+        let mut guard = shared.state.lock().expect("query state lock");
+        match attempt {
+            Ok(Some(answer)) => {
+                guard.peers[peer_index].state = PeerState::Answered;
+                guard.answers.push(answer);
+                shared.settled.notify_all();
+                return;
+            }
+            Ok(None) => {
+                guard.peers[peer_index].state = PeerState::Empty;
+                shared.settled.notify_all();
+                return;
+            }
+            Err(()) => {
+                guard.peers[peer_index].state = PeerState::Silent;
+                shared.settled.notify_all();
+            }
+        }
+        drop(guard);
+        // 次の問い直しの周期まで待つ(予算が残っていなければ打ち切り)。
+        if Instant::now() + RETRY_INTERVAL >= shared.deadline {
+            return;
+        }
+        std::thread::sleep(RETRY_INTERVAL);
+    }
+}
+
+/// 決着の判定を一箇所に集める(should/0135)。
+/// - object で回答が得られたら即 found。
+/// - スコープ全員が肯定的言明(empty / answered)で出揃ったら期限前に決着してよい。
+/// - 期限が来たら、沈黙(pending 含む)を silent に確定して timed_out(回答があれば found)。
+fn finalizer(shared: Arc<QueryShared>) {
+    let mut guard = shared.state.lock().expect("query state lock");
+    loop {
+        if guard.outcome != QueryOutcome::Running {
+            break;
+        }
+        let found_object = guard.kind == QueryKind::Object && !guard.answers.is_empty();
+        let all_positive = guard
+            .peers
+            .iter()
+            .all(|p| matches!(p.state, PeerState::Empty | PeerState::Answered));
+        if found_object || all_positive {
+            guard.outcome =
+                if guard.answers.is_empty() { QueryOutcome::ScopeEmpty } else { QueryOutcome::Found };
+            break;
+        }
+        let remaining = shared.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            for peer in guard.peers.iter_mut() {
+                if peer.state == PeerState::Pending {
+                    peer.state = PeerState::Silent;
+                }
+            }
+            guard.outcome =
+                if guard.answers.is_empty() { QueryOutcome::TimedOut } else { QueryOutcome::Found };
+            break;
+        }
+        let (next, _) = shared
+            .settled
+            .wait_timeout(guard, remaining)
+            .expect("condvar wait");
+        guard = next;
+    }
+    shared.settled.notify_all();
+}
+
+// ---- 直列化(API 応答) ----
+
+pub fn state_to_json(state: &QueryState) -> Vec<u8> {
+    let mut map = BTreeMap::new();
+    map.insert("query_id".to_string(), c1::Value::Text(state.id.clone()));
+    map.insert(
+        "kind".to_string(),
+        c1::Value::Text(
+            match state.kind {
+                QueryKind::Object => "object",
+                QueryKind::Ref => "ref",
+            }
+            .to_string(),
+        ),
+    );
+    map.insert("target".to_string(), c1::Value::Text(state.target.clone()));
+    map.insert("budget_ms".to_string(), c1::Value::Integer(state.budget_ms as i64));
+    map.insert(
+        "outcome".to_string(),
+        c1::Value::Text(
+            match state.outcome {
+                QueryOutcome::Running => "running",
+                QueryOutcome::Found => "found",
+                QueryOutcome::ScopeEmpty => "scope_empty",
+                QueryOutcome::TimedOut => "timed_out",
+            }
+            .to_string(),
+        ),
+    );
+    let answers: Vec<c1::Value> = state
+        .answers
+        .iter()
+        .map(|answer| {
+            let mut entry = BTreeMap::new();
+            match answer {
+                QueryAnswer::Object { source } => {
+                    entry.insert("source".to_string(), c1::Value::Text(source.clone()));
+                    entry.insert("stored".to_string(), c1::Value::Bool(true));
+                }
+                QueryAnswer::Ref { source, view } => {
+                    entry.insert("source".to_string(), c1::Value::Text(source.clone()));
+                    entry.insert("name".to_string(), c1::Value::Text(view.name.clone()));
+                    entry.insert(
+                        "target".to_string(),
+                        match &view.target {
+                            Some(t) => c1::Value::Text(t.clone()),
+                            None => c1::Value::Null,
+                        },
+                    );
+                    entry.insert("seq".to_string(), c1::Value::Integer(view.seq as i64));
+                    entry.insert("signer".to_string(), c1::Value::Text(view.signer.clone()));
+                }
+            }
+            c1::Value::Object(entry)
+        })
+        .collect();
+    map.insert("answers".to_string(), c1::Value::Array(answers));
+    let peers: Vec<c1::Value> = state
+        .peers
+        .iter()
+        .map(|peer| {
+            let mut entry = BTreeMap::new();
+            entry.insert("address".to_string(), c1::Value::Text(peer.address.clone()));
+            entry.insert(
+                "state".to_string(),
+                c1::Value::Text(
+                    match peer.state {
+                        PeerState::Pending => "pending",
+                        PeerState::Silent => "silent",
+                        PeerState::Empty => "empty",
+                        PeerState::Answered => "answered",
+                    }
+                    .to_string(),
+                ),
+            );
+            c1::Value::Object(entry)
+        })
+        .collect();
+    map.insert("peers".to_string(), c1::Value::Array(peers));
+    c1::to_canonical_bytes(&c1::Value::Object(map))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::StoreConfig;
+    use crate::sync::SyncError;
+
+    fn temp_engine(name: &str) -> (QueryEngine, PathBuf) {
+        let dir = std::env::temp_dir()
+            .join(format!("uniqnode-query-test-{}-{name}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+        let store = Arc::new(Mutex::new(Store::open(StoreConfig::new(&dir)).expect("open")));
+        (QueryEngine::new(store, dir.clone()), dir)
+    }
+
+    /// 挙動を番号で指定できるモックピア。
+    /// アドレスが "empty" → 常に無し、"answer:<bytes-hex>" → その内容、"silent" → 常に失敗。
+    struct MockPeer {
+        behavior: String,
+    }
+
+    impl PeerSource for MockPeer {
+        fn signers(&self) -> Result<Vec<(String, u64)>, SyncError> {
+            Ok(Vec::new())
+        }
+        fn refs_since(&self, _: &str, _: u64) -> Result<Vec<Vec<u8>>, SyncError> {
+            Ok(Vec::new())
+        }
+        fn fetch_object(&self, _id: &str) -> Result<Option<Vec<u8>>, SyncError> {
+            if self.behavior == "empty" {
+                Ok(None)
+            } else if let Some(hex) = self.behavior.strip_prefix("answer:") {
+                Ok(Some(crate::sha2::from_hex(hex).expect("hex")))
+            } else {
+                Err(SyncError::Peer("silent".into()))
+            }
+        }
+        fn fetch_ref(&self, name: &str) -> Result<Option<RefRecordView>, SyncError> {
+            if self.behavior == "empty" {
+                Ok(None)
+            } else if self.behavior == "ref" {
+                Ok(Some(RefRecordView {
+                    name: name.to_string(),
+                    target: None,
+                    seq: 7,
+                    at: 0,
+                    signer: "mock".into(),
+                }))
+            } else {
+                Err(SyncError::Peer("silent".into()))
+            }
+        }
+    }
+
+    fn mock_factory() -> PeerFactory {
+        Arc::new(|address| Box::new(MockPeer { behavior: address.to_string() }))
+    }
+
+    /// 決着の列挙表: ピアの挙動の組ごとに outcome が仕様どおりになる。
+    #[test]
+    fn outcome_table_matches_the_open_world_semantics() {
+        let bytes = b"the object";
+        let id = c1::id_for_bytes(bytes);
+        let answer = format!("answer:{}", crate::sha2::hex(bytes));
+
+        // (スコープ, 期待outcome, 期待沈黙数)
+        struct Case {
+            scope: Vec<String>,
+            expected: QueryOutcome,
+            expected_silent: usize,
+        }
+        let cases = [
+            Case {
+                scope: vec!["empty".into(), answer.clone()],
+                expected: QueryOutcome::Found,
+                expected_silent: 0,
+            },
+            Case {
+                scope: vec!["empty".into(), "empty".into()],
+                expected: QueryOutcome::ScopeEmpty,
+                expected_silent: 0,
+            },
+            Case {
+                scope: vec!["empty".into(), "silent".into()],
+                expected: QueryOutcome::TimedOut,
+                expected_silent: 1,
+            },
+            Case {
+                scope: vec!["silent".into(), answer.clone()],
+                expected: QueryOutcome::Found,
+                expected_silent: 1,
+            },
+            Case { scope: vec![], expected: QueryOutcome::ScopeEmpty, expected_silent: 0 },
+        ];
+        for (index, case) in cases.iter().enumerate() {
+            let (engine, dir) = temp_engine(&format!("outcome-{index}"));
+            let engine = engine.with_peer_factory(mock_factory());
+            let shared = engine.start(QueryKind::Object, &id, 600, case.scope.clone());
+            let state = shared.wait_settled();
+            assert_eq!(state.outcome, case.expected, "case {index}");
+            let silent =
+                state.peers.iter().filter(|p| p.state == PeerState::Silent).count();
+            assert_eq!(silent, case.expected_silent, "case {index} の沈黙数");
+            if case.expected == QueryOutcome::Found {
+                // 回答オブジェクトは検証の上ローカルに保存される。
+                assert!(engine.store.lock().expect("lock").has_object(&id), "case {index}");
+            }
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+    }
+
+    /// ローカルに既にあるオブジェクトは散布なしで即 found。
+    #[test]
+    fn local_hit_settles_without_scatter() {
+        let (engine, dir) = temp_engine("local-hit");
+        let engine = engine.with_peer_factory(mock_factory());
+        let id = {
+            let mut store = engine.store.lock().expect("lock");
+            store.put_object(b"already here").expect("put").0
+        };
+        // silent なピアがいても待たない。
+        let shared = engine.start(QueryKind::Object, &id, 5_000, vec!["silent".into()]);
+        let state = shared.wait_settled();
+        assert_eq!(state.outcome, QueryOutcome::Found);
+        assert!(matches!(&state.answers[0], QueryAnswer::Object { source } if source == "local"));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 偽の内容を返すピアは沈黙と同じ扱いになり、保存もされない。
+    #[test]
+    fn mislabeled_answer_counts_as_silence() {
+        let (engine, dir) = temp_engine("mislabeled");
+        let engine = engine.with_peer_factory(mock_factory());
+        let wrong = format!("answer:{}", crate::sha2::hex(b"impostor bytes"));
+        let real_id = c1::id_for_bytes(b"the real thing");
+        let shared = engine.start(QueryKind::Object, &real_id, 600, vec![wrong]);
+        let state = shared.wait_settled();
+        assert_eq!(state.outcome, QueryOutcome::TimedOut);
+        assert!(!engine.store.lock().expect("lock").has_object(&real_id));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// ハンドルの観測は単調: outcome は Running から終端へ一度だけ動き、回答数は減らない。
+    #[test]
+    fn handle_snapshots_are_monotonic() {
+        let (engine, dir) = temp_engine("monotonic");
+        let engine = engine.with_peer_factory(mock_factory());
+        let bytes = b"eventually found";
+        let id = c1::id_for_bytes(bytes);
+        let answer = format!("answer:{}", crate::sha2::hex(bytes));
+        let shared = engine.start(
+            QueryKind::Object,
+            &id,
+            2_000,
+            vec!["silent".into(), "empty".into(), answer],
+        );
+        let mut last_answers = 0usize;
+        let mut settled_seen = false;
+        loop {
+            let state = shared.snapshot();
+            assert!(state.answers.len() >= last_answers, "回答集合は単調増加");
+            last_answers = state.answers.len();
+            if state.outcome != QueryOutcome::Running {
+                if settled_seen {
+                    // 決着後にもう一周して不変を確認した。
+                    break;
+                }
+                settled_seen = true;
+                assert_eq!(state.outcome, QueryOutcome::Found);
+            }
+            std::thread::yield_now();
+        }
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn peers_file_round_trip() {
+        let dir = std::env::temp_dir()
+            .join(format!("uniqnode-peers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        assert!(read_peer_addresses(&dir).is_empty(), "無ければ空");
+        std::fs::write(
+            dir.join("peers.json"),
+            b"{\"peers\":[{\"address\":\"10.0.0.2:7440\"},{\"address\":\"10.0.0.3:7440\"}]}",
+        )
+        .expect("write");
+        assert_eq!(
+            read_peer_addresses(&dir),
+            vec!["10.0.0.2:7440".to_string(), "10.0.0.3:7440".to_string()]
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+}

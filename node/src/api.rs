@@ -473,5 +473,49 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
         }
     }
 
+    // 文書の取り込み(INGEST の「取り込み口の段」)。本文は生バイト列、種別は
+    // {name} の拡張子で判定する。
+    if let Some(rest) = path.strip_prefix("/v1/collections/") {
+        if method != "PUT" {
+            return error_response(405, "PUT のみ");
+        }
+        let Some((collection, name)) = rest.split_once("/documents/") else {
+            return error_response(404, "/v1/collections/{c}/documents/{name} の形");
+        };
+        if collection.is_empty() || name.is_empty() {
+            return error_response(400, "コレクション名と文書名が要る");
+        }
+        let Some((stem, extension)) = name.rsplit_once('.') else {
+            return error_response(400, "文書名に拡張子が要る(.md/.markdown/.txt)");
+        };
+        let Some(media) = crate::ingest::media_for_extension(extension) else {
+            return error_response(400, "対象外の拡張子(.md/.markdown/.txt のみ)");
+        };
+        let Ok(text) = std::str::from_utf8(&request.body) else {
+            return error_response(400, "ボディが UTF-8 でない");
+        };
+        let chunks = crate::ingest::chunk_for_media(media, text);
+        let input = crate::ingest::DocumentInput {
+            collection,
+            name: stem,
+            source: &request.body,
+            media,
+            chunks: &chunks,
+            extractor: None,
+        };
+        let mut store = store.lock().expect("lock");
+        return match crate::ingest::ingest_document(&mut store, &input) {
+            Ok(outcome) => Response::json(
+                200,
+                json_object(vec![
+                    ("doc_rev", c1::Value::Text(outcome.doc_rev_id)),
+                    ("new_objects", c1::Value::Integer(outcome.new_objects as i64)),
+                    ("ref_updated", c1::Value::Bool(outcome.ref_updated)),
+                ]),
+            ),
+            Err(e) => store_error_response(e),
+        };
+    }
+
     error_response(404, "no such endpoint")
 }

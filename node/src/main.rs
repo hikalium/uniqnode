@@ -32,9 +32,90 @@ fn usage() -> ! {
            serve <dir> <addr>         HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)\n\
            sync <dir> <peer_addr>     相手から pull で同期する(serve 停止中のストア用。\n\
                                       serve 中は POST /v1/sync を使う)\n\
+           ingest <dir> <collection> <path>\n\
+                                      文書を取り込む(.md/.markdown/.txt。ディレクトリは\n\
+                                      再帰。serve 停止中のストア用。serve 中は\n\
+                                      PUT /v1/collections/{{c}}/documents/{{name}} を使う)\n\
            flood <dir>                書き込み続ける(クラッシュ試験用の内部コマンド)"
     );
     std::process::exit(2);
+}
+
+/// ディレクトリを再帰して通常ファイルを集める(名前順)。
+fn collect_files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    if root.is_dir() {
+        let mut entries: Vec<_> =
+            std::fs::read_dir(root)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|e| e.path());
+        for entry in entries {
+            collect_files(&entry.path(), out)?;
+        }
+    } else {
+        out.push(root.to_path_buf());
+    }
+    Ok(())
+}
+
+/// 取り込みの CLI 本体(INGEST の「取り込み口の段」)。対象外のファイルは黙って捨てず、
+/// 最後に一覧で報告する(must/0022 の同型)。
+fn run_ingest(dir: &str, collection: &str, root: &str) -> Result<(), StoreError> {
+    let root_path = std::path::Path::new(root);
+    if !root_path.exists() {
+        return Err(StoreError::Invalid(format!("{root}: 存在しない")));
+    }
+    let mut files = Vec::new();
+    collect_files(root_path, &mut files)?;
+    let base = if root_path.is_dir() {
+        root_path
+    } else {
+        root_path.parent().unwrap_or_else(|| std::path::Path::new(""))
+    };
+    let mut store = open(dir);
+    let mut skipped: Vec<String> = Vec::new();
+    for file in &files {
+        let relative = file.strip_prefix(base).unwrap_or(file);
+        let extension = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let Some(media) = uniqnode::ingest::media_for_extension(extension) else {
+            skipped.push(relative.display().to_string());
+            continue;
+        };
+        let bytes = std::fs::read(file)?;
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return Err(StoreError::Invalid(format!(
+                "{}: UTF-8 でない({media} として取り込めない)",
+                file.display()
+            )));
+        };
+        let name_path = relative.with_extension("");
+        let name = name_path
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        let chunks = uniqnode::ingest::chunk_for_media(media, text);
+        let outcome = uniqnode::ingest::ingest_document(
+            &mut store,
+            &uniqnode::ingest::DocumentInput {
+                collection,
+                name: &name,
+                source: &bytes,
+                media,
+                chunks: &chunks,
+                extractor: None,
+            },
+        )?;
+        let state = if outcome.ref_updated { "updated" } else { "no-op" };
+        println!(
+            "{collection}/{name}: {state} chunks={} new_objects={} doc_rev={}",
+            chunks.len(),
+            outcome.new_objects,
+            outcome.doc_rev_id
+        );
+    }
+    for path in &skipped {
+        println!("対象外(拡張子): {path}");
+    }
+    Ok(())
 }
 
 fn open(dir: &str) -> Store {
@@ -104,6 +185,11 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 let target = state.target.as_deref().unwrap_or("(tombstone)");
                 println!("{name} -> {target} (seq {})", state.seq);
             }
+        }
+        "ingest" => {
+            let collection = rest.first().map(String::as_str).unwrap_or_else(|| usage());
+            let root = rest.get(1).map(String::as_str).unwrap_or_else(|| usage());
+            run_ingest(dir, collection, root)?;
         }
         "fsck" => {
             let store = open(dir);

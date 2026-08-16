@@ -195,6 +195,26 @@ pub fn chunk_pdf_text(text: &str) -> Vec<Chunk> {
     chunks
 }
 
+// ---- 取り込み口(INGEST の「取り込み口の段」) ----
+
+/// 対象拡張子と media の対応。CLI と API が同じ判定を共用する(should/0135)。
+/// PDF は「PDF の段」で加わる。
+pub fn media_for_extension(extension: &str) -> Option<&'static str> {
+    match extension {
+        "md" | "markdown" => Some("markdown"),
+        "txt" => Some("text"),
+        _ => None,
+    }
+}
+
+pub fn chunk_for_media(media: &str, text: &str) -> Vec<Chunk> {
+    if media == "markdown" {
+        chunk_markdown(text)
+    } else {
+        chunk_plain_text(text)
+    }
+}
+
 // ---- 書き込み経路(INGEST の「書き込み経路の段」) ----
 
 use crate::c1::{self, Value};

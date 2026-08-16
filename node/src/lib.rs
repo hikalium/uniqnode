@@ -8,6 +8,7 @@ pub mod ed25519;
 pub mod groups;
 pub mod health;
 pub mod http;
+pub mod ingest;
 pub mod query;
 pub mod sha2;
 pub mod store;

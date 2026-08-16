@@ -10,6 +10,7 @@ pub mod health;
 pub mod http;
 pub mod ingest;
 pub mod query;
+pub mod search;
 pub mod sha2;
 pub mod store;
 pub mod sync;

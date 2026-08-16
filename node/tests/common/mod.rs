@@ -49,6 +49,20 @@ impl Drop for Server {
     }
 }
 
+/// PDF テストの前提確認。pdftotext が無い環境では黙って飛ばさず、導入手順を示して
+/// 失敗する(docs/design/TESTING.md の外部コマンドの規約。openssl_interop と同じ扱い)。
+pub fn require_pdftotext() {
+    if let Err(error) = Command::new("pdftotext").arg("-v").output() {
+        panic!(
+            "PDF 取り込みのテストには pdftotext コマンドが必要({error})。\
+             導入例(sudo なし): apt-get download poppler-utils と dpkg -x で \
+             ~/opt/poppler/ へ展開し、PATH の通ったディレクトリへ symlink を置く。\
+             libpoppler の無い機械ではライブラリ側も同じ手順で展開して \
+             LD_LIBRARY_PATH を通す"
+        );
+    }
+}
+
 pub fn unique_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("uniqnode-test-{}-{name}", std::process::id()));
     if dir.exists() {

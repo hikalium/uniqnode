@@ -488,6 +488,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 engine,
                 health: Some(health),
                 referrers: std::sync::Mutex::new(None),
+                search: std::sync::Mutex::new(None),
             };
             let handler: std::sync::Arc<uniqnode::http::Handler> =
                 std::sync::Arc::new(move |request| uniqnode::api::handle(&context, request));

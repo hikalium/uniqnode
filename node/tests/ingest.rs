@@ -15,20 +15,6 @@ fn binary() -> &'static str {
 /// 区切られる。
 const THREE_PAGE_PDF: &[u8] = include_bytes!("assets/three_pages.pdf");
 
-/// PDF テストの前提確認。pdftotext が無い環境では黙って飛ばさず、導入手順を示して
-/// 失敗する(docs/design/TESTING.md の外部コマンドの規約。openssl_interop と同じ扱い)。
-fn require_pdftotext() {
-    if let Err(error) = Command::new("pdftotext").arg("-v").output() {
-        panic!(
-            "PDF 取り込みのテストには pdftotext コマンドが必要({error})。\
-             導入例(sudo なし): apt-get download poppler-utils と dpkg -x で \
-             ~/opt/poppler/ へ展開し、PATH の通ったディレクトリへ symlink を置く。\
-             libpoppler の無い機械ではライブラリ側も同じ手順で展開して \
-             LD_LIBRARY_PATH を通す"
-        );
-    }
-}
-
 /// doc_rev の JSON から chunks 列のオブジェクト ID を取り出す(テスト用の素朴な抽出)。
 fn chunk_ids_of(doc: &str) -> Vec<String> {
     doc.split("\"chunks\":[")

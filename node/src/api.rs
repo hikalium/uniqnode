@@ -20,6 +20,10 @@ pub struct ApiContext {
     /// (Store::open に全件パースを足さない。INGEST の「逆引き」節)、初回要求時に
     /// 構築して、世代(object_count)がずれたら次の要求で作り直す。
     pub referrers: Mutex<Option<crate::store::ReferrerIndex>>,
+    /// 検索索引の遅延キャッシュ(POST /v1/search)。referrers と同じ遅延構築だが、
+    /// 世代はオブジェクト数に加えて署名者ごとの最終 seq も見る(ref の張り替えだけの
+    /// 変化でも旧版のチャンクを見えから外すため。node/src/search.rs)。
+    pub search: Mutex<Option<crate::search::SearchIndex>>,
 }
 
 fn json_object(entries: Vec<(&str, c1::Value)>) -> Vec<u8> {
@@ -64,6 +68,7 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
     match (method, path) {
         ("GET", "/healthz") => Response::text(200, "ok\n"),
         ("POST", "/v1/query") => handle_query(context, request),
+        ("POST", "/v1/search") => handle_search(context, request),
         ("GET", "/v1/peers") => {
             let peers: Vec<c1::Value> = context
                 .engine
@@ -315,6 +320,95 @@ fn handle_query(context: &ApiContext, request: &Request) -> Response {
     let shared = context.engine.start(kind, &target, budget_ms, scope);
     let state = if wait { shared.wait_settled() } else { shared.snapshot() };
     Response::json(200, crate::query::state_to_json(&state))
+}
+
+/// POST /v1/search(RAG の「BM25 検索」の項)。ボディ:
+/// {"query": "...", "collection": "...", "top_k": N}(collection 省略時は全コレクション、
+/// top_k 省略時は 10)。索引は導出データの遅延キャッシュで、referrers と同じく初回
+/// 要求時に構築し、世代がずれたら次の要求で作り直す。
+fn handle_search(context: &ApiContext, request: &Request) -> Response {
+    let body_text = match std::str::from_utf8(&request.body) {
+        Ok(t) => t,
+        Err(_) => return error_response(400, "ボディが UTF-8 でない"),
+    };
+    let value = match c1::parse(body_text) {
+        Ok(v) => v,
+        Err(e) => return error_response(400, &format!("JSON が不正: {e}")),
+    };
+    let map = match &value {
+        c1::Value::Object(m) => m,
+        _ => return error_response(400, "ボディはオブジェクトであるべき"),
+    };
+    let query = match map.get("query") {
+        Some(c1::Value::Text(t)) if !t.is_empty() => t.clone(),
+        _ => return error_response(400, "query がない(空でない文字列)"),
+    };
+    let collection = match map.get("collection") {
+        None => None,
+        Some(c1::Value::Text(t)) if !t.is_empty() => Some(t.clone()),
+        _ => return error_response(400, "collection は空でない文字列"),
+    };
+    let top_k = match map.get("top_k") {
+        None => 10usize,
+        Some(c1::Value::Integer(n)) if (1..=1000).contains(n) => *n as usize,
+        _ => return error_response(400, "top_k は 1..=1000 の整数"),
+    };
+    if crate::search::terms_of(&query).is_empty() {
+        return error_response(
+            400,
+            "クエリに索引語が無い(英数字の語か、仮名・漢字などの文字が要る)",
+        );
+    }
+    let store = context.store.lock().expect("lock");
+    let mut cache = context.search.lock().expect("lock");
+    if !cache.as_ref().is_some_and(|index| index.is_current(&store)) {
+        match crate::search::SearchIndex::build(&store) {
+            Ok(index) => *cache = Some(index),
+            Err(e) => return store_error_response(e),
+        }
+    }
+    let index = cache.as_ref().expect("直前に構築した");
+    let hits = index.search(&query, collection.as_deref(), top_k);
+    Response::json(200, search_response_body(&hits))
+}
+
+/// JSON 文字列 1 個ぶんの直列化(引用符・エスケープ込み)。検索応答は score が小数で
+/// c1(整数のみ)では表せないため手で組むが、文字列のエスケープは c1 の直列化を通して
+/// 実装を増やさない(should/0135)。
+fn json_text(text: &str) -> String {
+    String::from_utf8(c1::to_canonical_bytes(&c1::Value::Text(text.to_string())))
+        .expect("c1 直列化は UTF-8")
+}
+
+/// 検索応答の本文。results の各件は snippet(チャンク本文の先頭)・id(チャンク ID。
+/// 全文の取得は既存の GET /v1/objects/{id})・score・citation(INGEST の「文書モデル」節
+/// の引用規則: document は ref パスから collections/<コレクション名>/ を除いた残り、
+/// position は chunks 列の添字、breadcrumbs、PDF なら page)。score_semantics は
+/// "bm25": スコアは同一応答内の順位付けにだけ意味があり、応答をまたいだ比較や絶対値の
+/// 閾値には使えない。
+fn search_response_body(hits: &[crate::search::SearchHit<'_>]) -> Vec<u8> {
+    let mut results = Vec::new();
+    for hit in hits {
+        let chunk = hit.chunk;
+        let breadcrumbs: Vec<String> =
+            chunk.breadcrumbs.iter().map(|title| json_text(title)).collect();
+        let mut citation = format!(
+            "{{\"breadcrumbs\":[{}],\"document\":{}",
+            breadcrumbs.join(","),
+            json_text(&chunk.document)
+        );
+        if let Some(page) = chunk.page {
+            citation.push_str(&format!(",\"page\":{page}"));
+        }
+        citation.push_str(&format!(",\"position\":{}}}", chunk.position));
+        results.push(format!(
+            "{{\"citation\":{citation},\"id\":{},\"score\":{},\"snippet\":{}}}",
+            json_text(&chunk.id),
+            hit.score,
+            json_text(&chunk.snippet),
+        ));
+    }
+    format!("{{\"results\":[{}],\"score_semantics\":\"bm25\"}}", results.join(",")).into_bytes()
 }
 
 fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Response {

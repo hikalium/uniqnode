@@ -72,7 +72,7 @@ fn collect_files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> s
     Ok(())
 }
 
-/// 取り込みの CLI 本体(INGEST の「取り込み口の段」と「PDF の段」)。対象外のファイルは
+/// 取り込みの CLI 本体(INGEST の「CLI と API」節と「PDF 抽出」節)。対象外のファイルは
 /// 黙って捨てず、最後に一覧で報告する(must/0022 の同型)。pdftotext の起動と版の取得は
 /// 最初の PDF に当たったとき一度だけ行い、以後の PDF で使い回す。
 fn run_ingest(
@@ -163,7 +163,7 @@ fn run_ingest(
     Ok(())
 }
 
-/// 注釈索引の取り込み CLI 本体(INGEST の「注釈の段」)。一致した注釈だけを取り込み、
+/// 注釈索引の取り込み CLI 本体(INGEST の「注釈の取り込みと照合」節)。一致した注釈だけを取り込み、
 /// 不一致は取り込まずに一致率とともに報告する(どの注釈がどの一致率で落ちたか)。
 fn run_ingest_annotations(
     dir: &str,

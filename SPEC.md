@@ -369,7 +369,7 @@ uniqnode コアの上に、次の応用層が載る予定である。仕様化�
 - 提示層: mgcanvas 形式へのエクスポート、閉世界ラッパー越しのファイルシステム風マウント。
 - 訂正の表現: 不変オブジェクトの誤りは「直す」のではなく、訂正辺(corrects 型)と
   改版追随辺(supersedes 型)という追加の言明で表す。現在の見えは ref が決め、
-  履歴と根拠は辺として辿れる([docs/plan/INGEST.md](#11ff6fec-cf85-4ae9-a24c-6098964f6cce))。
+  履歴と根拠は辺として辿れる([docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b))。
 
 ## 10. ノードローカル API
 
@@ -381,7 +381,9 @@ uniqnode コアの上に、次の応用層が載る予定である。仕様化�
 | `GET /healthz` | 死活 |
 | `GET /v1/status` | 版・オブジェクト数・ピア到達性・seq・健全性集計(ALERT を含む) |
 | `GET /v1/objects/{id}` | オブジェクト取得(ローカル。なければ 404 = ローカル不保持の言明) |
+| `GET /v1/objects/{id}/referrers` | 逆引き(この ID を参照する既知オブジェクトの一覧。自分の知る範囲の導出データで、空は不在の言明ではない) |
 | `POST /v1/objects` | オブジェクト投入(べき等。ID を返す) |
+| `PUT /v1/collections/{c}/documents/{name}` | 文書の取り込み(本文は生バイト列。種別は name の拡張子で判定) |
 | `GET /v1/refs` | ref の一覧(名前・target・seq・at) |
 | `GET /v1/refs/...` / `PUT /v1/refs/...` | ref の解決と更新(自DBノードの名前空間のみ書ける) |
 | `POST /v1/pins` / `GET /v1/pins` | pin の設定(発行者は同時に保持表明する)/ 一覧と保持者 |

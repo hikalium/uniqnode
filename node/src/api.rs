@@ -17,7 +17,7 @@ pub struct ApiContext {
     /// serve でのみ Some(健全性エンジン。SPEC §8)。
     pub health: Option<Arc<crate::health::HealthEngine>>,
     /// 逆引き索引の遅延キャッシュ(GET /v1/objects/{id}/referrers)。起動時には作らず
-    /// (Store::open に全件パースを足さない。INGEST の「リスクと戻し方」)、初回要求時に
+    /// (Store::open に全件パースを足さない。INGEST の「逆引き」節)、初回要求時に
     /// 構築して、世代(object_count)がずれたら次の要求で作り直す。
     pub referrers: Mutex<Option<crate::store::ReferrerIndex>>,
 }
@@ -372,7 +372,7 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
     }
 
     if let Some(rest) = path.strip_prefix("/v1/objects/") {
-        // 逆引き(INGEST の「訂正の段」): この ID を参照している既知オブジェクトの一覧。
+        // 逆引き(INGEST の「逆引き」節): この ID を参照している既知オブジェクトの一覧。
         if let Some(id) = rest.strip_suffix("/referrers") {
             if method != "GET" {
                 return error_response(405, "GET のみ");
@@ -518,7 +518,7 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
         }
     }
 
-    // 文書の取り込み(INGEST の「取り込み口の段」)。本文は生バイト列、種別は
+    // 文書の取り込み(INGEST の「CLI と API」節)。本文は生バイト列、種別は
     // {name} の拡張子で判定する。
     if let Some(rest) = path.strip_prefix("/v1/collections/") {
         if method != "PUT" {

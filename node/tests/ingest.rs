@@ -1,5 +1,5 @@
-//! 取り込み口の統合テスト(INGEST (uuid:11ff6fec-cf85-4ae9-a24c-6098964f6cce) の
-//! 「取り込み口の段」と「PDF の段」の確認)。実プロセスの serve に生 HTTP/1.1 で当て
+//! 取り込み層の統合テスト(INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の
+//! CLI・API・PDF 抽出・注釈・訂正の確認)。実プロセスの serve に生 HTTP/1.1 で当て
 //! (should/0138)、CLI は実プロセスで起動する。
 
 mod common;
@@ -260,7 +260,7 @@ fn cli_ingest_without_pdftotext_fails_with_install_instructions() {
     std::fs::remove_dir_all(&corpus).expect("cleanup");
 }
 
-// ---- 注釈の段(INGEST の「注釈の段」の確認) ----
+// ---- 注釈の取り込み(INGEST の「注釈の取り込みと照合」節の確認) ----
 
 use uniqnode::ingest::{parse_annotation_index, parse_manual_approvals, AnnotationEntry};
 
@@ -462,7 +462,7 @@ fn serve_without_pdftotext_rejects_pdf_with_instructions() {
     assert_eq!(response.status, 200, "{}", body_text(&response));
 }
 
-// ---- 訂正の段(INGEST の「訂正の段」の確認) ----
+// ---- 訂正の発行(INGEST の「訂正の発行」節と「逆引き」節の確認) ----
 
 /// annotates 型ノードの固定 ID(must/0023 の定数の末端確認で使う)。
 const ANNOTATES_TYPE_ID: &str =

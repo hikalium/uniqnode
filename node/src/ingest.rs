@@ -1,5 +1,5 @@
-//! 取り込み層のチャンカー(純関数層)。INGEST (uuid:11ff6fec-cf85-4ae9-a24c-6098964f6cce) の
-//! チャンカーの段。文書をチャンク(検索と引用の単位)に切る。ストア I/O は扱わない。
+//! 取り込み層: チャンカー・書き込み経路・pdftotext 委譲・注釈の取り込みと照合・訂正の
+//! 発行(INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b))。
 
 /// チャンクの大きさの上限(近似トークン数)。検索スニペットとして一度に読める長さ。
 pub const CHUNK_TOKEN_LIMIT: usize = 480;
@@ -195,7 +195,7 @@ pub fn chunk_pdf_text(text: &str) -> Vec<Chunk> {
     chunks
 }
 
-// ---- 取り込み口(INGEST の「取り込み口の段」) ----
+// ---- 取り込み口(INGEST の「CLI と API」節) ----
 
 /// 対象拡張子と media の対応。CLI と API が同じ判定を共用する(should/0135)。
 pub fn media_for_extension(extension: &str) -> Option<&'static str> {
@@ -217,7 +217,7 @@ pub fn chunk_for_media(media: &str, text: &str) -> Vec<Chunk> {
     }
 }
 
-// ---- PDF 抽出(INGEST の「PDF の段」) ----
+// ---- PDF 抽出(INGEST の「PDF 抽出」節) ----
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -295,7 +295,7 @@ impl PdfExtractor {
     }
 }
 
-// ---- 書き込み経路(INGEST の「書き込み経路の段」) ----
+// ---- 書き込み経路(INGEST の「文書モデル」節) ----
 
 use crate::c1::{self, Value};
 use crate::store::{Result, Store, StoreError};
@@ -423,7 +423,7 @@ pub fn ingest_document(store: &mut Store, input: &DocumentInput) -> Result<Inges
     Ok(IngestOutcome { doc_rev_id, new_objects, ref_updated: true })
 }
 
-// ---- 注釈の取り込み(INGEST の「注釈の段」) ----
+// ---- 注釈の取り込み(INGEST の「注釈の取り込みと照合」節) ----
 
 use std::collections::BTreeSet;
 
@@ -477,7 +477,7 @@ fn strip_enclosing_backticks(text: &str) -> &str {
     text.strip_prefix('`').and_then(|inner| inner.strip_suffix('`')).unwrap_or(text)
 }
 
-/// data.md の実形式(INGEST の前提節)だけを受け付けるパーサ(must/0020):
+/// data.md の実形式(INGEST の「注釈の取り込みと照合」節)だけを受け付けるパーサ(must/0020):
 /// spec_id の見出し + 表題・形式・URL の 3 行コードブロック(形式が zip のときだけ
 /// 4 行目に書庫内パス)+「- p.N: 節タイトル」の箇条書き(タイトルはバッククォート
 /// 囲みと裸の両方)。注釈が 1 件も無い見出しも正常。コードブロックの中身は使わない。
@@ -622,7 +622,7 @@ pub struct AnnotationMatch {
 
 /// 照合で数える「語」: 小文字化して英数字以外で分割し、数字だけの語を除く。同じ語の
 /// 繰り返しは 1 語と数える(重複を除く)。チャンカーの token_estimate(近似トークン数)
-/// とは別物である(INGEST の「注釈の照合」節)。
+/// とは別物である(INGEST の「注釈の取り込みと照合」節)。
 fn annotation_tokens(text: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut tokens = Vec::new();
@@ -638,7 +638,7 @@ fn annotation_tokens(text: &str) -> Vec<String> {
     tokens
 }
 
-/// 注釈の照合(INGEST の「注釈の照合」節の規範)。タイトル側の語の 6 割以上がページ
+/// 注釈の照合(INGEST の「注釈の取り込みと照合」節の照合規則)。タイトル側の語の 6 割以上がページ
 /// 本文の語の集合に含まれれば一致。根拠は、一致した各語を最初に含む本文行(ページ順・
 /// 重複なし)。取り込み時の検証と訂正のための再検証が共用する(should/0135)。
 /// 語が一つも残らないタイトルは空条件として一致になる(実データには存在しない)。
@@ -817,7 +817,7 @@ fn verification_record_value(method: &str, evidence: &[String]) -> Value {
 }
 
 /// 注釈を annotates 型の辺として取り込み、コレクションの索引を作り直して
-/// ref annotations/<コレクション名> を張る(INGEST の「注釈の段」)。照合に一致した
+/// ref annotations/<コレクション名> を張る(INGEST の「注釈の取り込みと照合」節)。照合に一致した
 /// 注釈は method=token-match、機械照合に落ちても承認リストにある (spec_id, ページ) の
 /// 注釈は method=manual の検証記録付きで入る。どちらでもない不一致は取り込まず
 /// rejected で報告する。辺と検証記録の結びつけは索引の対だけが持つ(検証記録は言明を
@@ -1005,7 +1005,7 @@ fn write_annotation_index(
     Ok((index_id, ref_updated, new_objects))
 }
 
-// ---- 訂正の発行(INGEST の「訂正の段」) ----
+// ---- 訂正の発行(INGEST の「訂正の発行」節) ----
 
 /// 訂正 1 件の結果(報告の素)。matched_tokens / total_tokens は新しい言明の再照合の
 /// 一致率。
@@ -1084,7 +1084,7 @@ fn find_doc_rev_for_blob(
     Ok(None)
 }
 
-/// 訂正の発行(INGEST の「訂正の段」)。wrong_id の言明を誤りとし、new_id の言明が
+/// 訂正の発行(INGEST の「訂正の発行」節)。wrong_id の言明を誤りとし、new_id の言明が
 /// 代わることを主張する corrects 辺を発行する。新しい言明は取り込み時と同じトークン照合
 /// (match_annotation。should/0135)で再照合し、根拠行つきの検証記録(method=token-match)
 /// を作って辺の meta.verification から指す。meta 内の s256: 文字列も参照なので、訂正の

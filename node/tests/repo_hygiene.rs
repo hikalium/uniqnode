@@ -1,4 +1,4 @@
-//! リポジトリ衛生検査(docs/plan/M1.md「ポリシー機械化」)。lamalium の
+//! リポジトリ衛生検査。lamalium の
 //! check-policy / check-docs の uniqnode 版。機械的に検査できる範囲:
 //! - policy/ の形式(ファイル名・番号帯・Level 行と置き場所の一致・必須節・廃止スタブ)
 //! - policy 参照の解決(policy/ の外のファイルが存在しないポリシー番号を参照しない。

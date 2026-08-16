@@ -298,7 +298,7 @@ impl PdfExtractor {
 // ---- 書き込み経路(INGEST の「書き込み経路の段」) ----
 
 use crate::c1::{self, Value};
-use crate::store::{Result, Store};
+use crate::store::{Result, Store, StoreError};
 use std::collections::BTreeMap;
 
 /// 取り込む文書 1 件の入力。name は取り込み起点からの相対パスから拡張子を除いたもの。
@@ -421,6 +421,505 @@ pub fn ingest_document(store: &mut Store, input: &DocumentInput) -> Result<Inges
     new_objects += usize::from(is_new);
     store.set_ref(&ref_path, Some(&doc_rev_id))?;
     Ok(IngestOutcome { doc_rev_id, new_objects, ref_updated: true })
+}
+
+// ---- 注釈の取り込み(INGEST の「注釈の段」) ----
+
+use std::collections::BTreeSet;
+
+/// 検証記録の method: 機械照合(must/0023: 生成側と判定側が同じ定数)。
+pub const METHOD_TOKEN_MATCH: &str = "token-match";
+/// 検証記録の method: 人手確認(--manual の承認リスト経由)。
+pub const METHOD_MANUAL: &str = "manual";
+
+/// annotates 型ノードの c1 正規形本文。辺の type はこの本文の ID を指し、生成側
+/// (ingest_annotations の辺の発行)と判定側(is_annotates_edge)が同じ定数を使う
+/// (must/0023)。
+pub const ANNOTATES_TYPE_BODY: &str = "{\"contents\":\"annotates\",\"kind\":\"node\",\"v\":1}";
+/// corrects 型ノードの c1 正規形本文。この段では定数定義のみで、発行経路は訂正の段が足す。
+pub const CORRECTS_TYPE_BODY: &str = "{\"contents\":\"corrects\",\"kind\":\"node\",\"v\":1}";
+/// supersedes 型ノードの c1 正規形本文。この段では定数定義のみ(改版追随は将来の段)。
+pub const SUPERSEDES_TYPE_BODY: &str = "{\"contents\":\"supersedes\",\"kind\":\"node\",\"v\":1}";
+
+/// annotates 型ノードの ID。
+pub fn annotates_type_id() -> String {
+    c1::id_for_bytes(ANNOTATES_TYPE_BODY.as_bytes())
+}
+
+/// corrects 型ノードの ID。
+pub fn corrects_type_id() -> String {
+    c1::id_for_bytes(CORRECTS_TYPE_BODY.as_bytes())
+}
+
+/// supersedes 型ノードの ID。
+pub fn supersedes_type_id() -> String {
+    c1::id_for_bytes(SUPERSEDES_TYPE_BODY.as_bytes())
+}
+
+/// 判定側: この c1 値は annotates 型の辺か。生成側と同じ型定数を通る(must/0023)。
+pub fn is_annotates_edge(value: &Value) -> bool {
+    let Value::Object(map) = value else { return false };
+    map.get("kind") == Some(&text_value("edge"))
+        && map.get("type") == Some(&text_value(&annotates_type_id()))
+}
+
+/// data.md の注釈 1 件(spec_id のページ page に節 title がある、という一次言明の素)。
+/// page は PDF の物理ページ番号(1 始まりの通し番号。紙面の刷り番号ではない)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotationEntry {
+    pub spec_id: String,
+    pub page: u32,
+    pub title: String,
+}
+
+/// 「`タイトル`」のようにバッククォートで囲まれていれば外す(裸ならそのまま)。
+fn strip_enclosing_backticks(text: &str) -> &str {
+    text.strip_prefix('`').and_then(|inner| inner.strip_suffix('`')).unwrap_or(text)
+}
+
+/// data.md の実形式(INGEST の前提節)だけを受け付けるパーサ(must/0020):
+/// spec_id の見出し + 表題・形式・URL の 3 行コードブロック(形式が zip のときだけ
+/// 4 行目に書庫内パス)+「- p.N: 節タイトル」の箇条書き(タイトルはバッククォート
+/// 囲みと裸の両方)。注釈が 1 件も無い見出しも正常。コードブロックの中身は使わない。
+pub fn parse_annotation_index(text: &str) -> std::result::Result<Vec<AnnotationEntry>, String> {
+    /// 次に来てよいもの。見出しの後には必ずコードブロックが 1 個来る。
+    #[derive(PartialEq)]
+    enum Expecting {
+        FirstHeading,
+        CodeBlock,
+        Bullets,
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let mut entries = Vec::new();
+    let mut spec_id = String::new();
+    let mut expecting = Expecting::FirstHeading;
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index];
+        let number = index + 1;
+        if line.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("# ") {
+            if expecting == Expecting::CodeBlock {
+                return Err(format!("{number} 行目: 見出し {spec_id} にコードブロックが無い"));
+            }
+            spec_id = strip_enclosing_backticks(rest.trim()).to_string();
+            if spec_id.is_empty() {
+                return Err(format!("{number} 行目: 見出しの spec_id が空"));
+            }
+            expecting = Expecting::CodeBlock;
+            index += 1;
+            continue;
+        }
+        if line == "```" {
+            if expecting != Expecting::CodeBlock {
+                return Err(format!(
+                    "{number} 行目: コードブロックは見出しの直後に 1 個だけ置ける"
+                ));
+            }
+            let mut body_lines = 0usize;
+            let mut is_zip = false;
+            let mut end = index + 1;
+            loop {
+                let Some(body) = lines.get(end) else {
+                    return Err(format!("{number} 行目: コードブロックが閉じていない"));
+                };
+                if *body == "```" {
+                    break;
+                }
+                if body_lines == 1 {
+                    is_zip = *body == "zip";
+                }
+                body_lines += 1;
+                end += 1;
+            }
+            let expected = if is_zip { 4 } else { 3 };
+            if body_lines != expected {
+                return Err(format!(
+                    "{number} 行目: コードブロックは表題・形式・URL の 3 行(形式 zip の\
+                     ときだけ書庫内パスの 4 行目)のはずが {body_lines} 行ある"
+                ));
+            }
+            expecting = Expecting::Bullets;
+            index = end + 1;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("- p.") {
+            if expecting != Expecting::Bullets {
+                return Err(format!(
+                    "{number} 行目: 注釈の行はコードブロックの後にしか置けない"
+                ));
+            }
+            let Some((digits, raw_title)) = rest.split_once(": ") else {
+                return Err(format!(
+                    "{number} 行目: 注釈は「- p.N: 節タイトル」の形のはず: {line:?}"
+                ));
+            };
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(format!("{number} 行目: ページ番号が数字でない: {digits:?}"));
+            }
+            let page: u32 = digits
+                .parse()
+                .map_err(|_| format!("{number} 行目: ページ番号が大きすぎる: {digits:?}"))?;
+            let title = strip_enclosing_backticks(raw_title.trim()).to_string();
+            if title.is_empty() {
+                return Err(format!("{number} 行目: 節タイトルが空"));
+            }
+            entries.push(AnnotationEntry { spec_id: spec_id.clone(), page, title });
+            index += 1;
+            continue;
+        }
+        return Err(format!(
+            "{number} 行目: 形式外の行(見出し・コードブロック・「- p.N: 節タイトル」\
+             だけを受け付ける。must/0020): {line:?}"
+        ));
+    }
+    if expecting == Expecting::CodeBlock {
+        return Err(format!("見出し {spec_id} にコードブロックが無いまま入力が終わった"));
+    }
+    Ok(entries)
+}
+
+/// --manual の承認リスト(人手確認済みの注釈)を読む。形式は 1 行 1 件で
+/// 「spec_id ページ番号」の空白区切り。空行は無視する。この形式だけを受け付ける
+/// (must/0020)。
+pub fn parse_manual_approvals(
+    text: &str,
+) -> std::result::Result<BTreeSet<(String, u32)>, String> {
+    let mut approvals = BTreeSet::new();
+    for (index, line) in text.lines().enumerate() {
+        let number = index + 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let (Some(spec_id), Some(page), None) = (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(format!(
+                "{number} 行目: 承認は「spec_id ページ番号」の 2 語のはず: {line:?}"
+            ));
+        };
+        if page.is_empty() || !page.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("{number} 行目: ページ番号が数字でない: {page:?}"));
+        }
+        let page: u32 =
+            page.parse().map_err(|_| format!("{number} 行目: ページ番号が大きすぎる: {page:?}"))?;
+        approvals.insert((spec_id.to_string(), page));
+    }
+    Ok(approvals)
+}
+
+/// 注釈の照合の結果。evidence は一致に使った本文行(検証記録に残す根拠)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotationMatch {
+    pub matched: bool,
+    pub matched_tokens: usize,
+    pub total_tokens: usize,
+    pub evidence: Vec<String>,
+}
+
+/// 照合で数える「語」: 小文字化して英数字以外で分割し、数字だけの語を除く。同じ語の
+/// 繰り返しは 1 語と数える(重複を除く)。チャンカーの token_estimate(近似トークン数)
+/// とは別物である(INGEST の「注釈の照合」節)。
+fn annotation_tokens(text: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut tokens = Vec::new();
+    for raw in text.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if raw.is_empty() || raw.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let token = raw.to_ascii_lowercase();
+        if seen.insert(token.clone()) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+/// 注釈の照合(INGEST の「注釈の照合」節の規範)。タイトル側の語の 6 割以上がページ
+/// 本文の語の集合に含まれれば一致。根拠は、一致した各語を最初に含む本文行(ページ順・
+/// 重複なし)。取り込み時の検証と訂正のための再検証が共用する(should/0135)。
+/// 語が一つも残らないタイトルは空条件として一致になる(実データには存在しない)。
+pub fn match_annotation(title: &str, page_lines: &[String]) -> AnnotationMatch {
+    let title_tokens = annotation_tokens(title);
+    let line_tokens: Vec<BTreeSet<String>> = page_lines
+        .iter()
+        .map(|line| annotation_tokens(line).into_iter().collect())
+        .collect();
+    let mut matched = 0usize;
+    let mut evidence_lines: BTreeSet<usize> = BTreeSet::new();
+    for token in &title_tokens {
+        if let Some(index) = line_tokens.iter().position(|set| set.contains(token)) {
+            matched += 1;
+            evidence_lines.insert(index);
+        }
+    }
+    let total = title_tokens.len();
+    AnnotationMatch {
+        // 6 割以上(matched / total >= 3/5)を整数演算で判定する。
+        matched: matched * 5 >= total * 3,
+        matched_tokens: matched,
+        total_tokens: total,
+        evidence: evidence_lines.into_iter().map(|i| page_lines[i].trim().to_string()).collect(),
+    }
+}
+
+/// 取り込まれた注釈 1 件(報告と索引の素)。
+#[derive(Debug)]
+pub struct AcceptedAnnotation {
+    pub spec_id: String,
+    pub page: u32,
+    pub title: String,
+    /// METHOD_TOKEN_MATCH か METHOD_MANUAL。
+    pub method: &'static str,
+    pub matched_tokens: usize,
+    pub total_tokens: usize,
+    pub edge_id: String,
+    pub verification_id: String,
+}
+
+/// 取り込まなかった注釈 1 件(どの注釈がどの一致率で落ちたかの報告)。
+#[derive(Debug)]
+pub struct RejectedAnnotation {
+    pub spec_id: String,
+    pub page: u32,
+    pub title: String,
+    pub matched_tokens: usize,
+    pub total_tokens: usize,
+}
+
+#[derive(Debug)]
+pub struct AnnotationOutcome {
+    pub accepted: Vec<AcceptedAnnotation>,
+    pub rejected: Vec<RejectedAnnotation>,
+    /// コレクションの索引オブジェクトの ID(ref annotations/<コレクション名> の指す先)。
+    pub index_id: String,
+    /// ref を張り替えたか。false = 索引が前回と同一(no-op)。
+    pub ref_updated: bool,
+    pub new_objects: usize,
+}
+
+/// spec_id 1 本ぶんの解決結果: PDF blob の ID と、必要なページの本文行。
+struct ResolvedDocument {
+    blob_id: String,
+    pages: BTreeMap<u32, Vec<String>>,
+}
+
+/// ストア上の c1 オブジェクトを読んで構文解析する。無い・壊れているは黙って飛ばさず
+/// 明示的に失敗する(must/0022)。
+fn parse_stored_object(store: &Store, id: &str, role: &str) -> Result<Value> {
+    let Some(bytes) = store.get_object(id)? else {
+        return Err(StoreError::Invalid(format!("{role} {id} がローカルに無い")));
+    };
+    let text = String::from_utf8(bytes)
+        .map_err(|_| StoreError::Invalid(format!("{role} {id} が UTF-8 でない")))?;
+    c1::parse(&text)
+        .map_err(|error| StoreError::Invalid(format!("{role} {id} を解釈できない: {error}")))
+}
+
+/// spec_id を取り込み済み PDF に解決する。ref collections/<コレクション名>/<spec_id> を
+/// 引いて doc_rev.source(PDF blob)を得、必要なページの本文行を meta.page の一致する
+/// チャンクの text から集める(pdftotext の再実行はしない)。ref が無ければ全体を
+/// 失敗させる(must/0022 の同型)。
+fn resolve_document(
+    store: &Store,
+    collection: &str,
+    spec_id: &str,
+    pages: &BTreeSet<u32>,
+) -> Result<ResolvedDocument> {
+    let ref_path = format!("collections/{collection}/{spec_id}");
+    let full_name = store.own_ref_name(&ref_path);
+    let Some(target) = store.get_ref(&full_name).and_then(|state| state.target.clone()) else {
+        return Err(StoreError::Invalid(format!(
+            "spec_id {spec_id} の PDF が未取り込み(ref {ref_path} が無い)。\
+             先に uniqnode ingest で PDF を取り込むこと"
+        )));
+    };
+    let doc_rev = parse_stored_object(store, &target, "doc_rev")?;
+    let Value::Object(doc) = &doc_rev else {
+        return Err(StoreError::Invalid(format!("doc_rev {target} がオブジェクトでない")));
+    };
+    let Some(Value::Text(blob_id)) = doc.get("source") else {
+        return Err(StoreError::Invalid(format!("doc_rev {target} に source が無い")));
+    };
+    let Some(Value::Array(chunk_ids)) = doc.get("chunks") else {
+        return Err(StoreError::Invalid(format!("doc_rev {target} に chunks 列が無い")));
+    };
+    let mut page_lines: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+    for chunk_ref in chunk_ids {
+        let Value::Text(chunk_id) = chunk_ref else {
+            return Err(StoreError::Invalid(format!(
+                "doc_rev {target} の chunks 列に文字列でない要素がある"
+            )));
+        };
+        let chunk = parse_stored_object(store, chunk_id, "chunk")?;
+        let Value::Object(chunk_map) = &chunk else {
+            return Err(StoreError::Invalid(format!("chunk {chunk_id} がオブジェクトでない")));
+        };
+        // meta.page を持たないチャンク(PDF 以外)は照合の対象にならない。
+        let page = match chunk_map.get("meta") {
+            Some(Value::Object(meta)) => meta.get("page"),
+            _ => None,
+        };
+        let Some(Value::Integer(page)) = page else { continue };
+        let Ok(page) = u32::try_from(*page) else { continue };
+        if !pages.contains(&page) {
+            continue;
+        }
+        if let Some(Value::Text(text)) = chunk_map.get("text") {
+            page_lines
+                .entry(page)
+                .or_default()
+                .extend(text.lines().map(|line| line.to_string()));
+        }
+    }
+    Ok(ResolvedDocument { blob_id: blob_id.clone(), pages: page_lines })
+}
+
+/// {v:1, kind:"node", contents:<text>} のノード(節タイトル用)。
+fn title_node_value(title: &str) -> Value {
+    let mut object = BTreeMap::new();
+    object.insert("v".to_string(), Value::Integer(1));
+    object.insert("kind".to_string(), text_value("node"));
+    object.insert("contents".to_string(), text_value(title));
+    Value::Object(object)
+}
+
+/// 検証記録: 何を検証したかは持たず、どう検証し何を根拠にしたかだけを持つ
+/// (INGEST の「訂正の表現」節。ASSERTIONS の原理 2 と 4)。
+fn verification_record_value(method: &str, evidence: &[String]) -> Value {
+    let mut contents = BTreeMap::new();
+    contents.insert("method".to_string(), text_value(method));
+    contents.insert(
+        "evidence".to_string(),
+        Value::Array(evidence.iter().map(|line| text_value(line)).collect()),
+    );
+    let mut object = BTreeMap::new();
+    object.insert("v".to_string(), Value::Integer(1));
+    object.insert("kind".to_string(), text_value("node"));
+    object.insert("contents".to_string(), Value::Object(contents));
+    Value::Object(object)
+}
+
+/// 注釈を annotates 型の辺として取り込み、コレクションの索引を作り直して
+/// ref annotations/<コレクション名> を張る(INGEST の「注釈の段」)。照合に一致した
+/// 注釈は method=token-match、機械照合に落ちても承認リストにある (spec_id, ページ) の
+/// 注釈は method=manual の検証記録付きで入る。どちらでもない不一致は取り込まず
+/// rejected で報告する。辺と検証記録の結びつけは索引の対だけが持つ(検証記録は言明を
+/// 指さず、言明も検証記録を持たない。どちらへ参照を張っても壊れる理由は INGEST の
+/// 「訂正の表現」節)。
+pub fn ingest_annotations(
+    store: &mut Store,
+    collection: &str,
+    entries: &[AnnotationEntry],
+    approvals: &BTreeSet<(String, u32)>,
+) -> Result<AnnotationOutcome> {
+    // 書き込みの前に spec_id を全件解決する(途中まで書いてから失敗する形を作らない)。
+    let mut needed: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
+    for entry in entries {
+        needed.entry(&entry.spec_id).or_default().insert(entry.page);
+    }
+    let mut documents: BTreeMap<&str, ResolvedDocument> = BTreeMap::new();
+    for (spec_id, pages) in &needed {
+        documents.insert(spec_id, resolve_document(store, collection, spec_id, pages)?);
+    }
+
+    let mut new_objects = 0usize;
+    let mut accepted: Vec<AcceptedAnnotation> = Vec::new();
+    let mut rejected: Vec<RejectedAnnotation> = Vec::new();
+    // annotates 型ノードは最初の受理で一度だけ書く(受理ゼロの実行では書かない)。
+    let mut type_id: Option<String> = None;
+    let no_lines: Vec<String> = Vec::new();
+    for entry in entries {
+        let document = documents.get(entry.spec_id.as_str()).expect("解決済み");
+        let lines = document.pages.get(&entry.page).unwrap_or(&no_lines);
+        let outcome = match_annotation(&entry.title, lines);
+        let record = if outcome.matched {
+            Some((METHOD_TOKEN_MATCH, outcome.evidence))
+        } else if approvals.contains(&(entry.spec_id.clone(), entry.page)) {
+            // 機械照合に落ちたが人が確認済み。黙った例外ではなく manual の記録を残す。
+            Some((METHOD_MANUAL, Vec::new()))
+        } else {
+            None
+        };
+        let Some((method, evidence)) = record else {
+            rejected.push(RejectedAnnotation {
+                spec_id: entry.spec_id.clone(),
+                page: entry.page,
+                title: entry.title.clone(),
+                matched_tokens: outcome.matched_tokens,
+                total_tokens: outcome.total_tokens,
+            });
+            continue;
+        };
+        if type_id.is_none() {
+            let (id, is_new) = store.put_object(ANNOTATES_TYPE_BODY.as_bytes())?;
+            new_objects += usize::from(is_new);
+            type_id = Some(id);
+        }
+        let type_id = type_id.as_ref().expect("直前に確保した");
+        let title_bytes = c1::to_canonical_bytes(&title_node_value(&entry.title));
+        let (title_id, is_new) = store.put_object(&title_bytes)?;
+        new_objects += usize::from(is_new);
+        // annotates 辺。参照先は文書名ではなく PDF blob のハッシュ(I1・原理 6)。
+        let mut edge = BTreeMap::new();
+        edge.insert("v".to_string(), Value::Integer(1));
+        edge.insert("kind".to_string(), text_value("edge"));
+        edge.insert("type".to_string(), text_value(type_id));
+        edge.insert(
+            "members".to_string(),
+            Value::Array(vec![text_value(&title_id), text_value(&document.blob_id)]),
+        );
+        let mut meta = BTreeMap::new();
+        meta.insert("page".to_string(), Value::Integer(i64::from(entry.page)));
+        edge.insert("meta".to_string(), Value::Object(meta));
+        let (edge_id, is_new) = store.put_object(&c1::to_canonical_bytes(&Value::Object(edge)))?;
+        new_objects += usize::from(is_new);
+        let record_bytes = c1::to_canonical_bytes(&verification_record_value(method, &evidence));
+        let (verification_id, is_new) = store.put_object(&record_bytes)?;
+        new_objects += usize::from(is_new);
+        accepted.push(AcceptedAnnotation {
+            spec_id: entry.spec_id.clone(),
+            page: entry.page,
+            title: entry.title.clone(),
+            method,
+            matched_tokens: outcome.matched_tokens,
+            total_tokens: outcome.total_tokens,
+            edge_id,
+            verification_id,
+        });
+    }
+
+    // 索引は取り込みの実行ごとにまとめて作り直す(1 件ごとに作り直さない)。索引の
+    // ref が無いと辺も検証記録も複製や pin の対象にならない(ASSERTIONS の原理 3)。
+    let pairs: Vec<Value> = accepted
+        .iter()
+        .map(|annotation| {
+            let mut pair = BTreeMap::new();
+            pair.insert("annotation".to_string(), text_value(&annotation.edge_id));
+            pair.insert("verification".to_string(), text_value(&annotation.verification_id));
+            Value::Object(pair)
+        })
+        .collect();
+    let mut contents = BTreeMap::new();
+    contents.insert("annotations".to_string(), Value::Array(pairs));
+    let mut index = BTreeMap::new();
+    index.insert("v".to_string(), Value::Integer(1));
+    index.insert("kind".to_string(), text_value("node"));
+    index.insert("contents".to_string(), Value::Object(contents));
+    let (index_id, is_new) = store.put_object(&c1::to_canonical_bytes(&Value::Object(index)))?;
+    new_objects += usize::from(is_new);
+
+    let ref_path = format!("annotations/{collection}");
+    let full_name = store.own_ref_name(&ref_path);
+    let current = store.get_ref(&full_name).and_then(|state| state.target.clone());
+    let ref_updated = current.as_deref() != Some(index_id.as_str());
+    if ref_updated {
+        store.set_ref(&ref_path, Some(&index_id))?;
+    }
+    Ok(AnnotationOutcome { accepted, rejected, index_id, ref_updated, new_objects })
 }
 
 #[cfg(test)]
@@ -628,6 +1127,275 @@ mod tests {
             meta.get("breadcrumbs"),
             Some(&Value::Array(vec![text_value("甲"), text_value("乙")]))
         );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    // ---- 注釈の段 ----
+
+    /// 照合規則: 小文字化・英数字以外での分割・数字だけの語の除去・6 割以上で一致
+    /// (期待値はリテラル。should/0137)。
+    #[test]
+    fn annotation_matching_follows_the_token_rule() {
+        let lines = vec![
+            "5.2.3.2 Generic Address Structure".to_string(),
+            "The platform uses tables.".to_string(),
+        ];
+        let outcome = match_annotation("5.2.3.2 Generic Address Structure", &lines);
+        assert!(outcome.matched);
+        // 数字だけの語(5, 2, 3)は数えない。
+        assert_eq!(outcome.matched_tokens, 3);
+        assert_eq!(outcome.total_tokens, 3);
+        assert_eq!(outcome.evidence, vec!["5.2.3.2 Generic Address Structure".to_string()]);
+
+        // 大文字小文字と区切り記号(em ダッシュ)は照合に影響しない。
+        let lines = vec!["CPUID—CPU Identification".to_string()];
+        let outcome = match_annotation("cpuid identification", &lines);
+        assert!(outcome.matched);
+        assert_eq!(outcome.evidence, vec!["CPUID—CPU Identification".to_string()]);
+
+        // 6 割の境界: 5 語中 3 語は一致、4 語中 2 語(5 割)は不一致。
+        let lines = vec!["alpha beta gamma".to_string()];
+        let at_the_threshold = match_annotation("alpha beta gamma delta epsilon", &lines);
+        assert!(at_the_threshold.matched);
+        assert_eq!(at_the_threshold.matched_tokens, 3);
+        assert_eq!(at_the_threshold.total_tokens, 5);
+        let below = match_annotation("alpha beta delta epsilon", &lines);
+        assert!(!below.matched);
+        assert_eq!(below.matched_tokens, 2);
+        assert_eq!(below.total_tokens, 4);
+
+        // 負例: ページに無い語だけのタイトルは落ち、根拠も残らない。
+        let missed = match_annotation("Nonexistent widget", &lines);
+        assert!(!missed.matched);
+        assert_eq!(missed.matched_tokens, 0);
+        assert_eq!(missed.total_tokens, 2);
+        assert_eq!(missed.evidence, Vec::<String>::new());
+    }
+
+    /// 根拠は、一致した各語を最初に含む本文行(ページ順・重複なし)。
+    #[test]
+    fn annotation_evidence_collects_the_first_line_for_each_matched_token() {
+        let lines = vec![
+            "first line about alpha".to_string(),
+            "second line about beta".to_string(),
+            "alpha again".to_string(),
+        ];
+        let outcome = match_annotation("Alpha Beta", &lines);
+        assert!(outcome.matched);
+        assert_eq!(
+            outcome.evidence,
+            vec!["first line about alpha".to_string(), "second line about beta".to_string()]
+        );
+    }
+
+    /// 型ノード三種の ID を固定で押さえる(must/0023。期待値はリテラル。should/0137)。
+    /// 本文は c1 正規形そのもの(パースして再直列化しても変わらない)。
+    #[test]
+    fn type_node_ids_are_pinned() {
+        assert_eq!(
+            annotates_type_id(),
+            "s256:5338025bc944148dd5ae2ea4fc2ac5807f260f6259cc8fd8b9556615983e0d3c"
+        );
+        assert_eq!(
+            corrects_type_id(),
+            "s256:78d9189f91557b5bff27aefd61643ee333f54d63f9bb70a47b9fa18be40a8b4d"
+        );
+        assert_eq!(
+            supersedes_type_id(),
+            "s256:7d6e8d3753bb00b3abecdac3875099b6b1f53683cc792b08c3e427f3206112e8"
+        );
+        for body in [ANNOTATES_TYPE_BODY, CORRECTS_TYPE_BODY, SUPERSEDES_TYPE_BODY] {
+            let value = c1::parse(body).expect("型ノード本文は c1");
+            assert_eq!(c1::to_canonical_bytes(&value), body.as_bytes());
+        }
+    }
+
+    /// ページ番号付きチャンク 1 個の擬似 PDF 文書を collections/specs/<name> に
+    /// 取り込む(注釈の段のテスト用。照合はチャンクの text だけを見るので PDF の
+    /// 実バイナリは不要)。
+    fn ingest_page_document(store: &mut Store, name: &str, page_text: &str) -> IngestOutcome {
+        let chunks = vec![Chunk {
+            text: page_text.to_string(),
+            breadcrumbs: Vec::new(),
+            page: Some(1),
+        }];
+        let source = format!("%PDF-fake {name}");
+        ingest_document(
+            store,
+            &DocumentInput {
+                collection: "specs",
+                name,
+                source: source.as_bytes(),
+                media: "pdf",
+                chunks: &chunks,
+                extractor: Some("pdftotext test"),
+            },
+        )
+        .expect("ingest")
+    }
+
+    /// 生成側(ingest_annotations の辺の発行)と判定側(is_annotates_edge)が同じ
+    /// 型定数を通ることを、実際に書かれた辺で見る(must/0023: 定数同士の比較ではなく
+    /// 生成経路を通す)。
+    #[test]
+    fn the_produced_edge_is_recognized_by_the_matcher_through_the_shared_constant() {
+        let (dir, mut store) = temp_store("annotation-type");
+        ingest_page_document(&mut store, "minispec", "Alpha Beta Gamma\nDelta line");
+        let entries = vec![AnnotationEntry {
+            spec_id: "minispec".to_string(),
+            page: 1,
+            title: "Alpha Beta".to_string(),
+        }];
+        let outcome =
+            ingest_annotations(&mut store, "specs", &entries, &BTreeSet::new()).expect("ingest");
+        assert_eq!(outcome.accepted.len(), 1);
+        let bytes =
+            store.get_object(&outcome.accepted[0].edge_id).expect("get").expect("present");
+        let value = c1::parse(&String::from_utf8(bytes).expect("utf-8")).expect("c1");
+        assert!(is_annotates_edge(&value), "発行した辺を判定側が認識しない");
+        // 別の型の辺は認識しない(判定が type を見ている証明)。
+        let Value::Object(mut map) = value else { panic!("辺はオブジェクト") };
+        map.insert("type".to_string(), text_value(&corrects_type_id()));
+        assert!(!is_annotates_edge(&Value::Object(map)));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 一致は入り、不一致は取り込まず報告する(負例を含む両向きの確認)。承認リストに
+    /// ある不一致は manual の検証記録付きで入り、無い不一致は入らない。再実行は no-op。
+    #[test]
+    fn matched_annotations_enter_and_mismatches_are_reported_not_ingested() {
+        let (dir, mut store) = temp_store("annotation-both-ways");
+        ingest_page_document(&mut store, "minispec", "Generic Address Structure\nOther line");
+        let entries = vec![
+            AnnotationEntry {
+                spec_id: "minispec".to_string(),
+                page: 1,
+                title: "Generic Address Structure".to_string(),
+            },
+            AnnotationEntry {
+                spec_id: "minispec".to_string(),
+                page: 1,
+                title: "Completely Unrelated Heading".to_string(),
+            },
+        ];
+        let outcome =
+            ingest_annotations(&mut store, "specs", &entries, &BTreeSet::new()).expect("ingest");
+        assert_eq!(outcome.accepted.len(), 1);
+        assert_eq!(outcome.accepted[0].title, "Generic Address Structure");
+        assert_eq!(outcome.accepted[0].method, METHOD_TOKEN_MATCH);
+        assert_eq!(outcome.rejected.len(), 1, "不一致が報告されなければならない");
+        assert_eq!(outcome.rejected[0].title, "Completely Unrelated Heading");
+        assert_eq!(outcome.rejected[0].matched_tokens, 0);
+        assert_eq!(outcome.rejected[0].total_tokens, 3);
+        assert!(outcome.ref_updated);
+
+        // 辺の形: {v:1, kind:"edge", type:<annotates>, members:[タイトルノード, blob],
+        // meta:{page:N}}。blob は擬似 PDF のハッシュ。
+        let bytes =
+            store.get_object(&outcome.accepted[0].edge_id).expect("get").expect("present");
+        let edge = c1::parse(&String::from_utf8(bytes).expect("utf-8")).expect("c1");
+        let Value::Object(edge) = edge else { panic!("辺はオブジェクト") };
+        assert_eq!(edge.get("kind"), Some(&text_value("edge")));
+        assert_eq!(edge.get("type"), Some(&text_value(&annotates_type_id())));
+        let title_id = c1::object_id(&title_node_value("Generic Address Structure"));
+        let blob_id = c1::id_for_bytes("%PDF-fake minispec".as_bytes());
+        assert_eq!(
+            edge.get("members"),
+            Some(&Value::Array(vec![text_value(&title_id), text_value(&blob_id)]))
+        );
+        let Some(Value::Object(meta)) = edge.get("meta") else { panic!("meta") };
+        assert_eq!(meta.get("page"), Some(&Value::Integer(1)));
+
+        // 検証記録: method=token-match、根拠は一致に使った本文行。何を検証したかは
+        // 持たない(言明への参照が無い)。
+        let bytes = store
+            .get_object(&outcome.accepted[0].verification_id)
+            .expect("get")
+            .expect("present");
+        let record_text = String::from_utf8(bytes).expect("utf-8");
+        assert_eq!(
+            record_text,
+            "{\"contents\":{\"evidence\":[\"Generic Address Structure\"],\
+             \"method\":\"token-match\"},\"kind\":\"node\",\"v\":1}"
+        );
+
+        // 索引には受理された 1 件だけが、辺と検証記録の対で載る。
+        let bytes = store.get_object(&outcome.index_id).expect("get").expect("present");
+        let index_text = String::from_utf8(bytes).expect("utf-8");
+        assert_eq!(
+            index_text,
+            format!(
+                "{{\"contents\":{{\"annotations\":[{{\"annotation\":\"{}\",\
+                 \"verification\":\"{}\"}}]}},\"kind\":\"node\",\"v\":1}}",
+                outcome.accepted[0].edge_id, outcome.accepted[0].verification_id
+            )
+        );
+        let full_name = store.own_ref_name("annotations/specs");
+        assert_eq!(
+            store.get_ref(&full_name).expect("ref").target.as_deref(),
+            Some(outcome.index_id.as_str())
+        );
+
+        // 再実行は完全な no-op(索引 ID・ref・オブジェクト数が動かない)。
+        let objects_before = store.object_count();
+        let seq_before = store.get_ref(&full_name).expect("ref").seq;
+        let again =
+            ingest_annotations(&mut store, "specs", &entries, &BTreeSet::new()).expect("ingest");
+        assert_eq!(again.index_id, outcome.index_id);
+        assert!(!again.ref_updated, "同じ入力の再実行で ref を張り替えてはならない");
+        assert_eq!(again.new_objects, 0);
+        assert_eq!(store.object_count(), objects_before);
+        assert_eq!(store.get_ref(&full_name).expect("ref").seq, seq_before);
+
+        // 承認リストに載せると、落ちていた注釈が manual の検証記録付きで入る。
+        let mut approvals = BTreeSet::new();
+        approvals.insert(("minispec".to_string(), 1u32));
+        let approved =
+            ingest_annotations(&mut store, "specs", &entries, &approvals).expect("ingest");
+        assert_eq!(approved.accepted.len(), 2);
+        assert!(approved.rejected.is_empty());
+        // 機械照合に通る注釈は承認リストがあっても token-match のまま。
+        assert_eq!(approved.accepted[0].method, METHOD_TOKEN_MATCH);
+        assert_eq!(approved.accepted[1].method, METHOD_MANUAL);
+        let bytes = store
+            .get_object(&approved.accepted[1].verification_id)
+            .expect("get")
+            .expect("present");
+        assert_eq!(
+            String::from_utf8(bytes).expect("utf-8"),
+            "{\"contents\":{\"evidence\":[],\"method\":\"manual\"},\"kind\":\"node\",\"v\":1}"
+        );
+        assert!(approved.ref_updated, "索引が変わったので ref も進む");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// ref の無い spec_id は黙って飛ばさず全体を失敗させ、何も書かない
+    /// (must/0022 の同型)。
+    #[test]
+    fn a_missing_pdf_ref_fails_the_whole_annotation_ingest_before_writing() {
+        let (dir, mut store) = temp_store("annotation-missing-ref");
+        ingest_page_document(&mut store, "present", "Alpha line");
+        let objects_before = store.object_count();
+        let entries = vec![
+            AnnotationEntry {
+                spec_id: "present".to_string(),
+                page: 1,
+                title: "Alpha".to_string(),
+            },
+            AnnotationEntry {
+                spec_id: "absent".to_string(),
+                page: 1,
+                title: "Alpha".to_string(),
+            },
+        ];
+        let error = ingest_annotations(&mut store, "specs", &entries, &BTreeSet::new())
+            .expect_err("ref の無い spec_id で成功してはならない");
+        let message = error.to_string();
+        assert!(message.contains("absent"), "{message}");
+        assert!(message.contains("先に"), "{message}");
+        assert_eq!(store.object_count(), objects_before, "失敗した取り込みが書き残した");
+        let full_name = store.own_ref_name("annotations/specs");
+        assert!(store.get_ref(&full_name).is_none(), "失敗した取り込みが ref を作った");
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

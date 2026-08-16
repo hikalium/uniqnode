@@ -38,6 +38,14 @@ fn usage() -> ! {
                                       PUT /v1/collections/{{c}}/documents/{{name}} を使う。\n\
                                       PDF の抽出は pdftotext に委譲し、--pdftotext の明示\n\
                                       指定が優先、無指定なら PATH を引く)\n\
+           ingest-annotations <dir> <collection> <data.md> [--manual <承認リスト>]\n\
+                                      注釈索引を取り込む(先に PDF を ingest しておく。\n\
+                                      タイトルとページ本文の照合に一致した注釈だけが\n\
+                                      annotates 辺として入り、不一致は一致率とともに\n\
+                                      報告される。承認リストは「spec_id ページ番号」の\n\
+                                      行の並びで、載っている注釈は照合に落ちても\n\
+                                      manual の検証記録付きで入る。serve 停止中の\n\
+                                      ストア用)\n\
            flood <dir>                書き込み続ける(クラッシュ試験用の内部コマンド)"
     );
     std::process::exit(2);
@@ -149,6 +157,62 @@ fn run_ingest(
     Ok(())
 }
 
+/// 注釈索引の取り込み CLI 本体(INGEST の「注釈の段」)。一致した注釈だけを取り込み、
+/// 不一致は取り込まずに一致率とともに報告する(どの注釈がどの一致率で落ちたか)。
+fn run_ingest_annotations(
+    dir: &str,
+    collection: &str,
+    data_md: &str,
+    manual: Option<&str>,
+) -> Result<(), StoreError> {
+    let text = std::fs::read_to_string(data_md)
+        .map_err(|error| StoreError::Invalid(format!("{data_md}: 読めない: {error}")))?;
+    let entries = uniqnode::ingest::parse_annotation_index(&text)
+        .map_err(|error| StoreError::Invalid(format!("{data_md}: {error}")))?;
+    let approvals = match manual {
+        None => Default::default(),
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|error| StoreError::Invalid(format!("{path}: 読めない: {error}")))?;
+            uniqnode::ingest::parse_manual_approvals(&text)
+                .map_err(|error| StoreError::Invalid(format!("{path}: {error}")))?
+        }
+    };
+    let mut store = open(dir);
+    let outcome =
+        uniqnode::ingest::ingest_annotations(&mut store, collection, &entries, &approvals)?;
+    for accepted in &outcome.accepted {
+        println!(
+            "取り込み: {} p.{} {} (method={}, 一致 {}/{})",
+            accepted.spec_id,
+            accepted.page,
+            accepted.title,
+            accepted.method,
+            accepted.matched_tokens,
+            accepted.total_tokens
+        );
+    }
+    for rejected in &outcome.rejected {
+        println!(
+            "不一致: {} p.{} {} (一致 {}/{})",
+            rejected.spec_id,
+            rejected.page,
+            rejected.title,
+            rejected.matched_tokens,
+            rejected.total_tokens
+        );
+    }
+    let state = if outcome.ref_updated { "updated" } else { "no-op" };
+    println!(
+        "annotations/{collection}: {state} 取り込み={} 不一致={} new_objects={} index={}",
+        outcome.accepted.len(),
+        outcome.rejected.len(),
+        outcome.new_objects,
+        outcome.index_id
+    );
+    Ok(())
+}
+
 fn open(dir: &str) -> Store {
     match Store::open(StoreConfig::new(dir)) {
         Ok(s) => s,
@@ -231,6 +295,21 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 usage();
             }
             run_ingest(dir, collection, root, pdftotext)?;
+        }
+        "ingest-annotations" => {
+            let collection = rest.first().map(String::as_str).unwrap_or_else(|| usage());
+            let data_md = rest.get(1).map(String::as_str).unwrap_or_else(|| usage());
+            let manual = match rest.get(2).map(String::as_str) {
+                None => None,
+                Some("--manual") => {
+                    Some(rest.get(3).map(String::as_str).unwrap_or_else(|| usage()))
+                }
+                Some(_) => usage(),
+            };
+            if rest.len() > 4 {
+                usage();
+            }
+            run_ingest_annotations(dir, collection, data_md, manual)?;
         }
         "fsck" => {
             let store = open(dir);

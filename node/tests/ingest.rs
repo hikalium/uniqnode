@@ -260,6 +260,183 @@ fn cli_ingest_without_pdftotext_fails_with_install_instructions() {
     std::fs::remove_dir_all(&corpus).expect("cleanup");
 }
 
+// ---- 注釈の段(INGEST の「注釈の段」の確認) ----
+
+use uniqnode::ingest::{parse_annotation_index, parse_manual_approvals, AnnotationEntry};
+
+/// data.md の抜粋(実形式そのまま。should/0112 で別ファイル)のパーサ資材。
+/// バッククォート囲みと裸のタイトル・zip の 4 行コードブロック・注釈ゼロの見出しを含む。
+const ANNOTATIONS_EXCERPT: &str = include_str!("assets/annotations_excerpt.md");
+
+/// 三ページ PDF 用の人工の注釈索引(一致 1 件と、照合に落ちる 1 件。should/0112)。
+const ANNOTATIONS_THREE_PAGES: &str = include_str!("assets/annotations_three_pages.md");
+
+fn entry(spec_id: &str, page: u32, title: &str) -> AnnotationEntry {
+    AnnotationEntry { spec_id: spec_id.to_string(), page, title: title.to_string() }
+}
+
+/// data.md の抜粋が実形式のとおり読めること(期待値はリテラル。should/0137)。
+/// 注釈ゼロの見出し(ecm_1_2)は項目を生まない。
+#[test]
+fn the_data_md_excerpt_parses_into_the_expected_entries() {
+    let entries = parse_annotation_index(ANNOTATIONS_EXCERPT).expect("parse");
+    assert_eq!(
+        entries,
+        vec![
+            entry("acpi_6_4", 162, "5.2.3.2 Generic Address Structure"),
+            entry("acpi_6_4", 166, "System Description Table Header"),
+            entry("acpi_6_4", 166, "DESCRIPTION HEADER SIGNATURES"),
+            entry("acpi_6_4", 402, "6.2.10 _MAT (Multiple APIC Table Entry)"),
+            entry("armv8a_pg_1_0", 88, "6.5.4 Hint instructions (WFI)"),
+            entry("cdc_1_2", 16, "3.4.2 Data Class Interface"),
+            entry("cdc_1_2", 20, "02h: Communications Device Class Code"),
+            entry("cdc_1_2", 20, "02h: Communications Interface Class Code"),
+            entry("cdc_1_2", 20, "06h: Ethernet Networking Control Model: Interface Subclass Code"),
+            entry("cdc_1_2", 21, "0Ah: Data Interface Class"),
+            entry("cdc_1_2", 25, "Table 12: Type Values for the bDescriptorType Field"),
+        ]
+    );
+}
+
+/// 実形式から外れた入力は受け付けない(must/0020): 形式外の行・閉じないコード
+/// ブロック・zip でないのに 4 行あるブロック・数字でないページ番号・コードブロックの
+/// 無い見出し。
+#[test]
+fn the_annotation_parser_rejects_input_outside_the_format() {
+    let stray_prose = "# `a`\n\n```\nT\npdf\nU\n```\n\nprose line\n";
+    let error = parse_annotation_index(stray_prose).expect_err("形式外の行を受理してはならない");
+    assert!(error.contains("形式外の行"), "{error}");
+    let unclosed = "# `a`\n\n```\nT\npdf\nU\n";
+    let error = parse_annotation_index(unclosed).expect_err("閉じないブロックを受理してはならない");
+    assert!(error.contains("閉じていない"), "{error}");
+    let four_line_pdf = "# `a`\n\n```\nT\npdf\nU\nextra\n```\n";
+    assert!(parse_annotation_index(four_line_pdf).is_err(), "zip 以外の 4 行ブロック");
+    let bad_page = "# `a`\n\n```\nT\npdf\nU\n```\n\n- p.x: Title\n";
+    assert!(parse_annotation_index(bad_page).is_err(), "数字でないページ番号");
+    let missing_block = "# `a`\n\n- p.1: Title\n";
+    assert!(parse_annotation_index(missing_block).is_err(), "コードブロックの無い見出し");
+}
+
+/// --manual の承認リストは「spec_id ページ番号」の行の並びだけを受け付ける(must/0020)。
+#[test]
+fn the_manual_approval_list_parses_and_rejects_other_shapes() {
+    let approvals = parse_manual_approvals("sdm_vol2 317\n\nthree_pages 3\n").expect("parse");
+    let expected: std::collections::BTreeSet<(String, u32)> =
+        [("sdm_vol2".to_string(), 317u32), ("three_pages".to_string(), 3u32)]
+            .into_iter()
+            .collect();
+    assert_eq!(approvals, expected);
+    assert!(parse_manual_approvals("sdm_vol2\n").is_err(), "ページ番号の無い行");
+    assert!(parse_manual_approvals("sdm_vol2 p.317\n").is_err(), "数字でないページ番号");
+    assert!(parse_manual_approvals("a b c\n").is_err(), "3 語の行");
+}
+
+/// 注釈の段の CLI 一式: PDF を取り込んだ後に注釈索引を取り込み、一致は annotates 辺と
+/// token-match の検証記録で入り、不一致は一致率とともに報告されて入らない(負例)。
+/// 再実行は no-op。--manual の承認で落ちた注釈も manual の検証記録付きで入る。
+#[test]
+fn cli_ingest_annotations_ingests_matches_and_reports_mismatches() {
+    require_pdftotext();
+    let store_dir = unique_dir("ingest-annotations-store");
+    let corpus = unique_dir("ingest-annotations-corpus");
+    std::fs::create_dir_all(&corpus).expect("mkdir");
+    std::fs::write(corpus.join("three_pages.pdf"), THREE_PAGE_PDF).expect("write");
+    let store = store_dir.to_str().expect("utf-8");
+    let output = Command::new(binary())
+        .args(["ingest", store, "specs", corpus.to_str().expect("utf-8")])
+        .output()
+        .expect("run ingest");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let annotations_path = corpus.join("annotations.md");
+    std::fs::write(&annotations_path, ANNOTATIONS_THREE_PAGES).expect("write");
+    let annotations = annotations_path.to_str().expect("utf-8");
+    let run = |extra: &[&str]| {
+        let mut arguments = vec!["ingest-annotations", store, "specs", annotations];
+        arguments.extend_from_slice(extra);
+        let output = Command::new(binary()).args(&arguments).output().expect("run");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    // 一致は入り(一致率つき)、不一致は一致率とともに報告されて入らない。
+    let first = run(&[]);
+    assert!(
+        first.contains("取り込み: three_pages p.1 Page one (method=token-match, 一致 2/2)"),
+        "{first}"
+    );
+    assert!(
+        first.contains("不一致: three_pages p.3 Nonexistent widget frobnicator (一致 0/3)"),
+        "{first}"
+    );
+    assert!(first.contains("annotations/specs: updated 取り込み=1 不一致=1"), "{first}");
+
+    // 再実行は no-op(索引もオブジェクトも増えない)。
+    let second = run(&[]);
+    assert!(second.contains("annotations/specs: no-op"), "{second}");
+    assert!(second.contains("new_objects=0"), "{second}");
+
+    // 索引 → annotates 辺 → 検証記録が別プロセスの get で辿れる。
+    let get = |id: &str| {
+        let output =
+            Command::new(binary()).args(["get", store, id]).output().expect("run get");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let index_id = first
+        .split("index=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("index id");
+    let index = get(index_id);
+    let edge_id = json_text_field(&index, "annotation").expect("annotation id");
+    let verification_id = json_text_field(&index, "verification").expect("verification id");
+    let edge = get(&edge_id);
+    assert!(edge.contains("\"kind\":\"edge\""), "{edge}");
+    // 辺の type は annotates 型ノードの固定 ID(must/0023 の定数の末端確認)。
+    assert!(
+        edge.contains(
+            "\"type\":\"s256:5338025bc944148dd5ae2ea4fc2ac5807f260f6259cc8fd8b9556615983e0d3c\""
+        ),
+        "{edge}"
+    );
+    assert!(edge.contains("\"page\":1"), "{edge}");
+    let record = get(&verification_id);
+    assert!(record.contains("\"method\":\"token-match\""), "{record}");
+    assert!(record.contains("Page one of three"), "{record}");
+
+    // 承認リストに載る不一致は manual の検証記録付きで入る。
+    let manual_path = corpus.join("approved.txt");
+    std::fs::write(&manual_path, "three_pages 3\n").expect("write");
+    let approved = run(&["--manual", manual_path.to_str().expect("utf-8")]);
+    assert!(
+        approved.contains(
+            "取り込み: three_pages p.3 Nonexistent widget frobnicator (method=manual, 一致 0/3)"
+        ),
+        "{approved}"
+    );
+    assert!(approved.contains("annotations/specs: updated 取り込み=2 不一致=0"), "{approved}");
+
+    // 取り込み済み PDF の無い spec_id は黙って飛ばさず全体を失敗させる(must/0022 の同型)。
+    let missing_path = corpus.join("missing.md");
+    std::fs::write(
+        &missing_path,
+        "# `absent_spec`\n\n```\nAbsent spec\npdf\nhttps://example.invalid/absent.pdf\n```\n\n- p.1: Anything\n",
+    )
+    .expect("write");
+    let output = Command::new(binary())
+        .args(["ingest-annotations", store, "specs", missing_path.to_str().expect("utf-8")])
+        .output()
+        .expect("run");
+    assert!(!output.status.success(), "ref の無い spec_id で成功してはならない");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("absent_spec"), "{stderr}");
+    assert!(stderr.contains("先に"), "{stderr}");
+
+    std::fs::remove_dir_all(&store_dir).expect("cleanup");
+    std::fs::remove_dir_all(&corpus).expect("cleanup");
+}
+
 /// serve の PATH に pdftotext が無いとき、PDF の PUT は導入手順を含む 503 で明示的に
 /// 失敗し、pdftotext の要らない Markdown の PUT は同じ serve で通ること。
 #[test]

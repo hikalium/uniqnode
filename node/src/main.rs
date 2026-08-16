@@ -32,10 +32,12 @@ fn usage() -> ! {
            serve <dir> <addr>         HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)\n\
            sync <dir> <peer_addr>     相手から pull で同期する(serve 停止中のストア用。\n\
                                       serve 中は POST /v1/sync を使う)\n\
-           ingest <dir> <collection> <path>\n\
-                                      文書を取り込む(.md/.markdown/.txt。ディレクトリは\n\
-                                      再帰。serve 停止中のストア用。serve 中は\n\
-                                      PUT /v1/collections/{{c}}/documents/{{name}} を使う)\n\
+           ingest <dir> <collection> <path> [--pdftotext <exe>]\n\
+                                      文書を取り込む(.md/.markdown/.txt/.pdf。ディレクトリ\n\
+                                      は再帰。serve 停止中のストア用。serve 中は\n\
+                                      PUT /v1/collections/{{c}}/documents/{{name}} を使う。\n\
+                                      PDF の抽出は pdftotext に委譲し、--pdftotext の明示\n\
+                                      指定が優先、無指定なら PATH を引く)\n\
            flood <dir>                書き込み続ける(クラッシュ試験用の内部コマンド)"
     );
     std::process::exit(2);
@@ -56,9 +58,15 @@ fn collect_files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> s
     Ok(())
 }
 
-/// 取り込みの CLI 本体(INGEST の「取り込み口の段」)。対象外のファイルは黙って捨てず、
-/// 最後に一覧で報告する(must/0022 の同型)。
-fn run_ingest(dir: &str, collection: &str, root: &str) -> Result<(), StoreError> {
+/// 取り込みの CLI 本体(INGEST の「取り込み口の段」と「PDF の段」)。対象外のファイルは
+/// 黙って捨てず、最後に一覧で報告する(must/0022 の同型)。pdftotext の起動と版の取得は
+/// 最初の PDF に当たったとき一度だけ行い、以後の PDF で使い回す。
+fn run_ingest(
+    dir: &str,
+    collection: &str,
+    root: &str,
+    pdftotext: Option<&str>,
+) -> Result<(), StoreError> {
     let root_path = std::path::Path::new(root);
     if !root_path.exists() {
         return Err(StoreError::Invalid(format!("{root}: 存在しない")));
@@ -72,6 +80,7 @@ fn run_ingest(dir: &str, collection: &str, root: &str) -> Result<(), StoreError>
     };
     let mut store = open(dir);
     let mut skipped: Vec<String> = Vec::new();
+    let mut pdf_extractor: Option<uniqnode::ingest::PdfExtractor> = None;
     for file in &files {
         let relative = file.strip_prefix(base).unwrap_or(file);
         let extension = file.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -80,11 +89,28 @@ fn run_ingest(dir: &str, collection: &str, root: &str) -> Result<(), StoreError>
             continue;
         };
         let bytes = std::fs::read(file)?;
-        let Ok(text) = std::str::from_utf8(&bytes) else {
-            return Err(StoreError::Invalid(format!(
-                "{}: UTF-8 でない({media} として取り込めない)",
-                file.display()
-            )));
+        let extracted;
+        let text: &str = if media == "pdf" {
+            if pdf_extractor.is_none() {
+                let located = uniqnode::ingest::PdfExtractor::locate(
+                    pdftotext.map(std::path::Path::new),
+                )
+                .map_err(StoreError::Invalid)?;
+                pdf_extractor = Some(located);
+            }
+            let extractor = pdf_extractor.as_ref().expect("直前に確保した");
+            extracted = extractor.extract(&bytes)?;
+            &extracted
+        } else {
+            match std::str::from_utf8(&bytes) {
+                Ok(text) => text,
+                Err(_) => {
+                    return Err(StoreError::Invalid(format!(
+                        "{}: UTF-8 でない({media} として取り込めない)",
+                        file.display()
+                    )));
+                }
+            }
         };
         let name_path = relative.with_extension("");
         let name = name_path
@@ -93,6 +119,11 @@ fn run_ingest(dir: &str, collection: &str, root: &str) -> Result<(), StoreError>
             .collect::<Vec<_>>()
             .join("/");
         let chunks = uniqnode::ingest::chunk_for_media(media, text);
+        let extractor_label = if media == "pdf" {
+            pdf_extractor.as_ref().map(|e| e.extractor.as_str())
+        } else {
+            None
+        };
         let outcome = uniqnode::ingest::ingest_document(
             &mut store,
             &uniqnode::ingest::DocumentInput {
@@ -101,7 +132,7 @@ fn run_ingest(dir: &str, collection: &str, root: &str) -> Result<(), StoreError>
                 source: &bytes,
                 media,
                 chunks: &chunks,
-                extractor: None,
+                extractor: extractor_label,
             },
         )?;
         let state = if outcome.ref_updated { "updated" } else { "no-op" };
@@ -189,7 +220,17 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
         "ingest" => {
             let collection = rest.first().map(String::as_str).unwrap_or_else(|| usage());
             let root = rest.get(1).map(String::as_str).unwrap_or_else(|| usage());
-            run_ingest(dir, collection, root)?;
+            let pdftotext = match rest.get(2).map(String::as_str) {
+                None => None,
+                Some("--pdftotext") => {
+                    Some(rest.get(3).map(String::as_str).unwrap_or_else(|| usage()))
+                }
+                Some(_) => usage(),
+            };
+            if rest.len() > 4 {
+                usage();
+            }
+            run_ingest(dir, collection, root, pdftotext)?;
         }
         "fsck" => {
             let store = open(dir);

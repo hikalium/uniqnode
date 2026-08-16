@@ -41,6 +41,18 @@ fn store_error_response(error: StoreError) -> Response {
     }
 }
 
+/// serve が PDF 抽出に使う pdftotext(PATH 依存。CLI と違い明示指定の引数は持たない)。
+/// 版の取得(pdftotext -v)はプロセスで一度だけ行い、以後は使い回す。見つからない失敗は
+/// 覚えず次の要求で引き直す(serve の実行中に導入されれば以後の要求は通る)。
+fn pdf_extractor() -> Result<&'static crate::ingest::PdfExtractor, String> {
+    static EXTRACTOR: std::sync::OnceLock<crate::ingest::PdfExtractor> = std::sync::OnceLock::new();
+    if let Some(extractor) = EXTRACTOR.get() {
+        return Ok(extractor);
+    }
+    let located = crate::ingest::PdfExtractor::locate(None)?;
+    Ok(EXTRACTOR.get_or_init(|| located))
+}
+
 pub fn handle(context: &ApiContext, request: &Request) -> Response {
     let store = &*context.store;
     let path = request.path.as_str();
@@ -486,13 +498,31 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
             return error_response(400, "コレクション名と文書名が要る");
         }
         let Some((stem, extension)) = name.rsplit_once('.') else {
-            return error_response(400, "文書名に拡張子が要る(.md/.markdown/.txt)");
+            return error_response(400, "文書名に拡張子が要る(.md/.markdown/.txt/.pdf)");
         };
         let Some(media) = crate::ingest::media_for_extension(extension) else {
-            return error_response(400, "対象外の拡張子(.md/.markdown/.txt のみ)");
+            return error_response(400, "対象外の拡張子(.md/.markdown/.txt/.pdf のみ)");
         };
-        let Ok(text) = std::str::from_utf8(&request.body) else {
-            return error_response(400, "ボディが UTF-8 でない");
+        let extracted;
+        let mut extractor_label = None;
+        let text: &str = if media == "pdf" {
+            // blob は PDF バイナリそのもの、チャンクは pdftotext の抽出テキストから作る。
+            let extractor = match pdf_extractor() {
+                Ok(extractor) => extractor,
+                // 委譲先が無いのはこの過程の一時的な状態であって要求の誤りではない。
+                Err(message) => return error_response(503, &message),
+            };
+            extractor_label = Some(extractor.extractor.as_str());
+            match extractor.extract(&request.body) {
+                Ok(text) => extracted = text,
+                Err(e) => return store_error_response(e),
+            }
+            &extracted
+        } else {
+            match std::str::from_utf8(&request.body) {
+                Ok(text) => text,
+                Err(_) => return error_response(400, "ボディが UTF-8 でない"),
+            }
         };
         let chunks = crate::ingest::chunk_for_media(media, text);
         let input = crate::ingest::DocumentInput {
@@ -501,7 +531,7 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
             source: &request.body,
             media,
             chunks: &chunks,
-            extractor: None,
+            extractor: extractor_label,
         };
         let mut store = store.lock().expect("lock");
         return match crate::ingest::ingest_document(&mut store, &input) {

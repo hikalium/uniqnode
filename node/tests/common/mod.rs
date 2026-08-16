@@ -58,7 +58,21 @@ pub fn unique_dir(name: &str) -> PathBuf {
 }
 
 pub fn start_server_at(dir: PathBuf) -> Server {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
+    start_server_at_with_env(dir, &[])
+}
+
+/// 環境変数を差し替えて serve を起動する(PATH を空にして pdftotext 不在の環境を
+/// 再現する用)。
+pub fn start_server_with_env(name: &str, envs: &[(&str, &str)]) -> Server {
+    start_server_at_with_env(unique_dir(name), envs)
+}
+
+fn start_server_at_with_env(dir: PathBuf, envs: &[(&str, &str)]) -> Server {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_uniqnode"));
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let mut child = command
         .args(["serve", dir.to_str().expect("utf-8"), "127.0.0.1:0"])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

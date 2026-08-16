@@ -198,20 +198,100 @@ pub fn chunk_pdf_text(text: &str) -> Vec<Chunk> {
 // ---- 取り込み口(INGEST の「取り込み口の段」) ----
 
 /// 対象拡張子と media の対応。CLI と API が同じ判定を共用する(should/0135)。
-/// PDF は「PDF の段」で加わる。
 pub fn media_for_extension(extension: &str) -> Option<&'static str> {
     match extension {
         "md" | "markdown" => Some("markdown"),
         "txt" => Some("text"),
+        "pdf" => Some("pdf"),
         _ => None,
     }
 }
 
+/// media に応じたチャンカー。PDF の text は pdftotext の抽出テキスト
+/// (form feed 区切り)であって PDF バイナリではない。
 pub fn chunk_for_media(media: &str, text: &str) -> Vec<Chunk> {
-    if media == "markdown" {
-        chunk_markdown(text)
-    } else {
-        chunk_plain_text(text)
+    match media {
+        "markdown" => chunk_markdown(text),
+        "pdf" => chunk_pdf_text(text),
+        _ => chunk_plain_text(text),
+    }
+}
+
+// ---- PDF 抽出(INGEST の「PDF の段」) ----
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// pdftotext が見つからないときに示す導入手順(sudo なし)。
+const PDFTOTEXT_INSTALL_HINT: &str =
+    "導入例(sudo なし): apt-get download poppler-utils と dpkg -x で ~/opt/poppler/ へ展開し、\
+     --pdftotext で実行ファイルを指すか PATH の通ったディレクトリへ symlink を置く。\
+     libpoppler の無い機械ではライブラリ側も同じ手順で展開して LD_LIBRARY_PATH を通す";
+
+/// pdftotext(poppler)への外部プロセス委譲。シェルを経由せず Command で直接起動する
+/// (must/0009 と同じ理由)。版は locate が起動確認を兼ねて一度だけ取得し、
+/// 以後の抽出で使い回す。
+pub struct PdfExtractor {
+    command: PathBuf,
+    /// doc_rev.meta.extractor に書く文字列(例 "pdftotext 22.02.0")。
+    pub extractor: String,
+}
+
+impl PdfExtractor {
+    /// 実行ファイルを見つけて版を確かめる。explicit(--pdftotext)の明示指定を優先し、
+    /// 無指定なら PATH を引く。見つからないときは導入手順を示して明示的に失敗する。
+    /// 黙って PDF を飛ばさない(must/0022 の同型)。
+    pub fn locate(explicit: Option<&Path>) -> std::result::Result<PdfExtractor, String> {
+        let command = match explicit {
+            Some(path) => path.to_path_buf(),
+            None => PathBuf::from("pdftotext"),
+        };
+        let probe = Command::new(&command).arg("-v").output().map_err(|error| {
+            format!(
+                "PDF の取り込みには pdftotext コマンドが必要({}: {error})。{}",
+                command.display(),
+                PDFTOTEXT_INSTALL_HINT
+            )
+        })?;
+        // 版は -v が stderr に出す先頭行「pdftotext version <版>」から取る。
+        let stderr = String::from_utf8_lossy(&probe.stderr);
+        let first_line = stderr.lines().next().unwrap_or("");
+        let version = first_line
+            .strip_prefix("pdftotext version ")
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "{} -v の出力から版を読めない(先頭行: {first_line:?})",
+                    command.display()
+                )
+            })?;
+        Ok(PdfExtractor { command, extractor: format!("pdftotext {version}") })
+    }
+
+    /// PDF バイト列からテキストを抽出する(form feed 区切り)。pdftotext は入力に
+    /// ファイルパスを要求するため、一時ファイルへ書いてから起動する。
+    pub fn extract(&self, pdf: &[u8]) -> Result<String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let serial = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp = std::env::temp_dir()
+            .join(format!("uniqnode-pdf-{}-{serial}.pdf", std::process::id()));
+        std::fs::write(&temp, pdf)?;
+        let output = Command::new(&self.command).arg(&temp).arg("-").output();
+        let removed = std::fs::remove_file(&temp);
+        let output = output?;
+        removed?;
+        if !output.status.success() {
+            return Err(crate::store::StoreError::Invalid(format!(
+                "pdftotext が失敗した({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        String::from_utf8(output.stdout).map_err(|_| {
+            crate::store::StoreError::Invalid("pdftotext の出力が UTF-8 でない".to_string())
+        })
     }
 }
 

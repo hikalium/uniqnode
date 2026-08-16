@@ -94,7 +94,7 @@ blob
 ```
 
 上位層(検索層など)は独自の kind(例: chunk, doc_rev)を追加してよい(MAY)。コアは kind を
-解釈せず、到達閉包の計算(§7.2)のために ID 参照の位置だけを規約する: c1 値の中の
+解釈せず、到達閉包の計算(§7.3)のために ID 参照の位置だけを規約する: c1 値の中の
 `"s256:" + 16進64桁` の形の文字列は参照として扱う。
 
 mgcanvas 互換: kind:node は mgcanvas の Atom に、kind:edge は Relation

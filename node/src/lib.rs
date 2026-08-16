@@ -5,6 +5,7 @@ pub mod api;
 pub mod c1;
 pub mod crc32;
 pub mod ed25519;
+pub mod eval;
 pub mod groups;
 pub mod health;
 pub mod http;

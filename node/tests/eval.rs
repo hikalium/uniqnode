@@ -15,15 +15,22 @@ use uniqnode::search::{chunk_terms_of, terms_of, SearchIndex};
 use uniqnode::store::{Store, StoreConfig};
 
 /// 固定の小コーパス(文書名, 本文)。文書名は資材のファイル名から拡張子を除いたもので、
-/// 正解チャンクの名前 `<文書>#<chunks 列の添字>` の前半になる。3 文書はそれぞれ
+/// 正解チャンクの名前 `<文書>#<chunks 列の添字>` の前半になる。前の 3 文書はそれぞれ
 /// 日本語・英語・識別子の場を持ち、日本語と英語の文書は先頭に列挙(目次)の節を持つ。
+/// eval_gap は語彙の隔たりの場で、クエリと正解が索引語を共有しない対のためにある
+/// (VOCABULARY_GAP_CASES)。
+///
+/// 文書を足すときは末尾に足す。対照方式(CorpusOrder)はコーパス順に返すので、前に
+/// 割り込ませると既存の対の順位が動く。
 const CORPUS: &[(&str, &str)] = &[
     ("eval_ja", include_str!("assets/eval_ja.md")),
     ("eval_en", include_str!("assets/eval_en.md")),
     ("eval_api", include_str!("assets/eval_api.md")),
+    ("eval_gap", include_str!("assets/eval_gap.md")),
 ];
 
-/// 「クエリ → 正解チャンク」対。正解はチャンクの名前(`<文書>#<添字>`)で書く。
+/// 語彙が一致する対(クエリの語が正解チャンクの本文か見出しに現れる)。正解はチャンクの
+/// 名前(`<文書>#<添字>`)で書く。
 /// チャンクのオブジェクト ID は内容ハッシュなので、コーパスの本文を一字直すだけで
 /// 変わり、固定資材に書けないためである。添字は chunk_markdown が見出しごとに切った
 /// 順で、各文書の 0 番は列挙(目次)の節である。
@@ -54,11 +61,46 @@ const CASES: &[(&str, &str)] = &[
     ("token_quarters", "eval_api#4"),            // [見出しのみ] 本文に識別子が無い
 ];
 
+/// 語彙が隔たる対(問いと正解が同じことを言っているのに、索引語を一つも共有しない)。
+/// キーワード一致では原理的に届かない場であり、意味で近さを測る方式
+/// (埋め込み。RAG (uuid:86363f4a-3df6-4aa2-9c64-b99aa5cb4e7b) の項 4)が効くはずの
+/// 領域である。共有語が空であることは
+/// a_vocabulary_gap_pair_shares_no_index_term_with_its_answer が機械的に確かめ、現在の
+/// BM25 が実際に届かないことは bm25_cannot_reach_any_vocabulary_gap_pair が確かめる。
+///
+/// 将来この対のどれかが上位に来たら、それは語の一致ではない何か(意味検索)が効いた
+/// 証拠である。
+const VOCABULARY_GAP_CASES: &[(&str, &str)] = &[
+    // [言い換え] 本文は「電源断・復帰」、問いは「電気が消えた・立ち上げ」。同じ出来事を
+    // 漢語と和語で言い分けているだけなので、bigram は一つも重ならない。
+    ("急に電気が消えたときの立ち上げ", "eval_gap#0"),
+    // [言い換え] 本文は「帯域の抑制・上限で抑える」、問いは「混まないように・速さを
+    // ゆるめる」。共有する索引語は無い。
+    ("ネットワークが混まないように送る速さをゆるめたい", "eval_gap#1"),
+    // [上位語と下位語] 本文は具体名(ed25519・x25519・chacha20)だけを並べ、総称の
+    // 「暗号方式」を一度も書いていない。総称で引くと索引語が無い。
+    ("どの暗号方式を採っているか", "eval_gap#2"),
+    // [英語の問いで日本語の本文] 本文は日本語だけで ASCII の語を持たず、問いは英語だけ。
+    // 語の集合が文字種の段階で交わらない。
+    ("how long are request logs kept", "eval_gap#3"),
+    // [質問文の形] 本文は名詞句と手順(計画停止・保持表明)、問いは「どうすれば〜できるか」。
+    // 問いの側の語(安全・落とす)は本文に無い。
+    ("どうすればノードを安全に落とせるか", "eval_gap#4"),
+    // [日本語の問いで英語の本文] 逆向きの多言語。本文は英語、問いは日本語で、こちらも
+    // 文字種の段階で交わらない。
+    ("時計がずれても大丈夫か", "eval_gap#5"),
+];
+
 /// 評価する打ち切り k。
 const CUTOFFS: &[usize] = &[1, 5, 10];
 
+/// 評価する対の全体(語彙が一致する対のあとに、語彙が隔たる対)。
 fn cases() -> Vec<EvalCase> {
-    CASES.iter().map(|(query, relevant)| EvalCase::new(query, &[*relevant])).collect()
+    CASES
+        .iter()
+        .chain(VOCABULARY_GAP_CASES)
+        .map(|(query, relevant)| EvalCase::new(query, &[*relevant]))
+        .collect()
 }
 
 /// コーパスを一時ストアへ取り込んで索引を作る。索引は Store を借りない導出データ
@@ -152,8 +194,8 @@ impl Retrieval for CorpusOrder {
 /// 数値は「あるべき値」ではなく「今の値」である。このテストの仕事は目標達成の判定では
 /// なく、順位が黙って悪化しないことの検出である(カバレッジを計測のみとしてゲートに
 /// しない TESTING (uuid:267326f7-e919-48f2-9737-fe0c0daec9d5) の方針と同じ扱い)。
-/// 現在は全対が 1 位で上限に達しているので、この対の集合はもう改良を測れない。次の
-/// 改良を数値で見たい者は、まず今の方式が取りこぼす対を足すこと。
+/// 語彙が一致する 13 対は全部 1 位、語彙が隔たる 6 対は全部圏外という内訳なので、
+/// 数値は上限に達しておらず、上げる改良も下げる悪化も見える。
 ///
 /// 基準線を意図して動かすときの手順: (1) このテストを走らせ、失敗メッセージの内訳で
 /// クエリごとの順位が意図どおりに動いたことを目で確かめる、(2) その実測値でリテラルを
@@ -163,14 +205,18 @@ impl Retrieval for CorpusOrder {
 fn bm25_holds_the_recorded_baseline_on_the_fixed_corpus() {
     let index = indexed_corpus("baseline");
     let report = bm25_report(&index);
-    assert_eq!(report.queries.len(), CASES.len(), "全対が評価されるべき");
-    // 実測 2026-08-16(千分率)。13 対すべてが 1 位。見出しを索引語に入れる前は
-    // Recall@1 0.538・Recall@5 0.846・Recall@10 0.846・MRR 0.692 で、見出しにしかない
-    // 語の 2 対は圏外だった。
-    assert_eq!(per_mille(report.mean_recall(1)), 1000, "Recall@1 の基準線\n{}", report.detail());
-    assert_eq!(per_mille(report.mean_recall(5)), 1000, "Recall@5 の基準線\n{}", report.detail());
-    assert_eq!(per_mille(report.mean_recall(10)), 1000, "Recall@10 の基準線\n{}", report.detail());
-    assert_eq!(per_mille(report.mean_reciprocal_rank), 1000, "MRR の基準線\n{}", report.detail());
+    assert_eq!(
+        report.queries.len(),
+        CASES.len() + VOCABULARY_GAP_CASES.len(),
+        "全対が評価されるべき"
+    );
+    // 実測 2026-08-17(千分率)。19 対のうち、語彙が一致する 13 対が 1 位、語彙が隔たる
+    // 6 対が圏外なので、どの打ち切りでも 13/19 = 0.684 で並ぶ。語彙が隔たる対を足す前は
+    // 13 対すべてが 1 位で、4 つの指標がいずれも 1.000 に飽和していた。
+    assert_eq!(per_mille(report.mean_recall(1)), 684, "Recall@1 の基準線\n{}", report.detail());
+    assert_eq!(per_mille(report.mean_recall(5)), 684, "Recall@5 の基準線\n{}", report.detail());
+    assert_eq!(per_mille(report.mean_recall(10)), 684, "Recall@10 の基準線\n{}", report.detail());
+    assert_eq!(per_mille(report.mean_reciprocal_rank), 684, "MRR の基準線\n{}", report.detail());
 }
 
 /// 検索方式を切り替えて数値が比較できることを実際の検索で示す:
@@ -183,25 +229,32 @@ fn switching_the_method_changes_the_numbers_on_the_same_pairs() {
     let bm25 = bm25_report(&index);
     let floor = evaluate(&CorpusOrder::over_corpus(), &cases(), CUTOFFS);
     assert_eq!(floor.method, "corpus-order");
-    // 実測 2026-08-16(千分率)。順位を付けないだけで Recall@1 は 1.000 から 0.385 へ、
-    // MRR は 1.000 から 0.679 へ落ちる。Recall@10 が下がらないのは、このコーパスでは
-    // 一致するチャンクが 10 件に収まるため(取りこぼしではなく規模の話)。見出しを
-    // 索引語に入れる前の対照は Recall@1 0.308・Recall@10 0.846・MRR 0.564 だった。
+    // 実測 2026-08-17(千分率)。同じ 19 対で、順位を付けないだけで Recall@1 は 0.684 から
+    // 0.263 へ、MRR は 0.684 から 0.465 へ落ちる。対照の Recall@5 と Recall@10 が BM25 と
+    // 並ぶのは、語彙が一致する対では一致するチャンクが 5 件に収まるためで(取りこぼしでは
+    // なく規模の話)、語彙が隔たる 6 対は両方式とも圏外である。語彙が隔たる対を足す前の
+    // 対照は Recall@1 0.385・Recall@10 1.000・MRR 0.679 だった。
     assert_eq!(
         per_mille(floor.mean_recall(1)),
-        385,
+        263,
         "対照の Recall@1 の基準線\n{}",
         floor.detail()
     );
     assert_eq!(
+        per_mille(floor.mean_recall(5)),
+        684,
+        "対照の Recall@5 の基準線\n{}",
+        floor.detail()
+    );
+    assert_eq!(
         per_mille(floor.mean_recall(10)),
-        1000,
+        684,
         "対照の Recall@10 の基準線\n{}",
         floor.detail()
     );
     assert_eq!(
         per_mille(floor.mean_reciprocal_rank),
-        679,
+        465,
         "対照の MRR の基準線\n{}",
         floor.detail()
     );
@@ -254,4 +307,62 @@ fn a_phrase_that_lives_only_in_a_heading_finds_its_section() {
         "見出しにしかない識別子で節が 1 位のはず\n{}",
         report.detail()
     );
+}
+
+/// 語彙が隔たる対が届かない理由を、順位ではなく語で名指しする: 問いの索引語と正解
+/// チャンクの索引語(本文と見出し)の共通部分が空である。BM25 の得点は共有する語から
+/// しか生まれない(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580) の BM25)ので、
+/// 共有語が無いことは「順位が低い」ではなく「原理的に返らない」を意味する。
+///
+/// この対を足すときの受け入れ条件でもある。共有語が一つでもあれば、その語が偶然
+/// 効いて当たることがあり、意味検索が効いた証拠にならなくなる。
+#[test]
+fn a_vocabulary_gap_pair_shares_no_index_term_with_its_answer() {
+    let corpus = CorpusOrder::over_corpus();
+    for (query, relevant) in VOCABULARY_GAP_CASES {
+        let answer = corpus
+            .chunks
+            .iter()
+            .find(|chunk| chunk.name == *relevant)
+            .unwrap_or_else(|| panic!("正解チャンク {relevant} がコーパスに無い"));
+        let mut shared: Vec<String> = terms_of(query)
+            .into_iter()
+            .filter(|term| answer.terms.contains(term))
+            .collect();
+        shared.sort();
+        shared.dedup();
+        assert!(
+            shared.is_empty(),
+            "問い {query:?} と正解 {relevant} は索引語 {} を共有している(共有語があると\
+             キーワード一致で当たりうるので、語彙の隔たりの対にならない)",
+            shared.join("、")
+        );
+    }
+}
+
+/// 語彙が隔たる 6 対は、現在の BM25 では一つも上位 10 件に入らない(圏外)。基準線の
+/// 平均が飽和から下がった理由をここで名指しする。
+///
+/// 取りこぼしの形は 2 通りある。実測 2026-08-17 では、6 対のうち 5 対は別の節が返り
+/// (語の一致だけを見ると別の節の方が近く見える)、日本語の問いで英語の本文を引く
+/// 1 対(「時計がずれても大丈夫か」)はコーパス全体と語を共有せず空振りになる。どちらも
+/// クエリ自体は索引語を持つので、生産経路の POST /v1/search が 400 で撥ねる形
+/// (索引語が 1 語も無いクエリ)ではない。それも下でいっしょに確かめる。
+#[test]
+fn bm25_cannot_reach_any_vocabulary_gap_pair() {
+    let index = indexed_corpus("gap");
+    let report = bm25_report(&index);
+    for (query, relevant) in VOCABULARY_GAP_CASES {
+        let outcome = report.outcome_of(query);
+        assert_eq!(
+            outcome.first_relevant_rank, None,
+            "問い {query:?} の正解 {relevant} は現在の BM25 では圏外のはず\n{}",
+            report.detail()
+        );
+        assert!(
+            !terms_of(query).is_empty(),
+            "問い {query:?} は索引語を持つはず(語の無いクエリは POST /v1/search が 400 で\
+             撥ねるので、生産経路の呼び手が投げられない問いを測ることになる)"
+        );
+    }
 }

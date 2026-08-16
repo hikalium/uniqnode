@@ -14,6 +14,9 @@ const SEARCH_JA_V2: &str = include_str!("assets/search_ja_v2.md");
 const SEARCH_EN: &str = include_str!("assets/search_en.md");
 /// テスト資材の最小 PDF(3 ページ。ingest の統合テストと共用)。
 const THREE_PAGE_PDF: &[u8] = include_bytes!("assets/three_pages.pdf");
+/// 目次の節(点線でページ番号をつないだ紙面)と本文の節を持つ日本語文書。低情報
+/// チャンクの後処理を確かめるための資材である。
+const SEARCH_LOWINFO: &str = include_str!("assets/search_lowinfo.md");
 
 fn put_document(address: &str, collection: &str, name: &str, body: &[u8]) {
     let path = format!("/v1/collections/{collection}/documents/{name}");
@@ -106,12 +109,20 @@ fn a_revision_and_a_tombstone_remove_old_chunks_from_search() {
 }
 
 /// PDF のチャンクは citation に物理ページ番号を持つ。
+///
+/// 資材の 1 ページは「Page two of three」の 4 語しかないので、低情報の判定
+/// (crate::search::is_low_information)に落ちる。実データで柱だけの紙面を落とすための
+/// 判定であり、この資材はそれと見分けがつかない。ここで見たいのは引用の形なので、
+/// include_low_information で戻して測る(索引には入ったままである)。
 #[test]
 fn pdf_search_citations_carry_the_page_number() {
     require_pdftotext();
     let server = start_server("search-pdf");
     put_document(&server.address, "specs", "three_pages.pdf", THREE_PAGE_PDF);
-    let response = search(&server.address, "{\"query\":\"Page two\",\"top_k\":1}");
+    let response = search(
+        &server.address,
+        "{\"query\":\"Page two\",\"top_k\":1,\"include_low_information\":true}",
+    );
     assert_eq!(response.status, 200, "{}", body_text(&response));
     let body = body_text(&response);
     assert_eq!(body.matches("\"id\":").count(), 1, "top_k=1 で 1 件だけ返るべき: {body}");
@@ -193,15 +204,137 @@ fn a_paraphrased_query_reaches_its_section_through_the_search_api() {
     );
     assert!(first.contains("\"breadcrumbs\":[\"運用の覚え書き\",\"電源断からの復帰\"]"), "{body}");
 
-    // 既定(埋め込みを装備した serve では融合)でも、上位 3 件に入る。BM25 の順位も
-    // 混ぜるので順位は下がりうるが、届かないことはない。
+    // 方式を省いた要求の既定は、装備と top_k で決まる(SEARCH の「方式の既定」。
+    // 決め方の家は uniqnode::embed::default_method)。3 件しか求めない要求は意味の
+    // 近さだけで答える。
     let body = body_text(&search(&server.address, &format!("{query}}}")));
-    assert!(body.contains("\"method\":\"hybrid\""), "{body}");
-    assert!(body.contains("\"score_semantics\":\"rrf\""), "融合の得点は BM25 とは別物: {body}");
+    assert!(body.contains("\"method\":\"embedding\""), "top_k 3 の既定は埋め込み: {body}");
+    assert!(body.contains("\"score_semantics\":\"cosine\""), "{body}");
     assert!(!body.contains("degraded"), "劣化していないはず: {body}");
-    assert!(body.contains(answer), "融合でも正解が上位 3 件に入るべき: {body}");
+    assert!(body.contains(answer), "既定でも正解が上位 3 件に入るべき: {body}");
+
+    // 10 件求める要求の既定は融合になる。BM25 の順位も混ぜるので順位は下がりうるが、
+    // 届かないことはない。
+    let body = body_text(&search(
+        &server.address,
+        "{\"query\":\"急に電気が消えたときの立ち上げ\",\"top_k\":10}",
+    ));
+    assert!(body.contains("\"method\":\"hybrid\""), "top_k 10 の既定は融合: {body}");
+    assert!(body.contains("\"score_semantics\":\"rrf\""), "融合の得点は BM25 とは別物: {body}");
+    assert!(body.contains(answer), "融合でも正解が上位 10 件に入るべき: {body}");
     drop(server);
     std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// 融合が片肺だったことを言う(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580)):
+/// hybrid を求められても、クエリの語がどのチャンクにも無ければ BM25 の順位は空で、
+/// 返る列は埋め込み単独とまったく同じものになる。融合が効いているように見えたまま
+/// 片肺で答えないことを確かめる(should/0128)。
+///
+/// 実データ(仕様書 PDF 25 本)では、純日本語の問い 14 本すべてでこれが起きていた
+/// (実測 2026-08-17。20260817-real-corpus-search-quality
+/// (uuid:faeda9ac-5e9e-4091-8122-2fba9f80c8db))。ここでは
+/// 同じ形を固定資材で作る: 日本語だけの文書に英語で問えば、語の集合は文字種の段階で
+/// 交わらない。ベクトルは劣化の試験と同じくこちらで 1 件だけ書き込むので、この試験が
+/// 測るのは順位の質ではなく「片肺だったと言うこと」だけである。
+#[test]
+fn hybrid_says_when_bm25_matched_nothing_and_the_fusion_was_one_sided() {
+    require_embedding_server();
+    let dir = unique_dir("search-one-sided");
+    let server = start_server_at_with_args(
+        dir.clone(),
+        &["--embed", uniqnode::embed::DEFAULT_EMBEDDING_URL],
+    );
+    put_document(&server.address, "notes", "search_ja.md", SEARCH_JA.as_bytes());
+    let seed = body_text(&search(&server.address, "{\"query\":\"世代の整合\",\"method\":\"bm25\"}"));
+    let chunk_id = json_text_field(&seed, "id").expect("チャンク ID");
+    let mut cache = uniqnode::embed::VectorCache::open(
+        uniqnode::embed::VectorCache::path_for(&dir, "bge-m3"),
+        "bge-m3",
+        uniqnode::embed::DEFAULT_EMBEDDING_DIMENSION,
+    )
+    .expect("open cache");
+    let mut vector = vec![0.0f32; uniqnode::embed::DEFAULT_EMBEDDING_DIMENSION];
+    vector[0] = 1.0;
+    cache.extend(vec![(chunk_id, vector)]).expect("write cache");
+
+    // 日本語だけの文書に英語で問う。BM25 単独では 1 件も返らない。
+    let query = "how long are request logs kept";
+    let body = body_text(&search(
+        &server.address,
+        &format!("{{\"query\":\"{query}\",\"top_k\":10,\"method\":\"bm25\"}}"),
+    ));
+    assert_eq!(body, EMPTY_RESULTS, "この問いは BM25 では空振りのはず: {body}");
+
+    // 融合を求めると答えは返るが、それは埋め込み単独の順位である。応答がそう言う。
+    let fused = body_text(&search(
+        &server.address,
+        &format!("{{\"query\":\"{query}\",\"top_k\":10,\"method\":\"hybrid\"}}"),
+    ));
+    assert!(fused.contains("\"method\":\"hybrid\""), "{fused}");
+    assert!(
+        fused.contains("BM25 が 1 語も一致せず、順位は埋め込み単独と同じである"),
+        "片肺の融合をそう言うべき: {fused}"
+    );
+    // 実際に同じ列であることを、埋め込み単独の応答と突き合わせて確かめる(言葉だけの
+    // 表明にしない)。
+    let alone = body_text(&search(
+        &server.address,
+        &format!("{{\"query\":\"{query}\",\"top_k\":10,\"method\":\"embedding\"}}"),
+    ));
+    let ids = |body: &str| -> Vec<String> {
+        body.split("\"id\":\"")
+            .skip(1)
+            .filter_map(|part| part.split('"').next())
+            .map(String::from)
+            .collect()
+    };
+    assert!(!ids(&alone).is_empty(), "埋め込み単独では返るはず: {alone}");
+    assert_eq!(ids(&fused), ids(&alone), "片肺の融合は埋め込み単独と同じ列のはず");
+
+    // 語が一致する問いでは、この表明は出ない(いつでも出る文言ではない)。被覆の欠落は
+    // 別の理由なので、そちらは残る。
+    let matched = body_text(&search(
+        &server.address,
+        "{\"query\":\"世代の整合\",\"top_k\":10,\"method\":\"hybrid\"}",
+    ));
+    assert!(!matched.contains("BM25 が 1 語も一致せず"), "語が一致すれば片肺ではない: {matched}");
+    assert!(matched.contains("ベクトルは 1/"), "被覆の欠落は残るべき: {matched}");
+    drop(server);
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// 低情報チャンク(目次の紙面・柱だけ・ページ番号だけ)は既定で応答から落ちるが、
+/// 索引からは消えない(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))。落とした
+/// 件数を応答が言うこと、include_low_information で戻せること、GET /v1/objects では
+/// いつでも引けることを確かめる。
+#[test]
+fn low_information_chunks_leave_the_results_but_stay_in_the_store() {
+    let server = start_server("search-lowinfo");
+    put_document(&server.address, "notes", "search_lowinfo.md", SEARCH_LOWINFO.as_bytes());
+    // 「索引の構築」は目次の節と本文の節の両方に現れる句である。
+    let query = "{\"query\":\"索引の構築\",\"top_k\":10";
+
+    // 既定では目次の節が落ち、本文の節だけが返る。落とした件数は応答が言う。
+    let body = body_text(&search(&server.address, &format!("{query}}}")));
+    assert_eq!(body.matches("\"id\":").count(), 1, "本文の節だけが返るべき: {body}");
+    assert!(body.contains("\"position\":1"), "残るのは本文の節(位置 1): {body}");
+    assert!(body.contains("\"filtered_low_information\":1"), "落とした件数を言うべき: {body}");
+
+    // include_low_information を立てれば、同じ問いで目次の節も戻る。
+    let kept = body_text(&search(
+        &server.address,
+        &format!("{query},\"include_low_information\":true}}"),
+    ));
+    assert_eq!(kept.matches("\"id\":").count(), 2, "目次の節も返るべき: {kept}");
+    assert!(!kept.contains("filtered_low_information"), "落としていない: {kept}");
+    assert!(kept.contains("\"position\":0"), "目次の節(位置 0)が戻るべき: {kept}");
+
+    // 索引から消したのではないので、チャンクの全文はいつでも引ける。
+    let toc = kept.split("\"citation\"").nth(1).expect("1 件目");
+    let id = json_text_field(toc, "id").expect("目次のチャンク ID");
+    let chunk = body_text(&simple(&server.address, "GET", &format!("/v1/objects/{id}"), b""));
+    assert!(chunk.contains("索引の構築"), "落としたチャンクも全文は引けるべき: {chunk}");
 }
 
 /// CLI を 1 回動かして標準出力を返す(取り込みとベクトル作りは serve 停止中のストア用の

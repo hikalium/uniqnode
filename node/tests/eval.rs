@@ -14,7 +14,7 @@ use uniqnode::embed::{
 };
 use uniqnode::eval::{
     chunk_name, evaluate, per_mille, Bm25Retrieval, EvalCase, EvalReport, HybridRetrieval,
-    Retrieval,
+    LowInformationFiltered, Retrieval,
 };
 use uniqnode::ingest::{chunk_markdown, ingest_document, DocumentInput};
 use uniqnode::search::{chunk_terms_of, terms_of, SearchIndex};
@@ -34,6 +34,11 @@ const CORPUS: &[(&str, &str)] = &[
     ("eval_api", include_str!("assets/eval_api.md")),
     ("eval_gap", include_str!("assets/eval_gap.md")),
 ];
+
+/// 固定コーパスには入れない資材(目次の節と本文の節を 1 つずつ持つ文書)。低情報の
+/// 後処理が効くことを見るためだけに、別の索引へ入れて使う。API の試験(node/tests/search.rs)
+/// と同じ資材である。
+const LOW_INFO: &str = include_str!("assets/search_lowinfo.md");
 
 /// 語彙が一致する対(クエリの語が正解チャンクの本文か見出しに現れる)。正解はチャンクの
 /// 名前(`<文書>#<添字>`)で書く。
@@ -122,14 +127,18 @@ struct IndexedCorpus {
 /// キャッシュに置く: 評価は毎回コーパスを取り込み直すので、残しても次回の鍵
 /// (チャンクのオブジェクト ID)は同じだが、測るたびに実際に埋め込みサーバを通す方が、
 /// 測定の前提(サーバが今も同じ模型で応じること)を確かめられる。
-fn indexed_corpus_with(name: &str, embedder: Option<&Embedder>) -> IndexedCorpus {
+fn indexed_corpus_with(
+    name: &str,
+    embedder: Option<&Embedder>,
+    documents: &[(&str, &str)],
+) -> IndexedCorpus {
     let dir: PathBuf =
         std::env::temp_dir().join(format!("uniqnode-eval-{}-{name}", std::process::id()));
     if dir.exists() {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
     let mut store = Store::open(StoreConfig::new(&dir)).expect("open store");
-    for (document, text) in CORPUS {
+    for (document, text) in documents {
         let chunks = chunk_markdown(text);
         ingest_document(
             &mut store,
@@ -156,7 +165,7 @@ fn indexed_corpus_with(name: &str, embedder: Option<&Embedder>) -> IndexedCorpus
 }
 
 fn indexed_corpus(name: &str) -> SearchIndex {
-    indexed_corpus_with(name, None).lexical
+    indexed_corpus_with(name, None, CORPUS).lexical
 }
 
 fn bm25_report(index: &SearchIndex) -> EvalReport {
@@ -366,6 +375,85 @@ fn a_vocabulary_gap_pair_shares_no_index_term_with_its_answer() {
     }
 }
 
+/// 低情報チャンクを落とす後処理(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580) の
+/// 「低情報チャンクの後処理」)を、評価方式の 1 つとして測る。生産経路の POST /v1/search が
+/// 既定でしていることと同じ判定である。
+///
+/// この固定コーパスには低情報チャンクが 1 件も無いので、数値は素の方式と 1 つも変わら
+/// ない。実データ(仕様書 PDF 25 本)では 25,098 チャンクのうち 1,960 件(7.8%)がこの
+/// 判定に落ち、純日本語の問いの上位 10 件では 10.7% を占めていた(実測 2026-08-17。
+/// 20260817-real-corpus-search-quality
+/// (uuid:faeda9ac-5e9e-4091-8122-2fba9f80c8db))。合成の小コーパスがその癖を
+/// 持たないことの記録であって、後処理が効かないことの証拠ではない。
+#[test]
+fn the_low_information_filter_finds_nothing_to_drop_on_the_fixed_corpus() {
+    let index = indexed_corpus("low-information");
+    let bm25 = Bm25Retrieval::new(&index, Some("eval"));
+    let filtered = LowInformationFiltered::new(&bm25, &index);
+    assert_eq!(filtered.name(), "bm25-filtered", "方式名で数値の出どころが読めるべき");
+    // 実測 2026-08-17: 固定コーパスの全チャンクのうち、低情報と判定されるのは 0 件。
+    assert_eq!(
+        filtered.low_information_count(),
+        0,
+        "固定コーパスに低情報チャンクは無いはず(あるなら判定か資材のどちらかが動いた)"
+    );
+    let report = evaluate(&filtered, &cases(), CUTOFFS);
+    // したがって基準線は BM25 と同一である(実測 2026-08-17。千分率)。
+    assert_eq!(
+        per_mille(report.mean_recall(1)),
+        684,
+        "後処理つき BM25 の Recall@1 の基準線\n{}",
+        report.detail()
+    );
+    assert_eq!(
+        per_mille(report.mean_recall(5)),
+        684,
+        "後処理つき BM25 の Recall@5 の基準線\n{}",
+        report.detail()
+    );
+    assert_eq!(
+        per_mille(report.mean_recall(10)),
+        684,
+        "後処理つき BM25 の Recall@10 の基準線\n{}",
+        report.detail()
+    );
+    assert_eq!(
+        per_mille(report.mean_reciprocal_rank),
+        684,
+        "後処理つき BM25 の MRR の基準線\n{}",
+        report.detail()
+    );
+    let plain = bm25_report(&index);
+    for outcome in &report.queries {
+        assert_eq!(
+            outcome.ranked,
+            plain.outcome_of(&outcome.query).ranked,
+            "落とすものが無いのに順位が動いた: {:?}",
+            outcome.query
+        );
+    }
+
+    // 後処理が本当に効くことは、低情報チャンクを持つ別の索引で見る(固定コーパスで
+    // 0 件だったのが「判定が何も落とさない」ためでないことの確認。should/0137)。
+    // 資材は API の試験と共用する(目次の節と本文の節を 1 つずつ持つ文書)。
+    let with_contents =
+        indexed_corpus_with("low-information-asset", None, &[("search_lowinfo", LOW_INFO)]).lexical;
+    let bm25 = Bm25Retrieval::new(&with_contents, Some("eval"));
+    let filtered = LowInformationFiltered::new(&bm25, &with_contents);
+    assert_eq!(filtered.low_information_count(), 1, "目次の節が低情報のはず");
+    let query = "索引の構築";
+    assert_eq!(
+        bm25.ranked(query, 10),
+        vec!["search_lowinfo#1".to_string(), "search_lowinfo#0".to_string()],
+        "素の BM25 は目次の節も返す(実測 2026-08-17: 本文の節が 1 位、目次の節が 2 位)"
+    );
+    assert_eq!(
+        filtered.ranked(query, 10),
+        vec!["search_lowinfo#1".to_string()],
+        "後処理は目次の節だけを落とす"
+    );
+}
+
 /// 埋め込み(意味検索)と RRF 融合の実測値。埋め込みサーバを要求するテストはこれと
 /// the_vocabulary_gap_pairs_that_semantics_reaches の 2 つで、無い環境では黙って飛ばさず
 /// 起動手順を示して落ちる(TESTING (uuid:267326f7-e919-48f2-9737-fe0c0daec9d5))。純粋な
@@ -374,7 +462,7 @@ fn a_vocabulary_gap_pair_shares_no_index_term_with_its_answer() {
 #[test]
 fn embedding_and_fusion_hold_the_recorded_baseline_on_the_fixed_corpus() {
     let embedder = common::require_embedding_server();
-    let indexed = indexed_corpus_with("embedding", Some(&embedder));
+    let indexed = indexed_corpus_with("embedding", Some(&embedder), CORPUS);
     let vectors = indexed.vectors.as_ref().expect("ベクトルの索引");
     // 二つの索引が同じチャンクを同じ並びで見ていること(位置で順位を融合する前提)。
     assert_eq!(vectors.chunk_count(), indexed.lexical.chunk_count());
@@ -501,7 +589,7 @@ fn embedding_and_fusion_hold_the_recorded_baseline_on_the_fixed_corpus() {
 #[test]
 fn the_vocabulary_gap_pairs_that_semantics_reaches() {
     let embedder = common::require_embedding_server();
-    let indexed = indexed_corpus_with("gap-semantics", Some(&embedder));
+    let indexed = indexed_corpus_with("gap-semantics", Some(&embedder), CORPUS);
     let vectors = indexed.vectors.as_ref().expect("ベクトルの索引");
     let search = || HybridSearch { lexical: &indexed.lexical, vectors: Some(vectors) };
     let embedding = evaluate(

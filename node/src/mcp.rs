@@ -612,25 +612,48 @@ fn tool_descriptors() -> Value {
             "method",
             method_property(),
         ),
+        (
+            "include_low_information",
+            schema_property(
+                "boolean",
+                "目次の紙面・柱だけ・ページ番号だけの低情報チャンクを応答に残すか\
+                 (省略時は false で落とす。落とした件数は応答に出る)",
+            ),
+        ),
     ]);
     let fetch_properties = object(vec![(
         "id",
         schema_property("string", "チャンクのオブジェクト ID(search が返す s256:… の値)"),
     )]);
+    let search_description = format!(
+        "取り込み済みの文書を検索し、本文の抜粋と出典(文書名・ページ番号・見出し・\
+         チャンク ID・取得日時)を返す。\n\
+         \n\
+         問い方で当たり方が大きく変わる。英語で問い、文書が使っている英語の術語と略語を\
+         そのまま入れること。実データ(仕様書 PDF 25 本)での実測 2026-08-17 では、\
+         同じ 14 主題を純日本語で問うと平均逆順位 0.315、日本語の文に英語術語を混ぜると \
+         0.869、英語だけで問うと 0.705〜0.798 だった。効くのは言語そのものではなく、\
+         文書が使う語がクエリに入っているかである。\n\
+         良い例: which field reports the period at which the HPET main counter increments\n\
+         悪い例: 高精度イベントタイマの主計数器が増える周期(文書は HPET としか書かない\
+         ので、この言い換えはどのページにも無い)\n\
+         日本語の言い方しか分からないときは、日英を併記した 1 本のクエリにする\
+         (例: HPET main counter 周期 tick period)。訳が外れても片方が当たる。\n\
+         \n\
+         方式は語の一致(bm25)・意味の近さ(embedding)・両者の融合(hybrid)。省略時は\
+         このノードの装備に従い、埋め込みがあれば top_k が {} 以下で embedding、\
+         それより多ければ hybrid になる。\n\
+         目次の紙面・柱だけ・ページ番号だけといった低情報のチャンクは既定で応答から落とす\
+         (落とした件数は応答に出る)。pdftotext が柱しか採れなかった図版のページを探す\
+         ときだけ include_low_information を true にする。\n\
+         得点は同じ応答の中の順位付けにだけ意味があり、応答をまたいだ比較には使えない。",
+        crate::embed::EMBEDDING_ONLY_TOP_K
+    );
     Value::Array(vec![
         object(vec![
             ("name", text("search")),
             ("title", text("uniqnode 検索")),
-            (
-                "description",
-                text(
-                    "取り込み済みの文書を検索し、本文の抜粋と出典(文書名・ページ番号・\
-                     見出し・チャンク ID・取得日時)を返す。方式は語の一致(bm25)・\
-                     意味の近さ(embedding)・両者の融合(hybrid)で、省略時はこの\
-                     ノードの装備に従う。得点は同じ応答の中の順位付けにだけ意味があり、\
-                     応答をまたいだ比較には使えない。",
-                ),
-            ),
+            ("description", text(&search_description)),
             (
                 "inputSchema",
                 object(vec![
@@ -681,7 +704,11 @@ fn method_property() -> Value {
         ("type", text("string")),
         (
             "description",
-            text("検索の方式(省略時はノードの装備に従う。埋め込みがあれば hybrid)"),
+            text(&format!(
+                "検索の方式(省略時はノードの装備に従う。埋め込みがあれば top_k が {} 以下で\
+                 embedding、それより多ければ hybrid)",
+                crate::embed::EMBEDDING_ONLY_TOP_K
+            )),
         ),
         (
             "enum",
@@ -793,6 +820,14 @@ fn render_search(request: &SearchRequest, outcome: &SearchResults) -> String {
     // 読み手にも見せる。
     if let Some(reason) = &outcome.degraded {
         out.push_str(&format!("劣化: {} で答えた({reason})\n", outcome.method.as_str()));
+    }
+    // 捨てたことを黙らない(must/0019 と同じ理由)。落とした件数と、戻す方法を書く。
+    if outcome.filtered_low_information > 0 {
+        out.push_str(&format!(
+            "低情報チャンク {} 件を応答から落とした(目次の紙面・柱だけ・ページ番号だけ。\
+             残すには include_low_information: true)\n",
+            outcome.filtered_low_information
+        ));
     }
     if outcome.results.is_empty() {
         out.push_str("一致なし。\n");

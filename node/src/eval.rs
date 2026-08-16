@@ -72,6 +72,14 @@ impl Retrieval for Bm25Retrieval<'_> {
 /// 劣化したまま数えない: 要求した方式で答えられなかったときは、その理由を言って落ちる。
 /// 埋め込みサーバが途中で落ちたのに BM25 の数値を「埋め込みの数値」として記録することが、
 /// この層で起こりうる最悪の間違いだからである(should/0136)。
+///
+/// 判定は「実際に使った方式が要求した方式か」で行う。方式が落ちた劣化(埋め込みサーバに
+/// 届かない・ベクトルが無い・索引がずれている)は必ず method を BM25 に変えるので、これで
+/// 捕まる。方式を落とさない注記(hybrid でクエリの語が 1 語も一致せず融合の入力が片側だけに
+/// なった、ベクトルの被覆が欠けている)は、その方式が実際にその問いへ返した順位そのもので
+/// あって別方式の数値ではないので、そのまま記録する。被覆の欠落だけは平均の意味を変えるので、
+/// 対を測る側(node/tests/eval.rs)が測定の前に全チャンクぶんのベクトルがあることを直接
+/// 確かめる。
 pub struct HybridRetrieval<'a> {
     search: HybridSearch<'a>,
     /// クエリを埋め込むための相手(生産経路では serve が要求ごとにロックの外で使う)。
@@ -100,7 +108,7 @@ impl Retrieval for HybridRetrieval<'_> {
         let embedding = QueryEmbedding::of(self.embedder, query);
         let outcome =
             self.search.ranked(self.method, query, &embedding, self.collection, top_k);
-        if outcome.method != self.method || outcome.degraded.is_some() {
+        if outcome.method != self.method {
             panic!(
                 "方式 {} を測ろうとしたが {} に劣化した({})。劣化した順位を方式の数値として\
                  記録してはならない",
@@ -116,6 +124,53 @@ impl Retrieval for HybridRetrieval<'_> {
                 let chunk = self.search.lexical.chunk(hit.position);
                 chunk_name(&chunk.document, chunk.position)
             })
+            .collect()
+    }
+}
+
+/// 低情報チャンク(目次の紙面・柱だけ・ページ番号だけ)を落とす後処理を、どの方式の上
+/// にも被せられる差し替え点。生産経路(node/src/api.rs の run_search)が応答を組むときに
+/// するのと同じことを、順位の列に対して行う。判定そのものは索引が構築時に済ませている
+/// (crate::search::is_low_information。判定を二重に実装しない。should/0135)。
+///
+/// 落とした件数ぶん列は短くなる(生産経路と同じで、順位付けそのものには手を入れない)。
+pub struct LowInformationFiltered<'a> {
+    inner: &'a dyn Retrieval,
+    /// チャンク名 → 低情報かどうか。方式が返すのは名前なので、索引の判定を名前で引ける
+    /// 形に写しておく。
+    low_information: std::collections::BTreeMap<String, bool>,
+    name: String,
+}
+
+impl<'a> LowInformationFiltered<'a> {
+    pub fn new(inner: &'a dyn Retrieval, index: &SearchIndex) -> LowInformationFiltered<'a> {
+        let mut low_information = std::collections::BTreeMap::new();
+        for position in 0..index.chunk_count() {
+            let chunk = index.chunk(position);
+            low_information
+                .insert(chunk_name(&chunk.document, chunk.position), chunk.low_information);
+        }
+        let name = format!("{}-filtered", inner.name());
+        LowInformationFiltered { inner, low_information, name }
+    }
+
+    /// この索引の中で低情報と判定されたチャンクの数(固定コーパスに低情報チャンクが
+    /// 何件あるかを、対の側が数えるため)。
+    pub fn low_information_count(&self) -> usize {
+        self.low_information.values().filter(|flag| **flag).count()
+    }
+}
+
+impl Retrieval for LowInformationFiltered<'_> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn ranked(&self, query: &str, top_k: usize) -> Vec<String> {
+        self.inner
+            .ranked(query, top_k)
+            .into_iter()
+            .filter(|name| !self.low_information.get(name).copied().unwrap_or(false))
             .collect()
     }
 }

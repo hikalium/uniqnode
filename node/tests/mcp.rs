@@ -187,6 +187,16 @@ fn the_handshake_lists_the_tools_and_search_answers_with_citations() {
     assert!(listed.contains("\"name\":\"search\""), "{listed}");
     assert!(listed.contains("\"name\":\"fetch\""), "{listed}");
     assert!(listed.contains("\"inputSchema\""), "{listed}");
+    // 問い方の手引きはツールの説明にしか無い(モデルが読むのはここだけである)。
+    // 実データで測った差(MCP (uuid:dacd474d-424a-45d5-a278-766fc2465dd9) の
+    // 「公開するツール」)を、良い例と悪い例つきで載せていることを確かめる。
+    assert!(listed.contains("英語で問い"), "問い方の手引きが説明に無い: {listed}");
+    assert!(
+        listed.contains("which field reports the period at which the HPET main counter increments"),
+        "良い例が説明に無い: {listed}"
+    );
+    assert!(listed.contains("高精度イベントタイマ"), "悪い例が説明に無い: {listed}");
+    assert!(listed.contains("日英を併記"), "訳が分からないときの逃げ道が説明に無い: {listed}");
 
     // (3) search。出典が全部そろっていること(完了条件は「出典付きで答えられる」で
     // あり、出典を欠いた応答は用を成さない)。
@@ -344,10 +354,52 @@ fn pdf_citations_carry_the_page_number_through_mcp() {
         pdf.to_str().expect("utf-8"),
     ]);
     let mut mcp = McpProcess::start(&dir, &[]);
-    let searched = mcp.call(1, "search", "{\"query\":\"Page two\",\"top_k\":1}");
+    // 資材の 1 ページは 4 語しかなく、低情報の判定に落ちる(実データで柱だけの紙面を
+    // 落とすための判定であり、この資材はそれと見分けがつかない)。ここで見たいのは
+    // 出典の形なので、include_low_information で戻して測る。
+    let searched = mcp.call(
+        1,
+        "search",
+        "{\"query\":\"Page two\",\"top_k\":1,\"include_low_information\":true}",
+    );
     assert!(searched.contains("specs/three_pages p.2"), "ページ番号が出典に無い: {searched}");
     assert!(searched.contains("見出し: (なし)"), "見出しの不在を言うべき: {searched}");
     mcp.finish();
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// 低情報チャンクを落としたことは、エージェントの読む応答にも標準エラーにも出る
+/// (黙って捨てない。must/0019 と同じ理由)。落とす判断そのものは REST と同じ
+/// run_search が持つので、ここで見るのは伝わり方だけである。
+#[test]
+fn the_search_tool_says_how_many_low_information_chunks_it_dropped() {
+    let dir = store_with("mcp-lowinfo", &["search_lowinfo.md"]);
+    let mut mcp = McpProcess::start(&dir, &[]);
+    // 「索引の構築」は目次の節(点線の紙面)と本文の節の両方に現れる。
+    let dropped = mcp.call(1, "search", "{\"query\":\"索引の構築\",\"top_k\":10}");
+    assert!(dropped.contains("1 件"), "本文の節だけが残るべき: {dropped}");
+    assert!(
+        dropped.contains("低情報チャンク 1 件を応答から落とした"),
+        "落とした件数を言うべき: {dropped}"
+    );
+    assert!(
+        dropped.contains("include_low_information"),
+        "戻し方を言うべき: {dropped}"
+    );
+    // 戻せば 2 件になり、落としたという行も出ない。
+    let kept = mcp.call(
+        2,
+        "search",
+        "{\"query\":\"索引の構築\",\"top_k\":10,\"include_low_information\":true}",
+    );
+    assert!(kept.contains("2 件"), "目次の節も返るべき: {kept}");
+    assert!(!kept.contains("落とした"), "落としていないのに言わない: {kept}");
+    let exit = mcp.finish();
+    assert!(
+        exit.stderr.contains("低情報チャンク 1 件を応答から落とした"),
+        "標準エラーにも残すべき: {}",
+        exit.stderr
+    );
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 

@@ -334,8 +334,14 @@ pub struct SearchRequest {
     /// 省略時は全コレクション。
     pub collection: Option<String>,
     pub top_k: usize,
-    /// 省略時は None。装備に従う既定を決めるのは run_search である。
+    /// 省略時は None。装備と top_k に従う既定を決めるのは run_search である
+    /// (crate::embed::default_method)。
     pub method: Option<crate::embed::SearchMethod>,
+    /// 低情報チャンク(目次の紙面・柱だけ・ページ番号だけ。判定は
+    /// crate::search::is_low_information)を応答に残すか。省略時は false で、既定では
+    /// 落とす。図版のページのように pdftotext が柱しか採れなかったチャンクを探すときは
+    /// true にする(索引からは外していないので、そのときは戻ってくる)。
+    pub include_low_information: bool,
 }
 
 /// 引用(取り込み層の引用規則。INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の
@@ -380,6 +386,10 @@ pub struct SearchResults {
     pub method: crate::embed::SearchMethod,
     pub degraded: Option<String>,
     pub results: Vec<SearchResult>,
+    /// 順位には入っていたが低情報として落とした件数。捨てたことを黙らないための欄で
+    /// ある(must/0019 と同じ理由: 落とした結果は、落としたと言わなければ最初から
+    /// 無かったことと区別できない)。0 なら応答に載らない。
+    pub filtered_low_information: usize,
 }
 
 /// 検索要求の読み取りと検証。誤りの文言は呼び手がそのまま使う(REST は 400 の本文、
@@ -415,10 +425,15 @@ pub fn parse_search_request(value: &c1::Value) -> Result<SearchRequest, String> 
         },
         _ => return Err("method は文字列".to_string()),
     };
+    let include_low_information = match map.get("include_low_information") {
+        None | Some(c1::Value::Null) => false,
+        Some(c1::Value::Bool(flag)) => *flag,
+        _ => return Err("include_low_information は真偽値".to_string()),
+    };
     if crate::search::terms_of(&query).is_empty() {
         return Err("クエリに索引語が無い(英数字の語か、仮名・漢字などの文字が要る)".to_string());
     }
-    Ok(SearchRequest { query, collection, top_k, method })
+    Ok(SearchRequest { query, collection, top_k, method, include_low_information })
 }
 
 /// 検索索引を最新にして貸す。索引は導出データの遅延キャッシュで、referrers と同じく
@@ -447,12 +462,13 @@ pub fn run_search(
     context: &ApiContext,
     request: &SearchRequest,
 ) -> Result<SearchResults, StoreError> {
-    // 既定は装備に従う。埋め込みを設定した節点で融合を既定にするのは、方式の指定を
-    // 知らない呼び手(CLI・MCP)が黙って BM25 だけに取り残されないため。
-    let requested = request.method.unwrap_or(match &context.embedding {
-        Some(_) => crate::embed::SearchMethod::Hybrid,
-        None => crate::embed::SearchMethod::Bm25,
-    });
+    // 既定は装備と top_k に従う(決め方の家は crate::embed::default_method。実データで
+    // 測った境目の根拠はそちらのコメントにある)。埋め込みを設定した節点で BM25 単独を
+    // 既定にしないのは、方式の指定を知らない呼び手(CLI・MCP)が黙って語の一致だけに
+    // 取り残されないためである。
+    let requested = request
+        .method
+        .unwrap_or_else(|| crate::embed::default_method(context.embedding.is_some(), request.top_k));
     // クエリの埋め込みは、どのロックも取る前に済ませる。埋め込みサーバとの往復であり、
     // その待ちのあいだ store のロックを持つと、1 本の検索で API 全体が塞がる
     // (node/src/sync.rs のロックの規律と同じ理由)。届かなければ理由を持ち帰り、
@@ -500,9 +516,21 @@ pub fn run_search(
             request.collection.as_deref(),
             request.top_k,
         );
+        // 低情報チャンク(目次の紙面・柱だけ・ページ番号だけ)は順位付けのあとで落とす。
+        // 索引から外さないのは、外すと GET /v1/objects/{id} の引用も組めなくなり、
+        // pdftotext が柱しか採れなかった図版のページが見えから消えるからである
+        // (SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))。
+        let mut filtered_low_information = 0usize;
         let results = ranked
             .hits
             .iter()
+            .filter(|hit| {
+                if request.include_low_information || !index.chunk(hit.position).low_information {
+                    return true;
+                }
+                filtered_low_information += 1;
+                false
+            })
             .map(|hit| {
                 let chunk = index.chunk(hit.position);
                 SearchResult {
@@ -513,7 +541,12 @@ pub fn run_search(
                 }
             })
             .collect();
-        SearchResults { method: ranked.method, degraded: ranked.degraded, results }
+        SearchResults {
+            method: ranked.method,
+            degraded: ranked.degraded,
+            results,
+            filtered_low_information,
+        }
     })?;
     // キャッシュを読めなかったのが根の理由なら、そちらを載せる(「索引がない」だけでは
     // 何を直せばよいか読めない)。
@@ -525,6 +558,15 @@ pub fn run_search(
             "uniqnode: search: {} を求められて {} で答えた: {reason}",
             requested.as_str(),
             outcome.method.as_str()
+        );
+    }
+    // 捨てたことは黙らない(must/0019 と同じ理由)。件数は応答にも載るが、応答を読まない
+    // 運用者にも見えるところへ 1 行出す。
+    if outcome.filtered_low_information > 0 {
+        eprintln!(
+            "uniqnode: search: 低情報チャンク {} 件を応答から落とした(目次の紙面・柱だけ・\
+             ページ番号だけ。残したいときは要求に include_low_information: true)",
+            outcome.filtered_low_information
         );
     }
     Ok(outcome)
@@ -621,8 +663,14 @@ pub fn search_response_body(outcome: &SearchResults) -> Vec<u8> {
         Some(reason) => format!("\"degraded\":{},", json_text(reason)),
         None => String::new(),
     };
+    // 落とした件数は 0 のとき載せない(degraded と同じ扱い。何も落ちなかった応答は
+    // 従来と同じ形のままである)。
+    let filtered = match outcome.filtered_low_information {
+        0 => String::new(),
+        count => format!("\"filtered_low_information\":{count},"),
+    };
     format!(
-        "{{{degraded}\"method\":\"{}\",\"results\":[{}],\"score_semantics\":\"{}\"}}",
+        "{{{degraded}{filtered}\"method\":\"{}\",\"results\":[{}],\"score_semantics\":\"{}\"}}",
         outcome.method.as_str(),
         results.join(","),
         outcome.method.score_semantics(),
@@ -725,6 +773,9 @@ pub fn search_request_body(request: &SearchRequest) -> Vec<u8> {
     if let Some(method) = request.method {
         map.insert("method".to_string(), c1::Value::Text(method.as_str().to_string()));
     }
+    if request.include_low_information {
+        map.insert("include_low_information".to_string(), c1::Value::Bool(true));
+    }
     c1::to_canonical_bytes(&c1::Value::Object(map))
 }
 
@@ -746,6 +797,14 @@ pub fn parse_search_response(body: &[u8]) -> Result<SearchResults, String> {
                 .ok_or_else(|| "応答の degraded が文字列でない".to_string())?
                 .to_string(),
         ),
+    };
+    let filtered_low_information = match value.field("filtered_low_information") {
+        None | Some(Json::Null) => 0,
+        Some(found) => found
+            .integer()
+            .filter(|count| *count >= 0)
+            .ok_or_else(|| "応答の filtered_low_information が非負整数でない".to_string())?
+            as usize,
     };
     let items = value.field("results").and_then(Json::array).ok_or("応答に results がない")?;
     let mut results = Vec::with_capacity(items.len());
@@ -770,7 +829,7 @@ pub fn parse_search_response(body: &[u8]) -> Result<SearchResults, String> {
         };
         results.push(SearchResult { id, score, snippet, citation });
     }
-    Ok(SearchResults { method, degraded, results })
+    Ok(SearchResults { method, degraded, results, filtered_low_information })
 }
 
 /// オブジェクトのバイト列がどれなのかを見分ける(チャンクの本文・チャンクでない c1
@@ -1124,6 +1183,7 @@ mod tests {
                     },
                 },
             ],
+            filtered_low_information: 2,
         };
         let body = search_response_body(&outcome);
         let text = String::from_utf8(body.clone()).expect("utf-8");
@@ -1137,10 +1197,13 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("\"page\":2"), "PDF のチャンクはページを持つ: {text}");
+        // 落とした件数は応答の欄で読める(捨てたことを黙らない)。
+        assert!(text.contains("\"filtered_low_information\":2,"), "{text}");
 
         let read = parse_search_response(&body).expect("読み直せるべき");
         assert_eq!(read.method.as_str(), "hybrid");
         assert_eq!(read.degraded.as_deref(), Some("埋め込みサーバに届かない"));
+        assert_eq!(read.filtered_low_information, 2);
         assert_eq!(read.results.len(), 2);
         assert_eq!(read.results[0].id, format!("s256:{}", "1".repeat(64)));
         assert!((read.results[0].score - 7.6674).abs() < 1e-12, "{}", read.results[0].score);
@@ -1161,6 +1224,10 @@ mod tests {
                 Err(message) => message,
             };
         assert!(missing.contains("score"), "{missing}");
+        // 何も落とさなかった応答は欄を持たず、読み手は 0 と読む(従来の形と同じ)。
+        let plain = parse_search_response(b"{\"method\":\"bm25\",\"results\":[]}")
+            .expect("落とした件数の欄が無い応答も読めるべき");
+        assert_eq!(plain.filtered_low_information, 0);
         let no_citation = match parse_search_response(
             b"{\"method\":\"bm25\",\"results\":[{\"citation\":{\"at\":1},\"id\":\"x\",\
               \"score\":1.0,\"snippet\":\"y\"}]}",
@@ -1180,11 +1247,13 @@ mod tests {
             collection: Some("notes".to_string()),
             top_k: 3,
             method: Some(crate::embed::SearchMethod::Bm25),
+            include_low_information: true,
         };
         let body = search_request_body(&request);
         assert_eq!(
             String::from_utf8(body.clone()).expect("utf-8"),
-            "{\"collection\":\"notes\",\"method\":\"bm25\",\"query\":\"世代の整合\",\"top_k\":3}"
+            "{\"collection\":\"notes\",\"include_low_information\":true,\"method\":\"bm25\",\
+             \"query\":\"世代の整合\",\"top_k\":3}"
         );
         let value = c1::parse(std::str::from_utf8(&body).expect("utf-8")).expect("c1");
         let read = parse_search_request(&value).expect("読み直せるべき");
@@ -1192,17 +1261,25 @@ mod tests {
         assert_eq!(read.collection.as_deref(), Some("notes"));
         assert_eq!(read.top_k, 3);
         assert_eq!(read.method.map(|method| method.as_str()), Some("bm25"));
+        assert!(read.include_low_information);
 
-        // 省略できる項は省いたまま書く(既定は読み手が持つ)。
+        // 省略できる項は省いたまま書く(既定は読み手が持つ)。低情報を残す指定は
+        // 既定(落とす)と同じなら書かない。
         let bare = SearchRequest {
             query: "x".to_string(),
             collection: None,
             top_k: 10,
             method: None,
+            include_low_information: false,
         };
         assert_eq!(
             String::from_utf8(search_request_body(&bare)).expect("utf-8"),
             "{\"query\":\"x\",\"top_k\":10}"
+        );
+        let value = c1::parse("{\"query\":\"x\"}").expect("c1");
+        assert!(
+            !parse_search_request(&value).expect("読み直せるべき").include_low_information,
+            "省略時は低情報を落とす"
         );
     }
 

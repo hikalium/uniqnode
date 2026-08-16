@@ -81,6 +81,77 @@ pub fn terms_of(text: &str) -> Vec<String> {
     terms
 }
 
+/// 目次の行とみなす点線の長さ(連続する `.` の数)。見出しとページ番号を点でつなぐ
+/// 組版がこの形になる。
+const DOT_LEADER_RUN: usize = 4;
+/// 本文に占める `.` の割合がこれを超えたら目次の紙面とみなす。実データ(仕様書 PDF
+/// 25 本)の目次ページは 1 行のほとんどが点で埋まる。
+const DOT_LEADER_RATIO: f64 = 0.15;
+/// 点線の行がこの本数以上あれば、割合が低くても目次の紙面とみなす(点線の行と本文が
+/// 同じチャンクに混じる紙面のため)。
+const DOT_LEADER_LINES: usize = 3;
+/// 「薄い」チャンクの長さの上限(文字数)。これ以上長ければ、語が少なくても本文と
+/// みなす。
+const THIN_CHAR_LIMIT: usize = 300;
+/// 「薄い」チャンクの異なり索引語の数の上限。ページ番号だけ・柱(ページヘッダ)だけの
+/// チャンクはここに落ちる。
+const THIN_TERM_LIMIT: usize = 8;
+
+/// このチャンクが低情報(目次の紙面・柱だけ・ページ番号だけ)かどうか(純関数。
+/// 判定の家はここだけ。should/0135)。判定は本文だけを見る。
+///
+/// 実データ(仕様書 PDF 25 本・索引対象 25,098 チャンク)で観察された二つの型を、
+/// そのまま条件にしてある。この判定に当たるのは 1,960 件(7.8%)で、標本 20 件の目視に
+/// 本文のチャンクは無く、検証済みの正解ページ 54 チャンクのうち巻き込みは 1 件だった
+/// (実測 2026-08-17。20260817-real-corpus-search-quality
+/// (uuid:faeda9ac-5e9e-4091-8122-2fba9f80c8db))。
+/// - 目次の紙面: `.` の割合が DOT_LEADER_RATIO を超えるか、点線の行が
+///   DOT_LEADER_LINES 本以上ある。
+/// - 薄いチャンク: 長さが THIN_CHAR_LIMIT 未満で、異なり索引語が THIN_TERM_LIMIT 未満。
+///
+/// 語の数え方は索引と同じ terms_of を通す(語の採り方を二重に実装しない。should/0135)。
+/// 日本語は文字 bigram になるので、同じ長さでも仮名漢字の本文は語数が多く、ここには
+/// 落ちない。
+///
+/// 判定するだけで索引からは外さない。索引に無いチャンクは GET /v1/objects/{id} でも
+/// 引用を組めなくなり、pdftotext が柱しか採れなかった図版のページが見えから消える。
+/// 落とすのは応答を組む側(node/src/api.rs の run_search)の後処理である。
+pub fn is_low_information(text: &str) -> bool {
+    let characters = text.chars().count();
+    if characters == 0 {
+        return true;
+    }
+    let dots = text.chars().filter(|character| *character == '.').count();
+    if dots as f64 / characters as f64 > DOT_LEADER_RATIO {
+        return true;
+    }
+    let leader_lines = text
+        .lines()
+        .filter(|line| {
+            let mut run = 0usize;
+            for character in line.chars() {
+                run = if character == '.' { run + 1 } else { 0 };
+                if run >= DOT_LEADER_RUN {
+                    return true;
+                }
+            }
+            false
+        })
+        .count();
+    if leader_lines >= DOT_LEADER_LINES {
+        return true;
+    }
+    if characters < THIN_CHAR_LIMIT {
+        let mut terms = terms_of(text);
+        terms.sort();
+        terms.dedup();
+        if terms.len() < THIN_TERM_LIMIT {
+            return true;
+        }
+    }
+    false
+}
+
 /// 見出しの語を本文の何回ぶんとして数えるか(重み)。見出しは本文より短く、同じ語を
 /// 繰り返さないので、重み 1(素直な連結)のままだと節の題を並べただけの目次の節に
 /// 定義の節が負ける。評価ハーネス(node/src/eval.rs)の固定コーパスで測ると、重み 1 は
@@ -158,6 +229,9 @@ pub struct IndexedChunk {
     pub page: Option<u32>,
     /// 取得日時(このチャンクを見えに置いている ref レコードの at。unix 秒)。
     pub at: i64,
+    /// 低情報(目次の紙面・柱だけ・ページ番号だけ)かどうか(判定は is_low_information)。
+    /// 索引には入れたままで、応答から落とすかどうかは要求の側が決める。
+    pub low_information: bool,
     /// このチャンクの語数(BM25 の文書長)。
     term_count: usize,
 }
@@ -346,6 +420,9 @@ impl SearchIndex {
                 breadcrumbs: chunk.breadcrumbs,
                 page: chunk.page,
                 at: chunk.at,
+                // 判定は構築時に一度だけ行う(応答のたびに全文を持ち歩かないため。
+                // IndexedChunk が持つのは先頭 200 文字のスニペットだけである)。
+                low_information: is_low_information(&chunk.text),
                 term_count: chunk.terms.len(),
             });
         })?;
@@ -548,6 +625,44 @@ mod tests {
         assert!(doubled < base * 2.0, "tf の伸びは線形未満(飽和)のはず");
         let long = bm25_term_score(1, 1, 2, 20, 10.0);
         assert!(long < base, "平均より長いチャンクは割り引かれるはず");
+    }
+
+    /// 低情報チャンクの判定。期待値はリテラルで書く(検査対象から導出しない。
+    /// should/0137)。落とすのは目次の紙面と、柱やページ番号だけの薄いチャンクで、
+    /// 本文はどの言語でも残る。
+    #[test]
+    fn low_information_catches_contents_pages_and_thin_chunks() {
+        // 目次の紙面: 見出しとページ番号を点でつないだ行が並ぶ(点の割合で落ちる)。
+        let contents = "IA-PC HPET ................................................ 4\n\
+                        1.1 Revision History ...................................... 5\n\
+                        1.2 Scope ................................................. 6\n";
+        assert!(is_low_information(contents));
+        // 本文に点線の行が混じる紙面。点の割合は低いが、点線の行が 3 本ある。
+        let mixed = format!(
+            "{}\n第 1 章 導入 .... 1\n第 2 章 索引 .... 2\n第 3 章 検索 .... 3\n",
+            "この章では索引の構築と検索の順位付けについて述べる。".repeat(12)
+        );
+        assert!(mixed.chars().filter(|c| *c == '.').count() * 100 < mixed.chars().count() * 15);
+        assert!(is_low_information(&mixed));
+        // 柱(ページヘッダ)だけ・ページ番号だけのチャンク。
+        assert!(is_low_information("RTL8139D(L)"));
+        assert!(is_low_information("142"));
+        assert!(is_low_information(""));
+        // 本文は残る。英語の一節は語が足りている。
+        let english = "The GetMemoryMap() function returns a copy of the current memory map. \
+                       The map is an array of memory descriptors, each of which describes a \
+                       contiguous block of memory.";
+        assert_eq!(terms_of(english).len(), 28);
+        assert!(!is_low_information(english));
+        // 日本語の短い一節も残る(文字 bigram なので語数が足りる)。
+        let japanese = "転置索引は導出データであり、世代の整合はオブジェクト数で確かめる。";
+        assert!(japanese.chars().count() < THIN_CHAR_LIMIT);
+        assert!(!is_low_information(japanese));
+        // 節番号の点は目次の点線ではない(割合が閾値に届かない)。落ちるとすれば、
+        // 見出しだけで本文の無い薄いチャンクだからである。
+        assert!(!is_low_information(&format!(
+            "5.2.3.2 Generic Address Structure\n{english}"
+        )));
     }
 
     #[test]

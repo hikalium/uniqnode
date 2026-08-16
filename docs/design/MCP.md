@@ -96,9 +96,22 @@ search ツールは、要求の読み取り(parse_search_request)から順位付
 
 - search の引数は POST /v1/search のボディと同じ形である: query(必須。空でない文字列で、索引語
   を最低 1 語含む)、collection(省略時は全コレクション)、top_k(1..=1000、省略時 10)、method
-  ("bm25" / "embedding" / "hybrid"、省略時はこのノードの装備に従う)。読み取りと検証は
-  parse_search_request の一箇所にあり、誤りの文言は REST の 400 の本文と同じものが JSON-RPC の
-  message に載る。
+  ("bm25" / "embedding" / "hybrid"、省略時はこのノードの装備と top_k に従う。
+  [docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580))、include_low_information
+  (省略時 false)。読み取りと検証は parse_search_request の一箇所にあり、誤りの文言は REST の
+  400 の本文と同じものが JSON-RPC の message に載る。
+- search の説明文は、モデルが読む唯一の手引きである。方式と得点の意味だけでなく、問い方を
+  そこに書く: 英語で問い、文書が使う英語の術語と略語をそのまま入れること。実データで測ると、
+  同じ 14 主題を純日本語で問うと MRR 0.332、日本語の文に英語術語を混ぜると 0.869、英語だけなら
+  0.705〜0.798 だった(実測 2026-08-17。
+  [docs/analysis/20260817-real-corpus-search-quality.md](#faeda9ac-5e9e-4091-8122-2fba9f80c8db))。
+  抽象的な助言では効かないので、良い例(which field reports the period at which the HPET main
+  counter increments)と悪い例(高精度イベントタイマの主計数器が増える周期。この訳語は HPET
+  仕様書のどのページにも無い)を 1 つずつ書き、日本語の言い方しか分からないときは日英を併記した
+  1 本のクエリにする(訳が外れても片方が当たる。併記の MRR は 0.671〜0.804)ことも書く。
+- 説明文に出る top_k の境目は定数 EMBEDDING_ONLY_TOP_K から組み立てる。説明に書いた既定と
+  実装が選ぶ既定が食い違わないためである(must/0023)。method の enum の 3 つの文字列を
+  SearchMethod の as_str から出すのと同じ理由である。
 - fetch の引数は id だけ(必須。search が返すチャンクのオブジェクト ID。`s256:` と 16 進 64 桁)。
 - method の enum に並ぶ 3 つの文字列は SearchMethod の as_str から出す。ツールの説明に書いた値と
   実装が受け付ける値が食い違わないためである(must/0023)。
@@ -135,7 +148,11 @@ search ツールは、要求の読み取り(parse_search_request)から順位付
   空振りが絞り込みのせいかどうかが読み手に分かる。
 - 要求した方式で答えられなかったときは「劣化: <方式> で答えた(<理由>)」の行が入る。同じことを
   標準エラーにも書く(黙って劣化しない。should/0128)。劣化の条件は REST と同一である
-  ([docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580))。
+  ([docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580))。融合を求めて BM25 が
+  1 件も一致しなかったとき(順位が埋め込み単独と同じになるとき)も、この行で言う。
+- 低情報チャンクを落としたときは「低情報チャンク <n> 件を応答から落とした(…。残すには
+  include_low_information: true)」の行が入る。件数と戻し方の両方を書くのは、読み手がモデルで
+  あり、次の手を選べるようにするためである。同じことを標準エラーにも書く。
 - 末尾の案内は定数 FETCH_HINT から出す。ツールの説明と同じ事実なので文言は 1 箇所が持つ
   (must/0023)。
 - 得点は同じ応答の中の順位付けにだけ意味があり、応答をまたいだ比較や絶対値の閾値には使えない。

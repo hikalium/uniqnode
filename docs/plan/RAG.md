@@ -9,7 +9,7 @@
 ([docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580))、検索方式を差し替えて
 数値で比べる評価ハーネス([docs/design/EVAL.md](#1109a04b-923e-4493-8f00-d704047d6a2a))、
 search と fetch を LLM エージェントへ出す MCP アダプタ
-([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))まで実装済み。テスト163本、
+([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))まで実装済み。テスト179本、
 CLI + HTTP API + MCP。
 「LLM から常用できる RAG ストレージ」というこの計画のゴールは、ここで成立している。
 以下は、その上に積む残りの作業項目を実行順に並べたものである(先頭は 6 の分散検索。

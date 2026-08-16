@@ -58,6 +58,38 @@ pub const RRF_K: f64 = 60.0;
 /// 融合する形と釣り合う。
 pub const RRF_DEPTH: usize = 10;
 
+/// 方式を指定しない要求で、埋め込みを備えた節点が embedding を選ぶ top_k の上限
+/// (これを超えたら hybrid)。
+///
+/// 実データ(仕様書 PDF 25 本・25,098 チャンク)での実測 2026-08-17 が境目を決めた
+/// (20260817-real-corpus-search-quality
+/// (uuid:faeda9ac-5e9e-4091-8122-2fba9f80c8db))。14 主題を 3 通りの言い方(英語・日本語に
+/// 英語術語を混ぜたもの・純日本語)で問い、低情報の後処理を効かせた状態で測った 3 通りの
+/// 平均は、浅い打ち切りで embedding、深い打ち切りで hybrid が上に出る:
+/// Recall@3 は 0.738 対 0.691(embedding が上)、Recall@5 は 0.809 対 0.833、
+/// Recall@10 は 0.905 対 0.929(いずれも hybrid が上)である。交差点は k=3 と k=5 の
+/// あいだにあり、境目をそこに置いた。
+///
+/// 言い方ごとの内訳は割れる。日本語に英語術語を混ぜた問いでは embedding の
+/// Recall@1 0.786・Recall@3 1.000 に対して hybrid が 0.714・0.857 と落ちるが、英語の
+/// 問いでは逆に hybrid の Recall@1 0.714 が embedding の 0.571 を上回る。深い側は割れず、
+/// 英語の Recall@10 は hybrid 1.000 対 embedding 0.929 である。
+///
+/// 少ししか返さない要求は 1 位を外すと取り返せないので、そこは意味の近さだけで答える
+/// (語の一致は、クエリが文書の語をそのまま持つときにしか効かない)。たくさん返す要求は
+/// 読み手が下位まで見られるので、語の一致が拾う当たりを足す融合を採る。
+pub const EMBEDDING_ONLY_TOP_K: usize = 3;
+
+/// 方式を指定しない要求の既定(決め方の家はここだけ。should/0135)。埋め込みが無ければ
+/// BM25 しかない。あるときは top_k で選ぶ(EMBEDDING_ONLY_TOP_K)。
+pub fn default_method(has_embedding: bool, top_k: usize) -> SearchMethod {
+    match (has_embedding, top_k <= EMBEDDING_ONLY_TOP_K) {
+        (false, _) => SearchMethod::Bm25,
+        (true, true) => SearchMethod::Embedding,
+        (true, false) => SearchMethod::Hybrid,
+    }
+}
+
 /// 埋め込み層の失敗。ストアの異常(ノードの故障)と、埋め込みサービスの側の失敗
 /// (劣化して動き続けられる)を分ける。sync.rs の SyncError と同じ分け方である。
 #[derive(Debug)]
@@ -898,6 +930,19 @@ impl HybridSearch<'_> {
             },
             _ => {
                 let lexical = self.lexical.search_positions(query, collection, fusion_depth(top_k));
+                // BM25 が 1 件も一致しないとき、融合の入力は片方だけになり、順位は埋め込み
+                // 単独とまったく同じ列になる。融合が効いているように見えたまま片肺で答えない
+                // ように、そう言う(黙って劣化しない。should/0128)。実データの純日本語の
+                // 問いでは 14/14 でこれが起きた(実測 2026-08-17)。
+                let one_sided = lexical.is_empty().then(|| {
+                    "BM25 が 1 語も一致せず、順位は埋め込み単独と同じである(融合は効いて\
+                     いない。文書が使う語をクエリに入れると語の一致も効く)"
+                        .to_string()
+                });
+                let degraded = match (coverage, one_sided) {
+                    (Some(coverage), Some(one_sided)) => Some(format!("{coverage}。{one_sided}")),
+                    (found, None) | (None, found) => found,
+                };
                 let rankings = vec![
                     lexical.iter().map(|hit| hit.position).collect::<Vec<usize>>(),
                     semantic.iter().map(|hit| hit.position).collect::<Vec<usize>>(),
@@ -906,7 +951,7 @@ impl HybridSearch<'_> {
                     .into_iter()
                     .map(|fused| ScoredChunk { position: fused.item, score: fused.score })
                     .collect();
-                RankedSearch { method: SearchMethod::Hybrid, degraded: coverage, hits }
+                RankedSearch { method: SearchMethod::Hybrid, degraded, hits }
             }
         }
     }
@@ -1020,6 +1065,23 @@ mod tests {
         let zero = "{\"data\":[{\"index\":0,\"embedding\":[0.0,0.0]}]}";
         let error = vectors_from_response(zero, 1, 2).expect_err("ノルム 0");
         assert!(error.contains("ノルム"), "{error}");
+    }
+
+    /// 方式を指定しない要求の既定。埋め込みが無ければ BM25 しかなく、あるときは top_k で
+    /// 分かれる(境目 EMBEDDING_ONLY_TOP_K の根拠は定数のコメントにある実測)。期待値は
+    /// リテラルで書く(検査対象から導出しない。should/0137)。
+    #[test]
+    fn the_default_method_follows_the_equipment_and_how_many_results_are_asked_for() {
+        assert_eq!(default_method(false, 1).as_str(), "bm25");
+        assert_eq!(default_method(false, 10).as_str(), "bm25");
+        assert_eq!(default_method(false, 1000).as_str(), "bm25");
+        assert_eq!(default_method(true, 1).as_str(), "embedding");
+        assert_eq!(default_method(true, 3).as_str(), "embedding");
+        assert_eq!(default_method(true, 4).as_str(), "hybrid");
+        assert_eq!(default_method(true, 10).as_str(), "hybrid");
+        // 境目は定数のとおり(定数を動かしたらこの 2 行が意味を保つ)。
+        assert_eq!(default_method(true, EMBEDDING_ONLY_TOP_K).as_str(), "embedding");
+        assert_eq!(default_method(true, EMBEDDING_ONLY_TOP_K + 1).as_str(), "hybrid");
     }
 
     /// RRF: 期待値は手計算のリテラル(should/0137)。片方の方式が空の列を返す場合

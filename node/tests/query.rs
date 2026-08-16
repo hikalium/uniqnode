@@ -1,6 +1,10 @@
 //! L2 分散クエリの統合テスト(SPEC §7.1, §7.2、§11 L2)。実プロセス3台。
 //! 受け入れ基準: 1台だけが持つ知識が budget 内に返る / 持ち主が全員停止なら timed_out
 //! (不存在とは報告されない) / 空応答と沈黙が区別されて報告される。
+//! 空応答と沈黙の区別は、決着を待ってから読む
+//! silence_of_the_only_holder_times_out_without_nonexistence_claims が担う。
+//! object の回答が来たら即 found で決着する規則があるため、found で決着した報告では
+//! 「持たないピアがまだ答えていない」ことがあり、その状態を決めつけてはならない。
 
 mod common;
 use common::*;
@@ -22,8 +26,10 @@ fn peer_state_of<'a>(report: &'a str, address: &str) -> &'a str {
     &state_rest[..state_rest.find('"').expect("close quote")]
 }
 
-/// 受け入れ基準1+3: 1台だけが持つ知識が budget 内に返り、持たないピアの空応答
-/// (肯定的言明)と回答が区別して報告される。取得したオブジェクトはローカルに残る。
+/// 受け入れ基準1: 1台だけが持つ知識が budget 内に返り、取得したオブジェクトは
+/// ローカルに残る。持たないピアの状態は決着の時点によって empty(自分は持たないという
+/// 肯定的言明)にも pending(まだ何も言っていない)にもなり、どちらも正しいので
+/// 決めつけない。
 #[test]
 fn knowledge_held_by_one_peer_is_found_within_budget() {
     let a = start_server("q-origin");
@@ -40,8 +46,14 @@ fn knowledge_held_by_one_peer_is_found_within_budget() {
     assert_eq!(response.status, 200);
     let report = body_text(&response);
     assert!(report.contains("\"outcome\":\"found\""), "{report}");
-    assert_eq!(peer_state_of(&report, &b.address), "empty", "{report}");
     assert_eq!(peer_state_of(&report, &c.address), "answered", "{report}");
+    // 持たないピアは、決着までに答えていれば empty、間に合わなければ pending。
+    // どちらも正しく、どちらであるかは決着の速さで決まるので、集合で受ける。
+    let holder_less_state = peer_state_of(&report, &b.address);
+    assert!(
+        holder_less_state == "empty" || holder_less_state == "pending",
+        "持たないピアの状態は empty か pending であるべきだが {holder_less_state} だった: {report}"
+    );
 
     // 取得済みオブジェクトが a から読める(機会的な複製)。
     let fetched = simple(&a.address, "GET", &format!("/v1/objects/{id}"), b"");

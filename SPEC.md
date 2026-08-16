@@ -384,6 +384,7 @@ uniqnode コアの上に、次の応用層が載る予定である。仕様化�
 | `GET /v1/objects/{id}/referrers` | 逆引き(この ID を参照する既知オブジェクトの一覧。自分の知る範囲の導出データで、空は不在の言明ではない) |
 | `POST /v1/objects` | オブジェクト投入(べき等。ID を返す) |
 | `PUT /v1/collections/{c}/documents/{name}` | 文書の取り込み(本文は生バイト列。種別は name の拡張子で判定) |
+| `POST /v1/search` | BM25 検索(索引は導出データで、見え = collections/ 配下の現行文書のチャンクだけが対象) |
 | `GET /v1/refs` | ref の一覧(名前・target・seq・at) |
 | `GET /v1/refs/...` / `PUT /v1/refs/...` | ref の解決と更新(自DBノードの名前空間のみ書ける) |
 | `POST /v1/pins` / `GET /v1/pins` | pin の設定(発行者は同時に保持表明する)/ 一覧と保持者 |

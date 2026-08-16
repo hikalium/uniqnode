@@ -322,7 +322,7 @@ fn handle_query(context: &ApiContext, request: &Request) -> Response {
     Response::json(200, crate::query::state_to_json(&state))
 }
 
-/// POST /v1/search(RAG の「BM25 検索」の項)。ボディ:
+/// POST /v1/search(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))。ボディ:
 /// {"query": "...", "collection": "...", "top_k": N}(collection 省略時は全コレクション、
 /// top_k 省略時は 10)。索引は導出データの遅延キャッシュで、referrers と同じく初回
 /// 要求時に構築し、世代がずれたら次の要求で作り直す。

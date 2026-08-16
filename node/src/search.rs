@@ -1,5 +1,5 @@
-//! 文字 bigram の転置索引と BM25 検索(RAG
-//! (uuid:35a888f7-5ac6-4333-831c-dd7753b82315) の BM25 検索の項)。
+//! 文字 bigram の転置索引と BM25 検索(SEARCH
+//! (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))。
 //!
 //! 索引は導出データ(I4)であり、ReferrerIndex(node/src/store.rs)と同じ遅延構築と
 //! する。Store::open には触れない(open はオブジェクトをパースせずハッシュだけを見る

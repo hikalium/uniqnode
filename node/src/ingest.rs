@@ -195,6 +195,134 @@ pub fn chunk_pdf_text(text: &str) -> Vec<Chunk> {
     chunks
 }
 
+// ---- 書き込み経路(INGEST の「書き込み経路の段」) ----
+
+use crate::c1::{self, Value};
+use crate::store::{Result, Store};
+use std::collections::BTreeMap;
+
+/// 取り込む文書 1 件の入力。name は取り込み起点からの相対パスから拡張子を除いたもの。
+pub struct DocumentInput<'a> {
+    pub collection: &'a str,
+    pub name: &'a str,
+    /// 原文そのもの(blob として保存される)。
+    pub source: &'a [u8],
+    /// "markdown" | "text" | "pdf"
+    pub media: &'a str,
+    pub chunks: &'a [Chunk],
+    /// 抽出器の名前と版(PDF のとき。例 "pdftotext 22.02")。
+    pub extractor: Option<&'a str>,
+}
+
+pub struct IngestOutcome {
+    pub doc_rev_id: String,
+    /// 新規に書かれたオブジェクト数(再取り込みでは 0)。
+    pub new_objects: usize,
+    /// ref を張り替えたか。false = 完全な no-op。
+    pub ref_updated: bool,
+}
+
+fn text_value(text: &str) -> Value {
+    Value::Text(text.to_string())
+}
+
+fn chunk_value(chunk: &Chunk) -> Value {
+    let mut object = BTreeMap::new();
+    object.insert("v".to_string(), Value::Integer(1));
+    object.insert("kind".to_string(), text_value("chunk"));
+    object.insert("text".to_string(), text_value(&chunk.text));
+    let mut meta = BTreeMap::new();
+    if !chunk.breadcrumbs.is_empty() {
+        meta.insert(
+            "breadcrumbs".to_string(),
+            Value::Array(chunk.breadcrumbs.iter().map(|b| text_value(b)).collect()),
+        );
+    }
+    if let Some(page) = chunk.page {
+        meta.insert("page".to_string(), Value::Integer(i64::from(page)));
+    }
+    if !meta.is_empty() {
+        object.insert("meta".to_string(), Value::Object(meta));
+    }
+    Value::Object(object)
+}
+
+/// 現行 doc_rev と同じ内容かを (source, chunks 列) で判定する(previous を含む ID の
+/// 比較では、同じ入力でも別 ID になり no-op が壊れるため)。
+fn same_revision(current: &Value, blob_id: &str, chunk_ids: &[String]) -> bool {
+    let Value::Object(map) = current else { return false };
+    if map.get("source") != Some(&text_value(blob_id)) {
+        return false;
+    }
+    match map.get("chunks") {
+        Some(Value::Array(items)) => {
+            items.len() == chunk_ids.len()
+                && items.iter().zip(chunk_ids).all(|(item, id)| item == &text_value(id))
+        }
+        _ => false,
+    }
+}
+
+/// blob + chunk 群 + doc_rev + ref を一括で書く。順序は blob と chunk 群 → doc_rev →
+/// ref(set_ref は存在しない target を拒否するため ref は最後)。同一内容の再取り込みは
+/// 新しいオブジェクトを書かず ref も触らない(べき等 = I1 の検証)。
+pub fn ingest_document(store: &mut Store, input: &DocumentInput) -> Result<IngestOutcome> {
+    let mut new_objects = 0usize;
+    let (blob_id, blob_new) = store.put_object(input.source)?;
+    new_objects += usize::from(blob_new);
+
+    let mut chunk_ids = Vec::with_capacity(input.chunks.len());
+    for chunk in input.chunks {
+        let bytes = c1::to_canonical_bytes(&chunk_value(chunk));
+        let (id, is_new) = store.put_object(&bytes)?;
+        new_objects += usize::from(is_new);
+        chunk_ids.push(id);
+    }
+
+    let ref_path = format!("collections/{}/{}", input.collection, input.name);
+    let full_name = store.own_ref_name(&ref_path);
+    let current_target = store.get_ref(&full_name).and_then(|state| state.target.clone());
+    if let Some(current_id) = &current_target {
+        if let Some(bytes) = store.get_object(current_id)? {
+            if let Ok(text) = String::from_utf8(bytes) {
+                if let Ok(value) = c1::parse(&text) {
+                    if same_revision(&value, &blob_id, &chunk_ids) {
+                        return Ok(IngestOutcome {
+                            doc_rev_id: current_id.clone(),
+                            new_objects,
+                            ref_updated: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let mut object = BTreeMap::new();
+    object.insert("v".to_string(), Value::Integer(1));
+    object.insert("kind".to_string(), text_value("doc_rev"));
+    object.insert("source".to_string(), text_value(&blob_id));
+    object.insert(
+        "chunks".to_string(),
+        Value::Array(chunk_ids.iter().map(|id| text_value(id)).collect()),
+    );
+    let mut meta = BTreeMap::new();
+    meta.insert("name".to_string(), text_value(input.name));
+    meta.insert("media".to_string(), text_value(input.media));
+    if let Some(extractor) = input.extractor {
+        meta.insert("extractor".to_string(), text_value(extractor));
+    }
+    object.insert("meta".to_string(), Value::Object(meta));
+    if let Some(previous) = &current_target {
+        object.insert("previous".to_string(), text_value(previous));
+    }
+    let bytes = c1::to_canonical_bytes(&Value::Object(object));
+    let (doc_rev_id, is_new) = store.put_object(&bytes)?;
+    new_objects += usize::from(is_new);
+    store.set_ref(&ref_path, Some(&doc_rev_id))?;
+    Ok(IngestOutcome { doc_rev_id, new_objects, ref_updated: true })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +431,103 @@ mod tests {
         assert_eq!(chunk_markdown(text), chunk_markdown(text));
         assert_eq!(chunk_markdown(""), Vec::new());
         assert_eq!(chunk_plain_text(""), Vec::new());
+    }
+
+    // ---- 書き込み経路 ----
+
+    use crate::store::StoreConfig;
+    use std::path::PathBuf;
+
+    fn temp_store(name: &str) -> (PathBuf, Store) {
+        let dir = std::env::temp_dir()
+            .join(format!("uniqnode-ingest-test-{}-{name}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+        let store = Store::open(StoreConfig::new(&dir)).expect("open store");
+        (dir, store)
+    }
+
+    fn ingest_markdown(store: &mut Store, name: &str, text: &str) -> IngestOutcome {
+        let chunks = chunk_markdown(text);
+        ingest_document(
+            store,
+            &DocumentInput {
+                collection: "notes",
+                name,
+                source: text.as_bytes(),
+                media: "markdown",
+                chunks: &chunks,
+                extractor: None,
+            },
+        )
+        .expect("ingest")
+    }
+
+    /// 段 2 の合格条件: 同一内容の再取り込みで ID 集合と ref の seq が変わらない。
+    #[test]
+    fn reingesting_the_same_document_is_a_complete_noop() {
+        let (dir, mut store) = temp_store("noop");
+        let text = "# 章\n\n本文。\n";
+        let first = ingest_markdown(&mut store, "memo", text);
+        assert!(first.ref_updated);
+        assert!(first.new_objects > 0);
+        let objects_after_first = store.object_count();
+        let full_name = store.own_ref_name("collections/notes/memo");
+        let seq_after_first = store.get_ref(&full_name).expect("ref").seq;
+
+        let second = ingest_markdown(&mut store, "memo", text);
+        assert!(!second.ref_updated, "再取り込みで ref を張り替えてはならない");
+        assert_eq!(second.new_objects, 0, "再取り込みで新オブジェクトを書いてはならない");
+        assert_eq!(second.doc_rev_id, first.doc_rev_id);
+        assert_eq!(store.object_count(), objects_after_first);
+        assert_eq!(store.get_ref(&full_name).expect("ref").seq, seq_after_first);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 内容が変わったら新しい doc_rev が前版への previous を持ち、ref が進む。
+    #[test]
+    fn a_changed_document_creates_a_new_revision_with_previous() {
+        let (dir, mut store) = temp_store("revision");
+        let first = ingest_markdown(&mut store, "memo", "# 章\n\n初版。\n");
+        let second = ingest_markdown(&mut store, "memo", "# 章\n\n改訂版。\n");
+        assert!(second.ref_updated);
+        assert_ne!(second.doc_rev_id, first.doc_rev_id);
+
+        let bytes = store.get_object(&second.doc_rev_id).expect("get").expect("present");
+        let value = c1::parse(&String::from_utf8(bytes).expect("utf-8")).expect("c1");
+        let Value::Object(map) = value else { panic!("doc_rev はオブジェクト") };
+        assert_eq!(map.get("previous"), Some(&text_value(&first.doc_rev_id)));
+
+        let full_name = store.own_ref_name("collections/notes/memo");
+        let state = store.get_ref(&full_name).expect("ref");
+        assert_eq!(state.target.as_deref(), Some(second.doc_rev_id.as_str()));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 引用が doc_rev 経由で組める: ref から doc_rev、chunks の添字と辿り、
+    /// 文書名(ref パス)・位置(添字)・見出し(meta.breadcrumbs)の三つが揃う。
+    #[test]
+    fn a_citation_is_resolvable_through_the_doc_rev() {
+        let (dir, mut store) = temp_store("citation");
+        let outcome =
+            ingest_markdown(&mut store, "memo", "# 甲\n\n## 乙\n\n引用される本文。\n");
+        let bytes = store.get_object(&outcome.doc_rev_id).expect("get").expect("present");
+        let value = c1::parse(&String::from_utf8(bytes).expect("utf-8")).expect("c1");
+        let Value::Object(map) = value else { panic!("doc_rev はオブジェクト") };
+        let Some(Value::Array(chunk_ids)) = map.get("chunks") else { panic!("chunks 列") };
+        assert_eq!(chunk_ids.len(), 1);
+        let Value::Text(chunk_id) = &chunk_ids[0] else { panic!("chunk id は文字列") };
+
+        let bytes = store.get_object(chunk_id).expect("get").expect("present");
+        let value = c1::parse(&String::from_utf8(bytes).expect("utf-8")).expect("c1");
+        let Value::Object(chunk) = value else { panic!("chunk はオブジェクト") };
+        assert_eq!(chunk.get("text"), Some(&text_value("引用される本文。")));
+        let Some(Value::Object(meta)) = chunk.get("meta") else { panic!("meta") };
+        assert_eq!(
+            meta.get("breadcrumbs"),
+            Some(&Value::Array(vec![text_value("甲"), text_value("乙")]))
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

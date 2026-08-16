@@ -23,7 +23,8 @@ const BM25_B: f64 = 0.75;
 /// ため、応答には先頭だけを載せる。
 const SNIPPET_CHAR_LIMIT: usize = 200;
 
-/// 本文を索引語の列に切る(索引の構築と問い合わせが共用する唯一の実装。should/0135)。
+/// 文字列を索引語の列に切る(索引の構築と問い合わせが共用する唯一の実装。should/0135。
+/// チャンクのどの文字列をここに通すかは chunk_terms_of が決める)。
 ///
 /// - 全体を小文字化した上で、ASCII 英数字と `_` の連なりは 1 語まるごと 1 語にする
 ///   (token_estimate のような識別子・英単語の完全一致のため。`_` を語に含めるので、
@@ -77,6 +78,40 @@ pub fn terms_of(text: &str) -> Vec<String> {
         }
     }
     flush(&mut run, run_class, &mut terms);
+    terms
+}
+
+/// 見出しの語を本文の何回ぶんとして数えるか(重み)。見出しは本文より短く、同じ語を
+/// 繰り返さないので、重み 1(素直な連結)のままだと節の題を並べただけの目次の節に
+/// 定義の節が負ける。評価ハーネス(node/src/eval.rs)の固定コーパスで測ると、重み 1 は
+/// 目次の対を取りこぼし、重み 2 と重み 3 は同じ数値になった。同じ数値なら小さい方を
+/// 採る(重みを上げるほど見出しが文書長を占め、本文の語が薄まる)。
+const BREADCRUMB_WEIGHT: usize = 2;
+
+/// チャンク 1 件が索引に出す語の列(本文の語に、見出しの語を重みの回数だけ続けたもの)。
+/// 索引の構築と評価ハーネスの対照方式が共用する、「このチャンクの索引語は何か」の唯一の
+/// 家(should/0135)。切り方そのものは terms_of の一箇所のままで、ここは切る対象と、
+/// 各語を何回数えるかを決める。
+///
+/// 見出し(meta.breadcrumbs)を含めるのは、見出しにしかない語で本文へ届くためである。
+/// チャンカーは見出し行を本文に残さず meta.breadcrumbs へ写す(INGEST
+/// (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の「チャンク分割」)ので、含めなければ
+/// 節の題だけにある語はどのチャンクからも消え、検索で到達できない。
+///
+/// 重みは出現数を増やす形で与える。BM25 の tf と文書長の両方が同じ 1 本の語の列から
+/// 出るので、フィールドごとに別の長さを持たせる仕掛けが要らない(その形も測ったが、
+/// 数値は同じだった)。
+///
+/// 見出しは 1 段ずつ切る(段をつないでから切らない)。つなぐと段の境をまたぐ bigram が
+/// 生まれ、どの見出しにも無い語が索引に入ってしまう。
+pub fn chunk_terms_of(text: &str, breadcrumbs: &[String]) -> Vec<String> {
+    let mut terms = terms_of(text);
+    for crumb in breadcrumbs {
+        let crumb_terms = terms_of(crumb);
+        for _ in 0..BREADCRUMB_WEIGHT {
+            terms.extend(crumb_terms.iter().cloned());
+        }
+    }
     terms
 }
 
@@ -186,11 +221,6 @@ impl SearchIndex {
                 let Value::Text(chunk_id) = chunk_ref else { continue };
                 let Some(Value::Object(chunk)) = read_c1(store, chunk_id)? else { continue };
                 let Some(Value::Text(text)) = chunk.get("text") else { continue };
-                let terms = terms_of(text);
-                if terms.is_empty() {
-                    // 語の無いチャンクはどのクエリにも一致しない。
-                    continue;
-                }
                 let (breadcrumbs, page) = match chunk.get("meta") {
                     Some(Value::Object(meta)) => {
                         let breadcrumbs = match meta.get("breadcrumbs") {
@@ -211,6 +241,12 @@ impl SearchIndex {
                     }
                     _ => (Vec::new(), None),
                 };
+                // 索引語は本文と見出しの両方から採る(chunk_terms_of)。
+                let terms = chunk_terms_of(text, &breadcrumbs);
+                if terms.is_empty() {
+                    // 語の無いチャンクはどのクエリにも一致しない。
+                    continue;
+                }
                 let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
                 for term in &terms {
                     *counts.entry(term).or_insert(0) += 1;
@@ -351,6 +387,24 @@ mod tests {
         assert_eq!(terms_of("--- 、。"), Vec::<String>::new());
     }
 
+    /// チャンクの索引語は本文の語に見出しの語が重みの回数だけ続いたもの。期待値は
+    /// リテラルで書く(検査対象から導出しない。should/0137)。
+    #[test]
+    fn chunk_terms_repeat_the_heading_terms_by_their_weight() {
+        // 見出しの語は BREADCRUMB_WEIGHT(2)回ぶん数える。本文の語は 1 回のまま。
+        assert_eq!(chunk_terms_of("本文", &["節".to_string()]), vec!["本文", "節", "節"]);
+        // 見出しは 1 段ずつ切る: 段をつなぐと生まれる「代整」は索引語にならない。
+        assert_eq!(
+            chunk_terms_of("", &["世代".to_string(), "整合".to_string()]),
+            vec!["世代", "世代", "整合", "整合"]
+        );
+        // 見出しを持たないチャンク(PDF はこの形)は本文の語だけ。
+        assert_eq!(
+            chunk_terms_of("token_estimate は 近似", &[]),
+            vec!["token_estimate", "は", "近似"]
+        );
+    }
+
     /// BM25 の期待値はリテラルで書く(検査対象から導出しない。should/0137)。文書長が
     /// 平均と等しく tf=1 のとき、飽和と正規化が打ち消し合って得点は idf に一致する。
     #[test]
@@ -470,6 +524,34 @@ mod tests {
         let hits = index.search("鍵", None, 10);
         assert_eq!(hits.len(), 1, "鍵を含むチャンクだけが返るべき");
         assert_eq!(hits[0].chunk.document, "keys");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 見出しにしかない語でも、その見出しの下のチャンクに届く。チャンカーは見出し行を
+    /// 本文に残さず meta.breadcrumbs へ写すので、索引が本文だけを見ていたころ、この
+    /// クエリはどのチャンクにも一致しなかった(空振り)。
+    #[test]
+    fn a_term_that_appears_only_in_the_heading_reaches_its_chunk() {
+        let (dir, mut store) = temp_store("heading-only");
+        // 本文には「監査証跡」の bigram(監査・査証・証跡)が一つも無い。
+        ingest_markdown(
+            &mut store,
+            "notes",
+            "manual",
+            "# 監査証跡\n\nだれがいつ何を書いたのかの記録を残す。\n",
+        );
+        ingest_markdown(&mut store, "notes", "other", "# 別\n\n関係の無い本文。\n");
+        let index = SearchIndex::build(&store).expect("build");
+        let hits = index.search("監査証跡", None, 10);
+        assert_eq!(hits.len(), 1, "見出しにしかない語で本文のチャンクに届くべき");
+        assert_eq!(hits[0].chunk.document, "manual");
+        assert_eq!(hits[0].chunk.breadcrumbs, vec!["監査証跡".to_string()]);
+        // 索引語に足すだけで、応答のスニペットは本文のまま(見出しは citation が持つ)。
+        assert!(
+            !hits[0].chunk.snippet.contains("監査証跡"),
+            "スニペットは本文のはず: {}",
+            hits[0].chunk.snippet
+        );
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

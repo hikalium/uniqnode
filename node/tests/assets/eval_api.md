@@ -23,3 +23,9 @@ breadcrumbs of every chunk in that section.
 pdftotext の版は取り込みの記録に残す。抽出器の名前と版を doc_rev の meta に書き、
 どの版で抽出したテキストなのかを後から辿れるようにする。版が変われば抽出結果も
 変わりうるためである。
+
+## token_quarters
+
+The chunker weighs an ASCII character as one unit and any other character as four, then packs
+paragraphs until the running total reaches the limit. Whole units keep the packing arithmetic
+free of floating point.

@@ -382,6 +382,7 @@ uniqnode コアの上に、次の応用層が載る予定である。仕様化�
 | `GET /v1/status` | 版・オブジェクト数・ピア到達性・seq・健全性集計(ALERT を含む) |
 | `GET /v1/objects/{id}` | オブジェクト取得(ローカル。なければ 404 = ローカル不保持の言明) |
 | `POST /v1/objects` | オブジェクト投入(べき等。ID を返す) |
+| `GET /v1/refs` | ref の一覧(名前・target・seq・at) |
 | `GET /v1/refs/...` / `PUT /v1/refs/...` | ref の解決と更新(自DBノードの名前空間のみ書ける) |
 | `POST /v1/pins` / `GET /v1/pins` | pin の設定(発行者は同時に保持表明する)/ 一覧と保持者 |
 | `GET /v1/health/events` | 健全性の遷移イベント(遷移でのみ記録。should/0129) |

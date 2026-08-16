@@ -25,8 +25,9 @@ fn search(address: &str, body: &str) -> HttpResponse {
     simple(address, "POST", "/v1/search", body.as_bytes())
 }
 
-/// 空振りの応答(results 空)の全文。空振りの検証は全文一致で行う。
-const EMPTY_RESULTS: &str = "{\"results\":[],\"score_semantics\":\"bm25\"}";
+/// 空振りの応答(results 空)の全文。空振りの検証は全文一致で行う。method は実際に
+/// 使った方式で、埋め込みを装備しない serve では bm25 になる。
+const EMPTY_RESULTS: &str = "{\"method\":\"bm25\",\"results\":[],\"score_semantics\":\"bm25\"}";
 
 /// 完了条件の三つ組: (1) 日本語クエリ・(2) 英語クエリ・(3) 識別子の完全一致で該当
 /// チャンクが top-k に入り、(5) citation の document・position・breadcrumbs が正しい。
@@ -140,6 +141,136 @@ fn a_collection_filter_narrows_the_search_scope() {
     assert_eq!(body, EMPTY_RESULTS, "存在しないコレクションは空振り: {body}");
 }
 
+/// 完了条件を生産経路で確かめる(RAG (uuid:86363f4a-3df6-4aa2-9c64-b99aa5cb4e7b) の項 4):
+/// 言い換えのクエリ(索引語を一つも共有しない問い)が、POST /v1/search 越しに正解の節へ
+/// 届く。資材は評価ハーネスの語彙の隔たりの場を使い回す(対の由来を一箇所に保つ。
+/// should/0135)。
+///
+/// 経路は運用と同じ順序である: CLI で取り込み、CLI でベクトルを作り(serve は止めた
+/// まま。ストアは二重に開けない)、そのあと serve を --embed 付きで起こす。
+#[test]
+fn a_paraphrased_query_reaches_its_section_through_the_search_api() {
+    require_embedding_server();
+    let dir = unique_dir("search-embedding");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/assets");
+    // 評価ハーネスと同じ 4 文書を入れる。1 文書だけでは競合が薄く、語の一致が空回り
+    // していることが順位に出ない。
+    for document in ["eval_ja.md", "eval_en.md", "eval_api.md", "eval_gap.md"] {
+        let path = assets.join(document);
+        run_cli(&["ingest", dir.to_str().expect("utf-8"), "notes", path.to_str().expect("utf-8")]);
+    }
+    let embedded = run_cli(&["embed", dir.to_str().expect("utf-8")]);
+    assert!(embedded.contains("embedded: 23"), "23 チャンクぶん作るはず: {embedded}");
+    // 二度目は何も計算しない(鍵はチャンクのオブジェクト ID なので、同じ内容は再利用)。
+    let again = run_cli(&["embed", dir.to_str().expect("utf-8")]);
+    assert!(again.contains("cached: 23") && again.contains("embedded: 0"), "{again}");
+
+    let server = start_server_at_with_args(
+        dir.clone(),
+        &["--embed", uniqnode::embed::DEFAULT_EMBEDDING_URL],
+    );
+    // 正解は eval_gap の 0 番(電源断からの復帰)。問いと索引語を一つも共有しないので、
+    // BM25 では返らない(評価ハーネスの bm25_cannot_reach_any_vocabulary_gap_pair が
+    // 原理として確かめている対である)。本文の一節で名指しする。
+    let answer = "無停電電源が尽きて";
+    let query = "{\"query\":\"急に電気が消えたときの立ち上げ\",\"top_k\":3";
+    let body = body_text(&search(&server.address, &format!("{query},\"method\":\"bm25\"}}")));
+    assert!(body.contains("\"method\":\"bm25\""), "{body}");
+    assert!(
+        !body.contains(answer),
+        "BM25 で正解が返るなら、この対はもう語彙の隔たりの対ではない: {body}"
+    );
+
+    // 埋め込み単独では正解が 1 位に来る(意味検索が効いている)。
+    let body = body_text(&search(&server.address, &format!("{query},\"method\":\"embedding\"}}")));
+    assert!(!body.contains("degraded"), "劣化していないはず: {body}");
+    assert!(body.contains("\"score_semantics\":\"cosine\""), "{body}");
+    let first = body.split("\"citation\"").nth(1).expect("1 件目");
+    assert!(
+        first.contains("\"document\":\"eval_gap\"") && first.contains("\"position\":0"),
+        "言い換えの問いで正解が 1 位に来るべき: {body}"
+    );
+    assert!(first.contains("\"breadcrumbs\":[\"運用の覚え書き\",\"電源断からの復帰\"]"), "{body}");
+
+    // 既定(埋め込みを装備した serve では融合)でも、上位 3 件に入る。BM25 の順位も
+    // 混ぜるので順位は下がりうるが、届かないことはない。
+    let body = body_text(&search(&server.address, &format!("{query}}}")));
+    assert!(body.contains("\"method\":\"hybrid\""), "{body}");
+    assert!(body.contains("\"score_semantics\":\"rrf\""), "融合の得点は BM25 とは別物: {body}");
+    assert!(!body.contains("degraded"), "劣化していないはず: {body}");
+    assert!(body.contains(answer), "融合でも正解が上位 3 件に入るべき: {body}");
+    drop(server);
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// CLI を 1 回動かして標準出力を返す(取り込みとベクトル作りは serve 停止中のストア用の
+/// 経路であり、テストも同じ道を通る。should/0138)。
+fn run_cli(arguments: &[&str]) -> String {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_uniqnode"))
+        .args(arguments)
+        .output()
+        .expect("uniqnode の起動");
+    assert!(
+        output.status.success(),
+        "uniqnode {arguments:?} が失敗した: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("utf-8")
+}
+
+/// 劣化の経路(RAG (uuid:86363f4a-3df6-4aa2-9c64-b99aa5cb4e7b) の項 4 の完了条件): 埋め込みを
+/// 装備した serve でも、埋め込みが使えないときは BM25 だけで答え続ける。落ちないことと、
+/// 黙って劣化しないこと(応答が実際に使った方式と理由を言うこと)の両方を確かめる
+/// (should/0128)。
+///
+/// このテストは埋め込みサーバを要求しない。届かない相手(誰も待ち受けていないポート)を
+/// 指し、ベクトルは試験が自分でキャッシュに書くので、劣化の判断だけを切り出して測れる。
+#[test]
+fn search_degrades_to_bm25_when_the_embedding_server_cannot_be_reached() {
+    let dir = unique_dir("search-degraded");
+    let server = start_server_at_with_args(dir.clone(), &["--embed", "http://127.0.0.1:1"]);
+    put_document(&server.address, "notes", "search_ja.md", SEARCH_JA.as_bytes());
+
+    // (1) ベクトルが 1 件も無い段階: 既定の方式(融合)を求めても BM25 で答え、理由が
+    // 「ベクトルが無い」であることを言う。
+    let body = body_text(&search(&server.address, "{\"query\":\"世代の整合\"}"));
+    assert!(body.contains("\"method\":\"bm25\""), "劣化後の方式が読めるべき: {body}");
+    assert!(body.contains("\"score_semantics\":\"bm25\""), "{body}");
+    assert!(body.contains("ベクトルが 1 件も無い"), "劣化の理由が読めるべき: {body}");
+    assert_eq!(body.matches("\"id\":").count(), 1, "劣化しても BM25 の結果は返るべき: {body}");
+    let chunk_id = json_text_field(&body, "id").expect("チャンク ID");
+
+    // (2) ベクトルはあるが埋め込みサーバに届かない段階: クエリを埋め込めないので、
+    // やはり BM25 で答え、理由は接続の失敗になる。ベクトルはストアの外の導出データ
+    // なので、serve を止めずに書ける(世代ではなくキャッシュの見かけで作り直される)。
+    let mut cache = uniqnode::embed::VectorCache::open(
+        uniqnode::embed::VectorCache::path_for(&dir, "bge-m3"),
+        "bge-m3",
+        uniqnode::embed::DEFAULT_EMBEDDING_DIMENSION,
+    )
+    .expect("open cache");
+    let mut vector = vec![0.0f32; uniqnode::embed::DEFAULT_EMBEDDING_DIMENSION];
+    vector[0] = 1.0;
+    cache.extend(vec![(chunk_id, vector)]).expect("write cache");
+
+    let body = body_text(&search(&server.address, "{\"query\":\"世代の整合\"}"));
+    assert!(body.contains("\"method\":\"bm25\""), "{body}");
+    assert!(body.contains("127.0.0.1:1"), "どのサーバに届かなかったかを言うべき: {body}");
+    assert!(body.contains("接続できない"), "劣化の理由が読めるべき: {body}");
+    assert_eq!(body.matches("\"id\":").count(), 1, "劣化しても BM25 の結果は返るべき: {body}");
+
+    // 方式を明示して BM25 を求めたときは、そもそも埋め込みを試さないので理由も出ない。
+    let body = body_text(&search(
+        &server.address,
+        "{\"query\":\"世代の整合\",\"method\":\"bm25\"}",
+    ));
+    assert!(body.contains("\"method\":\"bm25\""), "{body}");
+    assert!(!body.contains("degraded"), "劣化していないのに理由を出さない: {body}");
+    drop(server);
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
 /// 形式外の要求は理由を言って拒み(must/0022)、空のストアへの検索は空の成功。
 #[test]
 fn search_rejects_malformed_requests_explicitly() {
@@ -151,6 +282,8 @@ fn search_rejects_malformed_requests_explicitly() {
         ("{\"query\":\"x\",\"top_k\":0}", "top_k"),
         ("{\"query\":\"x\",\"top_k\":\"ten\"}", "top_k"),
         ("{\"query\":\"x\",\"collection\":7}", "collection"),
+        ("{\"query\":\"x\",\"method\":\"magic\"}", "method"),
+        ("{\"query\":\"x\",\"method\":7}", "method"),
         ("not json", "JSON"),
     ];
     for (request_body, needle) in cases {

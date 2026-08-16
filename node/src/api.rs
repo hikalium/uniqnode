@@ -24,6 +24,9 @@ pub struct ApiContext {
     /// 世代はオブジェクト数に加えて署名者ごとの最終 seq も見る(ref の張り替えだけの
     /// 変化でも旧版のチャンクを見えから外すため。node/src/search.rs)。
     pub search: Mutex<Option<crate::search::SearchIndex>>,
+    /// 埋め込みの装備(serve の --embed が与えられたときだけ Some。node/src/embed.rs)。
+    /// 無ければ検索は BM25 だけで答える。
+    pub embedding: Option<crate::embed::EmbeddingService>,
 }
 
 fn json_object(entries: Vec<(&str, c1::Value)>) -> Vec<u8> {
@@ -323,9 +326,14 @@ fn handle_query(context: &ApiContext, request: &Request) -> Response {
 }
 
 /// POST /v1/search(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))。ボディ:
-/// {"query": "...", "collection": "...", "top_k": N}(collection 省略時は全コレクション、
-/// top_k 省略時は 10)。索引は導出データの遅延キャッシュで、referrers と同じく初回
-/// 要求時に構築し、世代がずれたら次の要求で作り直す。
+/// {"query": "...", "collection": "...", "top_k": N, "method": "..."}(collection 省略時は
+/// 全コレクション、top_k 省略時は 10)。索引は導出データの遅延キャッシュで、referrers と
+/// 同じく初回要求時に構築し、世代がずれたら次の要求で作り直す。
+///
+/// method は "bm25"(語の一致)・"embedding"(意味の近さ)・"hybrid"(両者の RRF 融合)。
+/// 省略時の既定は装備に従う: 埋め込みが設定されていれば hybrid、なければ bm25 である。
+/// 埋め込みが使えないときは BM25 だけに劣化して答え、応答の method(実際に使った方式)と
+/// degraded(理由)がそれを語る(黙って劣化しない。should/0128)。
 fn handle_search(context: &ApiContext, request: &Request) -> Response {
     let body_text = match std::str::from_utf8(&request.body) {
         Ok(t) => t,
@@ -353,12 +361,41 @@ fn handle_search(context: &ApiContext, request: &Request) -> Response {
         Some(c1::Value::Integer(n)) if (1..=1000).contains(n) => *n as usize,
         _ => return error_response(400, "top_k は 1..=1000 の整数"),
     };
+    let requested = match map.get("method") {
+        // 既定は装備に従う。埋め込みを設定した節点で融合を既定にするのは、方式の指定を
+        // 知らない呼び手(既存の CLI・MCP)が黙って BM25 だけに取り残されないため。
+        None => match &context.embedding {
+            Some(_) => crate::embed::SearchMethod::Hybrid,
+            None => crate::embed::SearchMethod::Bm25,
+        },
+        Some(c1::Value::Text(t)) => match crate::embed::SearchMethod::parse(t) {
+            Some(method) => method,
+            None => {
+                return error_response(400, "method は \"bm25\"・\"embedding\"・\"hybrid\" のどれか")
+            }
+        },
+        _ => return error_response(400, "method は文字列"),
+    };
     if crate::search::terms_of(&query).is_empty() {
         return error_response(
             400,
             "クエリに索引語が無い(英数字の語か、仮名・漢字などの文字が要る)",
         );
     }
+    // クエリの埋め込みは、どのロックも取る前に済ませる。埋め込みサーバとの往復であり、
+    // その待ちのあいだ store のロックを持つと、1 本の検索で API 全体が塞がる
+    // (node/src/sync.rs のロックの規律と同じ理由)。届かなければ理由を持ち帰り、
+    // 下の順位付けが BM25 だけに劣化して答える。
+    let embedding = match requested {
+        crate::embed::SearchMethod::Bm25 => {
+            crate::embed::QueryEmbedding::Unavailable("bm25 を要求された".to_string())
+        }
+        _ => crate::embed::QueryEmbedding::of(
+            context.embedding.as_ref().map(|service| &service.embedder),
+            &query,
+        ),
+    };
+
     let store = context.store.lock().expect("lock");
     let mut cache = context.search.lock().expect("lock");
     if !cache.as_ref().is_some_and(|index| index.is_current(&store)) {
@@ -368,8 +405,46 @@ fn handle_search(context: &ApiContext, request: &Request) -> Response {
         }
     }
     let index = cache.as_ref().expect("直前に構築した");
-    let hits = index.search(&query, collection.as_deref(), top_k);
-    Response::json(200, search_response_body(&hits))
+
+    // ベクトルの索引も BM25 の索引と同じ遅延キャッシュで持つ。読むのはキャッシュ
+    // ファイルだけなので、検索要求が模型の計算を待つことはない(コーパスの埋め込みは
+    // CLI の uniqnode embed の仕事)。
+    let mut vector_cache = None;
+    let mut load_failure = None;
+    if requested != crate::embed::SearchMethod::Bm25 {
+        if let Some(service) = &context.embedding {
+            let mut guard = service.index.lock().expect("lock");
+            if !guard.as_ref().is_some_and(|vectors| service.index_is_current(vectors, &store)) {
+                match service.load_index(&store) {
+                    Ok(vectors) => *guard = Some(vectors),
+                    Err(e) => {
+                        *guard = None;
+                        load_failure = Some(format!("{e}"));
+                    }
+                }
+            }
+            vector_cache = Some(guard);
+        }
+    }
+    let search = crate::embed::HybridSearch {
+        lexical: index,
+        vectors: vector_cache.as_ref().and_then(|guard| guard.as_ref()),
+    };
+    let mut outcome =
+        search.ranked(requested, &query, &embedding, collection.as_deref(), top_k);
+    // キャッシュを読めなかったのが根の理由なら、そちらを載せる(「索引がない」だけでは
+    // 何を直せばよいか読めない)。
+    if load_failure.is_some() {
+        outcome.degraded = load_failure;
+    }
+    if let Some(reason) = &outcome.degraded {
+        eprintln!(
+            "uniqnode: search: {} を求められて {} で答えた: {reason}",
+            requested.as_str(),
+            outcome.method.as_str()
+        );
+    }
+    Response::json(200, search_response_body(index, &outcome))
 }
 
 /// JSON 文字列 1 個ぶんの直列化(引用符・エスケープ込み)。検索応答は score が小数で
@@ -383,13 +458,19 @@ fn json_text(text: &str) -> String {
 /// 検索応答の本文。results の各件は snippet(チャンク本文の先頭)・id(チャンク ID。
 /// 全文の取得は既存の GET /v1/objects/{id})・score・citation(INGEST の「文書モデル」節
 /// の引用規則: document は ref パスから collections/<コレクション名>/ を除いた残り、
-/// position は chunks 列の添字、breadcrumbs、PDF なら page)。score_semantics は
-/// "bm25": スコアは同一応答内の順位付けにだけ意味があり、応答をまたいだ比較や絶対値の
-/// 閾値には使えない。
-fn search_response_body(hits: &[crate::search::SearchHit<'_>]) -> Vec<u8> {
+/// position は chunks 列の添字、breadcrumbs、PDF なら page)。
+///
+/// method は実際に使った方式、score_semantics はその方式の得点の意味("bm25" の得点・
+/// "cosine"・順位から作った "rrf")である。どれも同一応答内の順位付けにだけ意味があり、
+/// 応答をまたいだ比較や絶対値の閾値には使えない。degraded は、要求した方式で答えられ
+/// なかったときだけ現れる理由である。
+fn search_response_body(
+    index: &crate::search::SearchIndex,
+    outcome: &crate::embed::RankedSearch,
+) -> Vec<u8> {
     let mut results = Vec::new();
-    for hit in hits {
-        let chunk = hit.chunk;
+    for hit in &outcome.hits {
+        let chunk = index.chunk(hit.position);
         let breadcrumbs: Vec<String> =
             chunk.breadcrumbs.iter().map(|title| json_text(title)).collect();
         let mut citation = format!(
@@ -408,7 +489,17 @@ fn search_response_body(hits: &[crate::search::SearchHit<'_>]) -> Vec<u8> {
             json_text(&chunk.snippet),
         ));
     }
-    format!("{{\"results\":[{}],\"score_semantics\":\"bm25\"}}", results.join(",")).into_bytes()
+    let degraded = match &outcome.degraded {
+        Some(reason) => format!("\"degraded\":{},", json_text(reason)),
+        None => String::new(),
+    };
+    format!(
+        "{{{degraded}\"method\":\"{}\",\"results\":[{}],\"score_semantics\":\"{}\"}}",
+        outcome.method.as_str(),
+        results.join(","),
+        outcome.method.score_semantics(),
+    )
+    .into_bytes()
 }
 
 fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Response {

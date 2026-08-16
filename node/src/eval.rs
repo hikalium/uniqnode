@@ -3,14 +3,17 @@
 //!
 //! この層が持つのは指標の計算(純関数)と方式の差し替え点だけで、固定の小コーパスと
 //! 「クエリ → 正解チャンク」対は資材の側にある(node/tests/assets/eval_*.md と
-//! node/tests/eval.rs)。現時点で載っている方式は BM25 だけだが、埋め込みと RRF 融合
-//! (RAG (uuid:86363f4a-3df6-4aa2-9c64-b99aa5cb4e7b) の項 4)は Retrieval を実装して
-//! 同じ evaluate に載り、同じ対で数値を比べられる。
+//! node/tests/eval.rs)。載っている方式は BM25(Bm25Retrieval)と、埋め込み・RRF 融合
+//! (HybridRetrieval。RAG (uuid:86363f4a-3df6-4aa2-9c64-b99aa5cb4e7b) の項 4)で、同じ対と
+//! 同じ指標で比べられる。埋め込みの方式は外部の埋め込みサーバに届くことを要求するので、
+//! その数値を測る回帰テストだけが前提を確かめて落ちる形になっている(node/tests/eval.rs の
+//! require_embedding_server。サーバを要らない部品の検査は node/src/embed.rs の単体テスト)。
 //!
 //! 指標は順位だけを見る(得点は見ない)。SEARCH
 //! (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580)の score_semantics のとおり、BM25 の得点は
 //! 同一応答内の順位付けにしか意味を持たず、方式をまたいで比べられないためである。
 
+use crate::embed::{Embedder, HybridSearch, QueryEmbedding, SearchMethod};
 use crate::search::SearchIndex;
 
 /// 評価の中でチャンクを名指す名前(この作り方の家はここだけ。should/0135)。引用
@@ -58,6 +61,61 @@ impl Retrieval for Bm25Retrieval<'_> {
             .search(query, self.collection, top_k)
             .into_iter()
             .map(|hit| chunk_name(&hit.chunk.document, hit.chunk.position))
+            .collect()
+    }
+}
+
+/// 埋め込み(意味検索)と RRF 融合を差し替え点に載せる被せ物。順位付けそのものは
+/// 生産経路(node/src/embed.rs の HybridSearch)が作る。評価が測るのは POST /v1/search が
+/// 使うのと同じ経路であって、評価のための第二実装ではない(should/0135)。
+///
+/// 劣化したまま数えない: 要求した方式で答えられなかったときは、その理由を言って落ちる。
+/// 埋め込みサーバが途中で落ちたのに BM25 の数値を「埋め込みの数値」として記録することが、
+/// この層で起こりうる最悪の間違いだからである(should/0136)。
+pub struct HybridRetrieval<'a> {
+    search: HybridSearch<'a>,
+    /// クエリを埋め込むための相手(生産経路では serve が要求ごとにロックの外で使う)。
+    embedder: Option<&'a Embedder>,
+    method: SearchMethod,
+    collection: Option<&'a str>,
+}
+
+impl<'a> HybridRetrieval<'a> {
+    pub fn new(
+        search: HybridSearch<'a>,
+        embedder: Option<&'a Embedder>,
+        method: SearchMethod,
+        collection: Option<&'a str>,
+    ) -> HybridRetrieval<'a> {
+        HybridRetrieval { search, embedder, method, collection }
+    }
+}
+
+impl Retrieval for HybridRetrieval<'_> {
+    fn name(&self) -> &str {
+        self.method.as_str()
+    }
+
+    fn ranked(&self, query: &str, top_k: usize) -> Vec<String> {
+        let embedding = QueryEmbedding::of(self.embedder, query);
+        let outcome =
+            self.search.ranked(self.method, query, &embedding, self.collection, top_k);
+        if outcome.method != self.method || outcome.degraded.is_some() {
+            panic!(
+                "方式 {} を測ろうとしたが {} に劣化した({})。劣化した順位を方式の数値として\
+                 記録してはならない",
+                self.method.as_str(),
+                outcome.method.as_str(),
+                outcome.degraded.unwrap_or_else(|| "理由なし".to_string())
+            );
+        }
+        outcome
+            .hits
+            .into_iter()
+            .map(|hit| {
+                let chunk = self.search.lexical.chunk(hit.position);
+                chunk_name(&chunk.document, chunk.position)
+            })
             .collect()
     }
 }

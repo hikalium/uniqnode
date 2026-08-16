@@ -63,6 +63,31 @@ pub fn require_pdftotext() {
     }
 }
 
+/// 埋め込みのテストの前提確認。埋め込みサーバが無い環境では黙って飛ばさず、起動の手順を
+/// 示して失敗する(docs/design/TESTING.md の外部コマンドの規約。require_pdftotext と同じ
+/// 扱い)。飛ばして緑にすると、検証したのか検証を諦めたのかが結果から区別できなくなる。
+///
+/// 生存の判定は実際に 1 本埋め込んでみることで行う。GET /v1/models の capabilities は
+/// この llama.cpp の版では常に ["completion"] を返し、埋め込みに対応しているかどうかの
+/// 判定に使えない(実測)ためである(should/0116: 設定ではなく観測された効果で確かめる)。
+pub fn require_embedding_server() -> uniqnode::embed::Embedder {
+    let embedder = uniqnode::embed::Embedder::new(
+        uniqnode::embed::DEFAULT_EMBEDDING_URL,
+        uniqnode::embed::DEFAULT_EMBEDDER_ID,
+    )
+    .expect("既定の埋め込み設定");
+    if let Err(error) = embedder.embed_query("疎通確認") {
+        panic!(
+            "埋め込みのテストには {} で待ち受ける埋め込みサーバが必要({error})。\
+             起動例: llama-server --model /work2/llm/models/bge-m3/bge-m3-FP16.gguf \
+             --host 127.0.0.1 --port 8083 --embeddings --pooling cls --embd-normalize 2 \
+             -ngl 99 --ctx-size 8192 --parallel 4 --batch-size 2048 --ubatch-size 2048",
+            embedder.endpoint()
+        );
+    }
+    embedder
+}
+
 pub fn unique_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("uniqnode-test-{}-{name}", std::process::id()));
     if dir.exists() {
@@ -72,22 +97,36 @@ pub fn unique_dir(name: &str) -> PathBuf {
 }
 
 pub fn start_server_at(dir: PathBuf) -> Server {
-    start_server_at_with_env(dir, &[])
+    start_server_at_with(dir, &[], &[])
 }
 
 /// 環境変数を差し替えて serve を起動する(PATH を空にして pdftotext 不在の環境を
 /// 再現する用)。
 pub fn start_server_with_env(name: &str, envs: &[(&str, &str)]) -> Server {
-    start_server_at_with_env(unique_dir(name), envs)
+    start_server_at_with(unique_dir(name), envs, &[])
 }
 
-fn start_server_at_with_env(dir: PathBuf, envs: &[(&str, &str)]) -> Server {
+/// serve に追加の引数を与えて起動する(--embed など)。
+pub fn start_server_with_args(name: &str, args: &[&str]) -> Server {
+    start_server_at_with(unique_dir(name), &[], args)
+}
+
+/// 既存のディレクトリに対して追加の引数つきで起動する(取り込み済みのストアを
+/// 使い回すテスト用)。
+pub fn start_server_at_with_args(dir: PathBuf, args: &[&str]) -> Server {
+    let mut server = start_server_at_with(dir, &[], args);
+    server.remove_dir_on_drop = false;
+    server
+}
+
+fn start_server_at_with(dir: PathBuf, envs: &[(&str, &str)], args: &[&str]) -> Server {
     let mut command = Command::new(env!("CARGO_BIN_EXE_uniqnode"));
     for (key, value) in envs {
         command.env(key, value);
     }
     let mut child = command
         .args(["serve", dir.to_str().expect("utf-8"), "127.0.0.1:0"])
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()

@@ -6,9 +6,15 @@
 //! HTTP の往復ではないので、serve を起こさずに済ませている(API そのものの検証は
 //! node/tests/search.rs の担当)。
 
+mod common;
+
 use std::path::PathBuf;
+use uniqnode::embed::{
+    fill_cache, Embedder, HybridSearch, SearchMethod, VectorCache, VectorIndex,
+};
 use uniqnode::eval::{
-    chunk_name, evaluate, per_mille, Bm25Retrieval, EvalCase, EvalReport, Retrieval,
+    chunk_name, evaluate, per_mille, Bm25Retrieval, EvalCase, EvalReport, HybridRetrieval,
+    Retrieval,
 };
 use uniqnode::ingest::{chunk_markdown, ingest_document, DocumentInput};
 use uniqnode::search::{chunk_terms_of, terms_of, SearchIndex};
@@ -103,9 +109,20 @@ fn cases() -> Vec<EvalCase> {
         .collect()
 }
 
+/// 索引の組(BM25 と、埋め込みを与えたときだけ作るベクトル)。
+struct IndexedCorpus {
+    lexical: SearchIndex,
+    vectors: Option<VectorIndex>,
+}
+
 /// コーパスを一時ストアへ取り込んで索引を作る。索引は Store を借りない導出データ
 /// なので、作った後はストアもディレクトリも畳んでよい。
-fn indexed_corpus(name: &str) -> SearchIndex {
+///
+/// 埋め込みを与えると、同じ走査から作ったベクトルの索引も返る。ベクトルはメモリだけの
+/// キャッシュに置く: 評価は毎回コーパスを取り込み直すので、残しても次回の鍵
+/// (チャンクのオブジェクト ID)は同じだが、測るたびに実際に埋め込みサーバを通す方が、
+/// 測定の前提(サーバが今も同じ模型で応じること)を確かめられる。
+fn indexed_corpus_with(name: &str, embedder: Option<&Embedder>) -> IndexedCorpus {
     let dir: PathBuf =
         std::env::temp_dir().join(format!("uniqnode-eval-{}-{name}", std::process::id()));
     if dir.exists() {
@@ -127,10 +144,19 @@ fn indexed_corpus(name: &str) -> SearchIndex {
         )
         .expect("ingest");
     }
-    let index = SearchIndex::build(&store).expect("build index");
+    let lexical = SearchIndex::build(&store).expect("build index");
+    let vectors = embedder.map(|embedder| {
+        let mut cache = VectorCache::in_memory(embedder.embedder_id(), embedder.dimension());
+        fill_cache(&store, embedder, &mut cache, &mut |_| {}).expect("埋め込み");
+        VectorIndex::from_cache(&store, &cache).expect("ベクトルの索引")
+    });
     drop(store);
     std::fs::remove_dir_all(&dir).expect("cleanup");
-    index
+    IndexedCorpus { lexical, vectors }
+}
+
+fn indexed_corpus(name: &str) -> SearchIndex {
+    indexed_corpus_with(name, None).lexical
 }
 
 fn bm25_report(index: &SearchIndex) -> EvalReport {
@@ -337,6 +363,174 @@ fn a_vocabulary_gap_pair_shares_no_index_term_with_its_answer() {
              キーワード一致で当たりうるので、語彙の隔たりの対にならない)",
             shared.join("、")
         );
+    }
+}
+
+/// 埋め込み(意味検索)と RRF 融合の実測値。埋め込みサーバを要求するテストはこれと
+/// the_vocabulary_gap_pairs_that_semantics_reaches の 2 つで、無い環境では黙って飛ばさず
+/// 起動手順を示して落ちる(TESTING (uuid:267326f7-e919-48f2-9737-fe0c0daec9d5))。純粋な
+/// 部品(RRF の融合・コサイン・応答の読み取り・キャッシュの往復)の検査はサーバを要求
+/// しない単体テスト(node/src/embed.rs)の側にある。
+#[test]
+fn embedding_and_fusion_hold_the_recorded_baseline_on_the_fixed_corpus() {
+    let embedder = common::require_embedding_server();
+    let indexed = indexed_corpus_with("embedding", Some(&embedder));
+    let vectors = indexed.vectors.as_ref().expect("ベクトルの索引");
+    // 二つの索引が同じチャンクを同じ並びで見ていること(位置で順位を融合する前提)。
+    assert_eq!(vectors.chunk_count(), indexed.lexical.chunk_count());
+    assert!(vectors.aligned_with(&indexed.lexical), "ベクトルの索引が BM25 側と揃うべき");
+    assert_eq!(
+        vectors.embedded_count(),
+        vectors.chunk_count(),
+        "固定コーパスは全チャンクにベクトルがあるべき"
+    );
+    let search = || HybridSearch { lexical: &indexed.lexical, vectors: Some(vectors) };
+    let bm25 = bm25_report(&indexed.lexical);
+    let embedding = evaluate(
+        &HybridRetrieval::new(search(), Some(&embedder), SearchMethod::Embedding, Some("eval")),
+        &cases(),
+        CUTOFFS,
+    );
+    let hybrid = evaluate(
+        &HybridRetrieval::new(search(), Some(&embedder), SearchMethod::Hybrid, Some("eval")),
+        &cases(),
+        CUTOFFS,
+    );
+
+    // 実測 2026-08-17(千分率)。基準線は「あるべき値」ではなく「今の値」であり、更新の
+    // 手順は BM25 の基準線と同じ(失敗メッセージの内訳で順位の動きを目で確かめてから
+    // リテラルを置き換える)。
+    //
+    // 埋め込み単独: 語彙が隔たる 6 対すべてが上位 10 件に入り、5 対は 1 位。取りこぼすのは
+    // 順位であって到達ではない(Recall@5 が 1.000)。落ちたのは、見出しにしかない句の対
+    // (「監査証跡の保全」が 2 位)と識別子の対(「token_quarters」が 3 位)で、どちらも
+    // 語の完全一致が効く場である。
+    assert_eq!(
+        per_mille(embedding.mean_recall(1)),
+        842,
+        "埋め込みの Recall@1 の基準線\n{}",
+        embedding.detail()
+    );
+    assert_eq!(
+        per_mille(embedding.mean_recall(5)),
+        1000,
+        "埋め込みの Recall@5 の基準線\n{}",
+        embedding.detail()
+    );
+    assert_eq!(
+        per_mille(embedding.mean_recall(10)),
+        1000,
+        "埋め込みの Recall@10 の基準線\n{}",
+        embedding.detail()
+    );
+    assert_eq!(
+        per_mille(embedding.mean_reciprocal_rank),
+        896,
+        "埋め込みの MRR の基準線\n{}",
+        embedding.detail()
+    );
+
+    // 融合: 語の一致が効く 13 対のうち 12 対を 1 位に保ったまま(埋め込み単独が落とした
+    // token_quarters をここで取り返す)、語彙が隔たる 6 対も全部 10 件以内に入れる。
+    assert_eq!(
+        per_mille(hybrid.mean_recall(1)),
+        684,
+        "融合の Recall@1 の基準線\n{}",
+        hybrid.detail()
+    );
+    assert_eq!(
+        per_mille(hybrid.mean_recall(5)),
+        947,
+        "融合の Recall@5 の基準線\n{}",
+        hybrid.detail()
+    );
+    assert_eq!(
+        per_mille(hybrid.mean_recall(10)),
+        1000,
+        "融合の Recall@10 の基準線\n{}",
+        hybrid.detail()
+    );
+    assert_eq!(
+        per_mille(hybrid.mean_reciprocal_rank),
+        791,
+        "融合の MRR の基準線\n{}",
+        hybrid.detail()
+    );
+
+    // 完了条件(RAG の項 4): どちらの方式も BM25 単独より Recall@k が上がる。打ち切りの
+    // どこで比べても下回らず、少なくとも一つで上回ることを確かめる。
+    for cutoff in CUTOFFS {
+        for report in [&embedding, &hybrid] {
+            assert!(
+                report.mean_recall(*cutoff) >= bm25.mean_recall(*cutoff),
+                "方式 {} の Recall@{cutoff} が BM25 を下回った\n{}\n{}",
+                report.method,
+                report.detail(),
+                bm25.detail()
+            );
+        }
+    }
+    assert!(
+        embedding.mean_recall(10) > bm25.mean_recall(10)
+            && hybrid.mean_recall(10) > bm25.mean_recall(10),
+        "意味を見る方式は BM25 単独の Recall@10 を上回るはず\n{}\n{}\n{}",
+        bm25.detail(),
+        embedding.detail(),
+        hybrid.detail()
+    );
+    // 埋め込み単独がこの固定コーパスでは融合より高い。コーパスの成り立ちがそうさせて
+    // いる(19 対のうち 6 対が語彙の隔たりの対で、語の一致が原理的に効かない場を多めに
+    // 含む)。実データの分布を代表する数値ではないので、既定の方式をこの比較だけで
+    // 決めない(EVAL (uuid:1109a04b-923e-4493-8f00-d704047d6a2a) の「既知の制約」)。
+    assert!(
+        embedding.mean_reciprocal_rank > hybrid.mean_reciprocal_rank,
+        "この固定コーパスでは埋め込み単独の MRR が融合を上回る記録\n{}\n{}",
+        embedding.detail(),
+        hybrid.detail()
+    );
+}
+
+/// 完了条件の中身を対ごとに名指しする: BM25 が原理的に届かない 6 対
+/// (VOCABULARY_GAP_CASES)が、意味を見る方式では上位 10 件に入る。基準線の平均が動いた
+/// 理由はここにある。
+///
+/// 順位そのものはリテラルで固定しない。同じ入力でもバッチの構成が変わると埋め込みは
+/// 1e-4 級でずれる(GPU の畳み込み順序)ので、僅差の順位は揺れうるためである。固定
+/// するのは「10 件以内に入る」という到達の事実で、実測の順位はコメントに残す。
+#[test]
+fn the_vocabulary_gap_pairs_that_semantics_reaches() {
+    let embedder = common::require_embedding_server();
+    let indexed = indexed_corpus_with("gap-semantics", Some(&embedder));
+    let vectors = indexed.vectors.as_ref().expect("ベクトルの索引");
+    let search = || HybridSearch { lexical: &indexed.lexical, vectors: Some(vectors) };
+    let embedding = evaluate(
+        &HybridRetrieval::new(search(), Some(&embedder), SearchMethod::Embedding, Some("eval")),
+        &cases(),
+        CUTOFFS,
+    );
+    let hybrid = evaluate(
+        &HybridRetrieval::new(search(), Some(&embedder), SearchMethod::Hybrid, Some("eval")),
+        &cases(),
+        CUTOFFS,
+    );
+    // 実測 2026-08-17 の順位(埋め込み単独 / 融合):
+    //   言い換え「急に電気が消えた…」 1 位 / 3 位
+    //   言い換え「ネットワークが混まない…」 1 位 / 4 位
+    //   上位語と下位語「どの暗号方式を…」 1 位 / 3 位
+    //   多言語(英語の問いで日本語の本文)「how long are request logs kept」 1 位 / 2 位
+    //   質問文の形「どうすればノードを安全に落とせるか」 5 位 / 9 位
+    //   多言語(日本語の問いで英語の本文)「時計がずれても大丈夫か」 1 位 / 1 位
+    // BM25 は 6 対とも圏外で、うち「時計がずれても大丈夫か」は空振りだった。
+    for (query, relevant) in VOCABULARY_GAP_CASES {
+        for report in [&embedding, &hybrid] {
+            let outcome = report.outcome_of(query);
+            assert!(
+                outcome.first_relevant_rank.is_some(),
+                "方式 {} で、問い {query:?} の正解 {relevant} が上位 10 件に入らなかった\n{}",
+                report.method,
+                report.detail()
+            );
+        }
     }
 }
 

@@ -29,7 +29,19 @@ fn usage() -> ! {
            cert-verify <dir>          標準入力の証明書を <dir>/groups.json で検証する\n\
            revoke-make <node_id> <group_id>\n\
                                       失効文の本体を標準出力へ(署名なし)\n\
-           serve <dir> <addr>         HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)\n\
+           serve <dir> <addr> [--embed <url>] [--embedder <id>]\n\
+                                      HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)。\n\
+                                      --embed を与えると POST /v1/search の既定が BM25 と\n\
+                                      埋め込みの RRF 融合になる。ベクトルは embed で作った\n\
+                                      キャッシュから読むので、検索が模型の計算を待つことは\n\
+                                      ない。届かなければ BM25 だけに劣化して答え、応答の\n\
+                                      method と degraded がそれを言う\n\
+           embed <dir> [--embed <url>] [--embedder <id>]\n\
+                                      見えのチャンクのうちベクトルの無いものを埋め込み、\n\
+                                      <dir>/derived/embeddings/<id>.vec に足す(導出データ。\n\
+                                      消しても作り直せる)。まとまりごとに fsync するので\n\
+                                      途中で止めても続きから再開できる。serve 停止中の\n\
+                                      ストア用\n\
            sync <dir> <peer_addr>     相手から pull で同期する(serve 停止中のストア用。\n\
                                       serve 中は POST /v1/sync を使う)\n\
            ingest <dir> <collection> <path> [--pdftotext <exe>]\n\
@@ -243,6 +255,49 @@ fn main() {
     }
 }
 
+/// 埋め込みの指定(serve と embed が共用する読み取り。should/0135)。
+struct EmbedOptions {
+    url: String,
+    embedder_id: String,
+    /// --embed が明示されたか。serve は明示されたときだけ埋め込みを装備する
+    /// (既定で外部プロセスに依存させない)。
+    requested: bool,
+}
+
+/// --embed <url> と --embedder <id> を読む。知らない引数は黙って捨てず usage で落とす。
+fn parse_embed_options(rest: &[String]) -> EmbedOptions {
+    let mut options = EmbedOptions {
+        url: uniqnode::embed::DEFAULT_EMBEDDING_URL.to_string(),
+        embedder_id: uniqnode::embed::DEFAULT_EMBEDDER_ID.to_string(),
+        requested: false,
+    };
+    let mut at = 0;
+    while at < rest.len() {
+        let value = || rest.get(at + 1).cloned().unwrap_or_else(|| usage());
+        match rest[at].as_str() {
+            "--embed" => {
+                options.url = value();
+                options.requested = true;
+            }
+            "--embedder" => options.embedder_id = value(),
+            _ => usage(),
+        }
+        at += 2;
+    }
+    options
+}
+
+/// 指定から埋め込みクライアントを組む(誤った指定はここで落とす)。
+fn embedder_from(options: &EmbedOptions) -> uniqnode::embed::Embedder {
+    match uniqnode::embed::Embedder::new(&options.url, &options.embedder_id) {
+        Ok(embedder) => embedder,
+        Err(message) => {
+            eprintln!("uniqnode: {message}");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
     match command {
         "init" | "status" => {
@@ -452,8 +507,63 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 }
             }
         }
+        "embed" => {
+            let options = parse_embed_options(rest);
+            let embedder = embedder_from(&options);
+            let store = open(dir);
+            let path = uniqnode::embed::VectorCache::path_for(
+                std::path::Path::new(dir),
+                embedder.embedder_id(),
+            );
+            let mut cache = match uniqnode::embed::VectorCache::open(
+                path.clone(),
+                embedder.embedder_id(),
+                embedder.dimension(),
+            ) {
+                Ok(cache) => cache,
+                Err(e) => {
+                    eprintln!("uniqnode: {e}");
+                    std::process::exit(5);
+                }
+            };
+            if cache.discarded_tail_bytes() > 0 {
+                eprintln!(
+                    "uniqnode: {} の末尾 {} バイトを捨てた(追記の途中で止まった記録)",
+                    path.display(),
+                    cache.discarded_tail_bytes()
+                );
+            }
+            println!("cache: {} ({} ベクトル)", path.display(), cache.vector_count());
+            println!("model: {} ({})", embedder.embedder_id(), embedder.endpoint());
+            let mut last = 0usize;
+            let report = uniqnode::embed::fill_cache(&store, &embedder, &mut cache, &mut |progress| {
+                // 25k チャンクは分単位かかる。どこまで進んだかを黙っていない。
+                if progress.embedded >= last + 200 {
+                    last = progress.embedded;
+                    eprintln!(
+                        "uniqnode: embedded {}/{}",
+                        progress.embedded,
+                        progress.distinct_chunks - progress.already_cached
+                    );
+                }
+            });
+            match report {
+                Ok(report) => println!(
+                    "chunks: {} (distinct {}), cached: {}, embedded: {}",
+                    report.chunks,
+                    report.distinct_chunks,
+                    report.already_cached,
+                    report.embedded
+                ),
+                Err(e) => {
+                    eprintln!("uniqnode: {e}");
+                    std::process::exit(5);
+                }
+            }
+        }
         "serve" => {
             let address = rest.first().map(String::as_str).unwrap_or_else(|| usage());
+            let options = parse_embed_options(&rest[1..]);
             let listener = std::net::TcpListener::bind(address)?;
             // テストや起動スクリプトが実際のポートを知れるように、束縛先を必ず表示する。
             println!("listening on {}", listener.local_addr()?);
@@ -483,12 +593,26 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 let health = health.clone();
                 std::thread::spawn(move || health.run());
             }
+            // 埋め込みは明示されたときだけ装備する。起動時に相手の生存を確かめない
+            // (should/0114: 起動を外部プロセスの都合で止めない)。届くかどうかは
+            // 検索要求のたびに分かり、届かなければ BM25 に劣化して答える。
+            let embedding = options.requested.then(|| {
+                let embedder =
+                    embedder_from(&options).with_timeout(uniqnode::embed::QUERY_EMBED_TIMEOUT);
+                eprintln!(
+                    "uniqnode: embedding: {} ({})",
+                    embedder.embedder_id(),
+                    embedder.endpoint()
+                );
+                uniqnode::embed::EmbeddingService::new(std::path::Path::new(dir), embedder)
+            });
             let context = uniqnode::api::ApiContext {
                 store,
                 engine,
                 health: Some(health),
                 referrers: std::sync::Mutex::new(None),
                 search: std::sync::Mutex::new(None),
+                embedding,
             };
             let handler: std::sync::Arc<uniqnode::http::Handler> =
                 std::sync::Arc::new(move |request| uniqnode::api::handle(&context, request));

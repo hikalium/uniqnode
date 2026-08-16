@@ -222,61 +222,11 @@ pub struct PeerStatusView {
 }
 
 impl HttpPeer {
-    /// 1リクエスト1接続の最小 HTTP/1.1 クライアント。
+    /// 相手への GET。HTTP の往復そのものは共用のクライアント(node/src/http.rs)が持ち、
+    /// ここはその失敗を「相手の側の失敗」として包み直すだけである(should/0135)。
     fn get(&self, path: &str) -> Result<(u16, Vec<u8>), SyncError> {
-        use std::io::{BufRead, BufReader, Read, Write};
-        use std::net::ToSocketAddrs;
-        let resolved = self
-            .address
-            .to_socket_addrs()
-            .map_err(|e| SyncError::Peer(format!("{} を解決できない: {e}", self.address)))?
-            .next()
-            .ok_or_else(|| SyncError::Peer(format!("{} を解決できない", self.address)))?;
-        let stream = std::net::TcpStream::connect_timeout(&resolved, self.timeout)
-            .map_err(|e| SyncError::Peer(format!("{} に接続できない: {e}", self.address)))?;
-        stream
-            .set_read_timeout(Some(self.timeout))
-            .map_err(|e| SyncError::Peer(format!("timeout 設定: {e}")))?;
-        let mut writer = stream.try_clone().map_err(|e| SyncError::Peer(e.to_string()))?;
-        writer
-            .write_all(
-                format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
-            )
-            .map_err(|e| SyncError::Peer(format!("送信: {e}")))?;
-        let mut reader = BufReader::new(stream);
-        let mut status_line = String::new();
-        reader
-            .read_line(&mut status_line)
-            .map_err(|e| SyncError::Peer(format!("応答読み取り: {e}")))?;
-        let status: u16 = status_line
-            .split(' ')
-            .nth(1)
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| SyncError::Peer(format!("応答ラインが不正: {status_line:?}")))?;
-        let mut content_length = 0usize;
-        loop {
-            let mut line = String::new();
-            reader
-                .read_line(&mut line)
-                .map_err(|e| SyncError::Peer(format!("ヘッダ読み取り: {e}")))?;
-            let trimmed = line.trim_end_matches(['\r', '\n']);
-            if trimmed.is_empty() {
-                break;
-            }
-            if let Some((name, value)) = trimmed.split_once(':') {
-                if name.trim().eq_ignore_ascii_case("content-length") {
-                    content_length = value
-                        .trim()
-                        .parse()
-                        .map_err(|_| SyncError::Peer("Content-Length が不正".into()))?;
-                }
-            }
-        }
-        let mut body = vec![0u8; content_length];
-        reader
-            .read_exact(&mut body)
-            .map_err(|e| SyncError::Peer(format!("ボディ読み取り: {e}")))?;
-        Ok((status, body))
+        let response = crate::http::get(&self.address, path, self.timeout).map_err(SyncError::Peer)?;
+        Ok((response.status, response.body))
     }
 
     /// 相手の /v1/status から生存確認と容量広告を得る(SPEC §8.2 の生存割引の情報源)。

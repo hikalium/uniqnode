@@ -170,15 +170,40 @@ struct Posting {
 /// 両方が現在値と一致することが「構築後に書き込みも ref の変化も無い」ことと同値。
 /// ReferrerIndex の object_count だけでは足りない: 文書の張り替え(既存 doc_rev への
 /// 巻き戻し)や tombstone は ref レコードしか増やさず、旧版のチャンクが索引に残る。
-struct Generation {
+///
+/// 導出データの索引はどれもこの世代で最新かを判定する(BM25 の転置索引と、ベクトルの
+/// 索引 node/src/embed.rs)。判定の家はここだけである(should/0135)。
+#[derive(Clone, PartialEq, Eq)]
+pub struct Generation {
     object_count: usize,
     signers: Vec<(String, u64)>,
+}
+
+impl Generation {
+    /// store の現在の世代。
+    pub fn current(store: &Store) -> Generation {
+        Generation { object_count: store.object_count(), signers: store.signers() }
+    }
+
+    /// この世代が store の現状と一致するか(= 構築後に書き込みも ref の変化も無い)。
+    pub fn matches(&self, store: &Store) -> bool {
+        *self == Generation::current(store)
+    }
 }
 
 /// 検索結果 1 件(得点と索引済みチャンクへの参照)。
 pub struct SearchHit<'a> {
     pub score: f64,
     pub chunk: &'a IndexedChunk,
+}
+
+/// 順位付けの途中の 1 件(索引内の位置と得点)。方式をまたいで順位を融合する側は、
+/// 引用を組む前のこの形で受け取る。
+#[derive(Clone, Copy)]
+pub struct ScoredChunk {
+    /// 索引内の位置(visit_indexable_chunks の走査順)。
+    pub position: usize,
+    pub score: f64,
 }
 
 pub struct SearchIndex {
@@ -199,79 +224,122 @@ fn read_c1(store: &Store, id: &str) -> Result<Option<Value>> {
     Ok(c1::parse(&text).ok())
 }
 
+/// 索引の対象になるチャンク 1 件(走査が呼び手へ渡す形)。
+pub struct IndexableChunk {
+    /// チャンクのオブジェクト ID。ベクトルの導出層はこれを鍵の半分に使う。
+    pub id: String,
+    pub collection: String,
+    pub document: String,
+    pub position: usize,
+    /// チャンクの本文全体(スニペットではない)。埋め込みに掛けるのはこちらである。
+    pub text: String,
+    pub breadcrumbs: Vec<String>,
+    pub page: Option<u32>,
+    /// このチャンクの索引語(chunk_terms_of の結果。呼び手が数え直さずに済むように渡す)。
+    pub terms: Vec<String>,
+}
+
+/// 「何が索引の対象か」の唯一の家(should/0135)。見えのチャンクのうち索引語を 1 語以上
+/// 持つものを、決定的な順序(ref 名の昇順 → chunks 列の順)で渡す。
+///
+/// ref は完全名 <署名者>/<パス> で並ぶが、対象はパスが collections/ 配下のものだけ
+/// (annotations/ などの ref は文書の見えではない。ASSERTIONS
+/// (uuid:c05379e2-2d30-41bc-8342-62103d94bb21) の原理 5)。tombstone と、doc_rev や
+/// chunk の形が崩れているものは飛ばす(索引は導出データであり、壊れた 1 個で構築全体を
+/// 失敗させない)。語の無いチャンクはどのクエリにも一致しないので渡さない。
+///
+/// BM25 の転置索引(SearchIndex)とベクトルの索引(node/src/embed.rs の VectorIndex)が
+/// これを共用する。同じ store の同じ世代から作る限り、両者は同じチャンクを同じ並びで
+/// 見る。ハイブリッド検索が二つの索引の位置を突き合わせられるのはこのためである。
+pub fn visit_indexable_chunks(
+    store: &Store,
+    visit: &mut dyn FnMut(IndexableChunk),
+) -> Result<()> {
+    for (name, state) in store.list_refs() {
+        // tombstone は現在の見えに無い(原理 5)。
+        let Some(target) = &state.target else { continue };
+        let Some((_signer, path)) = name.split_once('/') else { continue };
+        let Some(rest) = path.strip_prefix("collections/") else { continue };
+        let Some((collection, document)) = rest.split_once('/') else { continue };
+        let Some(Value::Object(doc_rev)) = read_c1(store, target)? else { continue };
+        let Some(Value::Array(chunk_ids)) = doc_rev.get("chunks") else { continue };
+        for (position, chunk_ref) in chunk_ids.iter().enumerate() {
+            let Value::Text(chunk_id) = chunk_ref else { continue };
+            let Some(Value::Object(chunk)) = read_c1(store, chunk_id)? else { continue };
+            let Some(Value::Text(text)) = chunk.get("text") else { continue };
+            let (breadcrumbs, page) = match chunk.get("meta") {
+                Some(Value::Object(meta)) => {
+                    let breadcrumbs = match meta.get("breadcrumbs") {
+                        Some(Value::Array(items)) => items
+                            .iter()
+                            .filter_map(|item| match item {
+                                Value::Text(t) => Some(t.clone()),
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    let page = match meta.get("page") {
+                        Some(Value::Integer(n)) => u32::try_from(*n).ok(),
+                        _ => None,
+                    };
+                    (breadcrumbs, page)
+                }
+                _ => (Vec::new(), None),
+            };
+            // 索引語は本文と見出しの両方から採る(chunk_terms_of)。
+            let terms = chunk_terms_of(text, &breadcrumbs);
+            if terms.is_empty() {
+                // 語の無いチャンクはどのクエリにも一致しない。
+                continue;
+            }
+            visit(IndexableChunk {
+                id: chunk_id.clone(),
+                collection: collection.to_string(),
+                document: document.to_string(),
+                position,
+                text: text.clone(),
+                breadcrumbs,
+                page,
+                terms,
+            });
+        }
+    }
+    Ok(())
+}
+
 impl SearchIndex {
-    /// 見えの全チャンクを一度走査して構築する。ref は完全名 <署名者>/<パス> で並ぶが、
-    /// 索引対象はパスが collections/ 配下のものだけ(annotations/ などの ref は文書の
-    /// 見えではない)。tombstone と、doc_rev や chunk の形が崩れているものは飛ばす。
+    /// 見えの全チャンクを一度走査して構築する(対象の決め方は visit_indexable_chunks)。
     pub fn build(store: &Store) -> Result<SearchIndex> {
-        let generation =
-            Generation { object_count: store.object_count(), signers: store.signers() };
+        let generation = Generation::current(store);
         let mut chunks: Vec<IndexedChunk> = Vec::new();
         let mut postings: BTreeMap<String, Vec<Posting>> = BTreeMap::new();
         let mut total_terms = 0usize;
-        for (name, state) in store.list_refs() {
-            // tombstone は現在の見えに無い(原理 5)。
-            let Some(target) = &state.target else { continue };
-            let Some((_signer, path)) = name.split_once('/') else { continue };
-            let Some(rest) = path.strip_prefix("collections/") else { continue };
-            let Some((collection, document)) = rest.split_once('/') else { continue };
-            let Some(Value::Object(doc_rev)) = read_c1(store, target)? else { continue };
-            let Some(Value::Array(chunk_ids)) = doc_rev.get("chunks") else { continue };
-            for (position, chunk_ref) in chunk_ids.iter().enumerate() {
-                let Value::Text(chunk_id) = chunk_ref else { continue };
-                let Some(Value::Object(chunk)) = read_c1(store, chunk_id)? else { continue };
-                let Some(Value::Text(text)) = chunk.get("text") else { continue };
-                let (breadcrumbs, page) = match chunk.get("meta") {
-                    Some(Value::Object(meta)) => {
-                        let breadcrumbs = match meta.get("breadcrumbs") {
-                            Some(Value::Array(items)) => items
-                                .iter()
-                                .filter_map(|item| match item {
-                                    Value::Text(t) => Some(t.clone()),
-                                    _ => None,
-                                })
-                                .collect(),
-                            _ => Vec::new(),
-                        };
-                        let page = match meta.get("page") {
-                            Some(Value::Integer(n)) => u32::try_from(*n).ok(),
-                            _ => None,
-                        };
-                        (breadcrumbs, page)
-                    }
-                    _ => (Vec::new(), None),
-                };
-                // 索引語は本文と見出しの両方から採る(chunk_terms_of)。
-                let terms = chunk_terms_of(text, &breadcrumbs);
-                if terms.is_empty() {
-                    // 語の無いチャンクはどのクエリにも一致しない。
-                    continue;
-                }
-                let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
-                for term in &terms {
-                    *counts.entry(term).or_insert(0) += 1;
-                }
-                let index = chunks.len();
-                for (term, term_frequency) in counts {
-                    // 走査はチャンク番号の昇順なので、各語の位置表も昇順で積み上がる。
-                    postings
-                        .entry(term.to_string())
-                        .or_default()
-                        .push(Posting { chunk: index, term_frequency });
-                }
-                total_terms += terms.len();
-                chunks.push(IndexedChunk {
-                    id: chunk_id.clone(),
-                    collection: collection.to_string(),
-                    document: document.to_string(),
-                    position,
-                    snippet: snippet_of(text),
-                    breadcrumbs,
-                    page,
-                    term_count: terms.len(),
-                });
+        visit_indexable_chunks(store, &mut |chunk| {
+            let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
+            for term in &chunk.terms {
+                *counts.entry(term.as_str()).or_insert(0) += 1;
             }
-        }
+            let index = chunks.len();
+            for (term, term_frequency) in counts {
+                // 走査はチャンク番号の昇順なので、各語の位置表も昇順で積み上がる。
+                postings
+                    .entry(term.to_string())
+                    .or_default()
+                    .push(Posting { chunk: index, term_frequency });
+            }
+            total_terms += chunk.terms.len();
+            chunks.push(IndexedChunk {
+                id: chunk.id,
+                collection: chunk.collection,
+                document: chunk.document,
+                position: chunk.position,
+                snippet: snippet_of(&chunk.text),
+                breadcrumbs: chunk.breadcrumbs,
+                page: chunk.page,
+                term_count: chunk.terms.len(),
+            });
+        })?;
         let average_length = if chunks.is_empty() {
             0.0
         } else {
@@ -283,8 +351,22 @@ impl SearchIndex {
     /// この索引が store の現状について最新か。オブジェクト数と署名者ごとの最終 seq の
     /// 両方が一致する限り、書き込みも ref の変化も挟まっていない。
     pub fn is_current(&self, store: &Store) -> bool {
-        self.generation.object_count == store.object_count()
-            && self.generation.signers == store.signers()
+        self.generation.matches(store)
+    }
+
+    /// 構築時点の世代(ベクトルの索引と同じ世代から作られたことを確かめる側が使う)。
+    pub fn generation(&self) -> &Generation {
+        &self.generation
+    }
+
+    /// 索引済みチャンクの件数。
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// 索引内の位置からチャンクを引く(位置は visit_indexable_chunks の走査順)。
+    pub fn chunk(&self, position: usize) -> &IndexedChunk {
+        &self.chunks[position]
     }
 
     /// 語 term の位置表。1 文字の非 ASCII 語は bigram の索引にそのままでは載らない
@@ -315,16 +397,33 @@ impl SearchIndex {
             .collect()
     }
 
-    /// BM25 で top_k 件を返す。collection を指定するとそのコレクションだけに絞る
-    /// (df は索引全体で数える。順位はどちらでも同一応答内でのみ意味を持つ)。
-    /// 同点は索引順(ref 名の昇順 → chunks 列の順)で安定に決める(should/0125 の
-    /// 決定性)。
+    /// BM25 で top_k 件を返す(search_positions の被せ物。順位付けの家はそちら)。
     pub fn search(
         &self,
         query: &str,
         collection: Option<&str>,
         top_k: usize,
     ) -> Vec<SearchHit<'_>> {
+        self.search_positions(query, collection, top_k)
+            .into_iter()
+            .map(|scored| SearchHit { score: scored.score, chunk: &self.chunks[scored.position] })
+            .collect()
+    }
+
+    /// BM25 で top_k 件を、索引内の位置と得点で返す。collection を指定するとその
+    /// コレクションだけに絞る(df は索引全体で数える。順位はどちらでも同一応答内でのみ
+    /// 意味を持つ)。同点は索引順(ref 名の昇順 → chunks 列の順)で安定に決める
+    /// (should/0125 の決定性)。
+    ///
+    /// 位置で返す形を持つのは、融合(node/src/embed.rs の RRF)がベクトル側の順位と
+    /// 突き合わせるためである。引用を組むのは応答を作る側の仕事で、順位付けはここで
+    /// 完結する。
+    pub fn search_positions(
+        &self,
+        query: &str,
+        collection: Option<&str>,
+        top_k: usize,
+    ) -> Vec<ScoredChunk> {
         let mut query_terms = terms_of(query);
         query_terms.sort();
         query_terms.dedup();
@@ -354,7 +453,7 @@ impl SearchIndex {
         ranked.truncate(top_k);
         ranked
             .into_iter()
-            .map(|(index, score)| SearchHit { score, chunk: &self.chunks[index] })
+            .map(|(position, score)| ScoredChunk { position, score })
             .collect()
     }
 }

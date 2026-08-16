@@ -325,63 +325,133 @@ fn handle_query(context: &ApiContext, request: &Request) -> Response {
     Response::json(200, crate::query::state_to_json(&state))
 }
 
-/// POST /v1/search(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))。ボディ:
-/// {"query": "...", "collection": "...", "top_k": N, "method": "..."}(collection 省略時は
-/// 全コレクション、top_k 省略時は 10)。索引は導出データの遅延キャッシュで、referrers と
-/// 同じく初回要求時に構築し、世代がずれたら次の要求で作り直す。
+/// 検索要求(POST /v1/search のボディと、MCP の search ツールの引数は同じ形である)。
+/// 読み取りと検証の家は parse_search_request の一箇所で、REST も MCP もそこを通る
+/// (should/0135)。
+pub struct SearchRequest {
+    pub query: String,
+    /// 省略時は全コレクション。
+    pub collection: Option<String>,
+    pub top_k: usize,
+    /// 省略時は None。装備に従う既定を決めるのは run_search である。
+    pub method: Option<crate::embed::SearchMethod>,
+}
+
+/// 引用(取り込み層の引用規則。INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の
+/// 「文書モデル」節): document は ref パスから collections/<コレクション名>/ を除いた
+/// 残り、position は chunks 列の添字、breadcrumbs は見出しの入れ子パス、PDF はさらに
+/// page、at はその版を見えに置いた ref レコードの時刻(取得日時。unix 秒)。
+pub struct Citation {
+    pub collection: String,
+    pub document: String,
+    pub position: usize,
+    pub page: Option<u32>,
+    pub breadcrumbs: Vec<String>,
+    pub at: i64,
+}
+
+impl Citation {
+    /// 索引済みチャンクから引用を組む(組み立ての家はここだけ。should/0135)。
+    fn of(chunk: &crate::search::IndexedChunk) -> Citation {
+        Citation {
+            collection: chunk.collection.clone(),
+            document: chunk.document.clone(),
+            position: chunk.position,
+            page: chunk.page,
+            breadcrumbs: chunk.breadcrumbs.clone(),
+            at: chunk.at,
+        }
+    }
+}
+
+/// 検索結果 1 件。id はチャンクのオブジェクト ID(全文は GET /v1/objects/{id} か、
+/// MCP の fetch ツールで取る)。
+pub struct SearchResult {
+    pub id: String,
+    pub score: f64,
+    pub snippet: String,
+    pub citation: Citation,
+}
+
+/// 検索 1 回の答え。method は実際に使った方式、degraded は要求した方式で答えられな
+/// かったときだけ現れる理由である(黙って劣化しない。should/0128)。
+pub struct SearchResults {
+    pub method: crate::embed::SearchMethod,
+    pub degraded: Option<String>,
+    pub results: Vec<SearchResult>,
+}
+
+/// 検索要求の読み取りと検証。誤りの文言は呼び手がそのまま使う(REST は 400 の本文、
+/// MCP は JSON-RPC の invalid params の message)。
 ///
 /// method は "bm25"(語の一致)・"embedding"(意味の近さ)・"hybrid"(両者の RRF 融合)。
-/// 省略時の既定は装備に従う: 埋め込みが設定されていれば hybrid、なければ bm25 である。
-/// 埋め込みが使えないときは BM25 だけに劣化して答え、応答の method(実際に使った方式)と
-/// degraded(理由)がそれを語る(黙って劣化しない。should/0128)。
-fn handle_search(context: &ApiContext, request: &Request) -> Response {
-    let body_text = match std::str::from_utf8(&request.body) {
-        Ok(t) => t,
-        Err(_) => return error_response(400, "ボディが UTF-8 でない"),
-    };
-    let value = match c1::parse(body_text) {
-        Ok(v) => v,
-        Err(e) => return error_response(400, &format!("JSON が不正: {e}")),
-    };
-    let map = match &value {
+pub fn parse_search_request(value: &c1::Value) -> Result<SearchRequest, String> {
+    let map = match value {
         c1::Value::Object(m) => m,
-        _ => return error_response(400, "ボディはオブジェクトであるべき"),
+        _ => return Err("要求はオブジェクトであるべき".to_string()),
     };
     let query = match map.get("query") {
         Some(c1::Value::Text(t)) if !t.is_empty() => t.clone(),
-        _ => return error_response(400, "query がない(空でない文字列)"),
+        _ => return Err("query がない(空でない文字列)".to_string()),
     };
     let collection = match map.get("collection") {
-        None => None,
+        None | Some(c1::Value::Null) => None,
         Some(c1::Value::Text(t)) if !t.is_empty() => Some(t.clone()),
-        _ => return error_response(400, "collection は空でない文字列"),
+        _ => return Err("collection は空でない文字列".to_string()),
     };
     let top_k = match map.get("top_k") {
-        None => 10usize,
+        None | Some(c1::Value::Null) => 10usize,
         Some(c1::Value::Integer(n)) if (1..=1000).contains(n) => *n as usize,
-        _ => return error_response(400, "top_k は 1..=1000 の整数"),
+        _ => return Err("top_k は 1..=1000 の整数".to_string()),
     };
-    let requested = match map.get("method") {
-        // 既定は装備に従う。埋め込みを設定した節点で融合を既定にするのは、方式の指定を
-        // 知らない呼び手(既存の CLI・MCP)が黙って BM25 だけに取り残されないため。
-        None => match &context.embedding {
-            Some(_) => crate::embed::SearchMethod::Hybrid,
-            None => crate::embed::SearchMethod::Bm25,
-        },
+    let method = match map.get("method") {
+        None | Some(c1::Value::Null) => None,
         Some(c1::Value::Text(t)) => match crate::embed::SearchMethod::parse(t) {
-            Some(method) => method,
+            Some(method) => Some(method),
             None => {
-                return error_response(400, "method は \"bm25\"・\"embedding\"・\"hybrid\" のどれか")
+                return Err("method は \"bm25\"・\"embedding\"・\"hybrid\" のどれか".to_string())
             }
         },
-        _ => return error_response(400, "method は文字列"),
+        _ => return Err("method は文字列".to_string()),
     };
     if crate::search::terms_of(&query).is_empty() {
-        return error_response(
-            400,
-            "クエリに索引語が無い(英数字の語か、仮名・漢字などの文字が要る)",
-        );
+        return Err("クエリに索引語が無い(英数字の語か、仮名・漢字などの文字が要る)".to_string());
     }
+    Ok(SearchRequest { query, collection, top_k, method })
+}
+
+/// 検索索引を最新にして貸す。索引は導出データの遅延キャッシュで、referrers と同じく
+/// 初回要求時に構築し、世代がずれたら次の要求で作り直す(検索と全文取得が共用する
+/// 唯一の入口。should/0135)。store のロックは呼び手が持つ。
+fn with_current_index<T>(
+    context: &ApiContext,
+    store: &Store,
+    use_index: impl FnOnce(&crate::search::SearchIndex) -> T,
+) -> Result<T, StoreError> {
+    let mut cache = context.search.lock().expect("lock");
+    if !cache.as_ref().is_some_and(|index| index.is_current(store)) {
+        *cache = Some(crate::search::SearchIndex::build(store)?);
+    }
+    Ok(use_index(cache.as_ref().expect("直前に構築した")))
+}
+
+/// 検索の本体(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))。方式の既定・劣化の
+/// 判断・引用の組み立てはここ 1 箇所にあり、REST の POST /v1/search と MCP の search
+/// ツールはどちらもこれを呼ぶ(検索の判断を二重に実装しない。should/0135)。
+///
+/// 埋め込みが使えないときは BM25 だけに劣化して答え、返り値の method(実際に使った
+/// 方式)と degraded(理由)がそれを語る。理由は標準エラーにも残すので、どちらの
+/// 呼び手から来ても劣化は観測できる(黙って劣化しない。should/0128)。
+pub fn run_search(
+    context: &ApiContext,
+    request: &SearchRequest,
+) -> Result<SearchResults, StoreError> {
+    // 既定は装備に従う。埋め込みを設定した節点で融合を既定にするのは、方式の指定を
+    // 知らない呼び手(CLI・MCP)が黙って BM25 だけに取り残されないため。
+    let requested = request.method.unwrap_or(match &context.embedding {
+        Some(_) => crate::embed::SearchMethod::Hybrid,
+        None => crate::embed::SearchMethod::Bm25,
+    });
     // クエリの埋め込みは、どのロックも取る前に済ませる。埋め込みサーバとの往復であり、
     // その待ちのあいだ store のロックを持つと、1 本の検索で API 全体が塞がる
     // (node/src/sync.rs のロックの規律と同じ理由)。届かなければ理由を持ち帰り、
@@ -392,20 +462,11 @@ fn handle_search(context: &ApiContext, request: &Request) -> Response {
         }
         _ => crate::embed::QueryEmbedding::of(
             context.embedding.as_ref().map(|service| &service.embedder),
-            &query,
+            &request.query,
         ),
     };
 
     let store = context.store.lock().expect("lock");
-    let mut cache = context.search.lock().expect("lock");
-    if !cache.as_ref().is_some_and(|index| index.is_current(&store)) {
-        match crate::search::SearchIndex::build(&store) {
-            Ok(index) => *cache = Some(index),
-            Err(e) => return store_error_response(e),
-        }
-    }
-    let index = cache.as_ref().expect("直前に構築した");
-
     // ベクトルの索引も BM25 の索引と同じ遅延キャッシュで持つ。読むのはキャッシュ
     // ファイルだけなので、検索要求が模型の計算を待つことはない(コーパスの埋め込みは
     // CLI の uniqnode embed の仕事)。
@@ -426,12 +487,33 @@ fn handle_search(context: &ApiContext, request: &Request) -> Response {
             vector_cache = Some(guard);
         }
     }
-    let search = crate::embed::HybridSearch {
-        lexical: index,
-        vectors: vector_cache.as_ref().and_then(|guard| guard.as_ref()),
-    };
-    let mut outcome =
-        search.ranked(requested, &query, &embedding, collection.as_deref(), top_k);
+    let mut outcome = with_current_index(context, &store, |index| {
+        let search = crate::embed::HybridSearch {
+            lexical: index,
+            vectors: vector_cache.as_ref().and_then(|guard| guard.as_ref()),
+        };
+        let ranked = search.ranked(
+            requested,
+            &request.query,
+            &embedding,
+            request.collection.as_deref(),
+            request.top_k,
+        );
+        let results = ranked
+            .hits
+            .iter()
+            .map(|hit| {
+                let chunk = index.chunk(hit.position);
+                SearchResult {
+                    id: chunk.id.clone(),
+                    score: hit.score,
+                    snippet: chunk.snippet.clone(),
+                    citation: Citation::of(chunk),
+                }
+            })
+            .collect();
+        SearchResults { method: ranked.method, degraded: ranked.degraded, results }
+    })?;
     // キャッシュを読めなかったのが根の理由なら、そちらを載せる(「索引がない」だけでは
     // 何を直せばよいか読めない)。
     if load_failure.is_some() {
@@ -444,7 +526,68 @@ fn handle_search(context: &ApiContext, request: &Request) -> Response {
             outcome.method.as_str()
         );
     }
-    Response::json(200, search_response_body(index, &outcome))
+    Ok(outcome)
+}
+
+/// 全文取得(MCP の fetch ツール)が返す 1 件。REST では GET /v1/objects/{id} が同じ
+/// バイト列を返すが、そちらは生のオブジェクトだけで引用は組まない。
+pub enum Fetched {
+    /// チャンクの全文。citation は見え(collections/ 配下の現行 doc_rev)にあるときだけ
+    /// 組める。旧版のチャンクは ID で取れても見えには無い。
+    Chunk { text: String, citation: Option<Citation> },
+    /// チャンクでない c1 オブジェクト(doc_rev・注釈など)。正規形のまま返す。
+    Object { text: String },
+    /// テキストでないバイト列(PDF の原文 blob など)。全文の代わりに大きさを言う。
+    Binary { bytes: usize },
+}
+
+/// オブジェクト ID から全文を取る。ローカルに無ければ None(「このDBノードは持って
+/// いない」というローカルな事実であって、不存在の言明ではない。SPEC §7.2/§10)。
+/// 引用は検索索引が持つ(同じ索引を使うので、検索の出典と全文の出典は一致する)。
+pub fn fetch_object(context: &ApiContext, id: &str) -> Result<Option<Fetched>, StoreError> {
+    let store = context.store.lock().expect("lock");
+    let Some(bytes) = store.get_object(id)? else { return Ok(None) };
+    let byte_count = bytes.len();
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Ok(Some(Fetched::Binary { bytes: byte_count }));
+    };
+    let chunk_text = match c1::parse(&text) {
+        Ok(c1::Value::Object(map)) => match (map.get("kind"), map.get("text")) {
+            (Some(c1::Value::Text(kind)), Some(c1::Value::Text(body))) if kind == "chunk" => {
+                Some(body.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(chunk_text) = chunk_text else { return Ok(Some(Fetched::Object { text })) };
+    let citation = with_current_index(context, &store, |index| {
+        index.chunk_by_id(id).map(Citation::of)
+    })?;
+    Ok(Some(Fetched::Chunk { text: chunk_text, citation }))
+}
+
+/// POST /v1/search(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))。ボディ:
+/// {"query": "...", "collection": "...", "top_k": N, "method": "..."}(collection 省略時は
+/// 全コレクション、top_k 省略時は 10)。判断は run_search が持ち、ここは HTTP の被せ物で
+/// ある。
+fn handle_search(context: &ApiContext, request: &Request) -> Response {
+    let body_text = match std::str::from_utf8(&request.body) {
+        Ok(t) => t,
+        Err(_) => return error_response(400, "ボディが UTF-8 でない"),
+    };
+    let value = match c1::parse(body_text) {
+        Ok(v) => v,
+        Err(e) => return error_response(400, &format!("JSON が不正: {e}")),
+    };
+    let search_request = match parse_search_request(&value) {
+        Ok(request) => request,
+        Err(message) => return error_response(400, &message),
+    };
+    match run_search(context, &search_request) {
+        Ok(results) => Response::json(200, search_response_body(&results)),
+        Err(e) => store_error_response(e),
+    }
 }
 
 /// JSON 文字列 1 個ぶんの直列化(引用符・エスケープ込み)。検索応答は score が小数で
@@ -456,37 +599,34 @@ fn json_text(text: &str) -> String {
 }
 
 /// 検索応答の本文。results の各件は snippet(チャンク本文の先頭)・id(チャンク ID。
-/// 全文の取得は既存の GET /v1/objects/{id})・score・citation(INGEST の「文書モデル」節
-/// の引用規則: document は ref パスから collections/<コレクション名>/ を除いた残り、
-/// position は chunks 列の添字、breadcrumbs、PDF なら page)。
+/// 全文の取得は既存の GET /v1/objects/{id})・score・citation(引用規則は Citation)。
+/// citation の at は取得日時(その版を見えに置いた ref レコードの時刻。unix 秒)である。
 ///
 /// method は実際に使った方式、score_semantics はその方式の得点の意味("bm25" の得点・
 /// "cosine"・順位から作った "rrf")である。どれも同一応答内の順位付けにだけ意味があり、
 /// 応答をまたいだ比較や絶対値の閾値には使えない。degraded は、要求した方式で答えられ
 /// なかったときだけ現れる理由である。
-fn search_response_body(
-    index: &crate::search::SearchIndex,
-    outcome: &crate::embed::RankedSearch,
-) -> Vec<u8> {
+fn search_response_body(outcome: &SearchResults) -> Vec<u8> {
     let mut results = Vec::new();
-    for hit in &outcome.hits {
-        let chunk = index.chunk(hit.position);
+    for result in &outcome.results {
+        let citation = &result.citation;
         let breadcrumbs: Vec<String> =
-            chunk.breadcrumbs.iter().map(|title| json_text(title)).collect();
-        let mut citation = format!(
-            "{{\"breadcrumbs\":[{}],\"document\":{}",
+            citation.breadcrumbs.iter().map(|title| json_text(title)).collect();
+        let mut rendered = format!(
+            "{{\"at\":{},\"breadcrumbs\":[{}],\"document\":{}",
+            citation.at,
             breadcrumbs.join(","),
-            json_text(&chunk.document)
+            json_text(&citation.document)
         );
-        if let Some(page) = chunk.page {
-            citation.push_str(&format!(",\"page\":{page}"));
+        if let Some(page) = citation.page {
+            rendered.push_str(&format!(",\"page\":{page}"));
         }
-        citation.push_str(&format!(",\"position\":{}}}", chunk.position));
+        rendered.push_str(&format!(",\"position\":{}}}", citation.position));
         results.push(format!(
-            "{{\"citation\":{citation},\"id\":{},\"score\":{},\"snippet\":{}}}",
-            json_text(&chunk.id),
-            hit.score,
-            json_text(&chunk.snippet),
+            "{{\"citation\":{rendered},\"id\":{},\"score\":{},\"snippet\":{}}}",
+            json_text(&result.id),
+            result.score,
+            json_text(&result.snippet),
         ));
     }
     let degraded = match &outcome.degraded {

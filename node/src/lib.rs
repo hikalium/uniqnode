@@ -11,6 +11,7 @@ pub mod groups;
 pub mod health;
 pub mod http;
 pub mod ingest;
+pub mod mcp;
 pub mod query;
 pub mod search;
 pub mod sha2;

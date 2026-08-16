@@ -36,6 +36,13 @@ fn usage() -> ! {
                                       キャッシュから読むので、検索が模型の計算を待つことは\n\
                                       ない。届かなければ BM25 だけに劣化して答え、応答の\n\
                                       method と degraded がそれを言う\n\
+           mcp <dir> [--embed <url>] [--embedder <id>]\n\
+                                      標準入出力で MCP(Model Context Protocol)を話す。\n\
+                                      LLM エージェント(Claude Code など)に search と\n\
+                                      fetch の2ツールを出す。標準出力はプロトコル専用で、\n\
+                                      ログは標準エラーへ出す。登録例:\n\
+                                      claude mcp add --transport stdio uniqnode --\n\
+                                      <この実行ファイル> mcp <dir>\n\
            embed <dir> [--embed <url>] [--embedder <id>]\n\
                                       見えのチャンクのうちベクトルの無いものを埋め込み、\n\
                                       <dir>/derived/embeddings/<id>.vec に足す(導出データ。\n\
@@ -560,6 +567,46 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                     std::process::exit(5);
                 }
             }
+        }
+        // MCP アダプタ(RAG 計画の項 5)。serve と同じ ApiContext を組み、HTTP の代わりに
+        // 標準入出力の JSON-RPC で search と fetch を出す。ここで標準出力へ書いてよいのは
+        // MCP のメッセージだけなので、起動の知らせも含めてログはすべて標準エラーへ出す。
+        "mcp" => {
+            let options = parse_embed_options(rest);
+            let data_dir = std::path::PathBuf::from(dir);
+            let store = std::sync::Arc::new(std::sync::Mutex::new(open(dir)));
+            let engine = std::sync::Arc::new(uniqnode::query::QueryEngine::new(
+                store.clone(),
+                data_dir.clone(),
+            ));
+            // serve と同じく、埋め込みは明示されたときだけ装備する(should/0114)。
+            // 届かなければ検索は BM25 に劣化し、ツールの応答と標準エラーの両方が
+            // そう言う。
+            let embedding = options.requested.then(|| {
+                let embedder =
+                    embedder_from(&options).with_timeout(uniqnode::embed::QUERY_EMBED_TIMEOUT);
+                eprintln!(
+                    "uniqnode: mcp: embedding: {} ({})",
+                    embedder.embedder_id(),
+                    embedder.endpoint()
+                );
+                uniqnode::embed::EmbeddingService::new(&data_dir, embedder)
+            });
+            let context = uniqnode::api::ApiContext {
+                store,
+                engine,
+                health: None,
+                referrers: std::sync::Mutex::new(None),
+                search: std::sync::Mutex::new(None),
+                embedding,
+            };
+            eprintln!(
+                "uniqnode: mcp: {dir} を stdio で提供する(protocol {}、tools: search・fetch)",
+                uniqnode::mcp::PROTOCOL_VERSION
+            );
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            uniqnode::mcp::serve_stdio(&context, &mut stdin.lock(), &mut stdout.lock())?;
         }
         "serve" => {
             let address = rest.first().map(String::as_str).unwrap_or_else(|| usage());

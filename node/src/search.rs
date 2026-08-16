@@ -145,7 +145,8 @@ fn snippet_of(text: &str) -> String {
 /// 索引済みチャンク 1 件。引用は doc_rev 側から組む(INGEST
 /// (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の「文書モデル」節): document は
 /// ref パスから collections/<コレクション名>/ を除いた残り、position は chunks 列の
-/// 添字、見出しは meta.breadcrumbs、PDF はさらに meta.page。
+/// 添字、見出しは meta.breadcrumbs、PDF はさらに meta.page。取得日時は、そのチャンクを
+/// 見えに置いている ref レコードの at である。
 pub struct IndexedChunk {
     /// チャンクのオブジェクト ID(全文の取得は既存の GET /v1/objects/{id})。
     pub id: String,
@@ -155,6 +156,8 @@ pub struct IndexedChunk {
     pub snippet: String,
     pub breadcrumbs: Vec<String>,
     pub page: Option<u32>,
+    /// 取得日時(このチャンクを見えに置いている ref レコードの at。unix 秒)。
+    pub at: i64,
     /// このチャンクの語数(BM25 の文書長)。
     term_count: usize,
 }
@@ -235,6 +238,10 @@ pub struct IndexableChunk {
     pub text: String,
     pub breadcrumbs: Vec<String>,
     pub page: Option<u32>,
+    /// 取得日時(このチャンクを見えに置いている ref レコードの at。unix 秒)。ref は
+    /// 署名済みの可変層のレコードであり、at は署名者がその版を書いた時刻である
+    /// (SPEC §4.4)。文書を取り込んだ時刻であって、原文が書かれた時刻ではない。
+    pub at: i64,
     /// このチャンクの索引語(chunk_terms_of の結果。呼び手が数え直さずに済むように渡す)。
     pub terms: Vec<String>,
 }
@@ -301,6 +308,7 @@ pub fn visit_indexable_chunks(
                 text: text.clone(),
                 breadcrumbs,
                 page,
+                at: state.at,
                 terms,
             });
         }
@@ -337,6 +345,7 @@ impl SearchIndex {
                 snippet: snippet_of(&chunk.text),
                 breadcrumbs: chunk.breadcrumbs,
                 page: chunk.page,
+                at: chunk.at,
                 term_count: chunk.terms.len(),
             });
         })?;
@@ -367,6 +376,13 @@ impl SearchIndex {
     /// 索引内の位置からチャンクを引く(位置は visit_indexable_chunks の走査順)。
     pub fn chunk(&self, position: usize) -> &IndexedChunk {
         &self.chunks[position]
+    }
+
+    /// オブジェクト ID から索引済みチャンクを引く(見えに無ければ None)。全文の取得
+    /// (MCP の fetch)が引用を組むために使う。走査は線形だが、引くのは 1 要求につき
+    /// 1 回であり、順位付けの内側ではない。
+    pub fn chunk_by_id(&self, id: &str) -> Option<&IndexedChunk> {
+        self.chunks.iter().find(|chunk| chunk.id == id)
     }
 
     /// 語 term の位置表。1 文字の非 ASCII 語は bigram の索引にそのままでは載らない
@@ -590,6 +606,14 @@ mod tests {
         assert_eq!(hits[0].chunk.collection, "notes");
         assert_eq!(hits[0].chunk.position, 0);
         assert_eq!(hits[0].chunk.breadcrumbs, vec!["章".to_string()]);
+        // 取得日時は ref レコードの at(取り込みの時刻)であって、既定値の 0 ではない。
+        // 下限はリテラル(2023-11-14T22:13:20Z)で書く(検査対象から導出しない。
+        // should/0137)。
+        assert!(
+            hits[0].chunk.at > 1_700_000_000,
+            "取得日時が ref レコードの at を運んでいない: {}",
+            hits[0].chunk.at
+        );
 
         // 改版: 旧版のチャンクは見えから消える。
         ingest_markdown(&mut store, "notes", "memo", "# 章\n\n改訂で言い換えた本文。\n");

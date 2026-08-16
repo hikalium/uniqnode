@@ -1,10 +1,11 @@
 //! 評価ハーネス: 検索方式を差し替えて Recall@k と MRR を比べる
-//! (RAG (uuid:8912f7c0-05fd-464d-9cba-4db8a5d30527) の項 3)。
+//! (EVAL (uuid:1109a04b-923e-4493-8f00-d704047d6a2a))。
 //!
 //! この層が持つのは指標の計算(純関数)と方式の差し替え点だけで、固定の小コーパスと
 //! 「クエリ → 正解チャンク」対は資材の側にある(node/tests/assets/eval_*.md と
 //! node/tests/eval.rs)。現時点で載っている方式は BM25 だけだが、埋め込みと RRF 融合
-//! (RAG の項 4)は Retrieval を実装して同じ evaluate に載り、同じ対で数値を比べられる。
+//! (RAG (uuid:86363f4a-3df6-4aa2-9c64-b99aa5cb4e7b) の項 4)は Retrieval を実装して
+//! 同じ evaluate に載り、同じ対で数値を比べられる。
 //!
 //! 指標は順位だけを見る(得点は見ない)。SEARCH
 //! (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580)の score_semantics のとおり、BM25 の得点は
@@ -287,7 +288,7 @@ mod tests {
         assert_eq!(per_mille(5.0 / 12.0), 417);
     }
 
-    /// 完了条件(RAG の項 3)の形: 同じ対のまま方式を差し替えると、数値が方式ごとに
+    /// 差し替え点が効いている形: 同じ対のまま方式を差し替えると、数値が方式ごとに
     /// 出て比べられる。期待値はリテラル(should/0137)。
     #[test]
     fn switching_the_method_produces_comparable_numbers() {

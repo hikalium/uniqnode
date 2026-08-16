@@ -46,6 +46,12 @@ fn usage() -> ! {
                                       行の並びで、載っている注釈は照合に落ちても\n\
                                       manual の検証記録付きで入る。serve 停止中の\n\
                                       ストア用)\n\
+           correct <dir> <collection> <誤った言明ID> <新しい言明ID> <理由>\n\
+                                      ストアにある言明の誤りを訂正する corrects 辺を\n\
+                                      発行する(新しい言明は取り込みと同じトークン照合で\n\
+                                      再照合され、根拠行つきの検証記録が付く。索引 ref\n\
+                                      annotations/<collection> に訂正の項が足される。\n\
+                                      serve 停止中のストア用)\n\
            flood <dir>                書き込み続ける(クラッシュ試験用の内部コマンド)"
     );
     std::process::exit(2);
@@ -311,6 +317,31 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             }
             run_ingest_annotations(dir, collection, data_md, manual)?;
         }
+        "correct" => {
+            let collection = rest.first().map(String::as_str).unwrap_or_else(|| usage());
+            let wrong_id = rest.get(1).map(String::as_str).unwrap_or_else(|| usage());
+            let new_id = rest.get(2).map(String::as_str).unwrap_or_else(|| usage());
+            let reason = rest.get(3).map(String::as_str).unwrap_or_else(|| usage());
+            if rest.len() > 4 {
+                usage();
+            }
+            let mut store = open(dir);
+            let outcome = uniqnode::ingest::correct_statement(
+                &mut store, collection, wrong_id, new_id, reason,
+            )?;
+            println!(
+                "corrects: {} (再照合 一致 {}/{}, verification={})",
+                outcome.corrects_edge_id,
+                outcome.matched_tokens,
+                outcome.total_tokens,
+                outcome.verification_id
+            );
+            let state = if outcome.ref_updated { "updated" } else { "no-op" };
+            println!(
+                "annotations/{collection}: {state} new_objects={} index={}",
+                outcome.new_objects, outcome.index_id
+            );
+        }
         "fsck" => {
             let store = open(dir);
             let report = store.fsck()?;
@@ -452,8 +483,12 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 let health = health.clone();
                 std::thread::spawn(move || health.run());
             }
-            let context =
-                uniqnode::api::ApiContext { store, engine, health: Some(health) };
+            let context = uniqnode::api::ApiContext {
+                store,
+                engine,
+                health: Some(health),
+                referrers: std::sync::Mutex::new(None),
+            };
             let handler: std::sync::Arc<uniqnode::http::Handler> =
                 std::sync::Arc::new(move |request| uniqnode::api::handle(&context, request));
             uniqnode::http::serve(listener, handler);

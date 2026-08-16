@@ -461,3 +461,213 @@ fn serve_without_pdftotext_rejects_pdf_with_instructions() {
     );
     assert_eq!(response.status, 200, "{}", body_text(&response));
 }
+
+// ---- 訂正の段(INGEST の「訂正の段」の確認) ----
+
+/// annotates 型ノードの固定 ID(must/0023 の定数の末端確認で使う)。
+const ANNOTATES_TYPE_ID: &str =
+    "s256:5338025bc944148dd5ae2ea4fc2ac5807f260f6259cc8fd8b9556615983e0d3c";
+/// corrects 型ノードの固定 ID。
+const CORRECTS_TYPE_ID: &str =
+    "s256:78d9189f91557b5bff27aefd61643ee333f54d63f9bb70a47b9fa18be40a8b4d";
+
+/// 標準入力からオブジェクトを投入して ID を得る(CLI put の実プロセス)。
+fn put_stdin(store: &str, bytes: &[u8]) -> String {
+    use std::io::Write as _;
+    let mut child = Command::new(binary())
+        .args(["put", store])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn put");
+    child.stdin.as_mut().expect("stdin").write_all(bytes).expect("write stdin");
+    let output = child.wait_with_output().expect("wait put");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .expect("id")
+        .to_string()
+}
+
+/// 訂正の段の本流を実プロセスで確認する: 照合を通る注釈を取り込み、それを誤りとして
+/// correct を実行すると corrects 辺が発行され、GET /v1/objects/{誤った言明}/referrers で
+/// 旧言明側から訂正が見つかる。ストアには PDF の生 blob(c1 でないオブジェクト)が
+/// 入っているので、逆引きの構築が非 c1 オブジェクトで壊れないことの確認を兼ねる。
+#[test]
+fn cli_correct_issues_a_corrects_edge_and_referrers_finds_it_from_the_wrong_statement() {
+    require_pdftotext();
+    let store_dir = unique_dir("correct-store");
+    let corpus = unique_dir("correct-corpus");
+    std::fs::create_dir_all(&corpus).expect("mkdir");
+    std::fs::write(corpus.join("three_pages.pdf"), THREE_PAGE_PDF).expect("write");
+    let store = store_dir.to_str().expect("utf-8").to_string();
+    let store = store.as_str();
+
+    // PDF と注釈(p.1「Page one」が照合を通る)を取り込む。
+    let output = Command::new(binary())
+        .args(["ingest", store, "specs", corpus.to_str().expect("utf-8")])
+        .output()
+        .expect("run ingest");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let ingest_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let doc_rev = ingest_stdout
+        .split("doc_rev=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("doc_rev id")
+        .to_string();
+    let annotations_path = corpus.join("annotations.md");
+    std::fs::write(&annotations_path, ANNOTATIONS_THREE_PAGES).expect("write");
+    let output = Command::new(binary())
+        .args(["ingest-annotations", store, "specs", annotations_path.to_str().expect("utf-8")])
+        .output()
+        .expect("run ingest-annotations");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let annotations_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    let get = |id: &str| {
+        let output = Command::new(binary()).args(["get", store, id]).output().expect("run get");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    // 誤った言明 = 取り込まれた p.1 の annotates 辺。blob は doc_rev.source から引く。
+    let index_id = annotations_stdout
+        .split("index=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("index id")
+        .to_string();
+    let wrong_id = json_text_field(&get(&index_id), "annotation").expect("annotation id");
+    let blob_id = json_text_field(&get(&doc_rev), "source").expect("source blob id");
+
+    // 新しい言明: p.2「Page two」の annotates 辺を put で作る(訂正の対象になりうる
+    // 言明はストアにある言明であって、注釈の取り込み経路で入ったものとは限らない)。
+    let title_id = put_stdin(store, "{\"contents\":\"Page two\",\"kind\":\"node\",\"v\":1}".as_bytes());
+    let new_edge = format!(
+        "{{\"kind\":\"edge\",\"members\":[\"{title_id}\",\"{blob_id}\"],\
+         \"meta\":{{\"page\":2}},\"type\":\"{ANNOTATES_TYPE_ID}\",\"v\":1}}"
+    );
+    let new_id = put_stdin(store, new_edge.as_bytes());
+
+    // 訂正の発行。再照合(2/2)を通り、corrects 辺と検証記録と索引の訂正の項ができる。
+    let reason = "注釈の行き先は p.1 ではなく p.2 だった";
+    let run_correct = || {
+        let output = Command::new(binary())
+            .args(["correct", store, "specs", &wrong_id, &new_id, reason])
+            .output()
+            .expect("run correct");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let first = run_correct();
+    assert!(first.contains("再照合 一致 2/2"), "{first}");
+    assert!(first.contains("annotations/specs: updated"), "{first}");
+    let corrects_id = first
+        .split("corrects: ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("corrects id")
+        .to_string();
+
+    // corrects 辺の形: type は corrects 型の固定 ID(must/0023 の末端確認)、members は
+    // [新しい言明, 誤った言明] の順、meta に理由と検証記録。
+    let edge = get(&corrects_id);
+    assert!(edge.contains(&format!("\"type\":\"{CORRECTS_TYPE_ID}\"")), "{edge}");
+    assert!(edge.contains(&format!("\"members\":[\"{new_id}\",\"{wrong_id}\"]")), "{edge}");
+    assert!(edge.contains(&format!("\"reason\":\"{reason}\"")), "{edge}");
+    let verification_id = json_text_field(&edge, "verification").expect("verification id");
+    let record = get(&verification_id);
+    assert!(record.contains("\"method\":\"token-match\""), "{record}");
+    assert!(record.contains("Page two of three"), "{record}");
+
+    // 索引: 訂正の項が足され、元の注釈の対も残っている。
+    let corrected_index_id = first
+        .split("index=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("index id")
+        .to_string();
+    let corrected_index = get(&corrected_index_id);
+    assert!(
+        corrected_index.contains(&format!("\"corrections\":[\"{corrects_id}\"]")),
+        "{corrected_index}"
+    );
+    assert!(
+        corrected_index.contains(&format!("\"annotation\":\"{wrong_id}\"")),
+        "{corrected_index}"
+    );
+
+    // 同じ訂正の再発行は no-op。
+    let second = run_correct();
+    assert!(second.contains("annotations/specs: no-op"), "{second}");
+    assert!(second.contains("new_objects=0"), "{second}");
+
+    // serve を立てて逆引きを引く。旧言明側から訂正(corrects 辺)が見つかる。
+    let server = start_server_at(store_dir.clone());
+    let referrers =
+        body_text(&simple(&server.address, "GET", &format!("/v1/objects/{wrong_id}/referrers"), b""));
+    assert!(referrers.contains(&corrects_id), "{referrers}");
+    // blob(c1 でない生 PDF)を参照する側も引ける: doc_rev と新旧の annotates 辺。
+    let blob_referrers =
+        body_text(&simple(&server.address, "GET", &format!("/v1/objects/{blob_id}/referrers"), b""));
+    assert!(blob_referrers.contains(&doc_rev), "{blob_referrers}");
+    assert!(blob_referrers.contains(&new_id), "{blob_referrers}");
+    // ローカルに無い ID は referrers 空の 200(404 ではない。逆引きは「自分の知る範囲」の
+    // 導出データであり、不在の言明ではない)。
+    let unknown = format!("s256:{}", "0".repeat(64));
+    let response =
+        simple(&server.address, "GET", &format!("/v1/objects/{unknown}/referrers"), b"");
+    assert_eq!(response.status, 200);
+    assert_eq!(body_text(&response), "{\"referrers\":[]}");
+    // ID の形をしていないパスは 400。
+    let response = simple(&server.address, "GET", "/v1/objects/nonsense/referrers", b"");
+    assert_eq!(response.status, 400, "{}", body_text(&response));
+
+    // 索引の構築後に書き込みが挟まっても、次の要求は作り直された索引で答える
+    // (世代 = object_count の整合)。
+    let late_referrer =
+        format!("{{\"kind\":\"node\",\"note\":\"{wrong_id}\",\"v\":1}}");
+    let late_id = put_object(&server.address, late_referrer.as_bytes());
+    let referrers =
+        body_text(&simple(&server.address, "GET", &format!("/v1/objects/{wrong_id}/referrers"), b""));
+    assert!(referrers.contains(&late_id), "書き込み後の逆引きが古い: {referrers}");
+
+    std::fs::remove_dir_all(&corpus).expect("cleanup");
+}
+
+/// correct の負例: 存在しない ID(誤った言明・新しい言明のそれぞれ)と annotates 辺で
+/// ない言明は、どれも明示的に失敗する(must/0022)。
+#[test]
+fn cli_correct_fails_explicitly_for_missing_ids_and_non_annotates_statements() {
+    let store_dir = unique_dir("correct-negative-store");
+    let store = store_dir.to_str().expect("utf-8");
+    let node_a = put_stdin(store, "{\"contents\":\"alpha\",\"kind\":\"node\",\"v\":1}".as_bytes());
+    let node_b = put_stdin(store, "{\"contents\":\"beta\",\"kind\":\"node\",\"v\":1}".as_bytes());
+    let absent = format!("s256:{}", "0".repeat(64));
+
+    let run_correct = |wrong: &str, new: &str| {
+        let output = Command::new(binary())
+            .args(["correct", store, "notes", wrong, new, "理由"])
+            .output()
+            .expect("run correct");
+        assert!(!output.status.success(), "失敗すべき correct が成功した");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    // 誤った言明がストアに無い。
+    let stderr = run_correct(&absent, &node_a);
+    assert!(stderr.contains("誤った言明"), "{stderr}");
+    assert!(stderr.contains(&absent), "{stderr}");
+    assert!(stderr.contains("ストアに無い"), "{stderr}");
+    // 新しい言明がストアに無い。
+    let stderr = run_correct(&node_a, &absent);
+    assert!(stderr.contains("新しい言明"), "{stderr}");
+    assert!(stderr.contains("ストアに無い"), "{stderr}");
+    // 新しい言明が annotates 辺でない(再照合できる形でない)。
+    let stderr = run_correct(&node_a, &node_b);
+    assert!(stderr.contains("annotates 型の辺でない"), "{stderr}");
+
+    std::fs::remove_dir_all(&store_dir).expect("cleanup");
+}

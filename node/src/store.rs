@@ -830,6 +830,11 @@ impl Store {
         self.object_index.len()
     }
 
+    /// 全オブジェクトの ID(昇順)。逆引き索引の構築(ReferrerIndex::build)が使う。
+    pub fn object_ids(&self) -> impl Iterator<Item = &String> {
+        self.object_index.keys()
+    }
+
     /// 自分の名前空間の最終 seq。
     pub fn last_seq(&self) -> u64 {
         self.signer_last_seq.get(&self.node_id_hex).copied().unwrap_or(0)
@@ -975,6 +980,57 @@ pub struct FsckReport {
     pub errors: Vec<String>,
 }
 
+/// 逆引き索引: あるオブジェクト ID を参照している既知オブジェクトの一覧。逆向きの知識は
+/// 「いま自分が知っている言明の集合」に相対的な事実であり言明にできないので、各DBノードが
+/// 手元で再構成する導出データ(I4)として持つ(ASSERTIONS
+/// (uuid:c05379e2-2d30-41bc-8342-62103d94bb21) の原理 3 帰結 2)。
+/// 遅延構築であり、Store::open には触れない(open はオブジェクトをパースせずハッシュだけを
+/// 見る唯一の共有経路であり、そこに全件パースを足すと壊れたオブジェクト 1 個でストアが
+/// 開かなくなる。INGEST (uuid:11ff6fec-cf85-4ae9-a24c-6098964f6cce) の「リスクと戻し方」)。
+pub struct ReferrerIndex {
+    /// 構築時点の object_count。オブジェクトは追記専用で消えないため、これが現在値と
+    /// 一致する限り索引は最新(世代番号による整合)。
+    generation: usize,
+    /// 参照先 ID → 参照している既知オブジェクトの ID 列(昇順)。
+    map: BTreeMap<String, Vec<String>>,
+}
+
+impl ReferrerIndex {
+    /// 全オブジェクトを一度走査して構築する。c1 としてパースできないオブジェクト
+    /// (生 blob 等)は参照ゼロとして飛ばす(参照の規約 SPEC §4.3 は c1 値の中の
+    /// s256: 文字列だけを参照と見なすため、パースできない内容は定義上参照を持たない)。
+    pub fn build(store: &Store) -> Result<ReferrerIndex> {
+        let generation = store.object_count();
+        let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for id in store.object_ids() {
+            let Some(bytes) = store.get_object(id)? else { continue };
+            let Ok(text) = std::str::from_utf8(&bytes) else { continue };
+            let Ok(value) = c1::parse(text) else { continue };
+            let mut references = Vec::new();
+            c1::collect_references(&value, &mut references);
+            references.sort();
+            references.dedup();
+            for target in references {
+                // 走査は ID 昇順なので、各参照先の一覧も自然に昇順で積み上がる。
+                map.entry(target).or_default().push(id.clone());
+            }
+        }
+        Ok(ReferrerIndex { generation, map })
+    }
+
+    /// この索引が store の現在のオブジェクト集合について最新か。オブジェクトは追記専用
+    /// なので object_count の一致が「構築後に書き込みが無い」ことと同値。
+    pub fn is_current(&self, store: &Store) -> bool {
+        self.generation == store.object_count()
+    }
+
+    /// id を参照している既知オブジェクトの一覧(昇順)。知らない ID は空を返す
+    /// (逆引きは「自分の知る範囲」の導出データであり、空は不在の言明ではない)。
+    pub fn referrers_of(&self, id: &str) -> &[String] {
+        self.map.get(id).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1023,6 +1079,38 @@ mod tests {
             let report = store.fsck().expect("fsck");
             assert!(report.errors.is_empty(), "{:?}", report.errors);
         }
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 逆引き索引(訂正の段): 参照される側から参照している既知オブジェクトが引け、
+    /// c1 でない blob は参照ゼロとして飛び、知らない ID は空。書き込みが挟まると
+    /// 世代(object_count)がずれ、作り直しで新しい参照が見える。
+    #[test]
+    fn the_referrer_index_answers_reverse_lookups_and_detects_staleness() {
+        let dir = temp_dir("referrer-index");
+        let mut store = Store::open(StoreConfig::new(&dir)).expect("open");
+        // UTF-8 でない生 blob(パースできないオブジェクトの代表)。
+        let (blob_id, _) = store.put_object(&[0x89, 0x50, 0x4e, 0x47, 0x00]).expect("put");
+        let (node_id, _) =
+            store.put_object(b"{\"contents\":\"x\",\"kind\":\"node\",\"v\":1}").expect("put");
+        let referrer_body = format!("{{\"kind\":\"node\",\"target\":\"{node_id}\",\"v\":1}}");
+        let (referrer_id, _) = store.put_object(referrer_body.as_bytes()).expect("put");
+
+        let index = ReferrerIndex::build(&store).expect("build");
+        assert!(index.is_current(&store));
+        assert_eq!(index.referrers_of(&node_id), std::slice::from_ref(&referrer_id));
+        assert!(index.referrers_of(&blob_id).is_empty(), "blob は誰からも参照されていない");
+        // 知らない ID は空(「自分の知る範囲」の導出データであり、不在の言明ではない)。
+        let unknown = format!("s256:{}", "0".repeat(64));
+        assert!(index.referrers_of(&unknown).is_empty());
+
+        // 書き込みが挟まると世代がずれ、作り直しで新しい参照が見える。
+        let second_body = format!("{{\"kind\":\"node\",\"note\":\"{blob_id}\",\"v\":1}}");
+        let (second_id, _) = store.put_object(second_body.as_bytes()).expect("put");
+        assert!(!index.is_current(&store), "書き込み後の索引を最新と誤認してはならない");
+        let rebuilt = ReferrerIndex::build(&store).expect("rebuild");
+        assert!(rebuilt.is_current(&store));
+        assert_eq!(rebuilt.referrers_of(&blob_id), std::slice::from_ref(&second_id));
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

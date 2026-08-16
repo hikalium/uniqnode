@@ -16,6 +16,10 @@ pub struct ApiContext {
     pub engine: Arc<QueryEngine>,
     /// serve でのみ Some(健全性エンジン。SPEC §8)。
     pub health: Option<Arc<crate::health::HealthEngine>>,
+    /// 逆引き索引の遅延キャッシュ(GET /v1/objects/{id}/referrers)。起動時には作らず
+    /// (Store::open に全件パースを足さない。INGEST の「リスクと戻し方」)、初回要求時に
+    /// 構築して、世代(object_count)がずれたら次の要求で作り直す。
+    pub referrers: Mutex<Option<crate::store::ReferrerIndex>>,
 }
 
 fn json_object(entries: Vec<(&str, c1::Value)>) -> Vec<u8> {
@@ -367,7 +371,36 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
         };
     }
 
-    if let Some(id) = path.strip_prefix("/v1/objects/") {
+    if let Some(rest) = path.strip_prefix("/v1/objects/") {
+        // 逆引き(INGEST の「訂正の段」): この ID を参照している既知オブジェクトの一覧。
+        if let Some(id) = rest.strip_suffix("/referrers") {
+            if method != "GET" {
+                return error_response(405, "GET のみ");
+            }
+            if !c1::is_object_id(id) {
+                return error_response(400, "オブジェクトIDの形式が不正");
+            }
+            let store = store.lock().expect("lock");
+            let mut cache = context.referrers.lock().expect("lock");
+            // 遅延構築。オブジェクトは追記専用なので、構築時点の object_count が現在値と
+            // 一致する限り索引は最新。書き込みが挟まれば次の要求で作り直す。
+            if !cache.as_ref().is_some_and(|index| index.is_current(&store)) {
+                match crate::store::ReferrerIndex::build(&store) {
+                    Ok(index) => *cache = Some(index),
+                    Err(e) => return store_error_response(e),
+                }
+            }
+            let index = cache.as_ref().expect("直前に構築した");
+            // ローカルに無い ID も referrers 空の 200(逆引きは「自分の知る範囲」の
+            // 導出データであり、空は不在の言明ではない)。
+            let referrers: Vec<c1::Value> =
+                index.referrers_of(id).iter().cloned().map(c1::Value::Text).collect();
+            return Response::json(
+                200,
+                json_object(vec![("referrers", c1::Value::Array(referrers))]),
+            );
+        }
+        let id = rest;
         if method != "GET" {
             return error_response(405, "GET のみ");
         }

@@ -744,14 +744,27 @@ fn resolve_document(
     let Some(Value::Text(blob_id)) = doc.get("source") else {
         return Err(StoreError::Invalid(format!("doc_rev {target} に source が無い")));
     };
+    let page_lines = collect_page_lines(store, &target, doc, pages)?;
+    Ok(ResolvedDocument { blob_id: blob_id.clone(), pages: page_lines })
+}
+
+/// doc_rev の chunks 列から、要求ページの本文行を集める(meta.page の一致するチャンクの
+/// text から取る。pdftotext の再実行はしない)。注釈の取り込みと訂正の再照合が共用する
+/// (should/0135)。
+fn collect_page_lines(
+    store: &Store,
+    doc_rev_id: &str,
+    doc: &BTreeMap<String, Value>,
+    pages: &BTreeSet<u32>,
+) -> Result<BTreeMap<u32, Vec<String>>> {
     let Some(Value::Array(chunk_ids)) = doc.get("chunks") else {
-        return Err(StoreError::Invalid(format!("doc_rev {target} に chunks 列が無い")));
+        return Err(StoreError::Invalid(format!("doc_rev {doc_rev_id} に chunks 列が無い")));
     };
     let mut page_lines: BTreeMap<u32, Vec<String>> = BTreeMap::new();
     for chunk_ref in chunk_ids {
         let Value::Text(chunk_id) = chunk_ref else {
             return Err(StoreError::Invalid(format!(
-                "doc_rev {target} の chunks 列に文字列でない要素がある"
+                "doc_rev {doc_rev_id} の chunks 列に文字列でない要素がある"
             )));
         };
         let chunk = parse_stored_object(store, chunk_id, "chunk")?;
@@ -775,7 +788,7 @@ fn resolve_document(
                 .extend(text.lines().map(|line| line.to_string()));
         }
     }
-    Ok(ResolvedDocument { blob_id: blob_id.clone(), pages: page_lines })
+    Ok(page_lines)
 }
 
 /// {v:1, kind:"node", contents:<text>} のノード(節タイトル用)。
@@ -894,6 +907,8 @@ pub fn ingest_annotations(
 
     // 索引は取り込みの実行ごとにまとめて作り直す(1 件ごとに作り直さない)。索引の
     // ref が無いと辺も検証記録も複製や pin の対象にならない(ASSERTIONS の原理 3)。
+    // 作り直しは現行索引の訂正の項を持ち越す(落とすと訂正の辺と根拠がどの ref からも
+    // 辿れなくなり、複製や pin の対象から外れる)。
     let pairs: Vec<Value> = accepted
         .iter()
         .map(|annotation| {
@@ -903,15 +918,83 @@ pub fn ingest_annotations(
             Value::Object(pair)
         })
         .collect();
+    let (_, corrections) = read_annotation_index(store, collection)?;
+    let index = annotation_index_value(&pairs, &corrections);
+    let (index_id, ref_updated, index_new) = write_annotation_index(store, collection, &index)?;
+    new_objects += index_new;
+    Ok(AnnotationOutcome { accepted, rejected, index_id, ref_updated, new_objects })
+}
+
+/// 索引オブジェクトを組む(注釈の取り込みと訂正の発行が同じ形を共用する。should/0135)。
+/// contents.annotations は {annotation, verification} の対の列、contents.corrections は
+/// corrects 辺 ID の列。corrections が空のときは鍵ごと省く(訂正の無い索引は注釈の段の
+/// 形のまま変わらない)。
+fn annotation_index_value(pairs: &[Value], corrections: &[String]) -> Value {
     let mut contents = BTreeMap::new();
-    contents.insert("annotations".to_string(), Value::Array(pairs));
+    contents.insert("annotations".to_string(), Value::Array(pairs.to_vec()));
+    if !corrections.is_empty() {
+        contents.insert(
+            "corrections".to_string(),
+            Value::Array(corrections.iter().map(|id| text_value(id)).collect()),
+        );
+    }
     let mut index = BTreeMap::new();
     index.insert("v".to_string(), Value::Integer(1));
     index.insert("kind".to_string(), text_value("node"));
     index.insert("contents".to_string(), Value::Object(contents));
-    let (index_id, is_new) = store.put_object(&c1::to_canonical_bytes(&Value::Object(index)))?;
-    new_objects += usize::from(is_new);
+    Value::Object(index)
+}
 
+/// 現行の注釈索引(ref annotations/<コレクション名>)の中身を読む。ref が無ければ空。
+/// 返り値は (annotations の対の列, corrections の ID 列)。形が崩れていたら黙って
+/// 進めず明示的に失敗する(must/0022)。
+fn read_annotation_index(
+    store: &Store,
+    collection: &str,
+) -> Result<(Vec<Value>, Vec<String>)> {
+    let full_name = store.own_ref_name(&format!("annotations/{collection}"));
+    let Some(target) = store.get_ref(&full_name).and_then(|state| state.target.clone()) else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let value = parse_stored_object(store, &target, "注釈索引")?;
+    let Value::Object(map) = &value else {
+        return Err(StoreError::Invalid(format!("注釈索引 {target} がオブジェクトでない")));
+    };
+    let Some(Value::Object(contents)) = map.get("contents") else {
+        return Err(StoreError::Invalid(format!("注釈索引 {target} に contents が無い")));
+    };
+    let Some(Value::Array(pairs)) = contents.get("annotations") else {
+        return Err(StoreError::Invalid(format!("注釈索引 {target} に annotations 列が無い")));
+    };
+    let corrections = match contents.get("corrections") {
+        None => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| match item {
+                Value::Text(id) => Ok(id.clone()),
+                _ => Err(StoreError::Invalid(format!(
+                    "注釈索引 {target} の corrections 列に文字列でない要素がある"
+                ))),
+            })
+            .collect::<Result<Vec<String>>>()?,
+        Some(_) => {
+            return Err(StoreError::Invalid(format!(
+                "注釈索引 {target} の corrections が列でない"
+            )))
+        }
+    };
+    Ok((pairs.clone(), corrections))
+}
+
+/// 索引を書いて ref annotations/<コレクション名> を張る。現行と同一なら ref は触らない
+/// (no-op)。返り値は (索引 ID, ref を張り替えたか, 新規オブジェクト数)。
+fn write_annotation_index(
+    store: &mut Store,
+    collection: &str,
+    index: &Value,
+) -> Result<(String, bool, usize)> {
+    let (index_id, is_new) = store.put_object(&c1::to_canonical_bytes(index))?;
+    let new_objects = usize::from(is_new);
     let ref_path = format!("annotations/{collection}");
     let full_name = store.own_ref_name(&ref_path);
     let current = store.get_ref(&full_name).and_then(|state| state.target.clone());
@@ -919,7 +1002,210 @@ pub fn ingest_annotations(
     if ref_updated {
         store.set_ref(&ref_path, Some(&index_id))?;
     }
-    Ok(AnnotationOutcome { accepted, rejected, index_id, ref_updated, new_objects })
+    Ok((index_id, ref_updated, new_objects))
+}
+
+// ---- 訂正の発行(INGEST の「訂正の段」) ----
+
+/// 訂正 1 件の結果(報告の素)。matched_tokens / total_tokens は新しい言明の再照合の
+/// 一致率。
+#[derive(Debug)]
+pub struct CorrectionOutcome {
+    pub corrects_edge_id: String,
+    pub verification_id: String,
+    pub matched_tokens: usize,
+    pub total_tokens: usize,
+    /// コレクションの索引オブジェクトの ID(ref annotations/<コレクション名> の指す先)。
+    pub index_id: String,
+    /// ref を張り替えたか。false = 同じ訂正の再発行(no-op)。
+    pub ref_updated: bool,
+    pub new_objects: usize,
+}
+
+/// annotates 辺の中身(節タイトルのノード ID・blob ID・ページ番号)。
+struct AnnotatesParts {
+    title_id: String,
+    blob_id: String,
+    page: u32,
+}
+
+/// annotates 型の辺から再照合に要る三つ組を取り出す。形が崩れていたら黙って進めず
+/// 明示的に失敗する(must/0022)。
+fn annotates_edge_parts(id: &str, value: &Value) -> Result<AnnotatesParts> {
+    let Value::Object(map) = value else {
+        return Err(StoreError::Invalid(format!("annotates 辺 {id} がオブジェクトでない")));
+    };
+    let Some(Value::Array(members)) = map.get("members") else {
+        return Err(StoreError::Invalid(format!("annotates 辺 {id} に members が無い")));
+    };
+    let (Some(Value::Text(title_id)), Some(Value::Text(blob_id)), None) =
+        (members.first(), members.get(1), members.get(2))
+    else {
+        return Err(StoreError::Invalid(format!(
+            "annotates 辺 {id} の members が [節タイトルのノード, blob] の 2 要素でない"
+        )));
+    };
+    let page = match map.get("meta") {
+        Some(Value::Object(meta)) => match meta.get("page") {
+            Some(Value::Integer(page)) => u32::try_from(*page).ok(),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(page) = page else {
+        return Err(StoreError::Invalid(format!(
+            "annotates 辺 {id} に meta.page(1 始まりの物理ページ番号)が無い"
+        )));
+    };
+    Ok(AnnotatesParts { title_id: title_id.clone(), blob_id: blob_id.clone(), page })
+}
+
+/// blob を source に持つ現行 doc_rev を ref collections/<コレクション名>/* から探す。
+/// 注釈は文書名ではなく blob に張られている(原理 6)ので、逆に blob から本文へ戻るには
+/// 現在の見え(ref)を引く。見つからなければ None(呼び手が明示的に失敗する)。
+fn find_doc_rev_for_blob(
+    store: &Store,
+    collection: &str,
+    blob_id: &str,
+) -> Result<Option<(String, Value)>> {
+    let prefix = store.own_ref_name(&format!("collections/{collection}/"));
+    for (name, state) in store.list_refs() {
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        // tombstone は現在の見えに無い。
+        let Some(target) = &state.target else { continue };
+        let value = parse_stored_object(store, target, "doc_rev")?;
+        let Value::Object(map) = &value else { continue };
+        if map.get("source") == Some(&text_value(blob_id)) {
+            return Ok(Some((target.clone(), value)));
+        }
+    }
+    Ok(None)
+}
+
+/// 訂正の発行(INGEST の「訂正の段」)。wrong_id の言明を誤りとし、new_id の言明が
+/// 代わることを主張する corrects 辺を発行する。新しい言明は取り込み時と同じトークン照合
+/// (match_annotation。should/0135)で再照合し、根拠行つきの検証記録(method=token-match)
+/// を作って辺の meta.verification から指す。meta 内の s256: 文字列も参照なので、訂正の
+/// 到達閉包が新旧の言明と根拠ごと運ばれる(原理 3 帰結 1)。索引 ref
+/// annotations/<コレクション名> に訂正の項を足す(原理 3 帰結 3)。
+pub fn correct_statement(
+    store: &mut Store,
+    collection: &str,
+    wrong_id: &str,
+    new_id: &str,
+    reason: &str,
+) -> Result<CorrectionOutcome> {
+    if wrong_id == new_id {
+        return Err(StoreError::Invalid(format!(
+            "誤った言明と新しい言明が同じ({wrong_id})。言明は自分自身を訂正できない"
+        )));
+    }
+    // 訂正の対象は既にストアにある言明だけ(INGEST の「訂正の表現」節)。無ければ
+    // 黙って進めず明示的に失敗する(must/0022)。
+    for (role, id) in [("誤った言明", wrong_id), ("新しい言明", new_id)] {
+        if !store.has_object(id) {
+            return Err(StoreError::Invalid(format!(
+                "{role} {id} がストアに無い(訂正は既にストアにある言明にだけ張れる)"
+            )));
+        }
+    }
+    // 新しい言明の再照合。照合はタイトルとページ本文のトークン照合なので、適用できるのは
+    // annotates 型の辺だけ。それ以外の形は理由を言って失敗する。
+    let new_value = parse_stored_object(store, new_id, "新しい言明")?;
+    if !is_annotates_edge(&new_value) {
+        return Err(StoreError::Invalid(format!(
+            "新しい言明 {new_id} が annotates 型の辺でない。再照合(タイトルとページ本文の\
+             トークン照合)は annotates 辺にしか適用できないため、この言明では訂正を\
+             発行できない"
+        )));
+    }
+    let parts = annotates_edge_parts(new_id, &new_value)?;
+    let title_value = parse_stored_object(store, &parts.title_id, "節タイトルのノード")?;
+    let title = match &title_value {
+        Value::Object(map) => match map.get("contents") {
+            Some(Value::Text(title)) => title.clone(),
+            _ => {
+                return Err(StoreError::Invalid(format!(
+                    "節タイトルのノード {} に contents(文字列)が無い",
+                    parts.title_id
+                )))
+            }
+        },
+        _ => {
+            return Err(StoreError::Invalid(format!(
+                "節タイトルのノード {} がオブジェクトでない",
+                parts.title_id
+            )))
+        }
+    };
+    let Some((doc_rev_id, doc_rev)) = find_doc_rev_for_blob(store, collection, &parts.blob_id)?
+    else {
+        return Err(StoreError::Invalid(format!(
+            "新しい言明の参照する blob {} を source に持つ doc_rev が collections/\
+             {collection}/ に無い。先に uniqnode ingest で文書を取り込むこと",
+            parts.blob_id
+        )));
+    };
+    let Value::Object(doc) = &doc_rev else {
+        return Err(StoreError::Invalid(format!("doc_rev {doc_rev_id} がオブジェクトでない")));
+    };
+    let mut pages = BTreeSet::new();
+    pages.insert(parts.page);
+    let page_lines = collect_page_lines(store, &doc_rev_id, doc, &pages)?;
+    let no_lines: Vec<String> = Vec::new();
+    let lines = page_lines.get(&parts.page).unwrap_or(&no_lines);
+    let outcome = match_annotation(&title, lines);
+    if !outcome.matched {
+        return Err(StoreError::Invalid(format!(
+            "新しい言明 {new_id} が照合に落ちた(p.{} との一致 {}/{})。照合を通らない言明\
+             では訂正を発行しない",
+            parts.page, outcome.matched_tokens, outcome.total_tokens
+        )));
+    }
+    // ここから書き込み。すべて content-addressed なので、同じ訂正の再発行は新規
+    // オブジェクトを生まない(べき等 = I1)。
+    let mut new_objects = 0usize;
+    let (type_id, is_new) = store.put_object(CORRECTS_TYPE_BODY.as_bytes())?;
+    new_objects += usize::from(is_new);
+    let record_bytes =
+        c1::to_canonical_bytes(&verification_record_value(METHOD_TOKEN_MATCH, &outcome.evidence));
+    let (verification_id, is_new) = store.put_object(&record_bytes)?;
+    new_objects += usize::from(is_new);
+    // corrects 辺。members は [新しい言明, 誤った言明] の順(INGEST の「訂正の表現」節)。
+    let mut edge = BTreeMap::new();
+    edge.insert("v".to_string(), Value::Integer(1));
+    edge.insert("kind".to_string(), text_value("edge"));
+    edge.insert("type".to_string(), text_value(&type_id));
+    edge.insert(
+        "members".to_string(),
+        Value::Array(vec![text_value(new_id), text_value(wrong_id)]),
+    );
+    let mut meta = BTreeMap::new();
+    meta.insert("reason".to_string(), text_value(reason));
+    meta.insert("verification".to_string(), text_value(&verification_id));
+    edge.insert("meta".to_string(), Value::Object(meta));
+    let (edge_id, is_new) = store.put_object(&c1::to_canonical_bytes(&Value::Object(edge)))?;
+    new_objects += usize::from(is_new);
+    // 索引に訂正の項を足す(訂正の辺も索引の ref から指されないと複製や pin の対象に
+    // ならない。原理 3 帰結 3)。同じ訂正の再発行は項を重複させない(no-op)。
+    let (pairs, mut corrections) = read_annotation_index(store, collection)?;
+    if !corrections.contains(&edge_id) {
+        corrections.push(edge_id.clone());
+    }
+    let index = annotation_index_value(&pairs, &corrections);
+    let (index_id, ref_updated, index_new) = write_annotation_index(store, collection, &index)?;
+    new_objects += index_new;
+    Ok(CorrectionOutcome {
+        corrects_edge_id: edge_id,
+        verification_id,
+        matched_tokens: outcome.matched_tokens,
+        total_tokens: outcome.total_tokens,
+        index_id,
+        ref_updated,
+        new_objects,
+    })
 }
 
 #[cfg(test)]
@@ -1396,6 +1682,226 @@ mod tests {
         assert_eq!(store.object_count(), objects_before, "失敗した取り込みが書き残した");
         let full_name = store.own_ref_name("annotations/specs");
         assert!(store.get_ref(&full_name).is_none(), "失敗した取り込みが ref を作った");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    // ---- 訂正の段 ----
+
+    /// 2 ページの擬似 PDF 文書(訂正の段のテスト用)。p.1 と p.2 に別の本文を置く。
+    fn ingest_two_page_document(store: &mut Store, name: &str) -> IngestOutcome {
+        let chunks = vec![
+            Chunk { text: "Alpha Beta Gamma".to_string(), breadcrumbs: Vec::new(), page: Some(1) },
+            Chunk {
+                text: "Delta Epsilon Zeta".to_string(),
+                breadcrumbs: Vec::new(),
+                page: Some(2),
+            },
+        ];
+        let source = format!("%PDF-fake {name}");
+        ingest_document(
+            store,
+            &DocumentInput {
+                collection: "specs",
+                name,
+                source: source.as_bytes(),
+                media: "pdf",
+                chunks: &chunks,
+                extractor: Some("pdftotext test"),
+            },
+        )
+        .expect("ingest")
+    }
+
+    /// p.1 と p.2 の注釈 2 件を取り込む(2 件目が訂正の「新しい言明」役)。
+    fn ingest_two_annotations(store: &mut Store) -> AnnotationOutcome {
+        ingest_two_page_document(store, "minispec");
+        let entries = vec![
+            AnnotationEntry {
+                spec_id: "minispec".to_string(),
+                page: 1,
+                title: "Alpha Beta".to_string(),
+            },
+            AnnotationEntry {
+                spec_id: "minispec".to_string(),
+                page: 2,
+                title: "Delta Epsilon".to_string(),
+            },
+        ];
+        let outcome =
+            ingest_annotations(store, "specs", &entries, &BTreeSet::new()).expect("ingest");
+        assert_eq!(outcome.accepted.len(), 2, "前提: 2 件とも照合を通る");
+        outcome
+    }
+
+    /// 訂正の段の本流: corrects 辺が正典仕様の形({v:1, kind:edge, type:<corrects>,
+    /// members:[新, 旧], meta:{reason, verification}})で発行され、検証記録は再照合の
+    /// 根拠行を持ち、索引に訂正の項が足される。同じ訂正の再発行は完全な no-op。
+    #[test]
+    fn correct_statement_issues_the_edge_with_reverification_and_updates_the_index() {
+        let (dir, mut store) = temp_store("correct-edge");
+        let annotations = ingest_two_annotations(&mut store);
+        let wrong_id = annotations.accepted[0].edge_id.clone();
+        let new_id = annotations.accepted[1].edge_id.clone();
+
+        let outcome =
+            correct_statement(&mut store, "specs", &wrong_id, &new_id, "p.1 は p.2 の誤り")
+                .expect("correct");
+        assert_eq!((outcome.matched_tokens, outcome.total_tokens), (2, 2));
+        assert!(outcome.ref_updated);
+
+        // corrects 辺の形(期待値はリテラルに近い正規形の全文。should/0137)。
+        let bytes = store.get_object(&outcome.corrects_edge_id).expect("get").expect("present");
+        assert_eq!(
+            String::from_utf8(bytes).expect("utf-8"),
+            format!(
+                "{{\"kind\":\"edge\",\"members\":[\"{new_id}\",\"{wrong_id}\"],\
+                 \"meta\":{{\"reason\":\"p.1 は p.2 の誤り\",\"verification\":\"{}\"}},\
+                 \"type\":\"{}\",\"v\":1}}",
+                outcome.verification_id,
+                corrects_type_id()
+            )
+        );
+        // 検証記録: 再照合の方法と根拠行(p.2 の本文)だけを持つ。
+        let bytes = store.get_object(&outcome.verification_id).expect("get").expect("present");
+        assert_eq!(
+            String::from_utf8(bytes).expect("utf-8"),
+            "{\"contents\":{\"evidence\":[\"Delta Epsilon Zeta\"],\
+             \"method\":\"token-match\"},\"kind\":\"node\",\"v\":1}"
+        );
+        // 索引: 注釈の対は残ったまま、corrections に訂正の辺が載り、ref が指す。
+        let bytes = store.get_object(&outcome.index_id).expect("get").expect("present");
+        let index_text = String::from_utf8(bytes).expect("utf-8");
+        assert!(
+            index_text
+                .contains(&format!("\"corrections\":[\"{}\"]", outcome.corrects_edge_id)),
+            "{index_text}"
+        );
+        assert!(index_text.contains(&format!("\"annotation\":\"{wrong_id}\"")), "{index_text}");
+        assert!(index_text.contains(&format!("\"annotation\":\"{new_id}\"")), "{index_text}");
+        let full_name = store.own_ref_name("annotations/specs");
+        assert_eq!(
+            store.get_ref(&full_name).expect("ref").target.as_deref(),
+            Some(outcome.index_id.as_str())
+        );
+
+        // 同じ訂正の再発行は完全な no-op(辺も索引もオブジェクト数も動かない)。
+        let objects_before = store.object_count();
+        let seq_before = store.get_ref(&full_name).expect("ref").seq;
+        let again =
+            correct_statement(&mut store, "specs", &wrong_id, &new_id, "p.1 は p.2 の誤り")
+                .expect("correct again");
+        assert_eq!(again.corrects_edge_id, outcome.corrects_edge_id);
+        assert_eq!(again.new_objects, 0, "再発行で新オブジェクトを書いてはならない");
+        assert!(!again.ref_updated, "再発行で ref を張り替えてはならない");
+        assert_eq!(store.object_count(), objects_before);
+        assert_eq!(store.get_ref(&full_name).expect("ref").seq, seq_before);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 訂正の負例: 存在しない ID・自分自身・annotates 辺でない言明・blob の引けない
+    /// 言明・照合に落ちる言明は、どれも明示的に失敗し(must/0022)、何も書かない。
+    #[test]
+    fn correct_statement_fails_explicitly_on_bad_input_and_writes_nothing() {
+        let (dir, mut store) = temp_store("correct-negative");
+        let annotations = ingest_two_annotations(&mut store);
+        let wrong_id = annotations.accepted[0].edge_id.clone();
+        let absent = format!("s256:{}", "0".repeat(64));
+
+        // 誤った言明がストアに無い(訂正は既にストアにある言明にだけ張れる)。
+        let new_id = annotations.accepted[1].edge_id.clone();
+        let error = correct_statement(&mut store, "specs", &absent, &new_id, "理由")
+            .expect_err("存在しない誤った言明で成功してはならない");
+        let message = error.to_string();
+        assert!(message.contains("誤った言明"), "{message}");
+        assert!(message.contains(&absent), "{message}");
+        assert!(message.contains("ストアに無い"), "{message}");
+
+        // 新しい言明がストアに無い。
+        let error = correct_statement(&mut store, "specs", &wrong_id, &absent, "理由")
+            .expect_err("存在しない新しい言明で成功してはならない");
+        let message = error.to_string();
+        assert!(message.contains("新しい言明"), "{message}");
+        assert!(message.contains("ストアに無い"), "{message}");
+
+        // 自分自身では訂正できない。
+        let error = correct_statement(&mut store, "specs", &wrong_id, &wrong_id, "理由")
+            .expect_err("自分自身の訂正で成功してはならない");
+        assert!(error.to_string().contains("自分自身"), "{error}");
+
+        // annotates 辺でない言明(節タイトルのノード)では再照合できない。
+        let title_id = c1::object_id(&title_node_value("Alpha Beta"));
+        let error = correct_statement(&mut store, "specs", &wrong_id, &title_id, "理由")
+            .expect_err("annotates 辺でない言明で成功してはならない");
+        assert!(error.to_string().contains("annotates 型の辺でない"), "{error}");
+
+        // 参照先 blob の doc_rev がコレクションに無い annotates 辺。
+        let make_edge = |title_id: &str, blob_id: &str, page: i64| {
+            let mut edge = BTreeMap::new();
+            edge.insert("v".to_string(), Value::Integer(1));
+            edge.insert("kind".to_string(), text_value("edge"));
+            edge.insert("type".to_string(), text_value(&annotates_type_id()));
+            edge.insert(
+                "members".to_string(),
+                Value::Array(vec![text_value(title_id), text_value(blob_id)]),
+            );
+            let mut meta = BTreeMap::new();
+            meta.insert("page".to_string(), Value::Integer(page));
+            edge.insert("meta".to_string(), Value::Object(meta));
+            c1::to_canonical_bytes(&Value::Object(edge))
+        };
+        let (dangling_id, _) = store.put_object(&make_edge(&title_id, &absent, 1)).expect("put");
+        let error = correct_statement(&mut store, "specs", &wrong_id, &dangling_id, "理由")
+            .expect_err("blob の引けない言明で成功してはならない");
+        assert!(error.to_string().contains("doc_rev"), "{error}");
+
+        // 照合に落ちる新しい言明では訂正を発行しない。失敗までに何も書かないこと。
+        let missed_title = title_node_value("Nonexistent widget");
+        let (missed_title_id, _) =
+            store.put_object(&c1::to_canonical_bytes(&missed_title)).expect("put");
+        let blob_id = c1::id_for_bytes("%PDF-fake minispec".as_bytes());
+        let (missed_edge_id, _) =
+            store.put_object(&make_edge(&missed_title_id, &blob_id, 2)).expect("put");
+        let objects_before = store.object_count();
+        let error = correct_statement(&mut store, "specs", &wrong_id, &missed_edge_id, "理由")
+            .expect_err("照合に落ちる言明で成功してはならない");
+        let message = error.to_string();
+        assert!(message.contains("照合に落ちた"), "{message}");
+        assert!(message.contains("0/2"), "{message}");
+        assert_eq!(store.object_count(), objects_before, "失敗した訂正が書き残した");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 索引の作り直し(ingest_annotations の再実行)が訂正の項を落とさない。落とすと
+    /// 訂正の辺と根拠がどの ref からも辿れず、複製や pin の対象から外れる(原理 3)。
+    #[test]
+    fn reingesting_annotations_preserves_recorded_corrections() {
+        let (dir, mut store) = temp_store("correct-preserved");
+        let annotations = ingest_two_annotations(&mut store);
+        let wrong_id = annotations.accepted[0].edge_id.clone();
+        let new_id = annotations.accepted[1].edge_id.clone();
+        let corrected =
+            correct_statement(&mut store, "specs", &wrong_id, &new_id, "p.1 は p.2 の誤り")
+                .expect("correct");
+        assert_ne!(corrected.index_id, annotations.index_id, "訂正で索引が進む前提");
+
+        // 同じ注釈の再取り込み: 索引は作り直されるが、訂正の項は持ち越されて no-op。
+        let entries = vec![
+            AnnotationEntry {
+                spec_id: "minispec".to_string(),
+                page: 1,
+                title: "Alpha Beta".to_string(),
+            },
+            AnnotationEntry {
+                spec_id: "minispec".to_string(),
+                page: 2,
+                title: "Delta Epsilon".to_string(),
+            },
+        ];
+        let again =
+            ingest_annotations(&mut store, "specs", &entries, &BTreeSet::new()).expect("ingest");
+        assert_eq!(again.index_id, corrected.index_id, "作り直しが訂正の項を落とした");
+        assert!(!again.ref_updated);
+        assert_eq!(again.new_objects, 0);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

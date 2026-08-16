@@ -69,7 +69,7 @@ const CASES: &[(&str, &str)] = &[
 
 /// 語彙が隔たる対(問いと正解が同じことを言っているのに、索引語を一つも共有しない)。
 /// キーワード一致では原理的に届かない場であり、意味で近さを測る方式
-/// (埋め込み。RAG (uuid:86363f4a-3df6-4aa2-9c64-b99aa5cb4e7b) の項 4)が効くはずの
+/// (埋め込み。SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))が効くはずの
 /// 領域である。共有語が空であることは
 /// a_vocabulary_gap_pair_shares_no_index_term_with_its_answer が機械的に確かめ、現在の
 /// BM25 が実際に届かないことは bm25_cannot_reach_any_vocabulary_gap_pair が確かめる。
@@ -457,8 +457,9 @@ fn embedding_and_fusion_hold_the_recorded_baseline_on_the_fixed_corpus() {
         hybrid.detail()
     );
 
-    // 完了条件(RAG の項 4): どちらの方式も BM25 単独より Recall@k が上がる。打ち切りの
-    // どこで比べても下回らず、少なくとも一つで上回ることを確かめる。
+    // 新しい二方式を足す意味は、BM25 単独より Recall@k が上がることにある(基準線を置く
+    // 理由そのもの。EVAL (uuid:1109a04b-923e-4493-8f00-d704047d6a2a))。打ち切りのどこで
+    // 比べても下回らず、少なくとも一つで上回ることを確かめる。
     for cutoff in CUTOFFS {
         for report in [&embedding, &hybrid] {
             assert!(

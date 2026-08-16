@@ -3,14 +3,17 @@
 <a id="19574e78-9bf5-4f87-a4c2-c4a10222c580"></a>
 
 読み手は、検索層のコード(node/src/search.rs、node/src/embed.rs と、node/src/api.rs の
-/v1/search)を読む者と、この層の上に MCP やリランカーを足す者。順位の質を数値で測る側は
-[docs/design/EVAL.md](#1109a04b-923e-4493-8f00-d704047d6a2a) にある。この文書は検索層の現在の
-実装を記述する。取り込み層
+/v1/search)を読む者と、この層の上にリランカーなどを足す者。順位の質を数値で測る側は
+[docs/design/EVAL.md](#1109a04b-923e-4493-8f00-d704047d6a2a)、この層を LLM エージェントへ出す
+アダプタは [docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9) にある。この文書は
+検索層の現在の実装を記述する。取り込み層
 ([docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b))のチャンクと doc_rev の上に
 載り、コア・プロトコル・ストレージ形式には手を入れていない。方式は 3 つある: 語の一致で引く
 BM25、意味の近さで引く埋め込み、両者の順位を RRF で融合したハイブリッドである。BM25 は外部
 依存を持たず、埋め込みだけが外部の埋め込みサーバに依存する(届かなければ BM25 に劣化して
 答える)。fetch 側は既存の GET /v1/objects/{id} で足りるので、検索専用の取得 API は無い。
+MCP の fetch ツールも別経路ではなく、同じ store の呼び出しに出典を添えるだけの薄い層である
+([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))。
 
 ## 索引語の切り方
 
@@ -167,8 +170,8 @@ BM25、意味の近さで引く埋め込み、両者の順位を RRF で融合�
 { "degraded": "埋め込みサーバが設定されていない(serve の --embed)",
   "method": "bm25",
   "results": [
-    { "citation": { "breadcrumbs": ["分散設計", "世代の整合"], "document": "search_ja",
-        "position": 1 },
+    { "citation": { "at": 1786904557, "breadcrumbs": ["分散設計", "世代の整合"],
+        "document": "search_ja", "position": 1 },
       "id": "s256:…", "score": 2.94, "snippet": "転置索引は導出データであり…" } ],
   "score_semantics": "bm25" }
 ```
@@ -179,6 +182,10 @@ BM25、意味の近さで引く埋め込み、両者の順位を RRF で融合�
   の「文書モデル」の節)のとおり: document は ref パスから collections/<コレクション名>/ を
   除いた残り、position は chunks 列の添字、breadcrumbs は見出しの入れ子パス、PDF はさらに
   page。
+- citation の at は取得日時である。その版を見えに置いた署名付き ref レコードの時刻(SPEC §4.4)
+  を unix 秒で載せる。その版がこのノードに取り込まれた時刻であって、原典が書かれた時刻ではない。
+  引用の組み立ては Citation::of の一箇所にあり、REST も MCP も同じ値を出す(引用を二重に実装
+  しない。should/0135)。日時としての描画は読み手の側の仕事で、MCP のアダプタは UTC で描く。
 - method は "bm25"(語の一致)・"embedding"(意味の近さ)・"hybrid"(両者の RRF 融合)の
   どれか。省略時の既定は装備に従い、serve に --embed があれば hybrid、無ければ bm25 である。
   方式の指定を知らない呼び手が、埋め込みを備えた節点で黙って BM25 だけに取り残されないため

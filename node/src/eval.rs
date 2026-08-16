@@ -4,7 +4,7 @@
 //! この層が持つのは指標の計算(純関数)と方式の差し替え点だけで、固定の小コーパスと
 //! 「クエリ → 正解チャンク」対は資材の側にある(node/tests/assets/eval_*.md と
 //! node/tests/eval.rs)。載っている方式は BM25(Bm25Retrieval)と、埋め込み・RRF 融合
-//! (HybridRetrieval。RAG (uuid:86363f4a-3df6-4aa2-9c64-b99aa5cb4e7b) の項 4)で、同じ対と
+//! (HybridRetrieval。SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))で、同じ対と
 //! 同じ指標で比べられる。埋め込みの方式は外部の埋め込みサーバに届くことを要求するので、
 //! その数値を測る回帰テストだけが前提を確かめて落ちる形になっている(node/tests/eval.rs の
 //! require_embedding_server。サーバを要らない部品の検査は node/src/embed.rs の単体テスト)。

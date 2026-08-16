@@ -568,9 +568,10 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 }
             }
         }
-        // MCP アダプタ(RAG 計画の項 5)。serve と同じ ApiContext を組み、HTTP の代わりに
-        // 標準入出力の JSON-RPC で search と fetch を出す。ここで標準出力へ書いてよいのは
-        // MCP のメッセージだけなので、起動の知らせも含めてログはすべて標準エラーへ出す。
+        // MCP アダプタ(MCP (uuid:dacd474d-424a-45d5-a278-766fc2465dd9))。serve と同じ
+        // ApiContext を組み、HTTP の代わりに標準入出力の JSON-RPC で search と fetch を
+        // 出す。ここで標準出力へ書いてよいのは MCP のメッセージだけなので、起動の知らせも
+        // 含めてログはすべて標準エラーへ出す。
         "mcp" => {
             let options = parse_embed_options(rest);
             let data_dir = std::path::PathBuf::from(dir);

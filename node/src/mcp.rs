@@ -1,5 +1,5 @@
 //! MCP(Model Context Protocol)アダプタ: 標準入出力の JSON-RPC 2.0 で search と fetch の
-//! 2 ツールを公開する(RAG (uuid:86363f4a-3df6-4aa2-9c64-b99aa5cb4e7b) の項 5)。
+//! 2 ツールを公開する(MCP (uuid:dacd474d-424a-45d5-a278-766fc2465dd9))。
 //!
 //! コアはあくまで REST であり、この層は薄い被せ物である。検索の判断(方式の既定・劣化の
 //! 判断・引用の組み立て)は node/src/api.rs の run_search が持ち、全文の取得は

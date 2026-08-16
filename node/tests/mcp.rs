@@ -1,4 +1,4 @@
-//! MCP アダプタの統合テスト(RAG (uuid:86363f4a-3df6-4aa2-9c64-b99aa5cb4e7b) の項 5)。
+//! MCP アダプタの統合テスト(MCP (uuid:dacd474d-424a-45d5-a278-766fc2465dd9))。
 //!
 //! 実プロセスとして `uniqnode mcp <dir>` を起こし、標準入力に JSON-RPC の要求を書いて
 //! 標準出力から応答を読む。エージェント(Claude Code)がこのサーバに話しかける経路
@@ -148,9 +148,10 @@ fn first_chunk_id(text: &str) -> String {
     text[start..start + 69].to_string()
 }
 
-/// 完了条件の経路そのもの(RAG の項 5): initialize → tools/list → tools/call が通り、
-/// search の答えが出典(文書名・見出し・チャンク ID・取得日時)を持ち、fetch が全文を
-/// 返す。エージェントが出典付きで答えられるのは、この 3 往復が通るからである。
+/// エージェントが通る経路そのもの(MCP (uuid:dacd474d-424a-45d5-a278-766fc2465dd9)):
+/// initialize → tools/list → tools/call が通り、search の答えが出典(文書名・見出し・
+/// チャンク ID・取得日時)を持ち、fetch が全文を返す。エージェントが出典付きで答えられる
+/// のは、この 3 往復が通るからである。
 #[test]
 fn the_handshake_lists_the_tools_and_search_answers_with_citations() {
     let dir = store_with("mcp-handshake", &["search_ja.md"]);

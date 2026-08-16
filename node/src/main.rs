@@ -36,13 +36,23 @@ fn usage() -> ! {
                                       キャッシュから読むので、検索が模型の計算を待つことは\n\
                                       ない。届かなければ BM25 だけに劣化して答え、応答の\n\
                                       method と degraded がそれを言う\n\
-           mcp <dir> [--embed <url>] [--embedder <id>]\n\
+           mcp <dir> [--serve-url <url>] [--embed <url>] [--embedder <id>]\n\
                                       標準入出力で MCP(Model Context Protocol)を話す。\n\
                                       LLM エージェント(Claude Code など)に search と\n\
                                       fetch の2ツールを出す。標準出力はプロトコル専用で、\n\
-                                      ログは標準エラーへ出す。登録例:\n\
+                                      ログは標準エラーへ出す。--serve-url を与えると、\n\
+                                      自分でストアを開かず、走っている serve の REST へ\n\
+                                      転送する(ストアの排他錠を取らないので、常駐した\n\
+                                      まま ingest・embed が通る。埋め込みを装備するのは\n\
+                                      転送先の serve なので --embed とは併用しない)。\n\
+                                      無指定ならストアを直接開く(serve 停止中のストア用)。\n\
+                                      登録例:\n\
                                       claude mcp add --transport stdio uniqnode --\n\
                                       <この実行ファイル> mcp <dir>\n\
+                                      --serve-url http://127.0.0.1:7440\n\
+           selfcheck                  この実行ファイルが健全であることを標準出力の1行で\n\
+                                      言う(mcp が自分を exec で差し替える前に、新しい\n\
+                                      イメージを子プロセスとして起こして確かめる用)\n\
            embed <dir> [--embed <url>] [--embedder <id>]\n\
                                       見えのチャンクのうちベクトルの無いものを埋め込み、\n\
                                       <dir>/derived/embeddings/<id>.vec に足す(導出データ。\n\
@@ -250,6 +260,12 @@ fn open(dir: &str) -> Store {
 
 fn main() {
     let arguments: Vec<String> = std::env::args().collect();
+    // 自己検査。mcp の自己置換(node/src/mcp.rs)が exec の前に子プロセスとして起こす
+    // 唯一の命令で、データディレクトリを取らないので引数の数の検査より前に見る。
+    if arguments.len() == 2 && arguments[1] == uniqnode::mcp::SELF_CHECK_COMMAND {
+        println!("{}", uniqnode::mcp::self_check_report());
+        return;
+    }
     if arguments.len() < 3 {
         usage();
     }
@@ -292,6 +308,31 @@ fn parse_embed_options(rest: &[String]) -> EmbedOptions {
         at += 2;
     }
     options
+}
+
+/// mcp の指定(転送先の serve と、埋め込みの指定)。
+struct McpOptions {
+    /// 走っている serve へ転送する形の転送先(--serve-url)。無ければストアを直接開く。
+    serve_url: Option<String>,
+    embed: EmbedOptions,
+}
+
+/// --serve-url <url> だけを抜き取り、残りは serve と同じ読み手に渡す(埋め込みの指定の
+/// 読み取りを二重に実装しない。should/0135)。
+fn parse_mcp_options(rest: &[String]) -> McpOptions {
+    let mut serve_url = None;
+    let mut others = Vec::new();
+    let mut at = 0;
+    while at < rest.len() {
+        if rest[at] == "--serve-url" {
+            serve_url = Some(rest.get(at + 1).cloned().unwrap_or_else(|| usage()));
+            at += 2;
+            continue;
+        }
+        others.push(rest[at].clone());
+        at += 1;
+    }
+    McpOptions { serve_url, embed: parse_embed_options(&others) }
 }
 
 /// 指定から埋め込みクライアントを組む(誤った指定はここで落とす)。
@@ -573,41 +614,67 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
         // 出す。ここで標準出力へ書いてよいのは MCP のメッセージだけなので、起動の知らせも
         // 含めてログはすべて標準エラーへ出す。
         "mcp" => {
-            let options = parse_embed_options(rest);
-            let data_dir = std::path::PathBuf::from(dir);
-            let store = std::sync::Arc::new(std::sync::Mutex::new(open(dir)));
-            let engine = std::sync::Arc::new(uniqnode::query::QueryEngine::new(
-                store.clone(),
-                data_dir.clone(),
-            ));
-            // serve と同じく、埋め込みは明示されたときだけ装備する(should/0114)。
-            // 届かなければ検索は BM25 に劣化し、ツールの応答と標準エラーの両方が
-            // そう言う。
-            let embedding = options.requested.then(|| {
-                let embedder =
-                    embedder_from(&options).with_timeout(uniqnode::embed::QUERY_EMBED_TIMEOUT);
-                eprintln!(
-                    "uniqnode: mcp: embedding: {} ({})",
-                    embedder.embedder_id(),
-                    embedder.endpoint()
-                );
-                uniqnode::embed::EmbeddingService::new(&data_dir, embedder)
-            });
-            let context = uniqnode::api::ApiContext {
-                store,
-                engine,
-                health: None,
-                referrers: std::sync::Mutex::new(None),
-                search: std::sync::Mutex::new(None),
-                embedding,
+            let options = parse_mcp_options(rest);
+            let backend = match &options.serve_url {
+                // 転送する形: 走っている serve の REST へ回す。ストアを開かない
+                // (排他錠を取らない)ので、常駐したまま ingest・embed が通る。
+                Some(url) => {
+                    if options.embed.requested {
+                        eprintln!(
+                            "uniqnode: mcp: --serve-url と --embed は併用しない\
+                             (埋め込みを装備するのは転送先の serve である)"
+                        );
+                        std::process::exit(2);
+                    }
+                    match uniqnode::mcp::ServeClient::new(url, dir) {
+                        Ok(client) => uniqnode::mcp::Backend::Forward(client),
+                        Err(message) => {
+                            eprintln!("uniqnode: mcp: {message}");
+                            std::process::exit(2);
+                        }
+                    }
+                }
+                // ストアを直接開く形: serve が走っていないストアに 1 人で向かうとき。
+                None => {
+                    let data_dir = std::path::PathBuf::from(dir);
+                    let store = std::sync::Arc::new(std::sync::Mutex::new(open(dir)));
+                    let engine = std::sync::Arc::new(uniqnode::query::QueryEngine::new(
+                        store.clone(),
+                        data_dir.clone(),
+                    ));
+                    // serve と同じく、埋め込みは明示されたときだけ装備する
+                    // (should/0114)。届かなければ検索は BM25 に劣化し、ツールの応答と
+                    // 標準エラーの両方がそう言う。
+                    let embedding = options.embed.requested.then(|| {
+                        let embedder = embedder_from(&options.embed)
+                            .with_timeout(uniqnode::embed::QUERY_EMBED_TIMEOUT);
+                        eprintln!(
+                            "uniqnode: mcp: embedding: {} ({})",
+                            embedder.embedder_id(),
+                            embedder.endpoint()
+                        );
+                        uniqnode::embed::EmbeddingService::new(&data_dir, embedder)
+                    });
+                    uniqnode::mcp::Backend::Local(Box::new(uniqnode::api::ApiContext {
+                        store,
+                        engine,
+                        health: None,
+                        referrers: std::sync::Mutex::new(None),
+                        search: std::sync::Mutex::new(None),
+                        embedding,
+                    }))
+                }
             };
-            eprintln!(
-                "uniqnode: mcp: {dir} を stdio で提供する(protocol {}、tools: search・fetch)",
-                uniqnode::mcp::PROTOCOL_VERSION
-            );
-            let stdin = std::io::stdin();
+            let mut server = uniqnode::mcp::StdioServer::new(backend);
+            server.announce(dir);
+            // 先読みバッファは自分で持つ。自己置換の前に「次のメッセージまで読んで
+            // しまっていないか」を確かめられるのは、この BufReader だけだからである。
+            // 容量を std::io::Stdin の内部バッファ(8KiB)より大きく採るのは、
+            // BufReader が自分の buffer 以上の読みを内部バッファを迂回して行うため:
+            // 見えない場所にバイトが溜まらない。
+            let mut input = std::io::BufReader::with_capacity(64 * 1024, std::io::stdin());
             let stdout = std::io::stdout();
-            uniqnode::mcp::serve_stdio(&context, &mut stdin.lock(), &mut stdout.lock())?;
+            server.serve(&mut input, &mut stdout.lock())?;
         }
         "serve" => {
             let address = rest.first().map(String::as_str).unwrap_or_else(|| usage());

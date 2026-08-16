@@ -171,7 +171,7 @@ MCP の fetch ツールも別経路ではなく、同じ store の呼び出し�
   "method": "bm25",
   "results": [
     { "citation": { "at": 1786904557, "breadcrumbs": ["分散設計", "世代の整合"],
-        "document": "search_ja", "position": 1 },
+        "collection": "notes", "document": "search_ja", "position": 1 },
       "id": "s256:…", "score": 2.94, "snippet": "転置索引は導出データであり…" } ],
   "score_semantics": "bm25" }
 ```
@@ -179,9 +179,11 @@ MCP の fetch ツールも別経路ではなく、同じ store の呼び出し�
 - snippet はチャンク本文の先頭 200 文字(定数 SNIPPET_CHAR_LIMIT。文字境界で切る)。
   全文は id(チャンクのオブジェクト ID)から既存の GET /v1/objects/{id} で取る。
 - citation は取り込み層の引用規則([docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b)
-  の「文書モデル」の節)のとおり: document は ref パスから collections/<コレクション名>/ を
-  除いた残り、position は chunks 列の添字、breadcrumbs は見出しの入れ子パス、PDF はさらに
-  page。
+  の「文書モデル」の節)のとおり: collection はコレクション名、document は ref パスから
+  collections/<コレクション名>/ を除いた残り、position は chunks 列の添字、breadcrumbs は
+  見出しの入れ子パス、PDF はさらに page。collection を載せるのは、全コレクションを跨いで
+  検索したとき、どの束から来た件なのかが応答だけで読めるようにするためである(MCP の
+  アダプタは「<コレクション名>/<文書名>」と描く)。
 - citation の at は取得日時である。その版を見えに置いた署名付き ref レコードの時刻(SPEC §4.4)
   を unix 秒で載せる。その版がこのノードに取り込まれた時刻であって、原典が書かれた時刻ではない。
   引用の組み立ては Citation::of の一箇所にあり、REST も MCP も同じ値を出す(引用を二重に実装
@@ -203,7 +205,27 @@ MCP の fetch ツールも別経路ではなく、同じ store の呼び出し�
   ロックを持つと、検索 1 本で API 全体が塞がるためである(sync のロックの規律と同じ理由)。
   クエリ 1 本ぶんの期限は 15 秒。
 - 応答本文は score のためだけに手組みの JSON である。score は小数で、c1 は整数しか持たない
-  ため。文字列のエスケープは c1 の直列化を通し、実装を増やさない(should/0135)。
+  ため。citation は小数を持たないので c1 の正規形をそのまま埋める(書き手は citation_value の
+  一箇所)。読む側は小数を読める最小の JSON(node/src/json.rs。埋め込みサーバの応答を読むのと
+  同じ一箇所)を通り、SearchResults に組み直す家は parse_search_response である。書き手と読み手を
+  api.rs の同じ節に並べて置き、噛み合うことを単体試験 rest_search_bodies_survive_a_round_trip が
+  確かめる(should/0135)。
+
+## GET /v1/objects/{id}/citation
+
+```jsonc
+// 見えにあるチャンクの出典。見えに無い ID・チャンクでない ID・持っていない ID は null。
+{ "citation": { "at": 1786904557, "breadcrumbs": ["分散設計", "世代の整合"],
+    "collection": "notes", "document": "search_ja", "position": 1 } }
+```
+
+- 全文そのものは既存の GET /v1/objects/{id} が生のバイト列で返す。こちらは出典だけを返す。
+  引用の組み立ては検索と同じ索引(Citation::of)から行うので、search が示した出典と一致する。
+- 逆引き(GET /v1/objects/{id}/referrers)と同じく、これは「自分の見えの範囲」の導出データで
+  ある。null は不在の言明ではない(SPEC §7.2/§10)。
+- この口を足したのは、走っている serve へ転送する形の MCP
+  ([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))が、fetch の応答に出典を添える
+  ためである。転送する形はストアを開かないので、出典を組めるのは serve だけである。
 
 ## 既知の癖
 

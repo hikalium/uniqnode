@@ -14,11 +14,18 @@ search ツールは、要求の読み取り(parse_search_request)から順位付
 アダプタがするのは JSON-RPC の封筒の付け外しと、LLM が読む形への整形だけである(検索の判断を
 二重に実装しない。should/0135)。
 
+後ろ盾には二つの形がある(node/src/mcp.rs の Backend)。走っている serve の REST へ転送する形と、
+自分でストアを開く形である。前者はストアの排他錠を取らないので、エージェントを繋いだまま
+取り込みと埋め込みを回せる。どちらの形でも整形は同じ関数を通る。
+
 ## 起動と標準入出力の規律
 
-- 起動は CLI のサブコマンドである: `uniqnode mcp <data_dir> [--embed <url>] [--embedder <id>]`。
-  serve と同じ ApiContext を組み、HTTP の代わりに標準入出力で話す。埋め込みを装備するのは
-  `--embed` を明示したときだけで、起動時に相手の生存は確かめない(serve と同じ。should/0114)。
+- 起動は CLI のサブコマンドである:
+  `uniqnode mcp <data_dir> [--serve-url <url>] [--embed <url>] [--embedder <id>]`。
+  `--serve-url` を与えれば走っている serve へ転送し、与えなければ serve と同じ ApiContext を
+  組んでストアを直接開く。どちらも HTTP の代わりに標準入出力で話す。ストアを直接開く形で
+  埋め込みを装備するのは `--embed` を明示したときだけで、起動時に相手の生存は確かめない
+  (serve と同じ。should/0114)。
 - 標準出力はプロトコル専用である(MCP の stdio 転送の規定)。1 行が 1 メッセージで、ログが 1 行
   でも混ざれば相手の解析はその行で壊れる。起動の知らせも、劣化の理由も、知らない通知の記録も、
   すべて標準エラーへ出す。
@@ -55,6 +62,35 @@ search ツールは、要求の読み取り(parse_search_request)から順位付
   捨てるほかないが、標準エラーには残す(must/0022)。
 - ツールの一覧は `result.tools` に入る。result そのものを配列にすると、相手はツールを 1 本も
   見つけられないまま「接続はできた」状態になる。
+
+## 二つの形(走っている serve へ転送する / ストアを直接開く)
+
+| 形 | 起こし方 | ストアの排他錠 | 検索と取得 |
+|---|---|---|---|
+| 転送する形 | `uniqnode mcp <dir> --serve-url http://127.0.0.1:7440` | 取らない | 走っている serve の REST を呼ぶ |
+| 直接開く形 | `uniqnode mcp <dir>` | 起動から終了まで持つ | 自分の ApiContext で答える |
+
+- 既定は直接開く形のままである。引数を足す形にしたのは、既に登録されている
+  `uniqnode mcp <dir>` を壊さないためと、serve を走らせないストアに 1 人で向かう道を残すため
+  である。運用として勧めるのは転送する形で、登録の例もそちらを先に置く。
+- 名前を `--serve` ではなく `--serve-url` にしたのは、値が URL であること(`host:port` では
+  ない)を呼び手に見せるためと、serve サブコマンドと読み違えないためである。値の形は
+  `--embed <url>` と揃う。
+- 転送する形でもデータディレクトリは要る。開くためではなく、届かないときに「どの serve を
+  起こせばよいか」を言うためである(案内は `uniqnode serve <dir> <host:port>`)。
+- 転送する形が呼ぶ REST は三つ: POST /v1/search(検索)、GET /v1/objects/{id}(全文)、
+  GET /v1/objects/{id}/citation(その出典)。応答から SearchResults と Fetched を組み直し、
+  描くのは両方の形が同じ render_search / render_fetch である(整形を二重に実装しない。
+  should/0135)。線の上の形は書き手(search_response_body・citation_value)と読み手
+  (parse_search_response・citation_from_json)を api.rs の同じ節に並べて置き、噛み合うことを
+  単体試験 rest_search_bodies_survive_a_round_trip が確かめる。
+- 検索の判断は転送する形でも serve 側の run_search が 1 回だけ行う。MCP 側は判断せず、応答の
+  method・degraded・citation をそのまま描く。劣化の理由も serve の言葉のまま出る。
+- 埋め込みを装備するのは転送先の serve である。転送する形に `--embed` を渡すのは矛盾なので、
+  併用は起動時に断る(黙って無視しない。must/0022)。
+- serve に届かないときは、原因(接続できない、など)と起動コマンドを添えて、ツールの結果
+  (isError: true)と標準エラーの両方に出す。転送する形の 1 要求の期限は 60 秒である(初回の
+  検索は serve 側の索引構築を待つため、クエリ埋め込みの 15 秒より長く採る)。
 
 ## 公開するツール
 
@@ -109,7 +145,11 @@ search ツールは、要求の読み取り(parse_search_request)から順位付
 
 REST 側は GET /v1/objects/{id} のままで、そちらは生のオブジェクトのバイト列だけを返す。MCP の
 fetch は同じ store の呼び出し(fetch_object)に出典を添える薄い層である。出典は検索と同じ索引から
-組むので、search が示した出典と fetch が示す出典は一致する。
+組むので、search が示した出典と fetch が示す出典は一致する。転送する形は全文と出典を別々に取る:
+バイト列は GET /v1/objects/{id}、出典は GET /v1/objects/{id}/citation である
+([docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580))。バイト列がチャンクなのか・
+チャンクでない c1 オブジェクトなのか・テキストでないのかの見分けは classify_object の 1 箇所に
+あり、ストアから読んでも REST から読んでも同じ答えになる(should/0135)。
 
 ```
 チャンク s256:1fe778dbd7f9ec4a923cbce2b7f75892d2e23ab4cbb0a1276849d7a2aa7148ab の全文
@@ -134,7 +174,7 @@ fetch は同じ store の呼び出し(fetch_object)に出典を添える薄い�
 | 封筒の誤り | error -32600 | jsonrpc が "2.0" でない、method が無い |
 | 知らないメソッド | error -32601 | resources/list など未実装のメソッド |
 | 要求の組み立ての誤り | error -32602 | params が無い、知らないツール名、query が無い、top_k が範囲外、method が 3 つ以外、id の形が不正 |
-| ツール実行の失敗 | result の isError: true | ストアを読めない、保持していない ID、テキストでない blob |
+| ツール実行の失敗 | result の isError: true | ストアを読めない、走っている serve に届かない、保持していない ID、テキストでない blob |
 
 - 分ける基準は「誰が直せるか」である。プロトコルの誤りは要求の組み立てが誤っている話で、モデル
   ではなく呼び出し側が直す。ツール実行の失敗はモデルが読んで次の手を選べる話なので、結果として
@@ -150,15 +190,24 @@ fetch は同じ store の呼び出し(fetch_object)に出典を添える薄い�
 
 ## Claude Code への登録
 
-一行で登録する形:
+走っている serve へ転送する形(勧める形。常駐したまま取り込みと埋め込みが回せる):
+
+```
+claude mcp add --transport stdio uniqnode -- /path/to/uniqnode mcp /path/to/data \
+  --serve-url http://127.0.0.1:7440
+```
+
+転送先の serve は別に起こしておく。埋め込みを装備するのはこちらである:
+
+```
+uniqnode serve /path/to/data 127.0.0.1:7440 --embed http://127.0.0.1:8083/v1/embeddings
+```
+
+serve を走らせないときは、ストアを直接開く形で登録する(この形に限り、埋め込みの引数を
+そのまま後ろに足せる):
 
 ```
 claude mcp add --transport stdio uniqnode -- /path/to/uniqnode mcp /path/to/data
-```
-
-埋め込みを装備するときは、サブコマンドの引数をそのまま後ろに足す:
-
-```
 claude mcp add --transport stdio uniqnode -- /path/to/uniqnode mcp /path/to/data \
   --embed http://127.0.0.1:8083/v1/embeddings
 ```
@@ -171,7 +220,7 @@ claude mcp add --transport stdio uniqnode -- /path/to/uniqnode mcp /path/to/data
     "uniqnode": {
       "type": "stdio",
       "command": "/path/to/uniqnode",
-      "args": ["mcp", "/path/to/data"]
+      "args": ["mcp", "/path/to/data", "--serve-url", "http://127.0.0.1:7440"]
     }
   }
 }
@@ -184,15 +233,63 @@ claude mcp add --transport stdio uniqnode -- /path/to/uniqnode mcp /path/to/data
 - 接続を確かめる最短の道は、標準入力に initialize を 1 行流して protocolVersion が返ることを見る
   ことである(標準出力に JSON-RPC 以外が出ていないことも同時に分かる)。
 
+## 自己置換(実行ファイルが更新されたとき)
+
+Claude Code に登録した stdio サーバは子プロセスとして起こされ、公式の説明どおり自動では繋ぎ
+直されない(Stdio servers are local processes and are not reconnected automatically)。実行
+ファイルを作り直しても走り続けるのは古いイメージのままで、セッションを再起動しない限り新しい
+実装は効かない。そこでサーバ自身が更新を見つけ、自分を exec で差し替える。execve はプロセス
+イメージを入れ替えるがファイル記述子は保つので、相手が握るパイプの反対側と PID は変わらず、
+差し替えはクライアントから見えない。
+
+- 検出は、起動時に控えた実行ファイル(std::env::current_exe)の更新時刻・大きさ・inode の比較で
+  ある。パスを起動時に控えるのは、置き換えられた後の /proc/self/exe が "(deleted)" 付きの読めない
+  道になるためである。
+- 差し替えの位置は「応答を書き終えた直後、次の読み込みの前」だけである。メッセージの処理の途中で
+  入れ替えると、読んだ要求が旧イメージと共に消える。
+- 先読みバッファが空であることを確かめてから exec する。BufReader が次のメッセージまで読んで
+  いれば、そのバイト列は旧イメージと共に消えるので、差し替えを次の機会に回す。標準入力の
+  BufReader を自分で持つのはこの検査のためで、容量は std::io::Stdin の内部バッファ(8KiB)より
+  大きく採る(見えない場所にバイトが溜まらないため)。
+- exec の前に、新しいイメージを子プロセスとして起こして健全さを確かめる(`uniqnode selfcheck`。
+  ツールの記述を実際に組み立てて 1 行を標準出力に書く)。見るのは終了コード 0 と標準出力の印
+  (定数 SELF_CHECK_MARKER)の両方である。終了コードだけを見ると、たまたま 0 で終わる別の実行
+  ファイルを健全とみなす。落ちたら差し替えず、理由を標準エラーに出して旧イメージのまま動き
+  続ける。ここで死ぬと、避けたかったセッション再起動をこちらから招くことになる。
+- 検査に落ちた姿は控え直す。同じ実行ファイルを応答のたびに検査し直さず、次にまた変わったときに
+  試す。子プロセスの待ちは 10 秒で打ち切り、終わらないイメージも健全とはみなさない。
+- 新しいイメージは initialize を受けた事実を忘れている(Claude Code は再送しない)。交渉した
+  プロトコル版と相手の名乗りを環境変数 UNIQNODE_MCP_HANDSHAKE_PROTOCOL /
+  UNIQNODE_MCP_HANDSHAKE_CLIENT で引き継ぎ、新しいイメージは起動時にそれを標準エラーに残す。
+  このアダプタは initialize の前でも tools/list と tools/call に答えるので、忘れてツールが
+  止まることはない。引き継ぐのは、記録が切れないことと、次の差し替えへ同じ内容を渡すためである。
+- ストアの排他錠は CLOEXEC 付きの FD なので exec で解放され、新しいイメージが取り直す
+  (取り直しの隙間は acquire_lock の 250ms 有界再試行が吸収する。
+  docs/analysis/20260816-lock-inheritance-race.md)。転送する形ではそもそも錠を持たない。
+- 差し替えたことは標準エラーに残す(黙って入れ替えない)。
+- 実測 2026-08-17: 転送する形で常駐中に cargo build で実行ファイルを置き換えると(inode
+  99526521 → 99525865)、次の応答の直後に exec が起き、PID は 4090627 のまま同じ標準入出力で
+  検索が通り続けた。標準エラーには「実行ファイルが更新された。自分を exec で差し替える」に
+  続いて、新しいイメージの「ハンドシェイク済みとして起動した(相手の protocol 2025-11-25、
+  client claude-code/2.1.232)」が並ぶ。壊れたイメージ(自己検査の命令名を潰した複製)を置いた
+  ときは「新しい実行ファイルの自己検査に落ちた。差し替えず、旧イメージのまま続ける:
+  … selfcheck が exit status: 2 で終わった」を出して差し替えず、以後の応答も旧イメージが返した。
+
 ## 運用上の制約
 
-- ストアは二重に開けない。MCP サーバは起動時にストアの排他錠を取り(抽象名前空間の Unix ソケット。
-  名前はデータディレクトリの正規化パスのハッシュ)、常駐しているあいだ、ストアを開く CLI の命令は
-  すべて断られる。実測 2026-08-17: `uniqnode mcp` の常駐中に ingest・embed・status を走らせると、
-  どれも「<dir> は別プロセスが開いている」を標準エラーに出して終了コード 1 で終わる。MCP を
-  終わらせた直後に同じ ingest は成功する。serve と同じ制約である。
-- したがって、文書の取り込みとコーパスの埋め込みは MCP サーバを止めてから走らせる。標準入力を
-  閉じればサーバは終わるので、エージェント側の接続を切れば足りる。
+- 転送する形はストアを開かないので、常駐したまま CLI を回せる。実測 2026-08-17:
+  `uniqnode mcp <dir> --serve-url http://127.0.0.1:7440` の常駐中に serve を止め、同じ
+  ディレクトリへ ingest(chunks=3)・embed(5 チャンクを bge-m3 で。終了コード 0)・status を
+  走らせるとすべて通り、serve を起こし直すと同じ MCP プロセスが新しい文書を hybrid で検索した。
+  MCP のプロセスは一度も再起動していない。改善のループはこの形で回す。
+- ストアを直接開く形では、従来どおりストアを二重に開けない。MCP サーバは起動時にストアの排他錠を
+  取り(抽象名前空間の Unix ソケット。名前はデータディレクトリの正規化パスのハッシュ)、常駐して
+  いるあいだ、ストアを開く CLI の命令はすべて断られる。実測 2026-08-17: `uniqnode mcp <dir>` の
+  常駐中に ingest・embed・status を走らせると、どれも「<dir> は別プロセスが開いている」を標準
+  エラーに出して終了コード 1 で終わる。MCP を終わらせた直後に同じ ingest は成功する。serve と
+  同じ制約である。
+- したがってこの形を使うときは、文書の取り込みとコーパスの埋め込みは MCP サーバを止めてから
+  走らせる。標準入力を閉じればサーバは終わるので、エージェント側の接続を切れば足りる。
 - 最初の search は索引の構築ぶんだけ待つ(実データ規模で約 9 秒。
   [docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580) の「既知の癖」)。以後は世代が
-  ずれるまでキャッシュ済みの索引で応える。
+  ずれるまでキャッシュ済みの索引で応える。転送する形では、その待ちも索引も serve の側にある。

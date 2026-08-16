@@ -14,11 +14,26 @@
 //! 受け取り側の既知の制限: 要求の解析は c1(SPEC §4.1)を使うため、整数しか受けない。
 //! JSON-RPC 自体と、この 2 ツールの引数はすべて文字列・整数・真偽値・オブジェクトなので
 //! 足りるが、小数を含む要求は解析誤り(-32700)として拒む。黙って読み飛ばさない。
+//!
+//! ツールの後ろ盾は二つの形がある(Backend)。ストアを直接開く形(Local)は起動から終了
+//! までストアの排他錠を持つので、常駐している間 CLI の ingest・embed は断られる。走って
+//! いる serve の REST へ転送する形(Forward)は錠を一切取らないので、エージェントを繋いだ
+//! まま取り込みと埋め込みを回せる。整形は一つで、どちらの形も同じ render_search /
+//! render_fetch を通る(検索の判断も整形も二重に実装しない。should/0135)。
+//!
+//! 実行ファイルが更新されたら、自分を exec で差し替える(StdioServer::replace_if_updated)。
+//! execve はプロセスイメージを入れ替えるがファイル記述子は保つので、相手が握るパイプの
+//! 反対側と PID は変わらず、差し替えはクライアントから見えない。位置は「応答を書き終えた
+//! 直後、次の読み込みの前」だけで、先読みバッファが空であることを確かめてから行う。
 
-use crate::api::{self, ApiContext, Fetched, SearchRequest, SearchResults};
+use crate::api::{self, ApiContext, Citation, Fetched, SearchRequest, SearchResults};
 use crate::c1::{self, Value};
+use crate::http;
 use std::collections::BTreeMap;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// initialize で答えるプロトコル版。相手が別の版を求めても、規定は「サーバが対応する
 /// 版を答える」であって誤りにはしない。Claude Code は 2025-11-25 を求めたうえで、この
@@ -38,116 +53,538 @@ const INVALID_PARAMS: i64 = -32602;
 /// 同じ事実なので、文言はこの 1 箇所から出す(must/0023)。
 const FETCH_HINT: &str = "全文が要るときは fetch ツールにチャンク ID を渡す。";
 
-/// 標準入出力で MCP を話す(相手が標準入力を閉じたら終わる)。
+/// 転送する形が serve を待つ期限(1 要求ぶん)。初回の検索は索引の構築ぶんだけ待つので
+/// (実データ規模で約 9 秒)、埋め込みのクエリ期限(15 秒)より長く採る。期限のない待ちは
+/// 作らない(should/0104)。
+const SERVE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 自己置換の前に新しいイメージを確かめるサブコマンド。呼ぶ側(このモジュール)と
+/// 答える側(node/src/main.rs)で同じ文字列を使う(must/0023)。
+pub const SELF_CHECK_COMMAND: &str = "selfcheck";
+
+/// 自己検査が健全なときに標準出力へ書く印。exec の前にこの印を確かめるので、たまたま
+/// 終了コード 0 で終わる別の実行ファイル(置き換え事故)を健全とみなさない。
+pub const SELF_CHECK_MARKER: &str = "uniqnode selfcheck ok";
+
+/// 自己検査の子プロセスを待つ期限。応答と応答のあいだで待つので短く採る。
+const SELF_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+/// 自己検査の子プロセスの終了を見に行く間隔。
+const SELF_CHECK_POLL: Duration = Duration::from_millis(5);
+
+/// 自己置換のとき、ハンドシェイクの事実を新しいイメージへ渡す環境変数。新しいイメージは
+/// initialize を受けた事実を忘れており、Claude Code は再送しない。渡す側と読む側で同じ
+/// 名前を使う(must/0023)。
+pub const HANDSHAKE_PROTOCOL_ENV: &str = "UNIQNODE_MCP_HANDSHAKE_PROTOCOL";
+pub const HANDSHAKE_CLIENT_ENV: &str = "UNIQNODE_MCP_HANDSHAKE_CLIENT";
+
+/// ツールの後ろ盾。ストアを直接開く形と、走っている serve の REST へ転送する形の二つ。
 ///
-/// 1 行読んで 1 行書く。応答を書くたびに flush するのは、相手が次の要求を出す前に
-/// この応答を読み切る必要があるためである(パイプの buffer に残したまま待つと、
-/// 双方が相手を待って止まる)。
-pub fn serve_stdio(
-    context: &ApiContext,
-    input: &mut dyn BufRead,
-    output: &mut dyn Write,
-) -> std::io::Result<()> {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if input.read_line(&mut line)? == 0 {
-            // 標準入力の EOF は相手が閉じたということ。速やかに終える。
-            return Ok(());
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(response) = handle_message(context, trimmed) {
-            output.write_all(response.as_bytes())?;
-            output.write_all(b"\n")?;
-            output.flush()?;
-        }
-    }
+/// 転送する形はストアの錠を一切取らない。これが要点である: Claude Code に登録した MCP
+/// サーバが常駐していても、同じデータディレクトリに対する ingest・embed が通る。検索の
+/// 判断(方式の既定・劣化・引用の組み立て)はどちらの形でも serve と同じ 1 箇所
+/// (node/src/api.rs の run_search)にあり、転送する形はその答えを REST の応答から
+/// 組み直すだけである(should/0135)。
+pub enum Backend {
+    /// ストアを直接開く形。起動から終了まで排他錠を持つ(serve と同じ制約)。
+    Local(Box<ApiContext>),
+    /// 走っている serve へ転送する形。錠を取らない。
+    Forward(ServeClient),
 }
 
-/// メッセージ 1 本の処理。応答を返すのは要求(id を持つもの)だけで、通知(id を持た
-/// ないもの)には何も返さない(返すと相手の解析が壊れる)。
-pub fn handle_message(context: &ApiContext, line: &str) -> Option<String> {
-    let message = match c1::parse(line) {
-        Ok(value) => value,
-        // 解析できなければ id も読めないので、規定どおり id は null で答える。
-        Err(error) => {
-            return Some(failure(&Value::Null, PARSE_ERROR, &format!("JSON が不正: {error}")))
+impl Backend {
+    /// 検索 1 回。誤りは LLM が読む文にして返す(ツール実行の失敗は isError の結果)。
+    fn search(&self, request: &SearchRequest) -> Result<SearchResults, String> {
+        match self {
+            Backend::Local(context) => {
+                api::run_search(context, request).map_err(|error| format!("{error}"))
+            }
+            Backend::Forward(client) => client.search(request),
         }
-    };
-    let Value::Object(map) = &message else {
-        return Some(failure(&Value::Null, INVALID_REQUEST, "要求はオブジェクトであるべき"));
-    };
-    // id が無い(または null)のは通知である。以後、応答を返さない道はここで分かれる。
-    let id = match map.get("id") {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(value.clone()),
-    };
-    let method = match map.get("method") {
-        Some(Value::Text(method)) => method.as_str(),
-        _ => {
-            let id = id?;
-            return Some(failure(&id, INVALID_REQUEST, "method がない(文字列)"));
-        }
-    };
-    if map.get("jsonrpc") != Some(&Value::Text("2.0".to_string())) {
-        let id = id?;
-        return Some(failure(&id, INVALID_REQUEST, "jsonrpc は \"2.0\" であるべき"));
     }
-    let params = map.get("params");
-    let Some(id) = id else {
-        // 通知。initialized と cancelled は受理して黙る。知らない通知も、応答を返して
-        // はならない以上ここで捨てるほかないが、標準エラーには残す(must/0022)。
-        if method != "notifications/initialized" && method != "notifications/cancelled" {
-            eprintln!("uniqnode: mcp: 知らない通知を無視した: {method}");
-        }
-        return None;
-    };
-    Some(match method {
-        "initialize" => success(&id, initialize_result(params)),
-        // 生存確認。空の結果が規定の答えである。
-        "ping" => success(&id, Value::Object(BTreeMap::new())),
-        "tools/list" => success(&id, tools_result()),
-        "tools/call" => call_tool(context, &id, params),
-        other => failure(&id, METHOD_NOT_FOUND, &format!("知らないメソッド: {other}")),
-    })
-}
 
-/// initialize の結果。capabilities は実装しているものだけを載せる(tools だけ)。
-/// 相手が求めた版に対応していればその版で、していなければこちらの版で答える。
-fn initialize_result(params: Option<&Value>) -> Value {
-    if let Some(Value::Object(map)) = params {
-        if let Some(Value::Text(requested)) = map.get("protocolVersion") {
-            if requested != PROTOCOL_VERSION {
-                eprintln!(
-                    "uniqnode: mcp: 相手は protocol {requested} を求めた。\
-                     {PROTOCOL_VERSION} で答える"
-                );
+    /// 全文 1 件(ローカルに無ければ None)。
+    fn fetch(&self, id: &str) -> Result<Option<Fetched>, String> {
+        match self {
+            Backend::Local(context) => {
+                api::fetch_object(context, id).map_err(|error| format!("{error}"))
+            }
+            Backend::Forward(client) => client.fetch(id),
+        }
+    }
+
+    /// 起動の知らせに載せる、この形の説明。
+    fn description(&self) -> String {
+        match self {
+            Backend::Local(_) => "ストアを直接開く形(排他錠を持つ)".to_string(),
+            Backend::Forward(client) => {
+                format!("{} へ転送する形(ストアの錠を取らない)", client.url)
             }
         }
     }
-    object(vec![
-        ("protocolVersion", text(PROTOCOL_VERSION)),
-        ("capabilities", object(vec![("tools", object(vec![("listChanged", Value::Bool(false))]))])),
-        (
-            "serverInfo",
-            object(vec![
-                ("name", text(SERVER_NAME)),
-                ("version", text(env!("CARGO_PKG_VERSION"))),
-                ("title", text("uniqnode RAG ストレージ")),
-            ]),
-        ),
-        (
-            "instructions",
-            text(
-                "uniqnode は取り込んだ文書をチャンク単位で検索できる知識ストアである。\
-                 search で問い、返った出典(文書名・ページ・見出し・取得日時)を答えに\
-                 添える。抜粋で足りなければ fetch にチャンク ID を渡して全文を読む。",
+}
+
+/// 走っている serve への最小のクライアント。検索は POST /v1/search、全文は
+/// GET /v1/objects/{id}、その出典は GET /v1/objects/{id}/citation を呼ぶ。
+pub struct ServeClient {
+    /// 接続先(host:port)。
+    address: String,
+    /// 与えられた URL(理由に出す。どこへ届かなかったのかを言うため)。
+    url: String,
+    /// 転送先の serve が開いているはずのデータディレクトリ(起動コマンドの案内に使う)。
+    data_dir: String,
+}
+
+impl ServeClient {
+    /// URL とデータディレクトリから組む。誤った URL はここで断る。
+    pub fn new(url: &str, data_dir: &str) -> Result<ServeClient, String> {
+        let (address, path) = http::split_http_url(url)?;
+        if path != "/" {
+            return Err(format!(
+                "{url}: serve の根を指す URL であるべき(例 http://127.0.0.1:7440)"
+            ));
+        }
+        Ok(ServeClient {
+            address,
+            url: url.to_string(),
+            data_dir: data_dir.to_string(),
+        })
+    }
+
+    /// 届かないときの文。原因と、その serve を起こすコマンドを添える。黙って失敗せず、
+    /// 読んだ者が次の手を打てる形で言う(must/0022)。
+    fn unreachable(&self, cause: &str) -> String {
+        format!(
+            "走っている serve に届かない({}): {cause}。\
+             転送する形の MCP は自分でストアを開かないので、先に serve を起こす: \
+             uniqnode serve {} {}",
+            self.url, self.data_dir, self.address
+        )
+    }
+
+    /// 相手が誤りを返したときの文(届いてはいるので、起動の案内は付けない)。
+    fn refused(&self, what: &str, status: u16, body: &[u8]) -> String {
+        format!("serve の {what} が {status} を返した({}): {}", self.url, http::body_head(body))
+    }
+
+    fn search(&self, request: &SearchRequest) -> Result<SearchResults, String> {
+        let body = api::search_request_body(request);
+        let response = http::post_json(&self.address, "/v1/search", &body, SERVE_TIMEOUT)
+            .map_err(|error| self.unreachable(&error))?;
+        if response.status != 200 {
+            return Err(self.refused("POST /v1/search", response.status, &response.body));
+        }
+        api::parse_search_response(&response.body)
+            .map_err(|error| format!("serve の検索応答を読めない({}): {error}", self.url))
+    }
+
+    fn fetch(&self, id: &str) -> Result<Option<Fetched>, String> {
+        let response = http::get(&self.address, &format!("/v1/objects/{id}"), SERVE_TIMEOUT)
+            .map_err(|error| self.unreachable(&error))?;
+        match response.status {
+            200 => {}
+            // 404 は「この serve のストアが持っていない」というローカルな事実である。
+            404 => return Ok(None),
+            status => {
+                return Err(self.refused(&format!("GET /v1/objects/{id}"), status, &response.body))
+            }
+        }
+        match api::classify_object(response.body) {
+            // 出典は全文とは別に取る(REST の GET /v1/objects/{id} は生のバイト列だけを
+            // 返す)。出典の組み立ては serve 側の索引が持つので、search が示した出典と
+            // 一致する。
+            Fetched::Chunk { text, .. } => {
+                let citation = self.citation(id)?;
+                Ok(Some(Fetched::Chunk { text, citation }))
+            }
+            other => Ok(Some(other)),
+        }
+    }
+
+    fn citation(&self, id: &str) -> Result<Option<Citation>, String> {
+        let path = format!("/v1/objects/{id}/citation");
+        let response = http::get(&self.address, &path, SERVE_TIMEOUT)
+            .map_err(|error| self.unreachable(&error))?;
+        if response.status != 200 {
+            return Err(self.refused(&format!("GET {path}"), response.status, &response.body));
+        }
+        let text = std::str::from_utf8(&response.body)
+            .map_err(|_| format!("serve の {path} の応答が UTF-8 でない"))?;
+        let value = crate::json::Json::parse(text)
+            .map_err(|error| format!("serve の {path} の応答を読めない: {error}"))?;
+        match value.field("citation") {
+            None => Err(format!("serve の {path} の応答に citation がない")),
+            Some(crate::json::Json::Null) => Ok(None),
+            Some(found) => api::citation_from_json(found)
+                .map(Some)
+                .map_err(|error| format!("serve の {path} の出典を読めない: {error}")),
+        }
+    }
+}
+
+/// 標準入力の読み手。1 行読むことに加えて、先読みバッファに未処理のバイトが残って
+/// いるかを答える。自己置換の前にこれを確かめる: BufReader が次のメッセージまで読んで
+/// いると、そのバイト列は旧イメージと共に消えるからである。
+pub trait MessageInput: BufRead {
+    fn has_buffered_bytes(&self) -> bool;
+}
+
+impl<R: Read> MessageInput for std::io::BufReader<R> {
+    fn has_buffered_bytes(&self) -> bool {
+        !self.buffer().is_empty()
+    }
+}
+
+/// initialize で交渉した内容。自己置換のとき新しいイメージへ引き継ぐ(新しいイメージは
+/// initialize を受けた事実を忘れており、Claude Code は再送しない)。
+#[derive(Default)]
+struct Handshake {
+    /// 相手が求めたプロトコル版(こちらが答えるのは PROTOCOL_VERSION)。
+    protocol: Option<String>,
+    /// 相手の名乗り(`<name>/<version>`)。
+    client: Option<String>,
+}
+
+impl Handshake {
+    /// 前のイメージからの引き継ぎ(環境変数)。空文字は無かったものと同じに扱う。
+    fn inherited() -> Handshake {
+        let read = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+        Handshake { protocol: read(HANDSHAKE_PROTOCOL_ENV), client: read(HANDSHAKE_CLIENT_ENV) }
+    }
+}
+
+/// 標準入出力で MCP を話すサーバ。後ろ盾(ストアを直接開く形か、serve へ転送する形)と、
+/// 起動時に控えた実行ファイルの姿と、交渉した内容を持つ。
+pub struct StdioServer {
+    backend: Backend,
+    /// 起動時に控えた実行ファイルの姿。None なら自己置換をしない。
+    binary: Option<BinaryStamp>,
+    handshake: Handshake,
+}
+
+impl StdioServer {
+    /// 後ろ盾を受けて組む。実行ファイルの姿はここで控える: 置き換えられた後の
+    /// /proc/self/exe は "(deleted)" 付きの読めない道になるので、比較の相手は
+    /// 起動時のパスでなければならない。
+    pub fn new(backend: Backend) -> StdioServer {
+        let handshake = Handshake::inherited();
+        if let Some(protocol) = &handshake.protocol {
+            eprintln!(
+                "uniqnode: mcp: ハンドシェイク済みとして起動した(相手の protocol {protocol}、\
+                 client {})",
+                handshake.client.as_deref().unwrap_or("(名乗りなし)")
+            );
+        }
+        StdioServer { backend, binary: BinaryStamp::of_current_exe(), handshake }
+    }
+
+    /// 起動の知らせ(標準出力はプロトコル専用なので標準エラーへ出す)。
+    pub fn announce(&self, target: &str) {
+        eprintln!(
+            "uniqnode: mcp: {target} を stdio で提供する(protocol {PROTOCOL_VERSION}、\
+             tools: search・fetch、{})",
+            self.backend.description()
+        );
+    }
+
+    /// 標準入出力で話す(相手が標準入力を閉じたら終わる)。
+    ///
+    /// 1 行読んで 1 行書く。応答を書くたびに flush するのは、相手が次の要求を出す前に
+    /// この応答を読み切る必要があるためである(パイプの buffer に残したまま待つと、
+    /// 双方が相手を待って止まる)。自己置換を試すのは、応答を書き終えた直後、次の
+    /// 読み込みの前だけである。
+    pub fn serve(
+        &mut self,
+        input: &mut dyn MessageInput,
+        output: &mut dyn Write,
+    ) -> std::io::Result<()> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if input.read_line(&mut line)? == 0 {
+                // 標準入力の EOF は相手が閉じたということ。速やかに終える。
+                return Ok(());
+            }
+            let trimmed = line.trim().to_string();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some(response) = self.handle_message(&trimmed) {
+                output.write_all(response.as_bytes())?;
+                output.write_all(b"\n")?;
+                output.flush()?;
+            }
+            // ここが差し替えの位置である。メッセージの処理の途中で入れ替えると、
+            // 読んだ要求が旧イメージと共に消える。
+            self.replace_if_updated(input);
+        }
+    }
+
+    /// メッセージ 1 本の処理。応答を返すのは要求(id を持つもの)だけで、通知(id を持た
+    /// ないもの)には何も返さない(返すと相手の解析が壊れる)。
+    pub fn handle_message(&mut self, line: &str) -> Option<String> {
+        let message = match c1::parse(line) {
+            Ok(value) => value,
+            // 解析できなければ id も読めないので、規定どおり id は null で答える。
+            Err(error) => {
+                return Some(failure(&Value::Null, PARSE_ERROR, &format!("JSON が不正: {error}")))
+            }
+        };
+        let Value::Object(map) = &message else {
+            return Some(failure(&Value::Null, INVALID_REQUEST, "要求はオブジェクトであるべき"));
+        };
+        // id が無い(または null)のは通知である。以後、応答を返さない道はここで分かれる。
+        let id = match map.get("id") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(value.clone()),
+        };
+        let method = match map.get("method") {
+            Some(Value::Text(method)) => method.as_str(),
+            _ => {
+                let id = id?;
+                return Some(failure(&id, INVALID_REQUEST, "method がない(文字列)"));
+            }
+        };
+        if map.get("jsonrpc") != Some(&Value::Text("2.0".to_string())) {
+            let id = id?;
+            return Some(failure(&id, INVALID_REQUEST, "jsonrpc は \"2.0\" であるべき"));
+        }
+        let params = map.get("params");
+        let Some(id) = id else {
+            // 通知。initialized と cancelled は受理して黙る。知らない通知も、応答を返して
+            // はならない以上ここで捨てるほかないが、標準エラーには残す(must/0022)。
+            if method != "notifications/initialized" && method != "notifications/cancelled" {
+                eprintln!("uniqnode: mcp: 知らない通知を無視した: {method}");
+            }
+            return None;
+        };
+        Some(match method {
+            "initialize" => success(&id, self.initialize_result(params)),
+            // 生存確認。空の結果が規定の答えである。
+            "ping" => success(&id, Value::Object(BTreeMap::new())),
+            "tools/list" => success(&id, tools_result()),
+            "tools/call" => call_tool(&self.backend, &id, params),
+            other => failure(&id, METHOD_NOT_FOUND, &format!("知らないメソッド: {other}")),
+        })
+    }
+
+    /// initialize の結果。capabilities は実装しているものだけを載せる(tools だけ)。
+    /// 相手が求めた版に対応していればその版で、していなければこちらの版で答える。
+    /// 交渉した内容は控える(自己置換のとき新しいイメージへ引き継ぐため)。
+    fn initialize_result(&mut self, params: Option<&Value>) -> Value {
+        if let Some(Value::Object(map)) = params {
+            if let Some(Value::Text(requested)) = map.get("protocolVersion") {
+                self.handshake.protocol = Some(requested.clone());
+                if requested != PROTOCOL_VERSION {
+                    eprintln!(
+                        "uniqnode: mcp: 相手は protocol {requested} を求めた。\
+                         {PROTOCOL_VERSION} で答える"
+                    );
+                }
+            }
+            if let Some(Value::Object(info)) = map.get("clientInfo") {
+                let field = |name: &str| match info.get(name) {
+                    Some(Value::Text(value)) => value.clone(),
+                    _ => "(不明)".to_string(),
+                };
+                self.handshake.client = Some(format!("{}/{}", field("name"), field("version")));
+            }
+        }
+        object(vec![
+            ("protocolVersion", text(PROTOCOL_VERSION)),
+            (
+                "capabilities",
+                object(vec![("tools", object(vec![("listChanged", Value::Bool(false))]))]),
             ),
-        ),
-    ])
+            (
+                "serverInfo",
+                object(vec![
+                    ("name", text(SERVER_NAME)),
+                    ("version", text(env!("CARGO_PKG_VERSION"))),
+                    ("title", text("uniqnode RAG ストレージ")),
+                ]),
+            ),
+            (
+                "instructions",
+                text(
+                    "uniqnode は取り込んだ文書をチャンク単位で検索できる知識ストアである。\
+                     search で問い、返った出典(文書名・ページ・見出し・取得日時)を答えに\
+                     添える。抜粋で足りなければ fetch にチャンク ID を渡して全文を読む。",
+                ),
+            ),
+        ])
+    }
+
+    /// 実行ファイルが更新されていたら、自分を exec で差し替える。
+    ///
+    /// execve はプロセスイメージを入れ替えるがファイル記述子は保つので、相手が握って
+    /// いるパイプの反対側と PID は変わらない。呼ぶのは応答を書き終えた直後だけである
+    /// (処理の途中で入れ替えると、読んだ要求が旧イメージと共に消える)。
+    fn replace_if_updated(&mut self, input: &dyn MessageInput) {
+        let Some(stamp) = &self.binary else { return };
+        let Some(current) = BinaryStamp::read(&stamp.path) else {
+            // 一瞬だけ読めない(置き換えの最中など)ことはある。次の機会に見る。
+            return;
+        };
+        if !stamp.differs_from(&current) {
+            return;
+        }
+        if input.has_buffered_bytes() {
+            // 先読みバッファに次のメッセージが載っている。ここで exec すると、その
+            // バイト列は旧イメージと共に消える。差し替えは次の機会に回す。
+            eprintln!(
+                "uniqnode: mcp: 実行ファイルが更新されたが、先読みバッファに次の\
+                 メッセージがある。差し替えを次の応答の後に回す"
+            );
+            return;
+        }
+        // 壊れたバイナリで自分を置き換えると MCP が死に、結局セッションの再起動が要る。
+        // exec の前に、新しいイメージを子プロセスとして起こして健全さを確かめる。
+        if let Err(reason) = self_check(&stamp.path) {
+            eprintln!(
+                "uniqnode: mcp: 新しい実行ファイルの自己検査に落ちた。差し替えず、\
+                 旧イメージのまま続ける: {reason}"
+            );
+            // 同じ姿を応答のたびに検査し直さない。次にまた変わったときに試す。
+            self.binary = Some(current);
+            return;
+        }
+        eprintln!(
+            "uniqnode: mcp: 実行ファイルが更新された。自分を exec で差し替える: {}",
+            stamp.path.display()
+        );
+        let path = stamp.path.clone();
+        let error = self.exec_replacement(&path);
+        // exec が返るのは失敗したときだけである(成功すればこの行は無い)。
+        eprintln!("uniqnode: mcp: exec に失敗した。旧イメージのまま続ける: {error}");
+        self.binary = Some(current);
+    }
+
+    /// 新しいイメージへの exec。引数はそのまま渡し、ハンドシェイクの事実は環境変数で
+    /// 引き継ぐ(新しいイメージは initialize を受けたことを忘れており、Claude Code は
+    /// 再送しない)。ストアの排他錠は CLOEXEC 付きの FD なので exec で解放され、新しい
+    /// イメージが取り直す(取り直しの隙間は acquire_lock の有界再試行が吸収する)。
+    fn exec_replacement(&self, path: &Path) -> std::io::Error {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new(path);
+        command.args(std::env::args_os().skip(1));
+        if let Some(protocol) = &self.handshake.protocol {
+            command.env(HANDSHAKE_PROTOCOL_ENV, protocol);
+        }
+        if let Some(client) = &self.handshake.client {
+            command.env(HANDSHAKE_CLIENT_ENV, client);
+        }
+        command.exec()
+    }
+}
+
+/// 起動時に控える実行ファイルの姿(更新の検出に使う)。パスも一緒に控えるのは、
+/// 置き換えられた後の /proc/self/exe が "(deleted)" 付きの読めない道になるためである。
+struct BinaryStamp {
+    path: PathBuf,
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+    inode: u64,
+}
+
+impl BinaryStamp {
+    /// 起動時の記録。位置か属性が読めなければ自己置換をしない(黙って諦めず理由を言う。
+    /// must/0022)。
+    fn of_current_exe() -> Option<BinaryStamp> {
+        let path = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!(
+                    "uniqnode: mcp: 実行ファイルの位置が分からない。自己置換をしない: {error}"
+                );
+                return None;
+            }
+        };
+        let stamp = BinaryStamp::read(&path);
+        if stamp.is_none() {
+            eprintln!(
+                "uniqnode: mcp: {} の属性を読めない。自己置換をしない",
+                path.display()
+            );
+        }
+        stamp
+    }
+
+    fn read(path: &Path) -> Option<BinaryStamp> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(BinaryStamp {
+            path: path.to_path_buf(),
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+            inode: metadata.ino(),
+        })
+    }
+
+    /// 更新の検出。cargo は新しい実行ファイルを別の inode で置くので inode だけでも
+    /// 足りるが、同じ inode を書き換える置き方(パッチ当て)も拾えるように更新時刻と
+    /// 大きさも見る。
+    fn differs_from(&self, other: &BinaryStamp) -> bool {
+        self.modified != other.modified || self.len != other.len || self.inode != other.inode
+    }
+}
+
+/// 自己検査(exec の前の防御)。新しいイメージを子プロセスとして起こし、規定の印を
+/// 標準出力に出して正常終了することを確かめる。終了コードだけを見ないのは、たまたま 0 で
+/// 終わる別の実行ファイルを健全とみなさないためである。
+fn self_check(path: &Path) -> Result<(), String> {
+    let mut child = Command::new(path)
+        .arg(SELF_CHECK_COMMAND)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("{} を起こせない: {error}", path.display()))?;
+    let deadline = Instant::now() + SELF_CHECK_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => return Err(format!("自己検査の子を待てない: {error}")),
+        }
+        if Instant::now() >= deadline {
+            // 終わらない新しいイメージも健全ではない。始末してから断る。
+            if let Err(error) = child.kill() {
+                eprintln!("uniqnode: mcp: 自己検査の子を kill できない: {error}");
+            }
+            if let Err(error) = child.wait() {
+                eprintln!("uniqnode: mcp: 自己検査の子を待てない: {error}");
+            }
+            return Err(format!("自己検査が {SELF_CHECK_TIMEOUT:?} で終わらない"));
+        }
+        std::thread::sleep(SELF_CHECK_POLL);
+    };
+    let mut reported = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        stdout
+            .read_to_string(&mut reported)
+            .map_err(|error| format!("自己検査の標準出力を読めない: {error}"))?;
+    }
+    if !status.success() {
+        return Err(format!("{} {SELF_CHECK_COMMAND} が {status} で終わった", path.display()));
+    }
+    if !reported.contains(SELF_CHECK_MARKER) {
+        return Err(format!(
+            "{} {SELF_CHECK_COMMAND} の標準出力に「{SELF_CHECK_MARKER}」が無い: {reported:?}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// 自己検査が標準出力へ書く 1 行(uniqnode selfcheck)。ツールの記述を実際に組み立てて
+/// 数えるので、新しいイメージがこの層まで動くことを確かめられる。文言の家はここである
+/// (書く側と読む側が同じ印を使う。must/0023)。
+pub fn self_check_report() -> String {
+    let tools = match tool_descriptors() {
+        Value::Array(tools) => tools.len(),
+        _ => 0,
+    };
+    format!("{SELF_CHECK_MARKER} version={} tools={tools}", env!("CARGO_PKG_VERSION"))
 }
 
 /// tools/list の結果。ツールの一覧は result.tools に入る(result そのものを配列に
@@ -267,7 +704,7 @@ fn read_only_annotations(title: &str) -> Value {
 /// tools/call の振り分け。知らないツール名と引数の誤りはプロトコルの誤り
 /// (-32602)、ツールを実行したうえでの失敗は isError の結果で返す(前者は要求の
 /// 組み立てが誤っている話、後者はモデルが読んで次の手を選べる話である)。
-fn call_tool(context: &ApiContext, id: &Value, params: Option<&Value>) -> String {
+fn call_tool(backend: &Backend, id: &Value, params: Option<&Value>) -> String {
     let Some(Value::Object(map)) = params else {
         return failure(id, INVALID_PARAMS, "params がない(オブジェクト)");
     };
@@ -277,28 +714,36 @@ fn call_tool(context: &ApiContext, id: &Value, params: Option<&Value>) -> String
     let empty = Value::Object(BTreeMap::new());
     let arguments = map.get("arguments").unwrap_or(&empty);
     match name.as_str() {
-        "search" => call_search(context, id, arguments),
-        "fetch" => call_fetch(context, id, arguments),
+        "search" => call_search(backend, id, arguments),
+        "fetch" => call_fetch(backend, id, arguments),
         other => failure(id, INVALID_PARAMS, &format!("知らないツール: {other}")),
     }
 }
 
+/// ツールを実行したうえでの失敗。モデルが読んで次の手を選べるように結果(isError)で
+/// 返し、同じ理由を標準エラーにも残す(応答を読まない運用者にも見えるように。
+/// must/0022)。転送する形で serve に届かないときの案内もこの道を通る。
+fn tool_failure(id: &Value, what: &str, reason: &str) -> String {
+    eprintln!("uniqnode: mcp: {what}: {reason}");
+    success(id, tool_text(&format!("{what}: {reason}"), true))
+}
+
 /// search ツール。引数の形は POST /v1/search のボディと同じで、読み取りも順位付けも
-/// REST と同じ関数を通る(should/0135)。
-fn call_search(context: &ApiContext, id: &Value, arguments: &Value) -> String {
+/// REST と同じ関数を通る(should/0135)。整形も、ストアを直接開く形と転送する形で
+/// 同じ render_search を通る。
+fn call_search(backend: &Backend, id: &Value, arguments: &Value) -> String {
     let request = match api::parse_search_request(arguments) {
         Ok(request) => request,
         Err(message) => return failure(id, INVALID_PARAMS, &message),
     };
-    match api::run_search(context, &request) {
+    match backend.search(&request) {
         Ok(results) => success(id, tool_text(&render_search(&request, &results), false)),
-        // ストアを読めないのはツールの実行の失敗。モデルが読んで判断できる形で返す。
-        Err(error) => success(id, tool_text(&format!("検索に失敗した: {error}"), true)),
+        Err(reason) => tool_failure(id, "検索に失敗した", &reason),
     }
 }
 
 /// fetch ツール。
-fn call_fetch(context: &ApiContext, id: &Value, arguments: &Value) -> String {
+fn call_fetch(backend: &Backend, id: &Value, arguments: &Value) -> String {
     let Value::Object(map) = arguments else {
         return failure(id, INVALID_PARAMS, "引数はオブジェクトであるべき");
     };
@@ -312,8 +757,8 @@ fn call_fetch(context: &ApiContext, id: &Value, arguments: &Value) -> String {
             "オブジェクトIDの形式が不正(s256: と16進64桁)",
         );
     }
-    match api::fetch_object(context, object_id) {
-        Err(error) => success(id, tool_text(&format!("取得に失敗した: {error}"), true)),
+    match backend.fetch(object_id) {
+        Err(reason) => tool_failure(id, "取得に失敗した", &reason),
         // ローカルに無いのは「このDBノードは持っていない」というローカルな事実で
         // あって、不存在の言明ではない(SPEC §7.2/§10)。
         Ok(None) => success(
@@ -540,13 +985,13 @@ mod tests {
     /// 通知(id を持たないメッセージ)には何も返さない。返すと相手の解析が壊れる。
     #[test]
     fn notifications_get_no_response() {
-        let (dir, context) = empty_context("notifications");
+        let (dir, mut server) = local_server("notifications");
         assert_eq!(
-            handle_message(&context, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"),
+            server.handle_message("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"),
             None
         );
         // 知らない通知も、応答は返さない(標準エラーには残す)。
-        assert_eq!(handle_message(&context, "{\"jsonrpc\":\"2.0\",\"method\":\"x/y\"}"), None);
+        assert_eq!(server.handle_message("{\"jsonrpc\":\"2.0\",\"method\":\"x/y\"}"), None);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
@@ -554,16 +999,16 @@ mod tests {
     /// 答える。
     #[test]
     fn malformed_messages_answer_with_the_standard_error_codes() {
-        let (dir, context) = empty_context("malformed");
-        let parse_error = handle_message(&context, "not json").expect("応答");
+        let (dir, mut server) = local_server("malformed");
+        let parse_error = server.handle_message("not json").expect("応答");
         assert!(parse_error.contains("\"code\":-32700"), "{parse_error}");
         assert!(parse_error.contains("\"id\":null"), "{parse_error}");
-        let unknown =
-            handle_message(&context, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x/y\"}")
-                .expect("応答");
+        let unknown = server
+            .handle_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x/y\"}")
+            .expect("応答");
         assert!(unknown.contains("\"code\":-32601"), "{unknown}");
         let no_version =
-            handle_message(&context, "{\"id\":1,\"method\":\"tools/list\"}").expect("応答");
+            server.handle_message("{\"id\":1,\"method\":\"tools/list\"}").expect("応答");
         assert!(no_version.contains("\"code\":-32600"), "{no_version}");
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -571,23 +1016,23 @@ mod tests {
     /// initialize は版・capabilities・サーバ情報を答え、tools/list は 2 ツールを出す。
     #[test]
     fn the_handshake_declares_the_two_tools() {
-        let (dir, context) = empty_context("handshake");
-        let initialized = handle_message(
-            &context,
-            "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":\
+        let (dir, mut server) = local_server("handshake");
+        let initialized = server
+            .handle_message(
+                "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":\
              {\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\
              \"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}",
-        )
-        .expect("応答");
+            )
+            .expect("応答");
         assert!(initialized.contains("\"protocolVersion\":\"2025-06-18\""), "{initialized}");
         assert!(initialized.contains("\"tools\":{\"listChanged\":false}"), "{initialized}");
         assert!(initialized.contains("\"name\":\"uniqnode\""), "{initialized}");
         // id 0 は「id が無い」ではない(通知と取り違えると応答が消える)。
         assert!(initialized.contains("\"id\":0"), "{initialized}");
 
-        let listed =
-            handle_message(&context, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")
-                .expect("応答");
+        let listed = server
+            .handle_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")
+            .expect("応答");
         // 一覧は result.tools に入る。result を配列にすると相手は 1 本もツールを
         // 見つけられない(名前だけを探す検査では、この取り違えを見逃す)。
         assert!(listed.contains("\"result\":{\"tools\":["), "{listed}");
@@ -602,49 +1047,72 @@ mod tests {
     /// isError で言う(黙って空を返さない)。
     #[test]
     fn the_tools_answer_over_an_empty_store() {
-        let (dir, context) = empty_context("empty-store");
-        let searched = handle_message(
-            &context,
-            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":\
+        let (dir, mut server) = local_server("empty-store");
+        let searched = server
+            .handle_message(
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":\
              {\"name\":\"search\",\"arguments\":{\"query\":\"世代の整合\"}}}",
-        )
-        .expect("応答");
+            )
+            .expect("応答");
         assert!(searched.contains("一致なし"), "{searched}");
         assert!(searched.contains("\"isError\":false"), "{searched}");
 
         let absent = format!("s256:{}", "0".repeat(64));
-        let fetched = handle_message(
-            &context,
-            &format!(
+        let fetched = server
+            .handle_message(&format!(
                 "{{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":\
                  {{\"name\":\"fetch\",\"arguments\":{{\"id\":\"{absent}\"}}}}}}"
-            ),
-        )
-        .expect("応答");
+            ))
+            .expect("応答");
         assert!(fetched.contains("\"isError\":true"), "{fetched}");
         assert!(fetched.contains("持っていない"), "{fetched}");
 
         // 知らないツールと引数の誤りはプロトコルの誤り。
-        let unknown_tool = handle_message(
-            &context,
-            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":\
-             {\"name\":\"delete\",\"arguments\":{}}}",
-        )
-        .expect("応答");
+        let unknown_tool = server
+            .handle_message(
+                "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":\
+                 {\"name\":\"delete\",\"arguments\":{}}}",
+            )
+            .expect("応答");
         assert!(unknown_tool.contains("\"code\":-32602"), "{unknown_tool}");
-        let no_query = handle_message(
-            &context,
-            "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":\
-             {\"name\":\"search\",\"arguments\":{}}}",
-        )
-        .expect("応答");
+        let no_query = server
+            .handle_message(
+                "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":\
+                 {\"name\":\"search\",\"arguments\":{}}}",
+            )
+            .expect("応答");
         assert!(no_query.contains("\"code\":-32602"), "{no_query}");
         assert!(no_query.contains("query"), "{no_query}");
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
-    /// 空のストアを開いた MCP の文脈(serve と同じ形を組む。HTTP は通らない)。
-    fn empty_context(name: &str) -> (std::path::PathBuf, ApiContext) {
+    /// 先読みバッファの検査(自己置換の前提)。1 行読んだ後に次のメッセージがバッファに
+    /// 載っていれば、そのバイト列は exec で消えるので、差し替えは見送らねばならない。
+    #[test]
+    fn a_buffered_next_message_is_visible_after_reading_a_line() {
+        let mut input = std::io::BufReader::new(&b"{\"a\":1}\n{\"b\":2}\n"[..]);
+        let mut line = String::new();
+        input.read_line(&mut line).expect("read");
+        assert_eq!(line, "{\"a\":1}\n");
+        assert!(input.has_buffered_bytes(), "次のメッセージがバッファに残っているはず");
+        line.clear();
+        input.read_line(&mut line).expect("read");
+        assert!(!input.has_buffered_bytes(), "読み切れば空のはず");
+    }
+
+    /// 自己検査は、起こせない実行ファイルを健全とは言わない(防御が黙って素通りすると、
+    /// 壊れたイメージへの exec で MCP が死ぬ)。
+    #[test]
+    fn the_self_check_refuses_a_binary_it_cannot_start() {
+        let missing =
+            std::env::temp_dir().join(format!("uniqnode-absent-{}", std::process::id()));
+        let error = self_check(&missing).expect_err("起こせないはず");
+        assert!(error.contains("起こせない"), "{error}");
+    }
+
+    /// 空のストアを直接開いた MCP のサーバ(serve と同じ形の ApiContext を組む。
+    /// HTTP は通らない)。
+    fn local_server(name: &str) -> (std::path::PathBuf, StdioServer) {
         let dir = std::env::temp_dir()
             .join(format!("uniqnode-mcp-unit-{}-{name}", std::process::id()));
         if dir.exists() {
@@ -662,6 +1130,6 @@ mod tests {
             search: std::sync::Mutex::new(None),
             embedding: None,
         };
-        (dir, context)
+        (dir, StdioServer::new(Backend::Local(Box::new(context))))
     }
 }

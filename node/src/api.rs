@@ -4,6 +4,7 @@
 
 use crate::c1;
 use crate::http::{Request, Response};
+use crate::json::Json;
 use crate::query::{QueryEngine, QueryKind};
 use crate::store::{Store, StoreError};
 use std::collections::BTreeMap;
@@ -547,24 +548,23 @@ pub enum Fetched {
 pub fn fetch_object(context: &ApiContext, id: &str) -> Result<Option<Fetched>, StoreError> {
     let store = context.store.lock().expect("lock");
     let Some(bytes) = store.get_object(id)? else { return Ok(None) };
-    let byte_count = bytes.len();
-    let Ok(text) = String::from_utf8(bytes) else {
-        return Ok(Some(Fetched::Binary { bytes: byte_count }));
-    };
-    let chunk_text = match c1::parse(&text) {
-        Ok(c1::Value::Object(map)) => match (map.get("kind"), map.get("text")) {
-            (Some(c1::Value::Text(kind)), Some(c1::Value::Text(body))) if kind == "chunk" => {
-                Some(body.clone())
-            }
-            _ => None,
-        },
-        _ => None,
-    };
-    let Some(chunk_text) = chunk_text else { return Ok(Some(Fetched::Object { text })) };
-    let citation = with_current_index(context, &store, |index| {
-        index.chunk_by_id(id).map(Citation::of)
-    })?;
-    Ok(Some(Fetched::Chunk { text: chunk_text, citation }))
+    match classify_object(bytes) {
+        Fetched::Chunk { text, .. } => {
+            let citation = citation_in_view(context, &store, id)?;
+            Ok(Some(Fetched::Chunk { text, citation }))
+        }
+        other => Ok(Some(other)),
+    }
+}
+
+/// 見え(collections/ 配下の現行 doc_rev)にあるチャンクの引用。ID で取れても見えに無い
+/// チャンク(旧版など)は None である。store のロックは呼び手が持つ。
+fn citation_in_view(
+    context: &ApiContext,
+    store: &Store,
+    id: &str,
+) -> Result<Option<Citation>, StoreError> {
+    with_current_index(context, store, |index| index.chunk_by_id(id).map(Citation::of))
 }
 
 /// POST /v1/search(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))。ボディ:
@@ -606,22 +606,10 @@ fn json_text(text: &str) -> String {
 /// "cosine"・順位から作った "rrf")である。どれも同一応答内の順位付けにだけ意味があり、
 /// 応答をまたいだ比較や絶対値の閾値には使えない。degraded は、要求した方式で答えられ
 /// なかったときだけ現れる理由である。
-fn search_response_body(outcome: &SearchResults) -> Vec<u8> {
+pub fn search_response_body(outcome: &SearchResults) -> Vec<u8> {
     let mut results = Vec::new();
     for result in &outcome.results {
-        let citation = &result.citation;
-        let breadcrumbs: Vec<String> =
-            citation.breadcrumbs.iter().map(|title| json_text(title)).collect();
-        let mut rendered = format!(
-            "{{\"at\":{},\"breadcrumbs\":[{}],\"document\":{}",
-            citation.at,
-            breadcrumbs.join(","),
-            json_text(&citation.document)
-        );
-        if let Some(page) = citation.page {
-            rendered.push_str(&format!(",\"page\":{page}"));
-        }
-        rendered.push_str(&format!(",\"position\":{}}}", citation.position));
+        let rendered = json_line(&citation_value(&result.citation));
         results.push(format!(
             "{{\"citation\":{rendered},\"id\":{},\"score\":{},\"snippet\":{}}}",
             json_text(&result.id),
@@ -640,6 +628,172 @@ fn search_response_body(outcome: &SearchResults) -> Vec<u8> {
         outcome.method.score_semantics(),
     )
     .into_bytes()
+}
+
+/// c1 の正規形を 1 行の文字列にする(c1 は JSON の部分集合なので、そのまま JSON の
+/// 一部として埋め込める)。
+fn json_line(value: &c1::Value) -> String {
+    String::from_utf8(c1::to_canonical_bytes(value)).expect("c1 直列化は UTF-8")
+}
+
+// ---- REST の線の上の形(書き手と読み手を並べて置く) ----
+//
+// 検索の応答と引用は、serve が書き、二人が読む: REST の呼び手と、走っている serve へ
+// 転送する形の MCP(node/src/mcp.rs)である。書き手と読み手を隣り合わせに置くのは、
+// 形を変えるときに片方だけが直る事故を防ぐためである(should/0135。両者が噛み合うことは
+// 単体試験 rest_search_bodies_survive_a_round_trip が確かめる)。
+
+/// 引用の JSON。検索応答の citation と GET /v1/objects/{id}/citation はこの 1 箇所から
+/// 出る。値はすべて整数・文字列・配列なので c1 の正規形で書ける(小数を持つのは score
+/// だけである)。
+pub fn citation_value(citation: &Citation) -> c1::Value {
+    let mut map = BTreeMap::new();
+    map.insert("at".to_string(), c1::Value::Integer(citation.at));
+    map.insert(
+        "breadcrumbs".to_string(),
+        c1::Value::Array(
+            citation.breadcrumbs.iter().map(|title| c1::Value::Text(title.clone())).collect(),
+        ),
+    );
+    map.insert("collection".to_string(), c1::Value::Text(citation.collection.clone()));
+    map.insert("document".to_string(), c1::Value::Text(citation.document.clone()));
+    if let Some(page) = citation.page {
+        map.insert("page".to_string(), c1::Value::Integer(page as i64));
+    }
+    map.insert("position".to_string(), c1::Value::Integer(citation.position as i64));
+    c1::Value::Object(map)
+}
+
+/// 引用を JSON から組み直す(citation_value の裏返し)。欠けた項は黙って埋めず、何が
+/// 足りないのかを言って失敗する(must/0022)。
+pub fn citation_from_json(value: &Json) -> Result<Citation, String> {
+    let text = |name: &str| -> Result<String, String> {
+        value
+            .field(name)
+            .and_then(Json::text)
+            .map(|found| found.to_string())
+            .ok_or_else(|| format!("citation の {name} がない(文字列)"))
+    };
+    let integer = |name: &str| -> Result<i64, String> {
+        value
+            .field(name)
+            .and_then(Json::integer)
+            .ok_or_else(|| format!("citation の {name} がない(整数)"))
+    };
+    let breadcrumbs = match value.field("breadcrumbs").and_then(Json::array) {
+        Some(items) => items
+            .iter()
+            .map(|item| {
+                item.text()
+                    .map(|title| title.to_string())
+                    .ok_or_else(|| "citation の breadcrumbs は文字列の配列".to_string())
+            })
+            .collect::<Result<Vec<String>, String>>()?,
+        None => return Err("citation の breadcrumbs がない(配列)".to_string()),
+    };
+    let position = integer("position")?;
+    let page = match value.field("page") {
+        None | Some(Json::Null) => None,
+        Some(found) => Some(
+            found
+                .integer()
+                .filter(|page| (0..=u32::MAX as i64).contains(page))
+                .ok_or_else(|| "citation の page が非負整数でない".to_string())?
+                as u32,
+        ),
+    };
+    Ok(Citation {
+        collection: text("collection")?,
+        document: text("document")?,
+        position: usize::try_from(position).map_err(|_| "citation の position が負".to_string())?,
+        page,
+        breadcrumbs,
+        at: integer("at")?,
+    })
+}
+
+/// 検索要求の本文(POST /v1/search のボディ)。読み取りは parse_search_request の
+/// 一箇所なので、書き手もここ 1 箇所に置く。省略できる項は、省略時の既定を持つ側
+/// (parse_search_request)に任せず、決まった値をそのまま書く。
+pub fn search_request_body(request: &SearchRequest) -> Vec<u8> {
+    let mut map = BTreeMap::new();
+    map.insert("query".to_string(), c1::Value::Text(request.query.clone()));
+    if let Some(collection) = &request.collection {
+        map.insert("collection".to_string(), c1::Value::Text(collection.clone()));
+    }
+    map.insert("top_k".to_string(), c1::Value::Integer(request.top_k as i64));
+    if let Some(method) = request.method {
+        map.insert("method".to_string(), c1::Value::Text(method.as_str().to_string()));
+    }
+    c1::to_canonical_bytes(&c1::Value::Object(map))
+}
+
+/// 検索応答を読む(search_response_body の裏返し)。score が小数なので c1 では読めず、
+/// 小数を読める最小の JSON(node/src/json.rs)を通す。
+pub fn parse_search_response(body: &[u8]) -> Result<SearchResults, String> {
+    let text = std::str::from_utf8(body).map_err(|_| "応答が UTF-8 でない".to_string())?;
+    let value = Json::parse(text)?;
+    let method = match value.field("method").and_then(Json::text) {
+        Some(name) => crate::embed::SearchMethod::parse(name)
+            .ok_or_else(|| format!("応答の method が知らない方式: {name}"))?,
+        None => return Err("応答に method がない".to_string()),
+    };
+    let degraded = match value.field("degraded") {
+        None | Some(Json::Null) => None,
+        Some(found) => Some(
+            found
+                .text()
+                .ok_or_else(|| "応答の degraded が文字列でない".to_string())?
+                .to_string(),
+        ),
+    };
+    let items = value.field("results").and_then(Json::array).ok_or("応答に results がない")?;
+    let mut results = Vec::with_capacity(items.len());
+    for item in items {
+        let id = item
+            .field("id")
+            .and_then(Json::text)
+            .ok_or_else(|| "results の要素に id がない".to_string())?
+            .to_string();
+        let score = item
+            .field("score")
+            .and_then(Json::number)
+            .ok_or_else(|| "results の要素に score がない".to_string())?;
+        let snippet = item
+            .field("snippet")
+            .and_then(Json::text)
+            .ok_or_else(|| "results の要素に snippet がない".to_string())?
+            .to_string();
+        let citation = match item.field("citation") {
+            Some(found) => citation_from_json(found)?,
+            None => return Err("results の要素に citation がない".to_string()),
+        };
+        results.push(SearchResult { id, score, snippet, citation });
+    }
+    Ok(SearchResults { method, degraded, results })
+}
+
+/// オブジェクトのバイト列がどれなのかを見分ける(チャンクの本文・チャンクでない c1
+/// オブジェクト・テキストでないバイト列)。引用は付けない。ストアから直に読んだときも、
+/// REST の GET /v1/objects/{id} から読んだときも、この 1 箇所を通る(should/0135)。
+pub fn classify_object(bytes: Vec<u8>) -> Fetched {
+    let byte_count = bytes.len();
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Fetched::Binary { bytes: byte_count };
+    };
+    let chunk_text = match c1::parse(&text) {
+        Ok(c1::Value::Object(map)) => match (map.get("kind"), map.get("text")) {
+            (Some(c1::Value::Text(kind)), Some(c1::Value::Text(body))) if kind == "chunk" => {
+                Some(body.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    match chunk_text {
+        Some(chunk_text) => Fetched::Chunk { text: chunk_text, citation: None },
+        None => Fetched::Object { text },
+    }
 }
 
 fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Response {
@@ -697,6 +851,27 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
     }
 
     if let Some(rest) = path.strip_prefix("/v1/objects/") {
+        // 出典(引用規則は Citation)。全文そのものは GET /v1/objects/{id} が返すので、
+        // ここは引用だけを返す。走っている serve へ転送する形の MCP(node/src/mcp.rs)が
+        // fetch の出典を組むために呼ぶ。見えに無いチャンクと、チャンクでない ID は
+        // citation:null(持っていない ID も同じ。逆引きと同じく「自分の見えの範囲」の
+        // 導出データであり、不在の言明ではない)。
+        if let Some(id) = rest.strip_suffix("/citation") {
+            if method != "GET" {
+                return error_response(405, "GET のみ");
+            }
+            if !c1::is_object_id(id) {
+                return error_response(400, "オブジェクトIDの形式が不正");
+            }
+            let store = store.lock().expect("lock");
+            return match citation_in_view(context, &store, id) {
+                Ok(Some(citation)) => {
+                    Response::json(200, json_object(vec![("citation", citation_value(&citation))]))
+                }
+                Ok(None) => Response::json(200, json_object(vec![("citation", c1::Value::Null)])),
+                Err(e) => store_error_response(e),
+            };
+        }
         // 逆引き(INGEST の「逆引き」節): この ID を参照している既知オブジェクトの一覧。
         if let Some(id) = rest.strip_suffix("/referrers") {
             if method != "GET" {
@@ -906,4 +1081,151 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
     }
 
     error_response(404, "no such endpoint")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// REST の線の上の形は、書き手と読み手が噛み合う。走っている serve へ転送する形の
+    /// MCP は、この読み手だけを頼りに出典を組み直すので、片方だけが直ると出典が消える。
+    /// 期待値は書き手の出力から導かず、線の上の文字列をリテラルで置く(should/0137)。
+    #[test]
+    fn rest_search_bodies_survive_a_round_trip() {
+        let outcome = SearchResults {
+            method: crate::embed::SearchMethod::Hybrid,
+            degraded: Some("埋め込みサーバに届かない".to_string()),
+            results: vec![
+                SearchResult {
+                    id: format!("s256:{}", "1".repeat(64)),
+                    score: 7.6674,
+                    // 本文の改行は c1 の直列化がエスケープに畳む(読み手が戻す)。
+                    snippet: "転置索引は\n導出データ".to_string(),
+                    citation: Citation {
+                        collection: "notes".to_string(),
+                        document: "search_ja".to_string(),
+                        position: 1,
+                        page: None,
+                        breadcrumbs: vec!["分散設計".to_string(), "世代の整合".to_string()],
+                        at: 1_786_904_557,
+                    },
+                },
+                SearchResult {
+                    id: format!("s256:{}", "2".repeat(64)),
+                    score: 0.5,
+                    snippet: "Page two".to_string(),
+                    citation: Citation {
+                        collection: "specs".to_string(),
+                        document: "three_pages".to_string(),
+                        position: 0,
+                        page: Some(2),
+                        breadcrumbs: Vec::new(),
+                        at: 1_786_904_600,
+                    },
+                },
+            ],
+        };
+        let body = search_response_body(&outcome);
+        let text = String::from_utf8(body.clone()).expect("utf-8");
+        // 出典はコレクション名も持つ(転送する形の MCP は「<コレクション>/<文書>」と
+        // 描くので、これが無いと出典が組めない)。
+        assert!(
+            text.contains(
+                "\"citation\":{\"at\":1786904557,\"breadcrumbs\":[\"分散設計\",\"世代の整合\"],\
+                 \"collection\":\"notes\",\"document\":\"search_ja\",\"position\":1}"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("\"page\":2"), "PDF のチャンクはページを持つ: {text}");
+
+        let read = parse_search_response(&body).expect("読み直せるべき");
+        assert_eq!(read.method.as_str(), "hybrid");
+        assert_eq!(read.degraded.as_deref(), Some("埋め込みサーバに届かない"));
+        assert_eq!(read.results.len(), 2);
+        assert_eq!(read.results[0].id, format!("s256:{}", "1".repeat(64)));
+        assert!((read.results[0].score - 7.6674).abs() < 1e-12, "{}", read.results[0].score);
+        assert_eq!(read.results[0].snippet, "転置索引は\n導出データ");
+        assert_eq!(read.results[0].citation.collection, "notes");
+        assert_eq!(read.results[0].citation.document, "search_ja");
+        assert_eq!(read.results[0].citation.position, 1);
+        assert_eq!(read.results[0].citation.page, None);
+        assert_eq!(read.results[0].citation.breadcrumbs, vec!["分散設計", "世代の整合"]);
+        assert_eq!(read.results[0].citation.at, 1_786_904_557);
+        assert_eq!(read.results[1].citation.page, Some(2));
+        assert!(read.results[1].citation.breadcrumbs.is_empty());
+
+        // 欠けた形は黙って通さない(must/0022)。
+        let missing =
+            match parse_search_response(b"{\"method\":\"bm25\",\"results\":[{\"id\":\"x\"}]}") {
+                Ok(_) => panic!("score も snippet も無い応答を通してはならない"),
+                Err(message) => message,
+            };
+        assert!(missing.contains("score"), "{missing}");
+        let no_citation = match parse_search_response(
+            b"{\"method\":\"bm25\",\"results\":[{\"citation\":{\"at\":1},\"id\":\"x\",\
+              \"score\":1.0,\"snippet\":\"y\"}]}",
+        ) {
+            Ok(_) => panic!("citation の欠けた応答を通してはならない"),
+            Err(message) => message,
+        };
+        assert!(no_citation.contains("citation の"), "{no_citation}");
+    }
+
+    /// 検索要求も、書いた本文がそのまま parse_search_request を通る(転送する形の MCP は
+    /// 自分で検証してから同じ本文を serve へ送る)。
+    #[test]
+    fn a_search_request_body_reads_back_as_the_same_request() {
+        let request = SearchRequest {
+            query: "世代の整合".to_string(),
+            collection: Some("notes".to_string()),
+            top_k: 3,
+            method: Some(crate::embed::SearchMethod::Bm25),
+        };
+        let body = search_request_body(&request);
+        assert_eq!(
+            String::from_utf8(body.clone()).expect("utf-8"),
+            "{\"collection\":\"notes\",\"method\":\"bm25\",\"query\":\"世代の整合\",\"top_k\":3}"
+        );
+        let value = c1::parse(std::str::from_utf8(&body).expect("utf-8")).expect("c1");
+        let read = parse_search_request(&value).expect("読み直せるべき");
+        assert_eq!(read.query, "世代の整合");
+        assert_eq!(read.collection.as_deref(), Some("notes"));
+        assert_eq!(read.top_k, 3);
+        assert_eq!(read.method.map(|method| method.as_str()), Some("bm25"));
+
+        // 省略できる項は省いたまま書く(既定は読み手が持つ)。
+        let bare = SearchRequest {
+            query: "x".to_string(),
+            collection: None,
+            top_k: 10,
+            method: None,
+        };
+        assert_eq!(
+            String::from_utf8(search_request_body(&bare)).expect("utf-8"),
+            "{\"query\":\"x\",\"top_k\":10}"
+        );
+    }
+
+    /// バイト列の見分けは 1 箇所(classify_object)で、ストアから読んでも REST から
+    /// 読んでも同じ答えになる。
+    #[test]
+    fn object_bytes_are_classified_as_chunk_object_or_binary() {
+        let chunk = b"{\"kind\":\"chunk\",\"text\":\"\xe6\x9c\xac\xe6\x96\x87\"}".to_vec();
+        match classify_object(chunk) {
+            Fetched::Chunk { text, citation } => {
+                assert_eq!(text, "本文");
+                // 引用は索引が持つ。バイト列だけからは組めない。
+                assert!(citation.is_none());
+            }
+            _ => panic!("チャンクのはず"),
+        }
+        match classify_object(b"{\"kind\":\"doc_rev\",\"v\":1}".to_vec()) {
+            Fetched::Object { text } => assert_eq!(text, "{\"kind\":\"doc_rev\",\"v\":1}"),
+            _ => panic!("チャンクでない c1 オブジェクトのはず"),
+        }
+        match classify_object(vec![0xff, 0xfe, 0x00]) {
+            Fetched::Binary { bytes } => assert_eq!(bytes, 3),
+            _ => panic!("テキストでないバイト列のはず"),
+        }
+    }
 }

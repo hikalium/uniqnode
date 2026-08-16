@@ -32,7 +32,12 @@ struct McpProcess {
 
 impl McpProcess {
     fn start(dir: &Path, arguments: &[&str]) -> McpProcess {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
+        McpProcess::start_program(Path::new(env!("CARGO_BIN_EXE_uniqnode")), dir, arguments)
+    }
+
+    /// 実行ファイルを指定して起こす(自己置換の検査は、実物ではなく複製を的にする)。
+    fn start_program(program: &Path, dir: &Path, arguments: &[&str]) -> McpProcess {
+        let mut child = Command::new(program)
             .args(["mcp", dir.to_str().expect("utf-8")])
             .args(arguments)
             .stdin(Stdio::piped())
@@ -359,4 +364,249 @@ fn the_search_tool_honours_collection_and_top_k() {
     assert!(narrowed.contains("コレクション absent"), "絞り込みの条件を書き戻すべき: {narrowed}");
     mcp.finish();
     std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// Claude Code が実際に送る initialize(should/0138)。自己置換の検査でも、引き継ぎの
+/// 中身(protocol とクライアントの名乗り)を見るために同じ形を送る。
+const CLAUDE_CODE_INITIALIZE: &str = "{\"method\":\"initialize\",\"params\":\
+    {\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"roots\":{\"listChanged\":true},\
+    \"elicitation\":{}},\"clientInfo\":{\"name\":\"claude-code\",\"version\":\"2.1.232\"}},\
+    \"jsonrpc\":\"2.0\",\"id\":0}";
+
+/// initialize の応答に出る表示名。自己置換の検査は、この文字列を同じ長さの別の文字列に
+/// 差し替えた複製を「新しいイメージ」として置き、応答がどちらから来たのかを見る。
+const SERVER_TITLE: &str = "uniqnode RAG ストレージ";
+const PATCHED_TITLE: &str = "uniqnode NEW ストレージ";
+
+/// CLI を 1 回動かして結果をそのまま返す(失敗する経路を検査する側で読むため)。
+fn cli_output(arguments: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_uniqnode"))
+        .args(arguments)
+        .output()
+        .expect("uniqnode の起動")
+}
+
+/// 転送する形(MCP (uuid:dacd474d-424a-45d5-a278-766fc2465dd9))。走っている serve の
+/// REST へ回す形で initialize / tools/list / tools/call が通り、出典はストアを直接開く形と
+/// 同じものが出る。serve が落ちていれば、黙って空を返さず、原因と起動コマンドを言う。
+#[test]
+fn the_forwarding_form_answers_through_serve_and_names_the_cause_when_serve_is_down() {
+    let dir = store_with("mcp-forward", &["search_ja.md"]);
+    let server = start_server_at_with_args(dir.clone(), &[]);
+    let serve_url = format!("http://{}", server.address);
+    let mut mcp = McpProcess::start(&dir, &["--serve-url", &serve_url]);
+
+    let initialized = mcp.request(CLAUDE_CODE_INITIALIZE);
+    assert!(initialized.contains("\"protocolVersion\":\"2025-06-18\""), "{initialized}");
+    assert!(initialized.contains("\"name\":\"uniqnode\""), "{initialized}");
+    let listed = mcp.request("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
+    assert!(listed.contains("\"result\":{\"tools\":["), "{listed}");
+    assert!(listed.contains("\"name\":\"search\""), "{listed}");
+
+    // 検索。整形はストアを直接開く形と同じ関数を通るので、出典の見え方も同じである。
+    let searched = mcp.call(2, "search", "{\"query\":\"世代の整合\"}");
+    assert!(searched.contains("\"isError\":false"), "{searched}");
+    assert!(searched.contains("方式 bm25"), "{searched}");
+    assert!(searched.contains("notes/search_ja"), "文書名が出典に無い: {searched}");
+    assert!(searched.contains("位置 1"), "{searched}");
+    assert!(
+        searched.contains("見出し: 分散設計 > 世代の整合"),
+        "見出しが出典に無い: {searched}"
+    );
+    assert!(searched.contains("チャンク ID: s256:"), "{searched}");
+    assert!(searched.contains("取得日時: 20"), "取得日時が出典に無い: {searched}");
+    assert!(searched.contains("抜粋: 転置索引は導出データであり"), "{searched}");
+
+    // 全文の取得。出典(取得日時を含む)は GET /v1/objects/{id}/citation から組む。
+    let chunk_id = first_chunk_id(&searched);
+    let fetched = mcp.call(3, "fetch", &format!("{{\"id\":\"{chunk_id}\"}}"));
+    assert!(fetched.contains("\"isError\":false"), "{fetched}");
+    assert!(
+        fetched.contains("世代の整合はオブジェクト数と署名者ごとの最終列番号"),
+        "全文が返っていない: {fetched}"
+    );
+    assert!(fetched.contains("出典: notes/search_ja"), "全文にも出典が要る: {fetched}");
+    assert!(fetched.contains("取得日時: 20"), "{fetched}");
+
+    // 持っていない ID は、転送する形でも「持っていない」と言う(404 の読み替え)。
+    let absent = format!("s256:{}", "a".repeat(64));
+    let missing = mcp.call(4, "fetch", &format!("{{\"id\":\"{absent}\"}}"));
+    assert!(missing.contains("\"isError\":true"), "{missing}");
+    assert!(missing.contains("持っていない"), "{missing}");
+
+    // serve を止める。以後は黙って失敗せず、原因と起動コマンドを言う(must/0022)。
+    drop(server);
+    let unreachable = mcp.call(5, "search", "{\"query\":\"世代の整合\"}");
+    assert!(unreachable.contains("\"isError\":true"), "{unreachable}");
+    assert!(unreachable.contains("serve に届かない"), "{unreachable}");
+    assert!(unreachable.contains("接続できない"), "原因を言うべき: {unreachable}");
+    assert!(
+        unreachable.contains("uniqnode serve"),
+        "起動コマンドを添えるべき: {unreachable}"
+    );
+    let unreachable_fetch = mcp.call(6, "fetch", &format!("{{\"id\":\"{chunk_id}\"}}"));
+    assert!(unreachable_fetch.contains("serve に届かない"), "{unreachable_fetch}");
+
+    // 同じ理由は標準エラーにも残る(応答を読まない運用者にも見えるように)。
+    let exit = mcp.finish();
+    assert!(
+        exit.stderr.contains("serve に届かない"),
+        "届かない理由が標準エラーに無い: {}",
+        exit.stderr
+    );
+    assert!(
+        exit.stderr.contains("へ転送する形(ストアの錠を取らない)"),
+        "どの形で起きたのかを起動時に言うべき: {}",
+        exit.stderr
+    );
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// 転送する形はストアの錠を取らない。これが改善の要点である: MCP サーバを常駐させた
+/// まま、同じデータディレクトリに対して CLI の取り込みと埋め込みが通る(ストアを直接
+/// 開く形なら、どちらも「別プロセスが開いている」で断られる)。
+#[test]
+fn the_forwarding_form_holds_no_store_lock_so_the_cli_can_ingest_and_embed() {
+    let dir = store_with("mcp-forward-lock", &["search_ja.md"]);
+    // serve は起こさない。ここで見たいのは「MCP が錠を取らないこと」だけであり、
+    // 錠を取っていればこの後の ingest が断られる。
+    let mcp = McpProcess::start(&dir, &["--serve-url", "http://127.0.0.1:7440"]);
+    let path = assets().join("search_en.md");
+    let text = dir.to_str().expect("utf-8");
+
+    // 取り込み: MCP の常駐中に成功する。
+    run_cli(&["ingest", text, "notes", path.to_str().expect("utf-8")]);
+    run_cli(&["status", text]);
+
+    // 埋め込み: 埋め込みサーバは要らない。ストアを開けたかどうかを見るので、開いた後に
+    // 出る cache の行があり、断りの文言が出ていないことを確かめる(この試験環境に
+    // 埋め込みサーバが居るとは限らないので、届かない先を指して失敗させる)。
+    let embedded = cli_output(&["embed", text, "--embed", "http://127.0.0.1:1"]);
+    let out = String::from_utf8_lossy(&embedded.stdout);
+    let error = String::from_utf8_lossy(&embedded.stderr);
+    assert!(out.contains("cache:"), "ストアを開けていない: {out} {error}");
+    assert!(
+        !error.contains("別プロセスが開いている"),
+        "MCP が錠を持っている: {error}"
+    );
+
+    // 取り込んだ結果は、走っている MCP からも見える(索引は世代で作り直される)。
+    mcp.finish();
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// 自己置換(バイナリの更新を検出して自分を exec で差し替える)。実プロセスで、
+/// 差し替えの前後で応答がどちらのイメージから来ているのかを見る。壊れたイメージを
+/// 置いたときは差し替えず、旧イメージのまま答え続ける(負例。発火を一度も見ていない
+/// 防御は未検証である)。
+#[test]
+fn the_server_execs_a_healthy_new_binary_and_refuses_a_broken_one() {
+    let dir = store_with("mcp-self-replace", &["search_ja.md"]);
+    let binary_dir = unique_dir("mcp-self-replace-bin");
+    std::fs::create_dir_all(&binary_dir).expect("mkdir");
+    let binary = binary_dir.join("uniqnode");
+    // 実物は cargo が管理するので触らない。複製を差し替えの的にする。
+    write_executable(&binary, &std::fs::read(env!("CARGO_BIN_EXE_uniqnode")).expect("read"));
+
+    let mut mcp = McpProcess::start_program(&binary, &dir, &[]);
+    let initialized = mcp.request(CLAUDE_CODE_INITIALIZE);
+    assert!(initialized.contains(SERVER_TITLE), "起動時のイメージが答えるべき: {initialized}");
+
+    // (1) 壊れたイメージ。自己検査のサブコマンド名を潰した複製を置く。exec してしまえば
+    // 表示名が変わるので、変わらないことが「差し替えなかった」ことの証拠になる。
+    replace_binary(
+        &binary,
+        &[(SERVER_TITLE, PATCHED_TITLE), ("selfcheck", "selfchecx")],
+    );
+    let ping = mcp.request("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}");
+    assert!(ping.contains("\"result\":{}"), "{ping}");
+    let after_broken = mcp.request(CLAUDE_CODE_INITIALIZE);
+    assert!(
+        after_broken.contains(SERVER_TITLE),
+        "壊れたイメージに差し替えてはならない: {after_broken}"
+    );
+
+    // (2) 健全なイメージ。表示名だけを変えた複製を置く。
+    replace_binary(&binary, &[(SERVER_TITLE, PATCHED_TITLE)]);
+    let ping = mcp.request("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}");
+    assert!(ping.contains("\"result\":{}"), "{ping}");
+    let after_good = mcp.request(CLAUDE_CODE_INITIALIZE);
+    assert!(
+        after_good.contains(PATCHED_TITLE),
+        "差し替えた後は新しいイメージが答えるべき: {after_good}"
+    );
+    // 差し替えは相手から見えない: 同じ標準入出力で会話が続き、検索もそのまま通る。
+    let searched = mcp.call(3, "search", "{\"query\":\"世代の整合\"}");
+    assert!(searched.contains("notes/search_ja"), "差し替え後も検索が通るべき: {searched}");
+
+    let exit = mcp.finish();
+    assert!(
+        exit.stderr.contains("自己検査に落ちた"),
+        "壊れたイメージを断った記録が無い: {}",
+        exit.stderr
+    );
+    assert!(
+        exit.stderr.contains("exec で差し替える"),
+        "差し替えの記録が無い(黙って入れ替えない): {}",
+        exit.stderr
+    );
+    // 新しいイメージは initialize を受けた事実を環境変数で引き継ぐ(Claude Code は
+    // 再送しない)。
+    assert!(
+        exit.stderr.contains("ハンドシェイク済みとして起動した(相手の protocol 2025-11-25、client claude-code/2.1.232)"),
+        "ハンドシェイクの引き継ぎが無い: {}",
+        exit.stderr
+    );
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+    std::fs::remove_dir_all(&binary_dir).expect("cleanup");
+}
+
+/// 自己置換の防御が呼ぶ命令(uniqnode selfcheck)は、健全な実行ファイルなら規定の印を
+/// 標準出力に出して正常終了する。防御はこの印と終了コードの両方を見る。
+#[test]
+fn selfcheck_reports_the_marker_on_stdout() {
+    let output = cli_output(&["selfcheck"]);
+    let reported = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "selfcheck は正常終了すべき: {}", output.status);
+    assert!(
+        reported.contains(uniqnode::mcp::SELF_CHECK_MARKER),
+        "印が無い: {reported}"
+    );
+    assert!(reported.contains("tools=2"), "ツールの記述を組み立てるべき: {reported}");
+}
+
+/// 実行ファイルを書く(実行の許可を付ける)。
+fn write_executable(path: &Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, bytes).expect("write binary");
+    let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("chmod");
+}
+
+/// 実行ファイルを、文字列を同じ長さの別の文字列に差し替えた複製で置き換える。
+///
+/// 置き換えは一時ファイルへ書いてから rename する。走っているイメージのファイルはその場
+/// では書けない(ETXTBSY)し、cargo が新しい実行ファイルを置くのも rename である。
+/// 長さを変えないのは、ELF の位置を動かさずに応答の見た目だけを変えるためである。
+fn replace_binary(path: &Path, patches: &[(&str, &str)]) {
+    let mut bytes = std::fs::read(env!("CARGO_BIN_EXE_uniqnode")).expect("read binary");
+    for (from, to) in patches {
+        assert_eq!(from.len(), to.len(), "同じ長さでなければ ELF が壊れる");
+        let mut replaced = 0usize;
+        let mut at = 0usize;
+        while at + from.len() <= bytes.len() {
+            if &bytes[at..at + from.len()] == from.as_bytes() {
+                bytes[at..at + from.len()].copy_from_slice(to.as_bytes());
+                replaced += 1;
+                at += from.len();
+            } else {
+                at += 1;
+            }
+        }
+        assert!(replaced > 0, "{from} が実行ファイルに見つからない");
+    }
+    let staged = path.with_extension("staged");
+    write_executable(&staged, &bytes);
+    std::fs::rename(&staged, path).expect("rename");
 }

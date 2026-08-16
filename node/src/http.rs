@@ -241,6 +241,17 @@ pub struct ClientResponse {
     pub body: Vec<u8>,
 }
 
+/// 応答の先頭だけを診断に載せる(全文をエラーメッセージに流し込まない)。相手が誤りを
+/// 返したときの言い方は、埋め込みクライアントも MCP の転送する形も同じである
+/// (should/0135)。
+pub fn body_head(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    match text.char_indices().nth(200) {
+        Some((offset, _)) => format!("{}…", &text[..offset]),
+        None => text.to_string(),
+    }
+}
+
 /// URL を (接続先の host:port, パス) に割る。scheme 省略と http:// を受け、https:// は
 /// 黙って平文で繋がず断る(TLS を実装していない。must/0022)。ポートを省略した相手は
 /// 80 番とみなす。

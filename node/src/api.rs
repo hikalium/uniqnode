@@ -554,7 +554,7 @@ pub fn run_search(
         outcome.degraded = load_failure;
     }
     if let Some(reason) = &outcome.degraded {
-        eprintln!(
+        crate::log_line!(
             "uniqnode: search: {} を求められて {} で答えた: {reason}",
             requested.as_str(),
             outcome.method.as_str()
@@ -563,7 +563,7 @@ pub fn run_search(
     // 捨てたことは黙らない(must/0019 と同じ理由)。件数は応答にも載るが、応答を読まない
     // 運用者にも見えるところへ 1 行出す。
     if outcome.filtered_low_information > 0 {
-        eprintln!(
+        crate::log_line!(
             "uniqnode: search: 低情報チャンク {} 件を応答から落とした(目次の紙面・柱だけ・\
              ページ番号だけ。残したいときは要求に include_low_information: true)",
             outcome.filtered_low_information

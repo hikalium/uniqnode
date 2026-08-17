@@ -54,7 +54,7 @@ pub fn read_groups(data_dir: &Path) -> Vec<GroupConfig> {
     let value = match c1::parse(&text) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("uniqnode: groups.json が読めない(無視して空扱い): {e}");
+            crate::log_line!("uniqnode: groups.json が読めない(無視して空扱い): {e}");
             return Vec::new();
         }
     };

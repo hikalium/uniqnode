@@ -103,13 +103,13 @@ pub fn serve(listener: TcpListener, handler: Arc<Handler>) -> ! {
                                 | std::io::ErrorKind::BrokenPipe
                         );
                         if !benign {
-                            eprintln!("uniqnode: http connection error: {e}");
+                            crate::log_line!("uniqnode: http connection error: {e}");
                         }
                     }
                 });
             }
             Err(e) => {
-                eprintln!("uniqnode: accept error: {e}");
+                crate::log_line!("uniqnode: accept error: {e}");
             }
         }
     }

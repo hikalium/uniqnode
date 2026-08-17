@@ -28,3 +28,7 @@ cargo run -p uniqnode -- serve /tmp/uniqnode-data 127.0.0.1:7440
 curl -X POST --data-binary '{"v":1,"kind":"node","contents":"hello"}' http://127.0.0.1:7440/v1/objects
 curl http://127.0.0.1:7440/v1/status
 ```
+
+serve と mcp のログは、何も指定しなくても `<データディレクトリ>/logs/` に残る(上の例なら
+`/tmp/uniqnode-data/logs/serve.log`)。標準エラーにも同じ行が出る。行の形・回転・保存先の
+変え方は [docs/design/LOGGING.md](#14a4e260-70af-4c52-9f19-1c116bddd004)。

@@ -1020,7 +1020,7 @@ impl EmbeddingService {
             self.embedder.dimension(),
         )?;
         if cache.discarded_tail_bytes() > 0 {
-            eprintln!(
+            crate::log_line!(
                 "uniqnode: {} の末尾 {} バイトを捨てた(追記の途中で止まった記録。\
                  uniqnode embed で埋め直せる)",
                 self.cache_path.display(),

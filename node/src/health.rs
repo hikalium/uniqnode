@@ -308,7 +308,7 @@ impl HealthEngine {
                             None => true,
                             Some(expected) if *expected == view.node_id => true,
                             Some(expected) => {
-                                eprintln!(
+                                crate::log_line!(
                                     "uniqnode: ピア {address} の node_id が証明書と一致しない\
                                      (証明書 {expected}, 実際 {})",
                                     view.node_id
@@ -332,7 +332,7 @@ impl HealthEngine {
             if accepted {
                 let mut report = SyncReport::default();
                 if let Err(e) = sync::sync_records(&self.store, &peer, &mut report) {
-                    eprintln!("uniqnode: 伝播交換({address}): {e}");
+                    crate::log_line!("uniqnode: 伝播交換({address}): {e}");
                 }
             }
         }
@@ -355,7 +355,7 @@ impl HealthEngine {
                             .entry(root.clone())
                             .and_modify(|r| r.last_tier_change = Some(Instant::now()));
                     }
-                    Err(e) => eprintln!("uniqnode: 降格に失敗({root}): {e}"),
+                    Err(e) => crate::log_line!("uniqnode: 降格に失敗({root}): {e}"),
                 }
             }
         }
@@ -493,7 +493,7 @@ impl HealthEngine {
                             break;
                         }
                     }
-                    Err(e) => eprintln!("uniqnode: 修復の取り寄せ({address}): {e}"),
+                    Err(e) => crate::log_line!("uniqnode: 修復の取り寄せ({address}): {e}"),
                 }
             }
         }
@@ -507,7 +507,7 @@ impl HealthEngine {
                         .entry(root.to_string())
                         .and_modify(|r| r.last_tier_change = Some(Instant::now()));
                 }
-                Err(e) => eprintln!("uniqnode: 保持表明に失敗({root}): {e}"),
+                Err(e) => crate::log_line!("uniqnode: 保持表明に失敗({root}): {e}"),
             }
         }
         // 取り寄せ元が見つからない場合は何もしない。時間経過で ALERT(unknown) が拾う。
@@ -527,7 +527,7 @@ pub fn read_node_config(data_dir: &std::path::Path) -> (Option<u64>, HealthParam
     let value = match crate::c1::parse(&text) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("uniqnode: node.json が読めない(既定値で続行): {e}");
+            crate::log_line!("uniqnode: node.json が読めない(既定値で続行): {e}");
             return (None, params);
         }
     };

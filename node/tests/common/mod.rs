@@ -6,7 +6,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStderr, Command, Stdio};
 
 pub struct Server {
     pub child: Child,
@@ -14,14 +14,16 @@ pub struct Server {
     pub dir: PathBuf,
     /// Drop 時にディレクトリを消すか(再起動テストでは残す)。
     pub remove_dir_on_drop: bool,
+    /// 捕まえた標準エラー(start_server_capturing_stderr で起こしたときだけ)。
+    pub stderr: Option<ChildStderr>,
 }
 
-impl Drop for Server {
-    fn drop(&mut self) {
-        // まず正常終了を頼む(カバレッジのプロファイル書き出しは正常終了でのみ起きる)。
-        // 応答を読み切ってから閉じる(書いた直後に閉じるとサーバ側の応答書き込みと
-        // 競合する)。期限内に終わらなければ kill に切り替える。
-        let asked = TcpStream::connect(&self.address).ok().and_then(|mut stream| {
+/// 正常終了を頼む(応答を読み切ってから閉じる)。頼めたら true。Drop と finish が
+/// 同じ手順を通る(should/0135)。
+fn ask_for_shutdown(address: &str) -> bool {
+    TcpStream::connect(address)
+        .ok()
+        .and_then(|mut stream| {
             stream
                 .write_all(
                     b"POST /v1/admin/shutdown HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -30,8 +32,30 @@ impl Drop for Server {
             let mut response = Vec::new();
             let _ = stream.read_to_end(&mut response);
             Some(())
-        });
-        if asked.is_some() {
+        })
+        .is_some()
+}
+
+impl Server {
+    /// 正常終了させ、標準エラーを読み切って返す(ログファイルとの突き合わせに使う)。
+    /// 呼ぶ前に remove_dir_on_drop を false にしておけば、終了後のデータディレクトリを
+    /// 読める。
+    pub fn finish(mut self) -> String {
+        let mut stderr = self.stderr.take().expect("標準エラーを捕まえて起こしていない");
+        ask_for_shutdown(&self.address);
+        let _ = self.child.wait();
+        let mut text = String::new();
+        stderr.read_to_string(&mut text).expect("read stderr");
+        text
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        // まず正常終了を頼む(カバレッジのプロファイル書き出しは正常終了でのみ起きる)。
+        // 期限内に終わらなければ kill に切り替える。
+        let asked = ask_for_shutdown(&self.address);
+        if asked {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while std::time::Instant::now() < deadline {
                 match self.child.try_wait() {
@@ -97,29 +121,40 @@ pub fn unique_dir(name: &str) -> PathBuf {
 }
 
 pub fn start_server_at(dir: PathBuf) -> Server {
-    start_server_at_with(dir, &[], &[])
+    start_server_at_with(dir, &[], &[], false)
+}
+
+/// 標準エラーを捕まえて起こす(ログファイルの内容と突き合わせるテスト用)。捕まえた
+/// 標準エラーは Server::finish で読み切る。
+pub fn start_server_capturing_stderr(name: &str, args: &[&str]) -> Server {
+    start_server_at_with(unique_dir(name), &[], args, true)
 }
 
 /// 環境変数を差し替えて serve を起動する(PATH を空にして pdftotext 不在の環境を
 /// 再現する用)。
 pub fn start_server_with_env(name: &str, envs: &[(&str, &str)]) -> Server {
-    start_server_at_with(unique_dir(name), envs, &[])
+    start_server_at_with(unique_dir(name), envs, &[], false)
 }
 
 /// serve に追加の引数を与えて起動する(--embed など)。
 pub fn start_server_with_args(name: &str, args: &[&str]) -> Server {
-    start_server_at_with(unique_dir(name), &[], args)
+    start_server_at_with(unique_dir(name), &[], args, false)
 }
 
 /// 既存のディレクトリに対して追加の引数つきで起動する(取り込み済みのストアを
 /// 使い回すテスト用)。
 pub fn start_server_at_with_args(dir: PathBuf, args: &[&str]) -> Server {
-    let mut server = start_server_at_with(dir, &[], args);
+    let mut server = start_server_at_with(dir, &[], args, false);
     server.remove_dir_on_drop = false;
     server
 }
 
-fn start_server_at_with(dir: PathBuf, envs: &[(&str, &str)], args: &[&str]) -> Server {
+fn start_server_at_with(
+    dir: PathBuf,
+    envs: &[(&str, &str)],
+    args: &[&str],
+    capture_stderr: bool,
+) -> Server {
     let mut command = Command::new(env!("CARGO_BIN_EXE_uniqnode"));
     for (key, value) in envs {
         command.env(key, value);
@@ -128,9 +163,10 @@ fn start_server_at_with(dir: PathBuf, envs: &[(&str, &str)], args: &[&str]) -> S
         .args(["serve", dir.to_str().expect("utf-8"), "127.0.0.1:0"])
         .args(args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(if capture_stderr { Stdio::piped() } else { Stdio::inherit() })
         .spawn()
         .expect("spawn serve");
+    let stderr = child.stderr.take();
     let stdout = child.stdout.take().expect("stdout");
     let mut line = String::new();
     BufReader::new(stdout).read_line(&mut line).expect("read listening line");
@@ -139,7 +175,7 @@ fn start_server_at_with(dir: PathBuf, envs: &[(&str, &str)], args: &[&str]) -> S
         .strip_prefix("listening on ")
         .expect("listening line")
         .to_string();
-    Server { child, address, dir, remove_dir_on_drop: true }
+    Server { child, address, dir, remove_dir_on_drop: true, stderr }
 }
 
 pub fn start_server(name: &str) -> Server {

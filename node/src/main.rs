@@ -1,14 +1,8 @@
 //! uniqnode CLI。ストアの初期化・操作・検証(SPEC §10 の HTTP API はこの上に載せる)。
 
 use std::io::{Read, Write};
+use uniqnode::clock::unix_now;
 use uniqnode::store::{Store, StoreConfig, StoreError};
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 fn usage() -> ! {
     eprintln!(
@@ -29,18 +23,21 @@ fn usage() -> ! {
            cert-verify <dir>          標準入力の証明書を <dir>/groups.json で検証する\n\
            revoke-make <node_id> <group_id>\n\
                                       失効文の本体を標準出力へ(署名なし)\n\
-           serve <dir> <addr> [--embed <url>] [--embedder <id>]\n\
+           serve <dir> <addr> [--embed <url>] [--embedder <id>] [ログの指定]\n\
                                       HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)。\n\
                                       --embed を与えると POST /v1/search の既定が BM25 と\n\
                                       埋め込みの RRF 融合になる。ベクトルは embed で作った\n\
                                       キャッシュから読むので、検索が模型の計算を待つことは\n\
                                       ない。届かなければ BM25 だけに劣化して答え、応答の\n\
-                                      method と degraded がそれを言う\n\
-           mcp <dir> [--serve-url <url>] [--embed <url>] [--embedder <id>]\n\
+                                      method と degraded がそれを言う。\n\
+                                      ログは既定で <dir>/logs/serve.log にも残す(下記)\n\
+           mcp <dir> [--serve-url <url>] [--embed <url>] [--embedder <id>] [ログの指定]\n\
                                       標準入出力で MCP(Model Context Protocol)を話す。\n\
                                       LLM エージェント(Claude Code など)に search と\n\
                                       fetch の2ツールを出す。標準出力はプロトコル専用で、\n\
-                                      ログは標準エラーへ出す。--serve-url を与えると、\n\
+                                      ログは標準エラーと <dir>/logs/mcp.log へ出す(登録\n\
+                                      した相手が標準エラーを吸うので、ファイルが唯一\n\
+                                      読める記録になる)。--serve-url を与えると、\n\
                                       自分でストアを開かず、走っている serve の REST へ\n\
                                       転送する(ストアの排他錠を取らないので、常駐した\n\
                                       まま ingest・embed が通る。埋め込みを装備するのは\n\
@@ -81,7 +78,17 @@ fn usage() -> ! {
                                       再照合され、根拠行つきの検証記録が付く。索引 ref\n\
                                       annotations/<collection> に訂正の項が足される。\n\
                                       serve 停止中のストア用)\n\
-           flood <dir>                書き込み続ける(クラッシュ試験用の内部コマンド)"
+           flood <dir>                書き込み続ける(クラッシュ試験用の内部コマンド)\n\
+         \n\
+         serve と mcp のログの指定(常駐する 2 つだけが持つ。既定は保存する):\n\
+           --log <path>               保存先を変える(既定 <dir>/logs/<serve|mcp>.log)\n\
+           --no-log                   ファイルへ残さず標準エラーだけに出す\n\
+           --log-max-bytes <n>        1 世代の上限(既定 {default_max_bytes})。越えたら\n\
+                                      <path>.1 へ送って新しい世代を開き、{generations} 世代\n\
+                                      まで残す(それより古いものは消える)\n\
+         ログは標準エラーとファイルの両方に同じ行が出る。行頭は UTC の時刻と pid",
+        default_max_bytes = uniqnode::log::DEFAULT_MAX_BYTES,
+        generations = uniqnode::log::RETAINED_GENERATIONS,
     );
     std::process::exit(2);
 }
@@ -248,11 +255,13 @@ fn run_ingest_annotations(
     Ok(())
 }
 
+/// ストアを開く。開けない理由(別のプロセスが錠を持っている、など)はログの出口を
+/// 通す: mcp がこれで落ちたとき、標準エラーは登録した相手の中で消えるためである。
 fn open(dir: &str) -> Store {
     match Store::open(StoreConfig::new(dir)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("uniqnode: ストアを開けない: {e}");
+            uniqnode::log_line!("uniqnode: ストアを開けない: {e}");
             std::process::exit(1);
         }
     }
@@ -310,15 +319,100 @@ fn parse_embed_options(rest: &[String]) -> EmbedOptions {
     options
 }
 
-/// mcp の指定(転送先の serve と、埋め込みの指定)。
+/// ログの指定(常駐する serve と mcp が持つ)。既定は保存する。ログは重要なデバッグ
+/// 資料であり、シェルのリダイレクトを忘れたら失われる、という置き方をしない。
+struct LogOptions {
+    /// 保存先(--log)。無指定なら <data_dir>/logs/<役割>.log。
+    path: Option<String>,
+    /// ファイルへ残すか(--no-log で false)。
+    enabled: bool,
+    /// 1 世代の上限(--log-max-bytes)。
+    max_bytes: u64,
+}
+
+/// 常駐する命令(serve・mcp)の指定。
+struct RunOptions {
+    embed: EmbedOptions,
+    log: LogOptions,
+}
+
+/// ログの指定だけを抜き取り、残りは埋め込みの読み手に渡す(読み取りを二重に実装
+/// しない。should/0135)。
+fn parse_run_options(rest: &[String]) -> RunOptions {
+    let mut log = LogOptions {
+        path: None,
+        enabled: true,
+        max_bytes: uniqnode::log::DEFAULT_MAX_BYTES,
+    };
+    let mut others = Vec::new();
+    let mut at = 0;
+    while at < rest.len() {
+        let value = || rest.get(at + 1).cloned().unwrap_or_else(|| usage());
+        match rest[at].as_str() {
+            "--log" => {
+                log.path = Some(value());
+                at += 2;
+            }
+            "--no-log" => {
+                log.enabled = false;
+                at += 1;
+            }
+            "--log-max-bytes" => {
+                let text = value();
+                log.max_bytes = match text.parse::<u64>() {
+                    Ok(bytes) if bytes > 0 => bytes,
+                    // 誤った指定を既定で埋めて黙って進まない(must/0022)。
+                    _ => {
+                        eprintln!("uniqnode: --log-max-bytes は正の整数: {text}");
+                        std::process::exit(2);
+                    }
+                };
+                at += 2;
+            }
+            _ => {
+                others.push(rest[at].clone());
+                at += 1;
+            }
+        }
+    }
+    RunOptions { embed: parse_embed_options(&others), log }
+}
+
+/// ログの保存を始める(既定で有効)。開けなければ理由を言って標準エラーだけで続ける。
+/// 黙って落とさない(must/0022)が、ログを書けないことは serve や mcp を止める理由には
+/// しない: 提供できる仕事があるのに、記録の都合で断る方が損である(should/0114)。
+fn start_logging(dir: &str, role: &str, options: &LogOptions) {
+    if !options.enabled {
+        eprintln!("uniqnode: {role}: --no-log によりログはファイルに残さない(標準エラーだけ)");
+        return;
+    }
+    let path = match &options.path {
+        Some(given) => std::path::PathBuf::from(given),
+        None => uniqnode::log::default_path(std::path::Path::new(dir), role),
+    };
+    match uniqnode::log::open(&path, options.max_bytes) {
+        Ok(()) => uniqnode::log_line!(
+            "uniqnode: {role}: ログを {} に残す(1 世代 {} バイト、{} 世代まで保持)",
+            path.display(),
+            options.max_bytes,
+            uniqnode::log::RETAINED_GENERATIONS
+        ),
+        Err(message) => eprintln!(
+            "uniqnode: {role}: ログをファイルに残せない({message})。\
+             標準エラーだけに出して続ける(--log で別の道を指せる)"
+        ),
+    }
+}
+
+/// mcp の指定(転送先の serve と、埋め込み・ログの指定)。
 struct McpOptions {
     /// 走っている serve へ転送する形の転送先(--serve-url)。無ければストアを直接開く。
     serve_url: Option<String>,
-    embed: EmbedOptions,
+    run: RunOptions,
 }
 
-/// --serve-url <url> だけを抜き取り、残りは serve と同じ読み手に渡す(埋め込みの指定の
-/// 読み取りを二重に実装しない。should/0135)。
+/// --serve-url <url> だけを抜き取り、残りは serve と同じ読み手に渡す(埋め込みとログの
+/// 指定の読み取りを二重に実装しない。should/0135)。
 fn parse_mcp_options(rest: &[String]) -> McpOptions {
     let mut serve_url = None;
     let mut others = Vec::new();
@@ -332,7 +426,7 @@ fn parse_mcp_options(rest: &[String]) -> McpOptions {
         others.push(rest[at].clone());
         at += 1;
     }
-    McpOptions { serve_url, embed: parse_embed_options(&others) }
+    McpOptions { serve_url, run: parse_run_options(&others) }
 }
 
 /// 指定から埋め込みクライアントを組む(誤った指定はここで落とす)。
@@ -340,7 +434,7 @@ fn embedder_from(options: &EmbedOptions) -> uniqnode::embed::Embedder {
     match uniqnode::embed::Embedder::new(&options.url, &options.embedder_id) {
         Ok(embedder) => embedder,
         Err(message) => {
-            eprintln!("uniqnode: {message}");
+            uniqnode::log_line!("uniqnode: {message}");
             std::process::exit(2);
         }
     }
@@ -612,15 +706,19 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
         // MCP アダプタ(MCP (uuid:dacd474d-424a-45d5-a278-766fc2465dd9))。serve と同じ
         // ApiContext を組み、HTTP の代わりに標準入出力の JSON-RPC で search と fetch を
         // 出す。ここで標準出力へ書いてよいのは MCP のメッセージだけなので、起動の知らせも
-        // 含めてログはすべて標準エラーへ出す。
+        // 含めてログはすべて標準エラーと <dir>/logs/mcp.log へ出す。標準エラーは登録した
+        // LLM クライアントが吸って利用者に見せないので、ファイルが唯一読める記録になる。
         "mcp" => {
             let options = parse_mcp_options(rest);
+            // 何よりも先に開く。ストアを開けない・転送先が誤っている、といった起動時の
+            // 失敗こそ残したい記録である。
+            start_logging(dir, uniqnode::log::MCP_ROLE, &options.run.log);
             let backend = match &options.serve_url {
                 // 転送する形: 走っている serve の REST へ回す。ストアを開かない
                 // (排他錠を取らない)ので、常駐したまま ingest・embed が通る。
                 Some(url) => {
-                    if options.embed.requested {
-                        eprintln!(
+                    if options.run.embed.requested {
+                        uniqnode::log_line!(
                             "uniqnode: mcp: --serve-url と --embed は併用しない\
                              (埋め込みを装備するのは転送先の serve である)"
                         );
@@ -629,7 +727,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                     match uniqnode::mcp::ServeClient::new(url, dir) {
                         Ok(client) => uniqnode::mcp::Backend::Forward(client),
                         Err(message) => {
-                            eprintln!("uniqnode: mcp: {message}");
+                            uniqnode::log_line!("uniqnode: mcp: {message}");
                             std::process::exit(2);
                         }
                     }
@@ -644,11 +742,11 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                     ));
                     // serve と同じく、埋め込みは明示されたときだけ装備する
                     // (should/0114)。届かなければ検索は BM25 に劣化し、ツールの応答と
-                    // 標準エラーの両方がそう言う。
-                    let embedding = options.embed.requested.then(|| {
-                        let embedder = embedder_from(&options.embed)
+                    // ログの両方がそう言う。
+                    let embedding = options.run.embed.requested.then(|| {
+                        let embedder = embedder_from(&options.run.embed)
                             .with_timeout(uniqnode::embed::QUERY_EMBED_TIMEOUT);
-                        eprintln!(
+                        uniqnode::log_line!(
                             "uniqnode: mcp: embedding: {} ({})",
                             embedder.embedder_id(),
                             embedder.endpoint()
@@ -674,16 +772,32 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // 見えない場所にバイトが溜まらない。
             let mut input = std::io::BufReader::with_capacity(64 * 1024, std::io::stdin());
             let stdout = std::io::stdout();
-            server.serve(&mut input, &mut stdout.lock())?;
+            // 終わりの理由もログに残す(標準エラーだけに出すと、登録した相手の中で消える)。
+            if let Err(error) = server.serve(&mut input, &mut stdout.lock()) {
+                uniqnode::log_line!("uniqnode: mcp: 標準入出力が壊れた: {error}");
+                std::process::exit(1);
+            }
         }
         "serve" => {
             let address = rest.first().map(String::as_str).unwrap_or_else(|| usage());
-            let options = parse_embed_options(&rest[1..]);
-            let listener = std::net::TcpListener::bind(address)?;
+            let options = parse_run_options(&rest[1..]);
+            // 束縛より先にログを開く。「そのアドレスを使えない」も残したい記録である。
+            start_logging(dir, uniqnode::log::SERVE_ROLE, &options.log);
+            let listener = match std::net::TcpListener::bind(address) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    uniqnode::log_line!("uniqnode: serve: {address} に束縛できない: {error}");
+                    std::process::exit(1);
+                }
+            };
             // テストや起動スクリプトが実際のポートを知れるように、束縛先を必ず表示する。
-            println!("listening on {}", listener.local_addr()?);
+            let bound = listener.local_addr()?;
+            println!("listening on {bound}");
             use std::io::Write as _;
             std::io::stdout().flush()?;
+            // 標準出力の 1 行は起動スクリプトとの取り決めなので形を変えない。ログにも
+            // 残すのは、後から「いつ、どのアドレスで起きたか」を読めるようにするため。
+            uniqnode::log_line!("uniqnode: serve: {bound} で待ち受ける");
             let data_dir = std::path::PathBuf::from(dir);
             let (capacity_bytes, health_params) = uniqnode::health::read_node_config(&data_dir);
             let mut store_config = uniqnode::store::StoreConfig::new(&data_dir);
@@ -691,7 +805,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             let store = match uniqnode::store::Store::open(store_config) {
                 Ok(s) => std::sync::Arc::new(std::sync::Mutex::new(s)),
                 Err(e) => {
-                    eprintln!("uniqnode: ストアを開けない: {e}");
+                    uniqnode::log_line!("uniqnode: ストアを開けない: {e}");
                     std::process::exit(1);
                 }
             };
@@ -711,10 +825,10 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // 埋め込みは明示されたときだけ装備する。起動時に相手の生存を確かめない
             // (should/0114: 起動を外部プロセスの都合で止めない)。届くかどうかは
             // 検索要求のたびに分かり、届かなければ BM25 に劣化して答える。
-            let embedding = options.requested.then(|| {
-                let embedder =
-                    embedder_from(&options).with_timeout(uniqnode::embed::QUERY_EMBED_TIMEOUT);
-                eprintln!(
+            let embedding = options.embed.requested.then(|| {
+                let embedder = embedder_from(&options.embed)
+                    .with_timeout(uniqnode::embed::QUERY_EMBED_TIMEOUT);
+                uniqnode::log_line!(
                     "uniqnode: embedding: {} ({})",
                     embedder.embedder_id(),
                     embedder.endpoint()

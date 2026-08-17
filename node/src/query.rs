@@ -11,6 +11,7 @@
 //!   署名付きレコードではないため報告のみ(取り込みは sync 経由のみ)。
 
 use crate::c1;
+use crate::clock::unix_now;
 use crate::store::Store;
 use crate::sync::{HttpPeer, PeerSource, RefRecordView};
 use std::collections::{BTreeMap, VecDeque};
@@ -129,15 +130,12 @@ pub fn read_peer_entries(data_dir: &Path) -> Vec<PeerEntry> {
     let value = match c1::parse(&text) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("uniqnode: peers.json が読めない(無視して空扱い): {e}");
+            crate::log_line!("uniqnode: peers.json が読めない(無視して空扱い): {e}");
             return Vec::new();
         }
     };
     let groups = crate::groups::read_groups(data_dir);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = unix_now();
     let mut out = Vec::new();
     if let c1::Value::Object(map) = &value {
         if let Some(c1::Value::Array(items)) = map.get("peers") {
@@ -165,7 +163,7 @@ pub fn read_peer_entries(data_dir: &Path) -> Vec<PeerEntry> {
                                 });
                             }
                             Err(reason) => {
-                                eprintln!(
+                                crate::log_line!(
                                     "uniqnode: ピア {address} の証明書を受け入れない: {reason}"
                                 );
                             }
@@ -190,7 +188,7 @@ fn random_hex_id() -> String {
         Ok(()) => {}
         Err(e) => {
             // ID はセキュリティ境界ではない(ハンドルの識別子)ので、失敗は時刻で代用する。
-            eprintln!("uniqnode: /dev/urandom が読めない({e})。時刻で代用する");
+            crate::log_line!("uniqnode: /dev/urandom が読めない({e})。時刻で代用する");
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
@@ -346,12 +344,12 @@ fn peer_worker(
                         match put {
                             Ok(_) => Ok(Some(QueryAnswer::Object { source: address.clone() })),
                             Err(e) => {
-                                eprintln!("uniqnode: query の保存に失敗: {e}");
+                                crate::log_line!("uniqnode: query の保存に失敗: {e}");
                                 Err(())
                             }
                         }
                     } else {
-                        eprintln!("uniqnode: {address} が {target} と異なる内容を返した(破棄)");
+                        crate::log_line!("uniqnode: {address} が {target} と異なる内容を返した(破棄)");
                         Err(())
                     }
                 }

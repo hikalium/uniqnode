@@ -28,6 +28,7 @@
 
 use crate::api::{self, ApiContext, Citation, Fetched, SearchRequest, SearchResults};
 use crate::c1::{self, Value};
+use crate::clock::format_unix_time;
 use crate::http;
 use std::collections::BTreeMap;
 use std::io::{BufRead, Read, Write};
@@ -268,7 +269,7 @@ impl StdioServer {
     pub fn new(backend: Backend) -> StdioServer {
         let handshake = Handshake::inherited();
         if let Some(protocol) = &handshake.protocol {
-            eprintln!(
+            crate::log_line!(
                 "uniqnode: mcp: ハンドシェイク済みとして起動した(相手の protocol {protocol}、\
                  client {})",
                 handshake.client.as_deref().unwrap_or("(名乗りなし)")
@@ -279,7 +280,7 @@ impl StdioServer {
 
     /// 起動の知らせ(標準出力はプロトコル専用なので標準エラーへ出す)。
     pub fn announce(&self, target: &str) {
-        eprintln!(
+        crate::log_line!(
             "uniqnode: mcp: {target} を stdio で提供する(protocol {PROTOCOL_VERSION}、\
              tools: search・fetch、{})",
             self.backend.description()
@@ -353,7 +354,7 @@ impl StdioServer {
             // 通知。initialized と cancelled は受理して黙る。知らない通知も、応答を返して
             // はならない以上ここで捨てるほかないが、標準エラーには残す(must/0022)。
             if method != "notifications/initialized" && method != "notifications/cancelled" {
-                eprintln!("uniqnode: mcp: 知らない通知を無視した: {method}");
+                crate::log_line!("uniqnode: mcp: 知らない通知を無視した: {method}");
             }
             return None;
         };
@@ -375,7 +376,7 @@ impl StdioServer {
             if let Some(Value::Text(requested)) = map.get("protocolVersion") {
                 self.handshake.protocol = Some(requested.clone());
                 if requested != PROTOCOL_VERSION {
-                    eprintln!(
+                    crate::log_line!(
                         "uniqnode: mcp: 相手は protocol {requested} を求めた。\
                          {PROTOCOL_VERSION} で答える"
                     );
@@ -431,7 +432,7 @@ impl StdioServer {
         if input.has_buffered_bytes() {
             // 先読みバッファに次のメッセージが載っている。ここで exec すると、その
             // バイト列は旧イメージと共に消える。差し替えは次の機会に回す。
-            eprintln!(
+            crate::log_line!(
                 "uniqnode: mcp: 実行ファイルが更新されたが、先読みバッファに次の\
                  メッセージがある。差し替えを次の応答の後に回す"
             );
@@ -440,7 +441,7 @@ impl StdioServer {
         // 壊れたバイナリで自分を置き換えると MCP が死に、結局セッションの再起動が要る。
         // exec の前に、新しいイメージを子プロセスとして起こして健全さを確かめる。
         if let Err(reason) = self_check(&stamp.path) {
-            eprintln!(
+            crate::log_line!(
                 "uniqnode: mcp: 新しい実行ファイルの自己検査に落ちた。差し替えず、\
                  旧イメージのまま続ける: {reason}"
             );
@@ -448,14 +449,14 @@ impl StdioServer {
             self.binary = Some(current);
             return;
         }
-        eprintln!(
+        crate::log_line!(
             "uniqnode: mcp: 実行ファイルが更新された。自分を exec で差し替える: {}",
             stamp.path.display()
         );
         let path = stamp.path.clone();
         let error = self.exec_replacement(&path);
         // exec が返るのは失敗したときだけである(成功すればこの行は無い)。
-        eprintln!("uniqnode: mcp: exec に失敗した。旧イメージのまま続ける: {error}");
+        crate::log_line!("uniqnode: mcp: exec に失敗した。旧イメージのまま続ける: {error}");
         self.binary = Some(current);
     }
 
@@ -493,7 +494,7 @@ impl BinaryStamp {
         let path = match std::env::current_exe() {
             Ok(path) => path,
             Err(error) => {
-                eprintln!(
+                crate::log_line!(
                     "uniqnode: mcp: 実行ファイルの位置が分からない。自己置換をしない: {error}"
                 );
                 return None;
@@ -501,7 +502,7 @@ impl BinaryStamp {
         };
         let stamp = BinaryStamp::read(&path);
         if stamp.is_none() {
-            eprintln!(
+            crate::log_line!(
                 "uniqnode: mcp: {} の属性を読めない。自己置換をしない",
                 path.display()
             );
@@ -549,10 +550,10 @@ fn self_check(path: &Path) -> Result<(), String> {
         if Instant::now() >= deadline {
             // 終わらない新しいイメージも健全ではない。始末してから断る。
             if let Err(error) = child.kill() {
-                eprintln!("uniqnode: mcp: 自己検査の子を kill できない: {error}");
+                crate::log_line!("uniqnode: mcp: 自己検査の子を kill できない: {error}");
             }
             if let Err(error) = child.wait() {
-                eprintln!("uniqnode: mcp: 自己検査の子を待てない: {error}");
+                crate::log_line!("uniqnode: mcp: 自己検査の子を待てない: {error}");
             }
             return Err(format!("自己検査が {SELF_CHECK_TIMEOUT:?} で終わらない"));
         }
@@ -751,7 +752,7 @@ fn call_tool(backend: &Backend, id: &Value, params: Option<&Value>) -> String {
 /// 返し、同じ理由を標準エラーにも残す(応答を読まない運用者にも見えるように。
 /// must/0022)。転送する形で serve に届かないときの案内もこの道を通る。
 fn tool_failure(id: &Value, what: &str, reason: &str) -> String {
-    eprintln!("uniqnode: mcp: {what}: {reason}");
+    crate::log_line!("uniqnode: mcp: {what}: {reason}");
     success(id, tool_text(&format!("{what}: {reason}"), true))
 }
 
@@ -900,38 +901,6 @@ fn breadcrumb_path(breadcrumbs: &[String]) -> String {
     breadcrumbs.join(" > ")
 }
 
-/// unix 秒を UTC の日時にする(例 2026-08-17T04:05:06Z)。取得日時は LLM が読む出典の
-/// 一部であり、整数のままでは日付として読めない。外部クレートは使えない(must/0008)
-/// ので暦の計算はここに置く。
-pub fn format_unix_time(seconds: i64) -> String {
-    let days = seconds.div_euclid(86_400);
-    let second_of_day = seconds.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        second_of_day / 3_600,
-        (second_of_day % 3_600) / 60,
-        second_of_day % 60
-    )
-}
-
-/// 1970-01-01 からの日数を暦の年月日にする(Howard Hinnant の civil_from_days。
-/// グレゴリオ暦の 400 年周期を使う閉じた式で、閏日の表を持たない)。
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    // 3 月始まりの年に移すと、閏日が年の最後に来て場合分けが消える。
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
-    (if month <= 2 { year + 1 } else { year }, month, day)
-}
-
 /// ツールの応答本体。isError はツールを実行したうえでの失敗を言う(プロトコルの誤りは
 /// JSON-RPC の error で返す)。
 fn tool_text(body: &str, is_error: bool) -> Value {
@@ -984,20 +953,6 @@ fn text(value: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 暦の期待値はリテラルで書く(検査対象から導出しない。should/0137)。値は
-    /// date -u -d @<秒> で突き合わせたもの。
-    #[test]
-    fn unix_seconds_render_as_utc_timestamps() {
-        assert_eq!(format_unix_time(0), "1970-01-01T00:00:00Z");
-        // 閏年の 2 月 29 日(400 年周期の閏年)。
-        assert_eq!(format_unix_time(951_782_400), "2000-02-29T00:00:00Z");
-        // 平年の 3 月 1 日(1900 は閏年ではない周期の側)。
-        assert_eq!(format_unix_time(1_709_251_199), "2024-02-29T23:59:59Z");
-        assert_eq!(format_unix_time(1_755_000_000), "2025-08-12T12:00:00Z");
-        // 1970 より前は負の秒。境界で 1 日ずれないことを見る。
-        assert_eq!(format_unix_time(-1), "1969-12-31T23:59:59Z");
-    }
 
     /// 見出しの無いチャンク(PDF)でも、出典の欄が空白のまま残らない。
     #[test]

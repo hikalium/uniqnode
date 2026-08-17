@@ -216,12 +216,7 @@ fn the_handshake_lists_the_tools_and_search_answers_with_citations() {
         "本文の抜粋が無い: {searched}"
     );
     // 取得日時: ref レコードの at。今この場で取り込んだので、日付は今日である。
-    let today = uniqnode::mcp::format_unix_time(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("unix 時刻")
-            .as_secs() as i64,
-    );
+    let today = uniqnode::clock::format_unix_time(uniqnode::clock::unix_now());
     assert!(
         searched.contains(&format!("取得日時: {}", &today[..10])),
         "取得日時が今日の取り込みを指していない(期待する日付 {}): {searched}",
@@ -243,6 +238,36 @@ fn the_handshake_lists_the_tools_and_search_answers_with_citations() {
     // 起動の知らせは標準エラーへ出る(標準出力の純度は finish が検査する)。
     let exit = mcp.finish();
     assert!(exit.stderr.contains("uniqnode: mcp:"), "起動の知らせが標準エラーに無い");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// mcp の標準エラーは登録した LLM クライアントが吸うので、利用者の目には触れない。
+/// そこで serve と同じく、既定で <dir>/logs/mcp.log にも残す。標準出力はプロトコル
+/// 専用なので、ログを足しても 1 行も混ざらないこと(純度は finish が検査する)。
+#[test]
+fn mcp_saves_its_log_to_a_file_by_default_without_touching_stdout() {
+    let dir = store_with("mcp-log", &["search_ja.md"]);
+    let mut mcp = McpProcess::start(&dir, &[]);
+    let searched = mcp.call(1, "search", "{\"query\":\"世代の整合\"}");
+    assert!(searched.contains("\"isError\":false"), "{searched}");
+    let exit = mcp.finish();
+
+    let path = uniqnode::log::default_path(&dir, uniqnode::log::MCP_ROLE);
+    assert!(path.exists(), "既定で mcp のログファイルが作られていない: {}", path.display());
+    let logged = std::fs::read_to_string(&path).expect("read log");
+    assert!(
+        logged.contains("uniqnode: mcp:"),
+        "起動の知らせがログに残っていない: {logged}"
+    );
+    // 標準エラーで見えるものと同じ内容が残る(片方だけの記録を作らない)。
+    assert_eq!(logged, exit.stderr, "ログファイルと標準エラーの内容が食い違う");
+    // 行頭に UTC の時刻が付く(後から読む記録なので、時刻の無い行は作らない)。
+    for line in logged.lines() {
+        assert!(
+            line.len() > 20 && line[..20].ends_with('Z') && line[20..].starts_with(" [pid "),
+            "行頭に UTC の時刻と pid が無い: {line}"
+        );
+    }
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 

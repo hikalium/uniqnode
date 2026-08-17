@@ -9,6 +9,7 @@
 //! この順序により「ref が指す先が存在しない」状態はクラッシュを挟んでも生じない。
 
 use crate::c1;
+use crate::clock::unix_now;
 use crate::crc32::crc32;
 use crate::ed25519;
 use crate::sha2;
@@ -203,13 +204,6 @@ fn atomic_write(dir: &Path, target: &Path, content: &[u8]) -> Result<()> {
     // rename を含むディレクトリエントリの永続化。
     std::fs::File::open(target.parent().expect("親ディレクトリがある"))?.sync_all()?;
     Ok(())
-}
-
-fn unix_now() -> i64 {
-    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => d.as_secs() as i64,
-        Err(_) => 0,
-    }
 }
 
 impl Store {

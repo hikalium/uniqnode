@@ -45,18 +45,73 @@ pub const DEFAULT_EMBED_TIMEOUT: Duration = Duration::from_secs(120);
 /// serve がクエリ 1 本を埋め込むときの期限。要求の待ちを長引かせない。
 pub const QUERY_EMBED_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// RRF の定数 k(慣例の 60)。順位 r に 1/(k + r) を与える。
-pub const RRF_K: f64 = 60.0;
-/// 融合に持ち込む各方式の候補数の下限(実際には top_k とこの値の大きい方)。要求が
-/// 10 件なら、各方式の上位 10 件どうしを融合する。
+/// RRF の定数 k。順位 r に 1/(k + r) を与える。
 ///
-/// 深さは測って決めた。評価ハーネスの固定コーパス(node/tests/eval.rs)で、深さ 100
-/// (両方式にほぼ全チャンクを出させる)は Recall@5 0.842・Recall@10 0.947・MRR 0.764、
-/// 深さ 10 は Recall@5 0.947・Recall@10 1.000・MRR 0.791 だった。深く採るほど、片方の
-/// 方式にとって無関係なチャンクまで順位を持ち、両方式に現れる凡庸な候補が片方の 1 位を
-/// 追い越しやすくなる。k = 60 は数百件の順位列を前提にした値なので、返す件数だけを
-/// 融合する形と釣り合う。
-pub const RRF_DEPTH: usize = 10;
+/// 原典(Cormack et al., SIGIR 2009)の k = 60 は数千件の完全な順位列を融合する設定で
+/// 選ばれた値で、ここが融合するのは各方式の上位 RRF_DEPTH 件だけである。深さ 30 に
+/// k = 60 を当てると寄与は 1/61〜1/90(最上位と最下位の差が 1.5 倍)にしかならず、
+/// 順位の情報がほとんど残らない。k = 20 なら 1/21〜1/50(2.4 倍)である。
+///
+/// 深さと組にして測って選んだ(実測 2026-08-18。測り方と格子は RRF_DEPTH のコメント)。
+/// 深さ 30 で k を振ったときの Recall@1/@3/@5/@10・MRR は次のとおりである。
+/// - k = 10: 0.618 / 0.824 / 0.912 / 0.971 / 0.737
+/// - k = 20: 0.618 / 0.824 / 0.941 / 0.971 / 0.738
+/// - k = 60: 0.618 / 0.794 / 0.941 / 0.971 / 0.731
+///
+/// k = 20 はどの打ち切りでも最良か同値である。k = 60 との差は 2 問の入れ替わりで、
+/// 「USB の standard device request の一覧」が 4 位から 2 位に上がり(語の一致と意味検索の
+/// 両方が上位に置く件が、片方だけの件を追い越す)、「ELF program header table entries」が
+/// 5 位から 7 位に下がる。10 と 20 の差は 1 問(「System V AMD64 ABI の引数レジスタ」が
+/// 7 位と 5 位)しかないので、この標本では 10 と 20 を強くは分けられない。両端(60)を
+/// 外せることだけがはっきり言えて、中を採った。
+pub const RRF_K: f64 = 20.0;
+/// 融合に持ち込む各方式の候補数の下限(実際には top_k とこの値の大きい方)。要求が
+/// 10 件でも、各方式の上位 30 件どうしを融合する。
+///
+/// 深さと k は格子で測って選んだ(実測 2026-08-18)。測り方: 実ストアの複製(仕様書
+/// PDF 25 本・25,884 チャンク)を /tmp に置いて 34 問を top_k=10 で引き、正解ページの
+/// 順位を数えた。問いは前の測定(20260817-real-corpus-search-quality
+/// (uuid:faeda9ac-5e9e-4091-8122-2fba9f80c8db))の 14 主題を英語と日英混在で言い直した
+/// 28 問に、xhci のスクラッチパッド・CLI・SYSCALL・red zone・HPET の周期・RTL8139 の
+/// TSD の 6 問を足したものである。低情報の後処理は生産経路と同じく融合の後に掛けた。
+/// 原本のストアには書いていない。MRR の格子は次のとおりである。
+///
+/// | 深さ | k=10 | k=20 | k=60 |
+/// |---|---|---|---|
+/// | 10 | 0.722 | 0.722 | 0.722 |
+/// | 30 | 0.737 | 0.738 | 0.731 |
+/// | 50 | 0.736 | 0.736 | 0.731 |
+/// | 100 | 0.733 | 0.736 | 0.731 |
+///
+/// 深さ 30・k = 20 は Recall@1 0.618・@3 0.824・@5 0.941・@10 0.971 で、12 組のどの指標
+/// でも最良か同値だった(深さ 10 は @3 0.794・@10 0.941)。深さ 10 から 30 で拾えた
+/// のは「System V AMD64 ABI argument registers calling convention」で、圏外から 5 位に
+/// 入る。深さ 10 では、正解が意味検索の 11 位以降にいると、語の一致がいくら上位に
+/// 置いても融合に入れなかった。
+///
+/// 深さ 50・100 とさらに広げると戻る。同じ問いが 50 で 7 位、100 で 8 位に下がる:
+/// 深く採るほど、片方の方式にとって無関係な候補まで順位を持ち、両方式に現れる凡庸な
+/// 件が上がってくる。天井は 30 のあたりにある。
+///
+/// 深さ 10 では k を 10 から 60 まで振っても 34 問の順位が 1 件も動かない。10 件しか
+/// 融合しない形では和の大小関係が変わらないためで、k を測るには深さが要る。これが
+/// 「深さと k を別々に選べない」ことの実測である。
+///
+/// 被覆のゲート(MIN_FUSION_COVERAGE)は深さで動かなかった。34 問の被覆は深さ
+/// 10/30/50/100 ですべて同値で、片肺になる問い(10/34)もどの深さでも同じ 10 問である。
+/// BM25 は多くのクエリ語に当たる件を上位に置くので、いちばんよく覆う件は深さ 10 の中に
+/// すでにいる。
+///
+/// 深さは片肺の問いには効かない。「スクラッチパッド」は BM25 が 0 件なので融合の入力が
+/// 意味検索だけになり、順位は意味検索そのままである。正解(xhci_1_2 p.334)が意味検索の
+/// 21 位にいる以上、深さをいくら広げても上位 10 件には入らない(直すのはクエリ展開と
+/// リランカーの側)。深さが効くのは、両方式が順位を持つ問いと、その先のリランカーへ渡す
+/// 候補集合の側である。
+///
+/// 固定コーパス(node/tests/eval.rs)では 12 組すべてが同じ数値だった。23 チャンクしか
+/// なく、BM25 の順位も 10 件に届かないので、深さを広げても融合の入力が増えない。この
+/// 二つの定数は実データでしか選べない。
+pub const RRF_DEPTH: usize = 30;
 
 /// 融合に語の一致を入れる下限の被覆率(クエリの異なり語のうち、当たった語の割合)。
 /// これを下回る順位は融合の入力にしない。
@@ -743,7 +798,7 @@ impl VectorIndex {
             embedded: 0,
             stamp: cache.stamp.clone(),
         };
-        visit_indexable_chunks(store, &mut |chunk| {
+        let missing = visit_indexable_chunks(store, &mut |chunk| {
             match cache.get(&chunk.id) {
                 Some(vector) if vector.len() == dimension => {
                     index.offsets.push(Some(index.data.len()));
@@ -754,6 +809,10 @@ impl VectorIndex {
             }
             index.ids.push(chunk.id);
         })?;
+        // 世代の札は走査の取りこぼしを添えて閉じる(規則は crate::search::Generation。
+        // BM25 の索引と同じ走査から作る以上、鮮度の判定も同じ規則でなければ、片方だけが
+        // 作り直されて位置の対応(aligned_with)が崩れる)。
+        index.generation.note_missing(missing);
         Ok(index)
     }
 
@@ -911,6 +970,27 @@ impl HybridSearch<'_> {
         scope: &CollectionScope,
         top_k: usize,
     ) -> RankedSearch {
+        self.ranked_with(requested, query, embedding, scope, top_k)
+    }
+
+    /// 語の一致に使うクエリを明示する形。カタカナの術語を索引に実在する英語語へ寄せた
+    /// クエリを渡すために要る(node/src/translit.rs)。
+    ///
+    /// 意味検索の側にこのクエリは渡らない。埋め込みは呼び手がロックの外で既に作って
+    /// あり(引数の embedding)、多言語の模型は日本語の問いをそのまま扱えるからである。
+    /// 寄せた語を意味検索にも混ぜると、かえって問いの意味が薄まる。
+    ///
+    /// 被覆率(MIN_FUSION_COVERAGE)は、ここに渡したクエリについて数える。寄せた語が
+    /// 当たったかどうかが、まさに測りたいことだからである。
+    pub fn ranked_with(
+        &self,
+        requested: SearchMethod,
+        lexical_query: &str,
+        embedding: &QueryEmbedding,
+        scope: &CollectionScope,
+        top_k: usize,
+    ) -> RankedSearch {
+        let query = lexical_query;
         if requested == SearchMethod::Bm25 {
             return RankedSearch {
                 method: SearchMethod::Bm25,
@@ -961,12 +1041,11 @@ impl HybridSearch<'_> {
                     )
                 } else if lexical_ranking.coverage() < MIN_FUSION_COVERAGE {
                     Some(format!(
-                        "BM25 は問いの {} 語のうち最大 {} 語(被覆 {:.2})にしか当たらないので、\
-                         融合に入れていない。順位は埋め込み単独と同じである(文書が使う語を\
-                         クエリに入れると語の一致も効く)",
-                        lexical_ranking.query_terms,
-                        lexical_ranking.matched_terms,
-                        lexical_ranking.coverage()
+                        "BM25 は問いの語のまとまりを {:.2} しか覆えないので(問いの語は \
+                         {} 個)、融合に入れていない。順位は埋め込み単独と同じである\
+                         (文書が使う語をクエリに入れると語の一致も効く)",
+                        lexical_ranking.coverage(),
+                        lexical_ranking.query_terms
                     ))
                 } else {
                     None
@@ -1128,12 +1207,12 @@ mod tests {
         let bm25 = vec!["a", "b", "c"];
         let semantic = vec!["c", "d", "a"];
         let fused = fuse_by_rank(&[bm25.clone(), semantic.clone()], 10);
-        // a: 1/61 + 1/63 = 0.032266…、c: 1/63 + 1/61 = 同じ値、b: 1/62、d: 1/62。
-        // a と c は同点なので、要素の順(a < c)で決まる。
+        // k = 20 なので、a: 1/21 + 1/23 = 0.091108…、c: 1/23 + 1/21 = 同じ値、b: 1/22、
+        // d: 1/22。a と c は同点なので、要素の順(a < c)で決まる。
         let names: Vec<&str> = fused.iter().map(|item| item.item).collect();
         assert_eq!(names, vec!["a", "c", "b", "d"]);
-        assert!((fused[0].score - (1.0 / 61.0 + 1.0 / 63.0)).abs() < 1e-12, "{}", fused[0].score);
-        assert!((fused[2].score - (1.0 / 62.0)).abs() < 1e-12, "{}", fused[2].score);
+        assert!((fused[0].score - (1.0 / 21.0 + 1.0 / 23.0)).abs() < 1e-12, "{}", fused[0].score);
+        assert!((fused[2].score - (1.0 / 22.0)).abs() < 1e-12, "{}", fused[2].score);
         // 両方に出る要素は、片方だけで 1 位の要素を追い越せる。
         let fused = fuse_by_rank(&[vec!["x", "y"], vec!["y", "z"]], 10);
         let names: Vec<&str> = fused.iter().map(|item| item.item).collect();

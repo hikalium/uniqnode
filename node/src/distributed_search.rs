@@ -789,6 +789,7 @@ mod tests {
             degraded: Some("埋め込みサーバが設定されていない".to_string()),
             results: vec![hit(&format!("s256:{}", "ab".repeat(32)))],
             filtered_low_information: 2,
+            reranked: false,
         };
         let message = answer_message(&store, "q7", &results);
 

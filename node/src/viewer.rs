@@ -10,7 +10,7 @@
 //!
 //! 自分でストアを開かないので排他錠を取らない。serve が常駐したままビューワを起こせる。
 //!
-//! 転送するのは頁が実際に使う 5 つの口だけである。ここを「/v1/ で始まれば何でも通す」に
+//! 転送するのは頁が実際に使う口だけである。ここを「/v1/ で始まれば何でも通す」に
 //! すると、ビューワの口がストア API 全体への素通しになる(書き込みの口も含めて)。
 
 use crate::http::{self, Request, Response};
@@ -67,6 +67,11 @@ impl Viewer {
 
     pub fn handle(&self, request: &Request) -> Response {
         let path = request.path.as_str();
+        // 問いは頁の道の問い合わせ部分に残る(`/?q=…`)。リロードで同じ画面が出るように
+        // するための頁側の仕掛けで、ビューワはその部分を読まない — 検索は頁が
+        // POST /v1/search で投げ直す。ここで落とすのは、道の照合を素の `/` と同じに
+        // するためだけである。
+        let path = path.split('?').next().unwrap_or(path);
         match (request.method.as_str(), path) {
             ("GET", "/") => Response {
                 status: 200,
@@ -106,16 +111,50 @@ impl Viewer {
 /// 相手の応答をそのまま返す。中身は読まない: 誤りの本文も含めて、serve が言ったことが
 /// そのままブラウザに届く(理由を途中で握り潰さない。must/0022)。
 ///
-/// 種別は octet-stream で通す。GET /v1/objects/{id} はチャンクの c1 JSON も PDF の原文
-/// blob も同じ口から返すので、こちらで JSON だと名乗ると嘘になることがある。頁の側は
-/// 本文として読んでから JSON として解こうと試みる。
+/// 種別も serve が名乗ったものを写す。ここで octet-stream に名乗り直すと、serve が
+/// image/jpeg と言った写しがブラウザに届く頃には型を失い、頁の <img> も PDF の埋め込みも
+/// 動かない。ビューワは運ぶだけの層なので、途中で名乗りを書き換えない。
 fn relay(response: http::ClientResponse) -> Response {
     Response {
         status: response.status,
-        content_type: "application/octet-stream",
+        content_type: relayed_content_type(upstream_content_type(&response)),
         body: response.body,
         shutdown_after: false,
     }
+}
+
+/// 上流の応答が名乗った Content-Type。相手が名乗らなければ None である。
+///
+/// 名乗りが無いときに、パスの拡張子や別名から型を決めることはしない。頼んだ形と、実際に
+/// 返ってきたバイト列は別のものである(must/0020: 推測でバイト列に型を付けない)。
+fn upstream_content_type(response: &http::ClientResponse) -> Option<&str> {
+    response.content_type.as_deref()
+}
+
+/// serve が名乗る型のうち、ビューワが写せるもの(この 4 つの口の契約が返しうる型)。
+/// 表に無い型と、上流が名乗らなかったときは application/octet-stream で通す。
+///
+/// 表と照合してから載せる理由は二つある。写し先の http::Response が持つのが
+/// &'static str であること、そして上流の言い分をそのまま応答ヘッダの字面にしないこと
+/// (相手の文字列を自分のヘッダに素通しさせない)である。
+const RELAYED_CONTENT_TYPES: [&str; 5] = [
+    "application/json",
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "text/plain; charset=utf-8",
+];
+
+fn relayed_content_type(upstream: Option<&str>) -> &'static str {
+    let Some(named) = upstream else {
+        return "application/octet-stream";
+    };
+    let named = named.trim();
+    RELAYED_CONTENT_TYPES
+        .iter()
+        .copied()
+        .find(|known| known.eq_ignore_ascii_case(named))
+        .unwrap_or("application/octet-stream")
 }
 
 fn not_found(path: &str) -> Response {
@@ -123,21 +162,40 @@ fn not_found(path: &str) -> Response {
         404,
         &format!(
             "{path} はビューワの口ではない(この頁が使うのは / と \
-             /v1/status・/v1/refs・/v1/search・/v1/objects/{{id}}[/citation] だけである)\n"
+             /v1/status・/v1/refs・/v1/search・\
+             /v1/objects/{{id}}[/citation|/rendition[/{{別名}}]] だけである)\n"
         ),
     )
 }
 
-/// GET /v1/objects/{id} と GET /v1/objects/{id}/citation だけを、形を確かめてから通す。
-/// ID の字種を確かめるのは、転送先へ組み立てるパスに要求の文字列をそのまま入れないため
-/// である(must/0020: 頼んだ形だけを受け取る)。
+/// GET で通すのは、頁が実際に引く 4 つの形だけである:
+///   /v1/objects/{id}                     チャンクの全文(c1 JSON か原文 blob)
+///   /v1/objects/{id}/citation            引用
+///   /v1/objects/{id}/rendition           写しの目録(生成しない)
+///   /v1/objects/{id}/rendition/{別名}    写しそのもの
+///
+/// ID の字種も別名も確かめるのは、転送先へ組み立てるパスに要求の文字列をそのまま入れない
+/// ためである(must/0020: 頼んだ形だけを受け取る)。別名は serve と同じ許可表
+/// (node/src/rendition.rs)と照合し、パスに置くのは表の側の字面である。表に無い別名
+/// (寸法指定・ページ番号の細工)はここで止まる。
 fn object_path(path: &str) -> Option<String> {
     let rest = path.strip_prefix("/v1/objects/")?;
-    let (id, suffix) = match rest.strip_suffix("/citation") {
-        Some(id) => (id, "/citation"),
-        None => (rest, ""),
+    let (id, tail) = match rest.split_once('/') {
+        Some((id, tail)) => (id, Some(tail)),
+        None => (rest, None),
     };
-    crate::c1::is_object_id(id).then(|| format!("/v1/objects/{id}{suffix}"))
+    if !crate::c1::is_object_id(id) {
+        return None;
+    }
+    match tail {
+        None => Some(format!("/v1/objects/{id}")),
+        Some("citation") => Some(format!("/v1/objects/{id}/citation")),
+        Some("rendition") => Some(format!("/v1/objects/{id}/rendition")),
+        Some(tail) => {
+            let alias = crate::rendition::Recipe::from_alias(tail.strip_prefix("rendition/")?)?;
+            Some(format!("/v1/objects/{id}/rendition/{}", alias.alias()))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -146,12 +204,33 @@ mod tests {
 
     /// 頁は外部資源を参照しない(繋がっていない機械でも開ける)。問い合わせ先も同じ
     /// 生成元の /v1/* だけである。
+    ///
+    /// 以前はここで `<img` の字面そのものを禁じていた。いまは頁が紙面のサムネを出すが、
+    /// その画像も同じ生成元の /v1/objects/{id}/rendition/thumb から来る。禁じたいのは
+    /// 画像という要素ではなく外への参照なので、検査を意図の側に寄せ、参照先が /v1/ で
+    /// 始まることを見る(字面を禁じたままだと、意図を満たす頁も落ちてしまう)。
     #[test]
     fn the_page_is_self_contained() {
         assert!(PAGE.starts_with("<!DOCTYPE html>"), "1 枚の HTML である");
-        for forbidden in ["http://", "https://", "//cdn", "<img"] {
+        for forbidden in ["http://", "https://", "src=\"//", "href=\"//", "url(//", "//cdn"] {
             // 転送先の既定 URL は Rust 側の定数で、頁には書かない。
             assert!(!PAGE.contains(forbidden), "頁が外部資源 {forbidden} を参照している");
+        }
+        // 参照先を字面で書いているところは、どれも同じ生成元の /v1/ で始まる(字面で
+        // ないところ = 変数は renditionUrls が組み立てた道で、その形は
+        // the_page_builds_the_rendition_paths_itself が固定している)。
+        for assignment in [".src = ", ".href = ", "src=", "href="] {
+            for (offset, _) in PAGE.match_indices(assignment) {
+                let value = &PAGE[offset + assignment.len()..];
+                let Some(literal) = value.strip_prefix(['`', '"']) else {
+                    continue; // 変数を渡している(下の試験が形を固定する)
+                };
+                assert!(
+                    literal.starts_with("/v1/") || literal.starts_with('#'),
+                    "頁が同じ生成元でない参照先を書いている: {}",
+                    &literal[..40.min(literal.len())]
+                );
+            }
         }
         assert!(PAGE.contains("fetch(\"/v1/status\")") || PAGE.contains("api(\"/v1/status\")"));
     }
@@ -195,6 +274,54 @@ mod tests {
         assert!(PAGE.contains("color-scheme: light dark"), "配色の申告が無い");
     }
 
+    /// 問いは道の問い合わせ部分に載る(`/?q=…`)。頁はそこから入力欄を復元して同じ検索を
+    /// やり直すので、リロードでも戻るでも画面が変わらない。ビューワ側は、その部分が付いた
+    /// 道でも素の `/` と同じく頁を返す(付いた瞬間に 404 になっては元も子もない)。
+    #[test]
+    fn the_page_is_served_with_a_query_string_too() {
+        let viewer = Viewer::new("http://127.0.0.1:1", "/tmp/store").expect("組める");
+        for path in ["/", "/?q=%E4%B8%96%E4%BB%A3", "/?q=x&method=bm25&top_k=5"] {
+            let request = Request {
+                method: "GET".into(),
+                path: path.into(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            };
+            let response = viewer.handle(&request);
+            assert_eq!(response.status, 200, "{path}");
+            assert_eq!(response.content_type, "text/html; charset=utf-8", "{path}");
+        }
+        // 問い合わせ部分は道の照合から落とすだけで、転送の許可を広げない。
+        let request = Request {
+            method: "GET".into(),
+            path: "/v1/peers?x=1".into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        assert_eq!(viewer.handle(&request).status, 404);
+    }
+
+    /// 頁が道に写す欄と、道から読み戻す欄が同じであること。片方だけ足すと、その欄だけ
+    /// リロードで消える(画面の状態は入力欄そのものであり、道はその写しである)。
+    #[test]
+    fn the_page_round_trips_the_search_form_through_the_query_string() {
+        for field in ["collection", "method", "top_k", "include_low_information"] {
+            assert!(
+                PAGE.contains(&format!("params.set(\"{field}\"")),
+                "{field} を道に写していない"
+            );
+            assert!(PAGE.contains(&format!("params.get(\"{field}\")")), "{field} を読み戻していない");
+        }
+        assert!(PAGE.contains("params.set(\"q\"") && PAGE.contains("params.get(\"q\")"), "問い");
+        // リロードと戻るの両方で同じ道を通る。
+        assert!(PAGE.contains("history.pushState"), "押すたびに履歴を積む");
+        assert!(PAGE.contains("popstate"), "戻る・進むで復元する");
+        assert!(PAGE.contains("if (urlToForm()) search(null);"), "読み込み時にやり直す");
+        // 結果そのものは道に載せない(載せると、ストアが変わった後の再読み込みで古い順位を
+        // 復元してしまう)。
+        assert!(!PAGE.contains("params.set(\"results\""), "結果を道に残さない");
+    }
+
     /// 頁は全文をチャンク ID そのままの道で取る。この API のパスは生のまま扱う規約
     /// (パーセントデコードしない。node/src/http.rs)なので、`s256:` のコロンを %3A に
     /// 直すと ID の形の検査に落ちて 404 になる(実際にそうなった)。
@@ -211,9 +338,9 @@ mod tests {
         assert_eq!(object_path(&format!("/v1/objects/{}", id.replace(':', "%3A"))), None);
     }
 
-    /// 通す口は 5 つだけで、それ以外は 404 になる(素通しにしない)。
+    /// 通す口は頁が引くものだけで、それ以外は 404 になる(素通しにしない)。
     #[test]
-    fn only_the_five_endpoints_the_page_uses_are_forwarded() {
+    fn only_the_endpoints_the_page_uses_are_forwarded() {
         let id = format!("s256:{}", "ab".repeat(32));
         assert_eq!(object_path(&format!("/v1/objects/{id}")), Some(format!("/v1/objects/{id}")));
         assert_eq!(
@@ -225,6 +352,142 @@ mod tests {
         assert_eq!(object_path("/v1/objects/s256:zz/citation"), None);
         assert_eq!(object_path(&format!("/v1/objects/{id}/referrers")), None);
         assert_eq!(object_path("/v1/refs/x"), None);
+    }
+
+    /// 写しの口は、目録と、許可表にある 4 つの別名だけを通す。別名を要求の文字列から
+    /// 組み立てないので、寸法指定やページ番号らしき細工はここで止まる(must/0020)。
+    #[test]
+    fn only_the_four_rendition_aliases_are_forwarded() {
+        let id = format!("s256:{}", "ab".repeat(32));
+        assert_eq!(
+            object_path(&format!("/v1/objects/{id}/rendition")),
+            Some(format!("/v1/objects/{id}/rendition")),
+            "目録は通る"
+        );
+        for alias in ["source", "thumb", "page", "pagepdf"] {
+            assert_eq!(
+                object_path(&format!("/v1/objects/{id}/rendition/{alias}")),
+                Some(format!("/v1/objects/{id}/rendition/{alias}")),
+                "{alias} は許可表にある"
+            );
+        }
+        // 許可表と、serve 側のレシピ表は同じものである(片方だけ増える事故を防ぐ)。
+        assert_eq!(
+            crate::rendition::Recipe::aliases(),
+            vec!["source", "thumb", "page", "pagepdf"],
+            "許可表が serve 側のレシピ表とずれている"
+        );
+        for unknown in [
+            "w1200",             // 任意の寸法(ストアが永久である以上、口の広さは容量の広さ)
+            "1414",              // ページ番号らしき細工
+            "thumb/1414",
+            "thumb/../citation",
+            "THUMB",
+            "",
+        ] {
+            assert_eq!(
+                object_path(&format!("/v1/objects/{id}/rendition/{unknown}")),
+                None,
+                "許可表に無い別名 {unknown:?} が通っている"
+            );
+        }
+        assert_eq!(object_path(&format!("/v1/objects/{id}/rendition/")), None);
+        assert_eq!(object_path(&format!("/v1/objects/{id}/renditions")), None);
+        assert_eq!(object_path(&format!("/v1/objects/{id}/rendition/thumb/extra")), None);
+        // ID の形が違えば、別名が正しくても通らない。
+        assert_eq!(object_path("/v1/objects/s256:zz/rendition/thumb"), None);
+    }
+
+    /// 頁は写しの道を自分で組み立てる。この形は serve 側の口の契約そのものなので、
+    /// 字面で固定する(統合テストは頁の JavaScript を走らせないため、頁が
+    /// encodeURIComponent していた事故を一度見逃している。should/0138)。
+    #[test]
+    fn the_page_builds_the_rendition_paths_itself() {
+        for path in [
+            "`/v1/objects/${id}/rendition`",
+            "`/v1/objects/${id}/rendition/source`",
+            "`/v1/objects/${id}/rendition/thumb`",
+            "`/v1/objects/${id}/rendition/page`",
+            "`/v1/objects/${id}/rendition/pagepdf`",
+        ] {
+            assert!(PAGE.contains(path), "頁が {path} を組み立てていない");
+        }
+        // 原本は当該ページを開く形で参照する(何も生成しないので必ず開く)。
+        assert!(PAGE.contains("#page=${entry.page}"), "原本の当該ページへ行く道が無い");
+        // サムネは見えたときに取りに行く(10 件ぶんの画像を一度に頼まない)。
+        assert!(PAGE.contains("img.loading = \"lazy\""), "サムネが lazy でない");
+        // 受け側が実際にその形を通すこと(頁と受け側が同じ形を見ている)。
+        let id = format!("s256:{}", "ab".repeat(32));
+        for alias in ["source", "thumb", "page", "pagepdf"] {
+            let path = format!("/v1/objects/{id}/rendition/{alias}");
+            assert_eq!(object_path(&path), Some(path.clone()), "{path}");
+        }
+    }
+
+    /// 目録から来た文言(出せない理由・注記)は、テキストの位置にしか入らない。理由の
+    /// 文言には取り込んだ文書の名前や外部コマンドの出力が混じるので、印付けの位置に
+    /// 入れると頁の上で走る。
+    #[test]
+    fn words_from_the_catalog_reach_the_page_as_text_only() {
+        for (number, line) in PAGE.lines().enumerate() {
+            let uses_catalog_words = line.contains(".reason") || line.contains(".note");
+            let is_comment = line.trim_start().starts_with("//");
+            if !uses_catalog_words || is_comment {
+                continue;
+            }
+            assert!(
+                line.contains("why(") || line.contains("textContent"),
+                "{} 行目: 目録の文言が印付けの位置に入っている: {line}",
+                number + 1
+            );
+        }
+        // 文言を置く関数そのものが、テキストとして置いている。
+        assert!(PAGE.contains("div.textContent = `${label}: ${text"), "why が textContent でない");
+    }
+
+    /// 目録の口が無い serve(旧版)に繋いだときは、頁は何も足さない。写しの箱を作るのは
+    /// 目録が返ってきた道の中だけなので、要求が通らなければ従来どおりの画面のままである
+    /// (壊れた見た目にしない)。頁の JavaScript は Rust からは走らせられないので、
+    /// ここで見るのは道の順序である(実際に 404 が返ることは統合テストが見る)。
+    #[test]
+    fn a_serve_without_the_catalog_leaves_the_page_as_it_was() {
+        let body = PAGE.split("async function attachRenditions").nth(1).expect("写しを足す道");
+        let probe = body.find("loadCatalog(").expect("目録を引く");
+        let refusal = body.find("return;").expect("引けないときに返す道");
+        assert!(refusal > probe, "目録を引く前に返している");
+        assert!(refusal - probe < 200, "目録が引けなかったときにそのまま返していない");
+        let box_call = body.find("renditionBox(").expect("写しの箱を作る道");
+        assert!(box_call > refusal, "目録が返る前に写しの箱を作っている");
+        assert!(body.contains("if (!shape) return;"), "一度も目録が返らなければ何も足さない");
+    }
+
+    /// 上流が名乗った型をそのまま写す。ここで名乗り直すと、serve が image/jpeg と言った
+    /// 写しがブラウザに届く頃には型を失う。表に無い型と、名乗りが無いときだけ
+    /// octet-stream になる(パスや別名から型を決めない)。
+    #[test]
+    fn the_content_type_is_the_one_the_serve_named() {
+        assert_eq!(relayed_content_type(Some("image/jpeg")), "image/jpeg");
+        assert_eq!(relayed_content_type(Some("image/png")), "image/png");
+        assert_eq!(relayed_content_type(Some("application/pdf")), "application/pdf");
+        assert_eq!(relayed_content_type(Some("application/json")), "application/json");
+        assert_eq!(relayed_content_type(Some(" image/jpeg ")), "image/jpeg");
+        assert_eq!(relayed_content_type(Some("IMAGE/JPEG")), "image/jpeg");
+        // 表に無い型は、その字面のまま応答ヘッダに載せない。
+        assert_eq!(relayed_content_type(Some("text/html")), "application/octet-stream");
+        assert_eq!(
+            relayed_content_type(Some("image/jpeg\r\nX-Injected: 1")),
+            "application/octet-stream"
+        );
+        assert_eq!(relayed_content_type(None), "application/octet-stream");
+        // serve 側のレシピが返す型は、どれもこの表にある(写せない型を作らない)。
+        for alias in crate::rendition::Recipe::aliases() {
+            let recipe = crate::rendition::Recipe::from_alias(alias).expect("許可表にある");
+            assert_eq!(
+                relayed_content_type(Some(recipe.content_type())),
+                recipe.content_type(),
+                "{alias} の型が写せない"
+            );
+        }
     }
 
     /// 誤った転送先は起動時に断る。

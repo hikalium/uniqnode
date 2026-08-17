@@ -217,6 +217,47 @@ pub fn chunk_for_media(media: &str, text: &str) -> Vec<Chunk> {
     }
 }
 
+/// 原本のバイト列も見て切る形。PDF のときだけ、節見出しの経路をチャンクの
+/// meta.breadcrumbs に載せる(node/src/outline.rs)。
+///
+/// なぜ要るか: PDF のチャンクは見出しを持たず、索引語は本文だけから出ていた。Markdown の
+/// チャンクは見出しを持ち、その語は本文の 2 倍で数えられる(BREADCRUMB_WEIGHT)のに、
+/// 規格書だけが節の構造を捨てていた。実測では、同じ語が出る 2 つの紙面 —「4.20
+/// Scratchpad Buffers」という節そのものと、レジスタ欄でその語が 1 回出るだけの紙面 —
+/// を区別する情報が、見出しにしか無かった。
+///
+/// 見出しが取れないときは黙って諦める(breadcrumbs 無しの、これまでと同じチャンク)。
+/// 取れなかった理由は呼び手が受け取り、記録に残す。
+pub fn chunk_for_media_with_source(
+    media: &str,
+    text: &str,
+    source: &[u8],
+) -> (Vec<Chunk>, Option<String>) {
+    let mut chunks = chunk_for_media(media, text);
+    if media != "pdf" {
+        return (chunks, None);
+    }
+    // ページ数は抽出した本文の改頁の数だけ確かに分かる(しおりは自分でページ数を
+    // 知らないので、最後のしおり以降のページに経路が付かない)。
+    let pages = chunks.iter().filter_map(|chunk| chunk.page).max();
+    match crate::outline::outline_of_pdf(source, pages) {
+        Ok(outline) => {
+            for chunk in chunks.iter_mut() {
+                if let Some(page) = chunk.page {
+                    let path = outline.path_for_page(page);
+                    if !path.is_empty() {
+                        chunk.breadcrumbs = path.to_vec();
+                    }
+                }
+            }
+            (chunks, Some(outline.reason))
+        }
+        // 道具が無いだけで取り込みを止めない(見出しは索引を良くするものであって、
+        // 文書の本文ではない)。理由は呼び手が記録する。
+        Err(reason) => (chunks, Some(reason)),
+    }
+}
+
 // ---- PDF 抽出(INGEST の「PDF 抽出」節) ----
 
 use std::path::{Path, PathBuf};

@@ -1,7 +1,9 @@
 <!DOCTYPE html>
 <!-- RAG ビューワの 1 枚。uniqnode viewer が / でこのまま返す。
      外部資源(CDN・フォント・画像)を一切参照しないので、繋がっていない機械でも開ける。
-     問い合わせ先は同じ生成元の /v1/* だけで、その先は viewer が serve へ転送する。 -->
+     問い合わせ先は同じ生成元の /v1/* だけで、その先は viewer が serve へ転送する。
+     紙面のサムネも、そのページの PDF も、この /v1/objects/{id}/rendition/… から来る
+     (外から取ってくる画像は一枚も無い)。 -->
 <html lang="ja">
 <head>
 <meta charset="utf-8">
@@ -39,7 +41,18 @@
   #notices:empty { display: none; }
   .notice { border-left: 3px solid var(--line); padding: .35rem .6rem; margin: .35rem 0;
             background: var(--panel); font-size: .87rem; }
-  .hit { border-top: 1px solid var(--line); padding: .8rem 0; }
+  .hit { border-top: 1px solid var(--line); padding: .8rem 0;
+         display: flex; gap: .8rem; flex-wrap: wrap; }
+  .body { flex: 1 1 22rem; min-width: 0; }
+  /* 写し(紙面のサムネと、その頁へ行く道)。参照先はどれも同じ生成元の /v1/objects/… で
+     ある。件の左に置き、拡大したときだけ行いっぱいに広げる。 */
+  .media { flex: 0 0 9rem; display: flex; flex-direction: column; gap: .25rem;
+           font-size: .78rem; }
+  .media.big { flex: 1 1 100%; }
+  .media img { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 4px;
+               background: var(--panel); cursor: zoom-in; }
+  .media.big img { cursor: zoom-out; }
+  .media .why { color: var(--dim); }
   .cite { display: flex; gap: .5rem; flex-wrap: wrap; align-items: baseline; }
   .doc { font-weight: 600; }
   .meta, .crumbs, .chunk { color: var(--dim); font-size: .82rem; }
@@ -132,11 +145,47 @@ async function loadNode() {
   }
 }
 
+// ---- 問いを道に残す(リロードと戻るで同じ画面が出るように) ----
+//
+// 画面の状態は入力欄そのものである。それを道の問い合わせ部分に写しておけば、リロードは
+// 同じ検索をやり直すだけで同じ画面になる。結果そのものは残さない(残すと、ストアが
+// 変わった後の再読み込みで古い順位を復元してしまう)。
+// 欄の名は要求の欄と同じにする(q だけは query が要求側の名なので短く採る)。
+
+/// いまの入力欄を道に写す。
+function formToUrl() {
+  const params = new URLSearchParams();
+  params.set("q", $("query").value.trim());
+  if ($("collection").value) params.set("collection", $("collection").value);
+  if ($("method").value) params.set("method", $("method").value);
+  if ($("topk").value && $("topk").value !== "10") params.set("top_k", $("topk").value);
+  if ($("lowinfo").checked) params.set("include_low_information", "1");
+  return `?${params}`;
+}
+
+/// 道の問い合わせ部分を入力欄に写す。問いがあれば true(呼び手が検索を投げる)。
+function urlToForm() {
+  const params = new URLSearchParams(location.search);
+  const query = params.get("q") || "";
+  $("query").value = query;
+  // コレクションの選択肢はまだ揃っていないことがある(loadNode が先に終わるとは限らない)。
+  // 値をそのまま入れておけば、選択肢が足された時点で選ばれた状態になる。
+  $("collection").value = params.get("collection") || "";
+  $("method").value = params.get("method") || "";
+  $("topk").value = params.get("top_k") || "10";
+  $("lowinfo").checked = params.get("include_low_information") === "1";
+  return query !== "";
+}
+
 // 検索 1 回。判断(方式の既定・劣化・引用)は serve の側にあり、ここは描くだけである。
 async function search(event) {
-  event.preventDefault();
+  if (event) event.preventDefault();
   const query = $("query").value.trim();
   if (!query) return;
+  // 道を今の問いに合わせる。押すたびに履歴を積むので、戻るで前の問いへ帰れる
+  // (同じ問いを押し直したときは積まない)。
+  const url = formToUrl();
+  if (event && url !== location.search) history.pushState(null, "", url);
   $("notices").textContent = "";
   $("results").textContent = "検索中…";
   $("go").disabled = true;
@@ -173,6 +222,7 @@ function render(body) {
     $("results").textContent = "一致なし。ここに無いことは、世界に無いことを意味しない。";
     return;
   }
+  const entries = [];
   hits.forEach((hit, index) => {
     const cite = hit.citation || {};
     const page = cite.page === undefined ? "" : ` p.${cite.page}`;
@@ -180,6 +230,7 @@ function render(body) {
     const div = document.createElement("div");
     div.className = "hit";
     div.innerHTML = `
+      <div class="body">
       <div class="cite">
         <span class="doc">${index + 1}. ${escapeText(cite.collection)}/${escapeText(cite.document)}${escapeText(page)}</span>
         <span class="meta">位置 ${cite.position} / 取得 ${formatTime(cite.at)} / 得点 ${hit.score.toFixed(4)}</span>
@@ -190,10 +241,134 @@ function render(body) {
         <button type="button">全文</button>
         <span class="chunk">${escapeText(hit.id)}</span>
       </div>
-      <div class="full"></div>`;
+      <div class="full"></div>
+      </div>`;
     div.querySelector("button").addEventListener("click", (event) => showFull(hit.id, div, event));
     $("results").append(div);
+    entries.push({ id: hit.id, page: cite.page, div });
   });
+  // 写しは描き終えてから足す(検索結果そのものは、写しの口が無くても出る)。
+  attachRenditions(entries);
+}
+
+// ---- 紙面の写し(PDF 由来の件だけ) ----
+//
+// serve の口は二つ。目録 /v1/objects/{id}/rendition は何も生成せず、その件でどの写しが
+// 出せるかを言う。写しそのもの /v1/objects/{id}/rendition/{別名} は、無ければその場で
+// 作って返す。別名は 4 つ(source・thumb・page・pagepdf)で、ビューワ側の許可表と同じ
+// である。
+
+// 目録を引く件数の上限。写しは要求されたときに作られるので、10 件ぶんを一度に頼まない。
+// 上位の数件だけ引き、残りには同じ形を当てて、画像は loading="lazy" に任せる。
+const RENDITION_PROBE_LIMIT = 3;
+
+// 頁が自分で組み立てる道。ID はそのまま path に置く(全文を取る道と同じ理由で、
+// パーセント符号化しない: 受け側の ID の形の検査に落ちて 404 になる)。
+function renditionUrls(id) {
+  return {
+    catalog: `/v1/objects/${id}/rendition`,
+    source: `/v1/objects/${id}/rendition/source`,
+    thumb: `/v1/objects/${id}/rendition/thumb`,
+    page: `/v1/objects/${id}/rendition/page`,
+    pagepdf: `/v1/objects/${id}/rendition/pagepdf`,
+  };
+}
+
+// 目録 1 件。別名で引ける形に直して返す。PDF 由来でない件は null(出せないものの席を
+// 作らない)。届かない・口が無いときは投げる(どうするかは呼び手が決める)。
+async function loadCatalog(id) {
+  const catalog = JSON.parse(await api(renditionUrls(id).catalog));
+  if (catalog.media !== "pdf") return null;
+  const views = {};
+  for (const view of catalog.views || []) views[view.alias] = view;
+  return views;
+}
+
+// serve から来た文言(出せない理由・注記)は、地の文としてその場に出す。値はテキストの
+// 位置にしか入らないので、文言に < が混じっても頁の上では走らない。
+function why(label, text) {
+  const div = document.createElement("div");
+  div.className = "why";
+  div.textContent = `${label}: ${text || "(理由なし)"}`;
+  return div;
+}
+
+function pageLink(href, label) {
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.target = "_blank";
+  anchor.rel = "noopener";
+  anchor.textContent = label;
+  return anchor;
+}
+
+// 1 件ぶんの写しの箱。views は目録の views を別名で引ける形にしたもの。
+// state が unavailable の項は隠さず、理由をその場に出す(空の箱にしない)。
+function renditionBox(entry, views) {
+  const urls = renditionUrls(entry.id);
+  const box = document.createElement("div");
+  box.className = "media";
+  const thumb = views.thumb || {};
+  const zoom = views.page || {};
+  if (thumb.state === "unavailable") {
+    box.append(why("サムネを出せない", thumb.reason));
+  } else {
+    const img = document.createElement("img");
+    img.loading = "lazy";                       // 下の件の画像は、見えたときに取りに行く
+    img.alt = `p.${entry.page} の紙面`;
+    img.src = urls.thumb;
+    box.append(img);
+    if (zoom.state === "unavailable") {
+      img.style.cursor = "default";             // 押しても何も起きないものを押せそうに見せない
+      box.append(why("拡大を出せない", zoom.reason));
+    } else {
+      // 押したときだけ拡大用の PNG(0.4 秒・371KB)に差し替える。もう一度押すと戻る。
+      img.addEventListener("click", () => {
+        img.src = box.classList.toggle("big") ? urls.page : urls.thumb;
+      });
+    }
+  }
+  // 原本 PDF の当該ページ。何も生成しないので、poppler の無い機械でも必ず開く。
+  const source = views.source || {};
+  if (source.state === "unavailable") {
+    box.append(why("原本を出せない", source.reason));
+  } else {
+    box.append(pageLink(`${urls.source}#page=${entry.page}`, `原本 PDF の p.${entry.page}`));
+  }
+  // そのページだけの PDF。注記(再描画であることなど)は目録の文言をそのまま添える。
+  const only = views.pagepdf || {};
+  if (only.state === "unavailable") {
+    box.append(why("このページだけの PDF を出せない", only.reason));
+  } else {
+    box.append(pageLink(urls.pagepdf, "このページだけの PDF"));
+    if (only.note) box.append(why("注", only.note));
+  }
+  return box;
+}
+
+// 描き終えた結果に写しを足す。目録の口が無い serve(旧版)では何も足さず、従来どおりの
+// 画面のままにする(壊れた見た目を作らない)。
+async function attachRenditions(entries) {
+  // PDF 由来の徴は引用のページ番号である(markdown・text の件には page が無い)。
+  const pdf = entries.filter((entry) => entry.page !== undefined);
+  let shape = null;
+  for (const entry of pdf.slice(0, RENDITION_PROBE_LIMIT)) {
+    let views;
+    try {
+      views = await loadCatalog(entry.id);
+    } catch {
+      return;                 // 目録の口が無い(旧 serve)・届かない: 何も足さない
+    }
+    if (!views) continue;     // PDF 由来でない件
+    shape = shape || views;
+    entry.div.prepend(renditionBox(entry, views));
+  }
+  if (!shape) return;
+  // 残りの件は目録を引かない。どの写しが出せるか(と、出せない理由)はレシピと機械の
+  // 性質で決まるので、同じ機械の上では件ごとに変わらない。道は ID から組み立てる。
+  for (const entry of pdf.slice(RENDITION_PROBE_LIMIT)) {
+    entry.div.prepend(renditionBox(entry, shape));
+  }
 }
 
 // 全文はチャンクのオブジェクトそのものを取り、本文だけを出す(チャンクでなければ生のまま)。
@@ -219,7 +394,12 @@ async function showFull(id, div, event) {
 }
 
 $("form").addEventListener("submit", search);
+// 戻る・進むでも同じ規律で復元する(道が状態の正典であり、履歴はその列である)。
+window.addEventListener("popstate", () => { if (urlToForm()) search(null); else $("results").textContent = ""; });
 loadNode();
+// 道に問いが載っていれば、そのまま同じ検索をやり直す(リロードで画面が変わらない)。
+// loadNode を待たない: コレクションの選択肢は後から足されても、選ばれた値は保たれる。
+if (urlToForm()) search(null);
 </script>
 </body>
 </html>

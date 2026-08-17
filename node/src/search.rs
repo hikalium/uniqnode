@@ -81,6 +81,42 @@ pub fn terms_of(text: &str) -> Vec<String> {
     terms
 }
 
+/// 索引語を「まとまり」に分けて返す(被覆率を数える単位。切り方そのものは terms_of の
+/// 一箇所のまま)。
+///
+/// ASCII の語は 1 語で 1 まとまりである。非 ASCII の連なりは、その連なりから出た文字
+/// bigram 全部で 1 まとまりになる。この区別が被覆率の意味を決める:
+/// - 「scratchpad」のような 1 語は、当たれば意図が当たったと言ってよい。
+/// - 「スクラッチパッド」の bigram は 1 語の断片であり、2 つ当たっただけでは意図が当たった
+///   ことにならない(「取り込み」が「割り込み」に当たる型。20260817-japanese-partial-match
+///   (uuid:ff9299d5-3dfb-4ad0-9b3b-f5d597271cdc))。
+///
+/// まとまりごとの当たり具合(当たった語 / まとまりの語数)の平均を被覆率とすると、
+/// 両方が同じ物差しで測れる。カタカナの問いを英語へ広げたとき(node/src/translit.rs)、
+/// 広げた語が当たれば被覆はまとまり単位で 0.5 に届き、断片だけの一致は届かない。
+pub fn term_groups_of(text: &str) -> Vec<Vec<String>> {
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    for run in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        if run.is_empty() {
+            continue;
+        }
+        // 1 つの連なりから出た語をまとめる。ASCII と非 ASCII が地続きの連なり
+        // (identifier1 と 日本語 が空白なしで続く形)は terms_of が境で切るので、
+        // ここでも同じ切り方に従い、出た語のうち ASCII の 1 語だけは独立させる。
+        let terms = terms_of(run);
+        let (ascii, wide): (Vec<String>, Vec<String>) = terms
+            .into_iter()
+            .partition(|term| term.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+        for word in ascii {
+            groups.push(vec![word]);
+        }
+        if !wide.is_empty() {
+            groups.push(wide);
+        }
+    }
+    groups
+}
+
 /// 目次の行とみなす点線の長さ(連続する `.` の数)。見出しとページ番号を点でつなぐ
 /// 組版がこの形になる。
 const DOT_LEADER_RUN: usize = 4;
@@ -227,6 +263,14 @@ pub struct IndexedChunk {
     pub snippet: String,
     pub breadcrumbs: Vec<String>,
     pub page: Option<u32>,
+    /// 原本(このチャンクの出た文書の doc_rev.source = 原文 blob のオブジェクト ID)。
+    /// PDF なら PDF そのもの、markdown なら原文テキストである。ページ画像の遅延生成は
+    /// これと page から「どの PDF の何ページか」を組み立てる。doc_rev に source が
+    /// 無い(壊れた・他実装が書いた)ときだけ None。
+    pub source: Option<String>,
+    /// 種別(doc_rev の meta.media。"pdf" / "markdown" / "text")。source をどう扱うか
+    /// (ページ画像に描けるのは "pdf" だけ)は呼び手がこれで判断する。
+    pub media: Option<String>,
     /// 取得日時(このチャンクを見えに置いている ref レコードの at。unix 秒)。
     pub at: i64,
     /// 低情報(目次の紙面・柱だけ・ページ番号だけ)かどうか(判定は is_low_information)。
@@ -243,28 +287,87 @@ struct Posting {
     term_frequency: u32,
 }
 
-/// 構築時点の世代。オブジェクトは追記専用、reflog は署名者ごとに seq 単調なので、
-/// 両方が現在値と一致することが「構築後に書き込みも ref の変化も無い」ことと同値。
-/// ReferrerIndex の object_count だけでは足りない: 文書の張り替え(既存 doc_rev への
-/// 巻き戻し)や tombstone は ref レコードしか増やさず、旧版のチャンクが索引に残る。
+/// 構築時点の世代(導出データの鮮度札)。索引の中身は次の二つだけの純関数である:
+/// (a) collections/ 配下の非 tombstone ref の束縛(名前 → target。visit_indexable_chunks が
+/// 読む範囲そのもの)、(b) そこから辿れるオブジェクトの内容(content-addressed で不変)。
+/// したがって索引が古くなる原因は二つしかない: 束縛が変わったか、構築時に「まだ無い」で
+/// 飛ばしたオブジェクト(未複製の doc_rev やチャンク)が後から届いたか。札はこの二つだけを
+/// 見る。
+///
+/// もとは (ストア全体のオブジェクト数, 署名者ごとの最終 seq) を見ていた。それはストアへの
+/// 書き込みすべてに反応する札で、索引が読まないもの — collections/ の外の ref、索引の対象で
+/// ないオブジェクト — を足しただけでも「古い」になり、次の検索が全再構築を引いた。実データ
+/// (25,754 オブジェクト)での再構築は BM25 索引の構築 8.80 秒、ベクトル索引の読み込み
+/// 8.31 秒である。たとえば PDF のページ画像をストアに 1 枚足すたびに次の検索が 17 秒に
+/// なり、その機能自体が成り立たない。札が見る範囲を索引が読む範囲に一致させれば、索引と
+/// 無関係な書き込みは索引を落とさない。
 ///
 /// 導出データの索引はどれもこの世代で最新かを判定する(BM25 の転置索引と、ベクトルの
 /// 索引 node/src/embed.rs)。判定の家はここだけである(should/0135)。
-#[derive(Clone, PartialEq, Eq)]
+///
+/// 等値は導出しない(以前は matches が `*self == current(store)` だった)。判定は札と
+/// 現状の非対称な比較 — missing が 0 なら object_count を見ない — であり、札同士の
+/// 等値とは別物である。両方があると、うっかり `==` で書いた側が黙って別の規則になる。
+#[derive(Clone)]
 pub struct Generation {
+    /// collections/ 配下の非 tombstone ref の束縛(ref の完全名 → target)。
+    bindings: Vec<(String, String)>,
+    /// 構築時に「ストアに無い」で飛ばしたオブジェクトの数。0 なら、後から何が届いても
+    /// 索引の中身は変わらない。
+    missing: usize,
+    /// missing が 0 でないときだけ意味を持つ(取りこぼしが埋まったかを見るため)。
     object_count: usize,
-    signers: Vec<(String, u64)>,
 }
 
 impl Generation {
-    /// store の現在の世代。
+    /// 走査を始める前の store の世代。取りこぼしの数は走査してみるまで判らないので 0 で
+    /// 置き、走査が終わったら note_missing で入れる。束縛とオブジェクト数を走査より先に
+    /// 採るのは、走査中に届いたものを「構築時に見えていた」と誤って記録しないためである
+    /// (先に採れば、取りこぼしたぶんは次の判定で古いに倒れる。安全側)。
     pub fn current(store: &Store) -> Generation {
-        Generation { object_count: store.object_count(), signers: store.signers() }
+        Generation {
+            bindings: Generation::bindings_of(store),
+            missing: 0,
+            object_count: store.object_count(),
+        }
     }
 
-    /// この世代が store の現状と一致するか(= 構築後に書き込みも ref の変化も無い)。
+    /// 構築の走査が「ストアに無い」で飛ばしたオブジェクトの数を記録する
+    /// (visit_indexable_chunks の返り値をそのまま渡す)。
+    pub fn note_missing(&mut self, missing: usize) {
+        self.missing = missing;
+    }
+
+    /// collections/ 配下の非 tombstone ref の束縛。RAM 上の ref 表(Store::list_refs)を
+    /// 一巡するだけで、ストアの読み込みは無い(O(#refs))。走査(visit_indexable_chunks)の
+    /// 絞り込みと同じ条件をここで繰り返しているが、あちらは 1 件ずつ doc_rev を開く走査で
+    /// あり、こちらは要求ごとに回る鮮度札である。同じ条件を二度書かずに済ませるには走査側を
+    /// 二段に割る必要があり、そのほうが「索引が読む範囲」を見失いやすい。
+    fn bindings_of(store: &Store) -> Vec<(String, String)> {
+        store
+            .list_refs()
+            .filter_map(|(name, state)| {
+                // tombstone は見えに無い = 索引が読まない。
+                let target = state.target.as_ref()?;
+                let (_signer, path) = name.split_once('/')?;
+                if !path.starts_with("collections/") {
+                    return None;
+                }
+                Some((name.clone(), target.clone()))
+            })
+            .collect()
+    }
+
+    /// この世代が store の現状について最新か。
+    /// - 束縛が違えば古い(文書の改版・巻き戻し・tombstone・新しい文書)。
+    /// - 束縛が同じでも、構築時に取りこぼしがあったならオブジェクト数も見る(取りこぼしが
+    ///   埋まったかもしれない)。取りこぼしの無かった索引は、束縛が同じである限り最新で
+    ///   ある: 読む範囲のオブジェクトは全部読めていて、その中身は不変だからである。
     pub fn matches(&self, store: &Store) -> bool {
-        *self == Generation::current(store)
+        if self.missing != 0 && self.object_count != store.object_count() {
+            return false;
+        }
+        self.bindings == Generation::bindings_of(store)
     }
 }
 
@@ -338,11 +441,19 @@ pub struct SearchIndex {
     average_length: f64,
 }
 
-/// ストア上のオブジェクトを c1 として読む。無い(他ノードの ref の複製前)・UTF-8 で
-/// ない・c1 でないは None(索引は導出データであり、壊れた 1 個で構築全体を失敗させ
-/// ない。ReferrerIndex と同じ扱い)。入出力の失敗だけは伝える。
-fn read_c1(store: &Store, id: &str) -> Result<Option<Value>> {
-    let Some(bytes) = store.get_object(id)? else { return Ok(None) };
+/// ストア上のオブジェクトを c1 として読む。読めなければ None(索引は導出データであり、
+/// 壊れた 1 個で構築全体を失敗させない。ReferrerIndex と同じ扱い)。入出力の失敗だけは
+/// 伝える。
+///
+/// 読めない理由は世代の判定にとって二種類に分かれるので、片方だけを missing に数える:
+/// - ストアに無い(他ノードの ref の複製前): あとから届けば索引の中身が変わる。数える。
+/// - UTF-8 でない・c1 でない: 中身は content-addressed で不変であり、同じ ID が後から
+///   別の内容になることはない。何が届いても索引は変わらないので数えない。
+fn read_c1(store: &Store, id: &str, missing: &mut usize) -> Result<Option<Value>> {
+    let Some(bytes) = store.get_object(id)? else {
+        *missing += 1;
+        return Ok(None);
+    };
     let Ok(text) = String::from_utf8(bytes) else { return Ok(None) };
     Ok(c1::parse(&text).ok())
 }
@@ -358,6 +469,10 @@ pub struct IndexableChunk {
     pub text: String,
     pub breadcrumbs: Vec<String>,
     pub page: Option<u32>,
+    /// 原本(doc_rev.source = 原文 blob のオブジェクト ID)。IndexedChunk と同じもの。
+    pub source: Option<String>,
+    /// 種別(doc_rev の meta.media。"pdf" / "markdown" / "text")。
+    pub media: Option<String>,
     /// 取得日時(このチャンクを見えに置いている ref レコードの at。unix 秒)。ref は
     /// 署名済みの可変層のレコードであり、at は署名者がその版を書いた時刻である
     /// (SPEC §4.4)。文書を取り込んだ時刻であって、原文が書かれた時刻ではない。
@@ -378,21 +493,43 @@ pub struct IndexableChunk {
 /// BM25 の転置索引(SearchIndex)とベクトルの索引(node/src/embed.rs の VectorIndex)が
 /// これを共用する。同じ store の同じ世代から作る限り、両者は同じチャンクを同じ並びで
 /// 見る。ハイブリッド検索が二つの索引の位置を突き合わせられるのはこのためである。
+///
+/// 返り値は「ストアに無い」で飛ばしたオブジェクトの数(doc_rev と chunk の合計)。
+/// 走査から作った導出データの鮮度札(Generation)がこれを要る: 0 なら、その札は
+/// ストアに何が届いても揺るがない(理由は Generation のコメント)。
 pub fn visit_indexable_chunks(
     store: &Store,
     visit: &mut dyn FnMut(IndexableChunk),
-) -> Result<()> {
+) -> Result<usize> {
+    let mut missing = 0usize;
     for (name, state) in store.list_refs() {
         // tombstone は現在の見えに無い(原理 5)。
         let Some(target) = &state.target else { continue };
         let Some((_signer, path)) = name.split_once('/') else { continue };
         let Some(rest) = path.strip_prefix("collections/") else { continue };
         let Some((collection, document)) = rest.split_once('/') else { continue };
-        let Some(Value::Object(doc_rev)) = read_c1(store, target)? else { continue };
+        let Some(Value::Object(doc_rev)) = read_c1(store, target, &mut missing)? else { continue };
+        // 原本(source = 原文 blob)と種別(meta.media)は、いま手にしている doc_rev から
+        // そのまま採る(走査の回数もストアの読み込み回数も増えない)。チャンクからは
+        // 「どの原本のどこか」へ辿れないと、PDF のページ画像を後から作れない。既存の
+        // 取り込み済みデータを読み直す必要が無いよう、ストアには何も書き足さない。
+        let source = match doc_rev.get("source") {
+            Some(Value::Text(blob)) => Some(blob.clone()),
+            _ => None,
+        };
+        let media = match doc_rev.get("meta") {
+            Some(Value::Object(meta)) => match meta.get("media") {
+                Some(Value::Text(media)) => Some(media.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
         let Some(Value::Array(chunk_ids)) = doc_rev.get("chunks") else { continue };
         for (position, chunk_ref) in chunk_ids.iter().enumerate() {
             let Value::Text(chunk_id) = chunk_ref else { continue };
-            let Some(Value::Object(chunk)) = read_c1(store, chunk_id)? else { continue };
+            let Some(Value::Object(chunk)) = read_c1(store, chunk_id, &mut missing)? else {
+                continue;
+            };
             let Some(Value::Text(text)) = chunk.get("text") else { continue };
             let (breadcrumbs, page) = match chunk.get("meta") {
                 Some(Value::Object(meta)) => {
@@ -428,22 +565,25 @@ pub fn visit_indexable_chunks(
                 text: text.clone(),
                 breadcrumbs,
                 page,
+                source: source.clone(),
+                media: media.clone(),
                 at: state.at,
                 terms,
             });
         }
     }
-    Ok(())
+    Ok(missing)
 }
 
 impl SearchIndex {
     /// 見えの全チャンクを一度走査して構築する(対象の決め方は visit_indexable_chunks)。
     pub fn build(store: &Store) -> Result<SearchIndex> {
-        let generation = Generation::current(store);
+        // 束縛は走査の前に採り、取りこぼしの数だけ走査のあとで足す(Generation)。
+        let mut generation = Generation::current(store);
         let mut chunks: Vec<IndexedChunk> = Vec::new();
         let mut postings: BTreeMap<String, Vec<Posting>> = BTreeMap::new();
         let mut total_terms = 0usize;
-        visit_indexable_chunks(store, &mut |chunk| {
+        let missing = visit_indexable_chunks(store, &mut |chunk| {
             let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
             for term in &chunk.terms {
                 *counts.entry(term.as_str()).or_insert(0) += 1;
@@ -465,6 +605,8 @@ impl SearchIndex {
                 snippet: snippet_of(&chunk.text),
                 breadcrumbs: chunk.breadcrumbs,
                 page: chunk.page,
+                source: chunk.source,
+                media: chunk.media,
                 at: chunk.at,
                 // 判定は構築時に一度だけ行う(応答のたびに全文を持ち歩かないため。
                 // IndexedChunk が持つのは先頭 200 文字のスニペットだけである)。
@@ -472,6 +614,7 @@ impl SearchIndex {
                 term_count: chunk.terms.len(),
             });
         })?;
+        generation.note_missing(missing);
         let average_length = if chunks.is_empty() {
             0.0
         } else {
@@ -480,8 +623,9 @@ impl SearchIndex {
         Ok(SearchIndex { generation, chunks, postings, average_length })
     }
 
-    /// この索引が store の現状について最新か。オブジェクト数と署名者ごとの最終 seq の
-    /// 両方が一致する限り、書き込みも ref の変化も挟まっていない。
+    /// この索引が store の現状について最新か(判定の規則は Generation)。collections/ の
+    /// 束縛が変わっていなければ最新である。索引が読まないもの(collections/ の外の ref、
+    /// 索引の対象でないオブジェクト)がいくら増えても作り直しにはならない。
     pub fn is_current(&self, store: &Store) -> bool {
         self.generation.matches(store)
     }
@@ -506,6 +650,19 @@ impl SearchIndex {
     /// 1 回であり、順位付けの内側ではない。
     pub fn chunk_by_id(&self, id: &str) -> Option<&IndexedChunk> {
         self.chunks.iter().find(|chunk| chunk.id == id)
+    }
+
+    /// 索引にある語を 1 度ずつ渡す(語と、その語を含むチャンク数)。
+    ///
+    /// カタカナのクエリを英語の術語へ寄せる層(node/src/translit.rs)が、実在する語だけを
+    /// 候補にするために使う。実在しない綴りを作らないことがあの層の要であり、その判定は
+    /// 「この索引に載っているか」でしかできない。チャンク数を添えるのは、骨格が同じ語が
+    /// 複数あるときの決め手になるからである(実測で、これを綴りの近さより先に見ると
+    /// 当たりが 32/70 から 53/70 に増えた)。
+    pub fn visit_terms(&self, visit: &mut dyn FnMut(&str, usize)) {
+        for (term, postings) in &self.postings {
+            visit(term, postings.len());
+        }
     }
 
     /// 語 term の位置表。1 文字の非 ASCII 語は bigram の索引にそのままでは載らない
@@ -573,11 +730,22 @@ impl SearchIndex {
         scope: &CollectionScope,
         top_k: usize,
     ) -> LexicalRanking {
+        // 語のまとまり(ASCII の 1 語 / 非 ASCII の連なりから出た bigram の束)。被覆は
+        // まとまり単位で数える(term_groups_of の理由を参照)。
+        let groups = term_groups_of(query);
+        let mut group_of: BTreeMap<String, usize> = BTreeMap::new();
+        for (index, group) in groups.iter().enumerate() {
+            for term in group {
+                group_of.entry(term.clone()).or_insert(index);
+            }
+        }
         let mut query_terms = terms_of(query);
         query_terms.sort();
         query_terms.dedup();
         // (得点の合計, 一致した異なりクエリ語の数)。
         let mut scores: BTreeMap<usize, (f64, usize)> = BTreeMap::new();
+        // チャンクごとに、まとまりの何番目の語が当たったか(被覆をまとまり単位で数える)。
+        let mut hits_per_group: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for term in &query_terms {
             let postings = self.postings_of(term);
             if postings.is_empty() {
@@ -598,33 +766,53 @@ impl SearchIndex {
                     self.average_length,
                 );
                 entry.1 += 1;
+                if let Some(group) = group_of.get(term) {
+                    let counts =
+                        hits_per_group.entry(posting.chunk).or_insert_with(|| vec![0; groups.len()]);
+                    counts[*group] += 1;
+                }
             }
         }
         let query_term_count = query_terms.len();
+        // まとまりごとの当たり具合の平均。ASCII の 1 語は当たれば 1.0、非 ASCII の連なりは
+        // 「当たった bigram / その連なりの bigram 数」になる。
+        let coverage_of = |chunk: usize| -> f64 {
+            let Some(counts) = hits_per_group.get(&chunk) else { return 0.0 };
+            if groups.is_empty() {
+                return 0.0;
+            }
+            let sum: f64 = counts
+                .iter()
+                .zip(groups.iter())
+                .map(|(matched, group)| *matched as f64 / group.len().max(1) as f64)
+                .sum();
+            sum / groups.len() as f64
+        };
         // 被覆率を得点に掛ける(古典的な coord)。クエリ語の一部にしか当たっていない
         // チャンクを、当たった語が稀だというだけで上位に置かないためである。文字 bigram の
         // 索引では、この歪みが日本語の複合語で顕著に出る: 「割り込み」と「取り込み」は
         // bigram を 2 つ共有し、英語コーパスの中では日本語 bigram の df が 1 なので idf が
         // 跳ね上がって、無関係な文書が高得点で 1 位を取る(実測 2026-08-17。
         // 20260817-japanese-partial-match (uuid:ff9299d5-3dfb-4ad0-9b3b-f5d597271cdc))。
-        let mut ranked: Vec<(usize, f64, usize)> = scores
+        let mut ranked: Vec<(usize, f64, f64)> = scores
             .into_iter()
-            .map(|(position, (score, matched))| {
-                let coverage = matched as f64 / query_term_count.max(1) as f64;
-                (position, score * coverage, matched)
+            .map(|(position, (score, _matched))| {
+                let coverage = coverage_of(position);
+                (position, score * coverage, coverage)
             })
             .collect();
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         ranked.truncate(top_k);
         // 返す順位の中で最もよく覆っているものを、その順位全体の被覆とする(融合に効かせる
         // のは「語の一致がどれだけ当たったか」であり、下位の弱い件ではない)。
-        let best_matched = ranked.iter().map(|(_, _, matched)| *matched).max().unwrap_or(0);
+        let best_coverage =
+            ranked.iter().map(|(_, _, coverage)| *coverage).fold(0.0f64, f64::max);
         LexicalRanking {
             hits: ranked
                 .into_iter()
                 .map(|(position, score, _)| ScoredChunk { position, score })
                 .collect(),
-            matched_terms: best_matched,
+            coverage: best_coverage,
             query_terms: query_term_count,
         }
     }
@@ -633,26 +821,24 @@ impl SearchIndex {
 /// BM25 の順位 1 回ぶんと、その被覆(クエリの異なり語のうち何語に当たったか)。
 pub struct LexicalRanking {
     pub hits: Vec<ScoredChunk>,
-    /// 返した順位の中で最もよく覆っている件の、一致した異なりクエリ語の数。
-    pub matched_terms: usize,
-    /// クエリの異なり語の数(0 なら索引語の無いクエリ)。
+    /// 返した順位の中で最もよく覆っている件の被覆率(0.0..=1.0)。まとまり単位で数える
+    /// (term_groups_of)。
+    coverage: f64,
+    /// クエリの異なり語の数(0 なら索引語の無いクエリ)。誤りの本文に出す。
     pub query_terms: usize,
 }
 
 impl LexicalRanking {
-    /// 被覆率(0.0..=1.0)。語の無いクエリは 0。
+    /// 被覆率(0.0..=1.0)。当たりが無ければ 0。
     pub fn coverage(&self) -> f64 {
-        if self.query_terms == 0 {
-            return 0.0;
-        }
-        self.matched_terms as f64 / self.query_terms as f64
+        self.coverage
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingest::{chunk_markdown, ingest_document, DocumentInput, IngestOutcome};
+    use crate::ingest::{chunk_markdown, ingest_document, Chunk, DocumentInput, IngestOutcome};
     use crate::store::StoreConfig;
     use std::path::PathBuf;
 
@@ -801,6 +987,143 @@ mod tests {
         .expect("ingest")
     }
 
+    /// PDF の取り込みを真似る(原本の PDF そのものを source に、pdftotext の出力を
+    /// チャンクにする形。ここでは PDF の中身は問われないので短いバイト列でよい)。
+    fn ingest_pdf(
+        store: &mut Store,
+        collection: &str,
+        name: &str,
+        bytes: &[u8],
+        chunks: &[Chunk],
+    ) -> IngestOutcome {
+        ingest_document(
+            store,
+            &DocumentInput {
+                collection,
+                name,
+                source: bytes,
+                media: "pdf",
+                chunks,
+                extractor: Some("pdftotext 22.02"),
+            },
+        )
+        .expect("ingest")
+    }
+
+    /// 索引項は原本(doc_rev.source = 原文 blob)と種別(meta.media)を運ぶ。ページ画像の
+    /// 遅延生成は、チャンクからこの二つと page を辿って「どの PDF の何ページか」を組む。
+    /// doc_rev には既に両方あるので、ストアには何も書き足していない(取り込み済みの
+    /// データを読み直さずに済むことが要件である)。
+    #[test]
+    fn the_index_carries_the_source_blob_and_the_media_of_each_document() {
+        let (dir, mut store) = temp_store("provenance");
+        let pdf_bytes = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
+        let chunks = vec![Chunk {
+            text: "割り込みの初期化手順を述べる。合言葉は雷鳥である。".to_string(),
+            breadcrumbs: Vec::new(),
+            page: Some(7),
+        }];
+        ingest_pdf(&mut store, "specs", "manual", pdf_bytes, &chunks);
+        let markdown = "# 章\n\nこちらは markdown の本文。合言葉は雲雀である。\n";
+        ingest_markdown(&mut store, "notes", "memo", markdown);
+        let index = SearchIndex::build(&store).expect("build");
+
+        // PDF のチャンク: media は "pdf"、source は原本 PDF の blob そのもの。
+        let hits = index.search("雷鳥", &CollectionScope::All, 10);
+        assert_eq!(hits.len(), 1);
+        let pdf_chunk = hits[0].chunk;
+        assert_eq!(pdf_chunk.media.as_deref(), Some("pdf"));
+        assert_eq!(pdf_chunk.page, Some(7), "PDF のチャンクは紙面の番号を持つ");
+        let pdf_source = pdf_chunk.source.clone().expect("原本の PDF を指しているはず");
+        assert_eq!(
+            store.get_object(&pdf_source).expect("get").as_deref(),
+            Some(&pdf_bytes[..]),
+            "source が指す blob は取り込んだ PDF そのもののはず"
+        );
+
+        // markdown のチャンク: media は "markdown"、source は原文テキストの blob。
+        let hits = index.search("雲雀", &CollectionScope::All, 10);
+        assert_eq!(hits.len(), 1);
+        let markdown_chunk = hits[0].chunk;
+        assert_eq!(markdown_chunk.media.as_deref(), Some("markdown"));
+        assert_eq!(markdown_chunk.page, None, "markdown に紙面は無い");
+        let markdown_source = markdown_chunk.source.clone().expect("原文を指しているはず");
+        assert_eq!(
+            store.get_object(&markdown_source).expect("get").as_deref(),
+            Some(markdown.as_bytes()),
+            "source が指す blob は取り込んだ原文テキストそのもののはず"
+        );
+        assert_ne!(markdown_source, pdf_source, "文書ごとに別の原本を指す");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 世代は collections/ の束縛だけを見る(規則は Generation)。張り替えと tombstone では
+    /// ずれ、索引が読まないもの — collections/ の外の ref、索引の対象でないオブジェクト —
+    /// が増えてもずれない。後者が肝である: PDF のページ画像をストアに足しても索引は生き
+    /// 残る(足すたびに作り直すと、実測 8.80 秒 + 8.31 秒が次の検索に乗る)。
+    #[test]
+    fn the_generation_shifts_only_when_the_collections_bindings_change() {
+        let (dir, mut store) = temp_store("generation");
+        ingest_markdown(&mut store, "notes", "memo", "# 章\n\n初版だけの合言葉。\n");
+        let index = SearchIndex::build(&store).expect("build");
+        assert!(index.is_current(&store));
+
+        // 索引が読まないオブジェクト(たとえば後から作るページ画像)を足しても、束縛は
+        // 変わらないので索引は生き残る。
+        let (image, is_new) = store.put_object(b"\"page image bytes\"").expect("put");
+        assert!(is_new, "新しいオブジェクトとして入る");
+        assert!(index.is_current(&store), "無関係なオブジェクトで索引を捨ててはならない");
+        // collections/ の外へ ref を張っても同じ(reflog は伸び、署名者の seq も進む)。
+        store.set_ref("pages/memo/1", Some(&image)).expect("set_ref");
+        assert!(index.is_current(&store), "collections/ の外の ref で索引を捨ててはならない");
+        assert_eq!(
+            index.search("合言葉", &CollectionScope::All, 10).len(),
+            1,
+            "生き残った索引はそのまま引ける"
+        );
+
+        // 改版(collections/ の ref の張り替え)ではずれる。
+        ingest_markdown(&mut store, "notes", "memo", "# 章\n\n改訂で言い換えた本文。\n");
+        assert!(!index.is_current(&store), "束縛が変わったのに最新と誤認している");
+        let rebuilt = SearchIndex::build(&store).expect("rebuild");
+        assert!(rebuilt.is_current(&store));
+
+        // tombstone でもずれる(オブジェクトは 1 個も増えない)。
+        let objects = store.object_count();
+        store.set_ref("collections/notes/memo", None).expect("tombstone");
+        assert_eq!(store.object_count(), objects, "tombstone はオブジェクトを増やさない");
+        assert!(!rebuilt.is_current(&store), "tombstone を世代が検出できていない");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 取りこぼし(ref が指す doc_rev がまだ複製されていない)を抱えて構築した索引は、
+    /// その doc_rev が届いたことに気づく。取りこぼしが 0 でない間だけオブジェクト数を
+    /// 見る、という規則の証明である(0 なら束縛だけを見る。上の試験)。
+    #[test]
+    fn an_index_built_over_a_missing_doc_rev_notices_it_arriving() {
+        let (dir_a, mut a) = temp_store("missing-a");
+        let (dir_b, mut b) = temp_store("missing-b");
+        let outcome = ingest_markdown(&mut a, "notes", "memo", "# 章\n\n複製前の合言葉。\n");
+        // B へは ref レコードだけを複製する(L1 の受け側と同じ経路)。
+        let signer = a.node_id_hex().to_string();
+        for record in a.export_ref_records(&signer, 0).expect("export") {
+            assert!(b.ingest_ref_record(&record).expect("ingest record"));
+        }
+        assert!(!b.has_object(&outcome.doc_rev_id), "B は ref の先をまだ持たない");
+
+        let index = SearchIndex::build(&b).expect("build");
+        assert_eq!(index.chunk_count(), 0, "実体が無いので索引は空");
+        assert!(index.is_current(&b));
+
+        // doc_rev が届けば索引の中身は変わる。束縛は同じままだが、取りこぼしを抱えて
+        // いたので、オブジェクト数の変化で古いと判る。
+        let doc_rev = a.get_object(&outcome.doc_rev_id).expect("get").expect("A は持つ");
+        b.put_object(&doc_rev).expect("put");
+        assert!(!index.is_current(&b), "取りこぼしが埋まったのに最新と誤認している");
+        std::fs::remove_dir_all(&dir_a).expect("cleanup");
+        std::fs::remove_dir_all(&dir_b).expect("cleanup");
+    }
+
     /// 見え(原理 5)と世代整合: 索引は collections/ 配下の ref が指す現行 doc_rev の
     /// チャンクだけを持ち、改版でも、オブジェクトの増えない ref だけの変化
     /// (tombstone)でも、世代がずれて作り直しになる。
@@ -839,7 +1162,7 @@ mod tests {
         assert_eq!(rebuilt.search("改訂", &CollectionScope::All, 10).len(), 1);
 
         // ref の張り替えだけの変化(tombstone)はオブジェクトを増やさないが、世代
-        // (署名者ごとの最終 seq)がずれて作り直しになる。
+        // (collections/ の束縛)がずれて作り直しになる。
         let objects = store.object_count();
         store.set_ref("collections/notes/memo", None).expect("tombstone");
         assert_eq!(store.object_count(), objects, "tombstone はオブジェクトを増やさない");

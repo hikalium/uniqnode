@@ -175,7 +175,13 @@ fn run_ingest(
             .map(|c| c.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
-        let chunks = uniqnode::ingest::chunk_for_media(media, text);
+        // PDF は節見出しの経路も載せる(node/src/outline.rs)。取れなければ理由を出して、
+        // 見出しの無いチャンクとして続ける。
+        let (chunks, outline_reason) =
+            uniqnode::ingest::chunk_for_media_with_source(media, text, &bytes);
+        if let Some(reason) = outline_reason {
+            uniqnode::log_line!("uniqnode: ingest: {name} の節見出し: {reason}");
+        }
         let extractor_label = if media == "pdf" {
             pdf_extractor.as_ref().map(|e| e.extractor.as_str())
         } else {
@@ -301,6 +307,11 @@ struct EmbedOptions {
     /// --embed が明示されたか。serve は明示されたときだけ埋め込みを装備する
     /// (既定で外部プロセスに依存させない)。
     requested: bool,
+    /// 順位を取り直すリランカーの URL(--rerank)。
+    rerank_url: String,
+    reranker_id: String,
+    /// --rerank が明示されたか。
+    rerank_requested: bool,
 }
 
 /// --embed <url> と --embedder <id> を読む。知らない引数は黙って捨てず usage で落とす。
@@ -309,6 +320,9 @@ fn parse_embed_options(rest: &[String]) -> EmbedOptions {
         url: uniqnode::embed::DEFAULT_EMBEDDING_URL.to_string(),
         embedder_id: uniqnode::embed::DEFAULT_EMBEDDER_ID.to_string(),
         requested: false,
+        rerank_url: uniqnode::rerank::DEFAULT_RERANK_URL.to_string(),
+        reranker_id: uniqnode::rerank::DEFAULT_RERANKER_ID.to_string(),
+        rerank_requested: false,
     };
     let mut at = 0;
     while at < rest.len() {
@@ -319,6 +333,14 @@ fn parse_embed_options(rest: &[String]) -> EmbedOptions {
                 options.requested = true;
             }
             "--embedder" => options.embedder_id = value(),
+            // 順位の取り直しは埋め込みと同じ流儀で装備する: 明示されたときだけ繋ぎ、
+            // 起動時に相手の生存は確かめない(should/0114)。届かなければ融合の順位の
+            // まま答え、理由が応答の degraded に出る。
+            "--rerank" => {
+                options.rerank_url = value();
+                options.rerank_requested = true;
+            }
+            "--reranker" => options.reranker_id = value(),
             _ => usage(),
         }
         at += 2;
@@ -767,6 +789,8 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                         referrers: std::sync::Mutex::new(None),
                         search: std::sync::Mutex::new(None),
                         embedding,
+                        reranker: None,
+                        data_dir,
                     }))
                 }
             };
@@ -842,6 +866,29 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 );
                 uniqnode::embed::EmbeddingService::new(std::path::Path::new(dir), embedder)
             });
+            // 順位の取り直しも埋め込みと同じ扱い(明示されたときだけ・起動時に生存を
+            // 確かめない)。誤った URL はここで落とす: 検索のたびに同じ誤りを言うより、
+            // 起動時に一度言うほうが直しやすい。
+            let reranker = match options.embed.rerank_requested {
+                false => None,
+                true => match uniqnode::rerank::Reranker::new(
+                    &options.embed.rerank_url,
+                    &options.embed.reranker_id,
+                ) {
+                    Ok(reranker) => {
+                        uniqnode::log_line!(
+                            "uniqnode: rerank: {} ({})",
+                            reranker.reranker_id(),
+                            reranker.endpoint()
+                        );
+                        Some(reranker)
+                    }
+                    Err(message) => {
+                        uniqnode::log_line!("uniqnode: rerank: {message}");
+                        std::process::exit(2);
+                    }
+                },
+            };
             let context = uniqnode::api::ApiContext {
                 store,
                 engine,
@@ -849,6 +896,10 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 referrers: std::sync::Mutex::new(None),
                 search: std::sync::Mutex::new(None),
                 embedding,
+                reranker,
+                // ページの写しの作業ファイル置き場を組むために持つ(健全性エンジンへ
+                // 渡した data_dir は移動済みなので、同じ dir から作り直す)。
+                data_dir: std::path::PathBuf::from(dir),
             };
             let handler: std::sync::Arc<uniqnode::http::Handler> =
                 std::sync::Arc::new(move |request| uniqnode::api::handle(&context, request));

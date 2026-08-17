@@ -28,6 +28,13 @@ pub struct ApiContext {
     /// 埋め込みの装備(serve の --embed が与えられたときだけ Some。node/src/embed.rs)。
     /// 無ければ検索は BM25 だけで答える。
     pub embedding: Option<crate::embed::EmbeddingService>,
+    /// 順位を取り直すリランカー(serve の --rerank が与えられたときだけ Some。
+    /// node/src/rerank.rs)。無ければ融合の順位のまま答える。
+    pub reranker: Option<crate::rerank::Reranker>,
+    /// このDBノードのデータディレクトリ。ページの写しの作業ファイル置き場
+    /// (crate::rendition::RenditionOptions::in_data_dir)を組むために持つ。store から
+    /// 取れない(Store は自分の置き場を外へ出さない)ので、組み立てた側から渡す。
+    pub data_dir: std::path::PathBuf,
 }
 
 fn json_object(entries: Vec<(&str, c1::Value)>) -> Vec<u8> {
@@ -389,6 +396,9 @@ pub struct SearchResults {
     pub method: crate::embed::SearchMethod,
     pub degraded: Option<String>,
     pub results: Vec<SearchResult>,
+    /// 取り直した順位か(リランカーを通したときだけ true)。得点の意味が変わるので、
+    /// 応答の score_semantics はこれを見て決める(crate::rerank の約束)。
+    pub reranked: bool,
     /// 順位には入っていたが低情報として落とした件数。捨てたことを黙らないための欄で
     /// ある(must/0019 と同じ理由: 落とした結果は、落としたと言わなければ最初から
     /// 無かったことと区別できない)。0 なら応答に載らない。
@@ -514,12 +524,42 @@ pub fn run_search(
     }
     // 要求の絞り込みと共有ポリシーの交差。どちらかが挙げていないコレクションは見ない。
     let scope = crate::search::CollectionScope::of(request.collection.as_deref()).intersect(share);
+    // リランカーを装備しているときは、要求された件数より深く採ってから取り直す。深さは
+    // リランカーが決める(既定 30)。ここで top_k に切ってしまうと、取り直しは「上位
+    // 5 件の並べ替え」にしかならない: 実測で、正解が一次検索の 21 位にいて、深く採って
+    // 再採点したときだけ 2 位に上がった問いがある(20260818-search-quality)。
+    let candidate_k = match &context.reranker {
+        Some(reranker) => request.top_k.max(reranker.depth()),
+        None => request.top_k,
+    };
     let mut outcome = with_current_index(context, &store, |index| {
+        // 語の一致に使うクエリは、カタカナの術語を索引に実在する英語語へ寄せたものを
+        // 使う(node/src/translit.rs)。コーパスが英語なので、日本語の文字 bigram は
+        // どの語にも当たらず、語の一致が丸ごと死んでいた: 実測で、日本語だけの 50 語の
+        // うち 44 語が BM25 で 0 件、寄せた後は 50 語すべてに当たりが出て 42 語は英語で
+        // 問うたときと同じチャンクが 1 位になった。
+        //
+        // 寄せるのは語の一致の側だけである。意味検索は多言語の模型が日本語のまま扱える
+        // (寄せた語を混ぜると、かえって問いの意味が薄まる)。
+        let lexical_query = crate::translit::expand_query(
+            &request.query,
+            &crate::translit::VocabularyFn(|visit: &mut dyn FnMut(&str, u64)| {
+                index.visit_terms(&mut |term, chunks| visit(term, chunks as u64));
+            }),
+        );
+        if lexical_query != request.query {
+            crate::log_line!(
+                "uniqnode: search: 語の一致のために問いを広げた: {:?} → {:?}",
+                request.query,
+                lexical_query
+            );
+        }
         let search = crate::embed::HybridSearch {
             lexical: index,
             vectors: vector_cache.as_ref().and_then(|guard| guard.as_ref()),
         };
-        let ranked = search.ranked(requested, &request.query, &embedding, &scope, request.top_k);
+        let ranked =
+            search.ranked_with(requested, &lexical_query, &embedding, &scope, candidate_k);
         // 低情報チャンク(目次の紙面・柱だけ・ページ番号だけ)は順位付けのあとで落とす。
         // 索引から外さないのは、外すと GET /v1/objects/{id} の引用も組めなくなり、
         // pdftotext が柱しか採れなかった図版のページが見えから消えるからである
@@ -550,6 +590,7 @@ pub fn run_search(
             degraded: ranked.degraded,
             results,
             filtered_low_information,
+            reranked: false,
         }
     })?;
     // キャッシュを読めなかったのが根の理由なら、そちらを載せる(「索引がない」だけでは
@@ -569,6 +610,53 @@ pub fn run_search(
             None => reason,
         });
     }
+    // 順位の取り直し(リランカーを装備したときだけ)。ストアのロックはここまでで放して
+    // ある: 0.8 秒級の往復であり、埋め込みと同じくロックを持ったまま待たない
+    // (node/src/embed.rs のロックの規律)。取り直せなければ順位も得点もそのままで、
+    // 理由を degraded に足して答え続ける(黙って劣化しない。should/0128)。
+    drop(store);
+    let reranked = crate::rerank::rerank_items(
+        context.reranker.as_ref(),
+        &request.query,
+        &mut outcome.results,
+        // 節見出しの経路を本文の前に置いてから採点させる(contextual chunk header)。
+        // 抜粋だけを渡すと、リランカーには「その語が出る一文」と「その語を題に持つ節」の
+        // 区別が付かない: 実測で、xHCI の「4.20 Scratchpad Buffers」の節と、Slot Context
+        // の説明の中で同じ語が 1 度出る紙面が、抜粋だけでは後者が上に来ていた。見出しは
+        // 引用が既に持っているので、ここで足すのに新しい取得は要らない。
+        |result| match result.citation.breadcrumbs.is_empty() {
+            true => result.snippet.clone(),
+            false => format!(
+                "{} / {}\n\n{}",
+                result.citation.document,
+                result.citation.breadcrumbs.join(" > "),
+                result.snippet
+            ),
+        },
+        |result| &mut result.score,
+    );
+    outcome.reranked = reranked.reranked;
+    // 劣化として言うのは「装備しているのに取り直せなかった」ときだけである。装備して
+    // いないことは劣化ではない: 呼び手は取り直しを要求できない(方式と違って要求の欄が
+    // 無い)ので、無い装備の不在を毎回の応答で詫びる理由が無い。埋め込みの側が
+    // 「埋め込みサーバが設定されていない」を言うのは、呼び手が method=hybrid を
+    // 要求できるからである。
+    if let (true, Some(reason)) = (context.reranker.is_some(), reranked.degraded) {
+        outcome.degraded = Some(match outcome.degraded.take() {
+            Some(earlier) => format!("{earlier}。{reason}"),
+            None => reason,
+        });
+    }
+    if reranked.reranked {
+        crate::log_line!(
+            "uniqnode: search: 上位 {} 件をリランカーで取り直した",
+            reranked.rescored
+        );
+    }
+    // 深く採った分は、取り直し(または取り直せなかったこと)が済んでから要求の件数へ
+    // 切る。切るのを最後にするのは、深さの意味が「候補の広さ」であって「返す件数」では
+    // ないからである。低情報として落とした件数は、切る前の順位について数えてある。
+    outcome.results.truncate(request.top_k);
     if let Some(reason) = &outcome.degraded {
         crate::log_line!(
             "uniqnode: search: {} を求められて {} で答えた: {reason}",
@@ -790,10 +878,15 @@ pub fn search_response_body(outcome: &SearchResults) -> Vec<u8> {
         count => format!("\"filtered_low_information\":{count},"),
     };
     format!(
+        // 取り直したときは得点の意味が変わる(順位付けにしか使えない logit)。方式は
+        // 一次検索が何だったかを言い続け、得点の意味だけが差し替わる(crate::rerank)。
         "{{{degraded}{filtered}\"method\":\"{}\",\"results\":[{}],\"score_semantics\":\"{}\"}}",
         outcome.method.as_str(),
         results.join(","),
-        outcome.method.score_semantics(),
+        match outcome.reranked {
+            true => crate::rerank::RERANK_SCORE_SEMANTICS,
+            false => outcome.method.score_semantics(),
+        },
     )
     .into_bytes()
 }
@@ -1030,7 +1123,7 @@ pub fn parse_search_response(body: &[u8]) -> Result<SearchResults, String> {
         };
         results.push(SearchResult { id, score, snippet, citation });
     }
-    Ok(SearchResults { method, degraded, results, filtered_low_information })
+    Ok(SearchResults { method, degraded, results, filtered_low_information, reranked: false })
 }
 
 /// オブジェクトのバイト列がどれなのかを見分ける(チャンクの本文・チャンクでない c1
@@ -1053,6 +1146,307 @@ pub fn classify_object(bytes: Vec<u8>) -> Fetched {
     match chunk_text {
         Some(chunk_text) => Fetched::Chunk { text: chunk_text, citation: None },
         None => Fetched::Object { text },
+    }
+}
+
+// ---- ページの写し(GET /v1/objects/{chunk_id}/rendition[/{alias}]) ----
+
+/// 写しの鍵を組むために見えの索引から引く、チャンク 1 件の姿。
+struct RenditionSubject {
+    citation: Citation,
+    /// 原本 blob(doc_rev.source)。
+    source: Option<String>,
+    /// 種別(doc_rev の meta.media)。
+    media: Option<String>,
+    page: Option<u32>,
+}
+
+/// 見えの索引からチャンクを引く。見えに無ければ None(旧版のチャンク・このDBノードが
+/// 持っていない ID)。store のロックは呼び手が持つ。
+fn rendition_subject(
+    context: &ApiContext,
+    store: &Store,
+    chunk_id: &str,
+) -> Result<Option<RenditionSubject>, StoreError> {
+    with_current_index(context, store, |index| {
+        index.chunk_by_id(chunk_id).map(|chunk| RenditionSubject {
+            citation: Citation::of(chunk),
+            source: chunk.source.clone(),
+            media: chunk.media.clone(),
+            page: chunk.page,
+        })
+    })
+}
+
+/// ページ番号の照合に使う本文を、検索の索引から集める。索引はチャンクごとに原本 ID と
+/// ページ番号を RAM に持っているので、同じ紙面のチャンク(実測で 1 ページあたり平均
+/// 1.8 件)だけをストアから読めばよい。
+///
+/// 見えを走査して集める道(rendition::PageEvidence::ScanStore)は、その文書のチャンクを
+/// 全部開く。大きな仕様書では桁が違う: sdm_vol2(4,188 チャンク)で実測 5 秒に対し、
+/// 索引から引けば道具の費用(pdftotext 0.05 秒 + pdftoppm 0.06 秒)だけになる。索引を
+/// 持っている serve が走査に落ちる理由は無い。
+fn page_evidence_texts(
+    context: &ApiContext,
+    store: &Store,
+    source: &str,
+    page: u32,
+) -> Result<Vec<String>, StoreError> {
+    let ids = with_current_index(context, store, |index| {
+        (0..index.chunk_count())
+            .map(|position| index.chunk(position))
+            .filter(|chunk| chunk.source.as_deref() == Some(source) && chunk.page == Some(page))
+            .map(|chunk| chunk.id.clone())
+            .collect::<Vec<String>>()
+    })?;
+    let mut texts = Vec::with_capacity(ids.len());
+    for id in ids {
+        // 壊れた 1 個で照合全体を失敗させない(索引の構築と同じ扱い)。
+        let Some(bytes) = store.get_object(&id)? else { continue };
+        let Ok(text) = String::from_utf8(bytes) else { continue };
+        let Ok(c1::Value::Object(chunk)) = c1::parse(&text) else { continue };
+        if let Some(c1::Value::Text(body)) = chunk.get("text") {
+            texts.push(body.clone());
+        }
+    }
+    Ok(texts)
+}
+
+/// ページの写しの鍵(原本 blob とページ番号)。PDF 由来でないチャンク(media が pdf で
+/// ない・ページ番号が無い・原本を持たない)は None である。出せないものの席を作らない
+/// という判断の家はここ 1 つで、カタログ(席を並べる側)と実体(断る側)が同じ答えを見る
+/// (should/0135)。
+fn page_key(subject: &RenditionSubject) -> Option<(&str, u32)> {
+    let source = subject.source.as_deref()?;
+    let page = subject.page?;
+    (subject.media.as_deref() == Some("pdf")).then_some((source, page))
+}
+
+/// 写しの層の誤りをそのまま HTTP にする。状態符号も文言も rendition.rs が決めていて、
+/// ここは既存の誤り応答の形({"error": …})に載せ替えるだけである。
+fn rendition_error_response(error: crate::rendition::RenditionError) -> Response {
+    error_response(error.status(), &error.to_string())
+}
+
+/// 用意できた写しをそのまま返す。Content-Type はレシピ(恒等レシピだけは原本の中身)が
+/// 決めたものである。
+fn rendition_response(rendition: crate::rendition::Rendition) -> Response {
+    Response::bytes_typed(200, rendition.content_type, rendition.bytes)
+}
+
+/// 席 1 つの JSON。状態の判断は rendition::inspect にあり、ここは URL を足して写すだけ。
+fn view_value(
+    store: &Store,
+    base: &str,
+    blob_id: &str,
+    page: u32,
+    alias: &str,
+) -> Result<c1::Value, crate::rendition::RenditionError> {
+    let request = crate::rendition::RenditionRequest { blob_id, page, alias };
+    let status = crate::rendition::inspect(store, &request)?;
+    let mut map = BTreeMap::new();
+    map.insert("alias".to_string(), c1::Value::Text(status.alias.to_string()));
+    map.insert("content_type".to_string(), c1::Value::Text(status.content_type.to_string()));
+    map.insert("state".to_string(), c1::Value::Text(status.state.to_string()));
+    map.insert("url".to_string(), c1::Value::Text(format!("{base}/{}", status.alias)));
+    if let Some(reason) = status.reason {
+        map.insert("reason".to_string(), c1::Value::Text(reason));
+    }
+    if let Some(note) = status.note {
+        map.insert("note".to_string(), c1::Value::Text(note.to_string()));
+    }
+    Ok(c1::Value::Object(map))
+}
+
+/// GET /v1/objects/{chunk_id}/rendition。そのチャンクについて出せる写しの一覧を返す。
+/// ここは何も作らない(ストアを読むだけ)。state は stored(既に在る)・absent(頼めば
+/// 作る)・unavailable(作れない。理由つき)である。
+fn handle_rendition_catalog(context: &ApiContext, chunk_id: &str) -> Response {
+    if !c1::is_object_id(chunk_id) {
+        return error_response(400, "オブジェクトIDの形式が不正");
+    }
+    let store = context.store.lock().expect("lock");
+    let subject = match rendition_subject(context, &store, chunk_id) {
+        Ok(Some(subject)) => subject,
+        // 見えに無いチャンク(旧版・このDBノードが持っていない ID)には席が組めない。
+        Ok(None) => {
+            return error_response(
+                404,
+                "このチャンクは見えに無い(旧版か、このDBノードが持っていない)",
+            )
+        }
+        Err(e) => return store_error_response(e),
+    };
+    let base = format!("/v1/objects/{chunk_id}/rendition");
+    let mut views = Vec::new();
+    match subject.source.as_deref() {
+        // 原本の席は種別によらず作る(markdown の原文テキストも配れる)。
+        Some(blob_id) => match view_value(&store, &base, blob_id, 0, "source") {
+            Ok(view) => views.push(view),
+            Err(e) => return rendition_error_response(e),
+        },
+        // doc_rev が原本を持っていない(壊れた・他実装が書いた)。席は作るが、出せない
+        // ことを理由つきで言う(黙って席を消すと、無いのか作れないのかが読めない)。
+        None => {
+            let mut map = BTreeMap::new();
+            map.insert("alias".to_string(), c1::Value::Text("source".to_string()));
+            map.insert(
+                "content_type".to_string(),
+                c1::Value::Text("application/octet-stream".to_string()),
+            );
+            map.insert(
+                "state".to_string(),
+                c1::Value::Text(crate::rendition::STATE_UNAVAILABLE.to_string()),
+            );
+            map.insert(
+                "reason".to_string(),
+                c1::Value::Text("この文書の doc_rev に原本(source)が無い".to_string()),
+            );
+            map.insert("url".to_string(), c1::Value::Text(format!("{base}/source")));
+            views.push(c1::Value::Object(map));
+        }
+    }
+    // ページの写しの席は、PDF 由来のチャンクにだけ作る(出せないものの席を作らない)。
+    if let Some((blob_id, page)) = page_key(&subject) {
+        for alias in ["thumb", "page", "pagepdf"] {
+            match view_value(&store, &base, blob_id, page, alias) {
+                Ok(view) => views.push(view),
+                Err(e) => return rendition_error_response(e),
+            }
+        }
+    }
+    Response::json(
+        200,
+        json_object(vec![
+            ("citation", citation_value(&subject.citation)),
+            (
+                "media",
+                match &subject.media {
+                    Some(media) => c1::Value::Text(media.clone()),
+                    None => c1::Value::Null,
+                },
+            ),
+            (
+                "page",
+                match subject.page {
+                    Some(page) => c1::Value::Integer(page as i64),
+                    None => c1::Value::Null,
+                },
+            ),
+            (
+                "source",
+                match &subject.source {
+                    Some(source) => c1::Value::Text(source.clone()),
+                    None => c1::Value::Null,
+                },
+            ),
+            ("views", c1::Value::Array(views)),
+        ]),
+    )
+}
+
+/// GET /v1/objects/{chunk_id}/rendition/{alias}。無ければ作って足して返す。
+///
+/// 錠の規律(node/src/embed.rs・node/src/sync.rs と同じ): 生成は poppler との往復で実測
+/// 0.4 秒かかるので、そのあいだストアの錠を持たない。三段に割ってあり(rendition.rs の
+/// prepare / render / commit)、錠を握るのは第 1 段と第 3 段だけである。
+fn handle_rendition(context: &ApiContext, chunk_id: &str, alias: &str) -> Response {
+    if !c1::is_object_id(chunk_id) {
+        return error_response(400, "オブジェクトIDの形式が不正");
+    }
+    // 知らない別名は鍵を組む前に断る(許可表を知るのは rendition.rs)。
+    let recipe = match crate::rendition::recipe_for_alias(alias) {
+        Ok(recipe) => recipe,
+        Err(e) => return rendition_error_response(e),
+    };
+    let options = crate::rendition::RenditionOptions::in_data_dir(&context.data_dir);
+
+    // 第 1 段(錠を持つ): チャンクから鍵を組み、既に在るなら読むだけで返す。
+    let prepared = {
+        let store = context.store.lock().expect("lock");
+        let subject = match rendition_subject(context, &store, chunk_id) {
+            Ok(Some(subject)) => subject,
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "このチャンクは見えに無い(旧版か、このDBノードが持っていない)",
+                )
+            }
+            Err(e) => return store_error_response(e),
+        };
+        let key = match (page_key(&subject), recipe.is_identity(), &subject.source) {
+            (Some(key), _, _) => (key.0.to_string(), key.1),
+            // 原本そのものは PDF 由来でなくても配れる。
+            (None, true, Some(source)) => (source.clone(), 0),
+            (None, false, Some(_)) => {
+                return error_response(
+                    400,
+                    &format!(
+                        "チャンク {chunk_id} は PDF の紙面に結びついていない\
+                         (media={}、page={})ので {alias} の写しは作れない\
+                         (この鎖にあるのは source の席だけである)",
+                        subject.media.as_deref().unwrap_or("不明"),
+                        match subject.page {
+                            Some(page) => page.to_string(),
+                            None => "無し".to_string(),
+                        }
+                    ),
+                )
+            }
+            (None, _, None) => {
+                return error_response(404, "この文書の doc_rev に原本(source)が無い")
+            }
+        };
+        let request = crate::rendition::RenditionRequest {
+            blob_id: &key.0,
+            page: key.1,
+            alias,
+        };
+        // 照合の材料は索引から引く(走査に落ちない。page_evidence_texts の理由を参照)。
+        let evidence = if options.verify_page {
+            match page_evidence_texts(context, &store, &key.0, key.1) {
+                Ok(texts) => texts,
+                Err(e) => return store_error_response(e),
+            }
+        } else {
+            Vec::new()
+        };
+        match crate::rendition::prepare(
+            &store,
+            &options,
+            &request,
+            crate::rendition::PageEvidence::Given(&evidence),
+        ) {
+            Ok(prepared) => prepared,
+            Err(e) => return rendition_error_response(e),
+        }
+    }; // ここで錠を放す。
+
+    let work = match prepared {
+        crate::rendition::Prepared::Ready(rendition) => return rendition_response(rendition),
+        crate::rendition::Prepared::Work(work) => work,
+    };
+    // 第 2 段(錠を持たない): poppler を回す。このあいだ他の要求はストアを使える。
+    let started = std::time::Instant::now();
+    let rendered = match crate::rendition::render(&work) {
+        Ok(rendered) => rendered,
+        Err(e) => return rendition_error_response(e),
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    // 第 3 段(錠を取り直す): ストアへ足して名前を付ける。
+    let mut store = context.store.lock().expect("lock");
+    match crate::rendition::commit(&mut store, work, rendered) {
+        Ok(rendition) => {
+            // 作ったことは記録に残す(費用の実測は、この行だけが後から読める根拠になる)。
+            crate::log_line!(
+                "uniqnode: rendition: {chunk_id} の {alias} を {elapsed_ms} ミリ秒で作った\
+                 ({} バイト、{})",
+                rendition.bytes.len(),
+                rendition.recipe
+            );
+            rendition_response(rendition)
+        }
+        Err(e) => rendition_error_response(e),
     }
 }
 
@@ -1159,6 +1553,22 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
                 200,
                 json_object(vec![("referrers", c1::Value::Array(referrers))]),
             );
+        }
+        // ページの写し(node/src/rendition.rs)。鍵は取り込み済みチャンクの ID で、原本
+        // blob とページ番号は見えの索引から引く(呼び手は「どの PDF の何ページか」を
+        // 知らなくてよい)。カタログは席を並べるだけで何も作らず、実体の口は無ければ
+        // 作って足す。判断はすべて rendition.rs にあり、ここは HTTP の被せ物である。
+        if let Some(chunk_id) = rest.strip_suffix("/rendition") {
+            if method != "GET" {
+                return error_response(405, "GET のみ");
+            }
+            return handle_rendition_catalog(context, chunk_id);
+        }
+        if let Some((chunk_id, alias)) = rest.split_once("/rendition/") {
+            if method != "GET" {
+                return error_response(405, "GET のみ");
+            }
+            return handle_rendition(context, chunk_id, alias);
         }
         let id = rest;
         if method != "GET" {
@@ -1317,7 +1727,13 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
                 Err(_) => return error_response(400, "ボディが UTF-8 でない"),
             }
         };
-        let chunks = crate::ingest::chunk_for_media(media, text);
+        // PDF は節見出しの経路も載せる(node/src/outline.rs)。取れなければ理由を記録に
+        // 残して、見出しの無いチャンクとして続ける(黙って諦めない。must/0022)。
+        let (chunks, outline_reason) =
+            crate::ingest::chunk_for_media_with_source(media, text, &request.body);
+        if let Some(reason) = outline_reason {
+            crate::log_line!("uniqnode: ingest: {collection}/{stem} の節見出し: {reason}");
+        }
         let input = crate::ingest::DocumentInput {
             collection,
             name: stem,
@@ -1385,6 +1801,7 @@ mod tests {
                 },
             ],
             filtered_low_information: 2,
+            reranked: false,
         };
         let body = search_response_body(&outcome);
         let text = String::from_utf8(body.clone()).expect("utf-8");

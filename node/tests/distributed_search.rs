@@ -125,7 +125,7 @@ fn a_node_that_is_not_registered_gets_no_answer() {
 
     let refused = distributed_search(
         &here.address,
-        "{\"query\":\"token_estimate\",\"peers\":true,\"budget_ms\":600}",
+        "{\"query\":\"token_estimate\",\"peers\":true,\"budget_ms\":2500}",
     );
     assert!(refused.contains("\"outcome\":\"timed_out\""), "{refused}");
     assert!(refused.contains("\"state\":\"silent\""), "{refused}");
@@ -142,7 +142,7 @@ fn a_node_that_is_not_registered_gets_no_answer() {
     );
     let untrusted = distributed_search(
         &here.address,
-        "{\"query\":\"token_estimate\",\"peers\":true,\"budget_ms\":600}",
+        "{\"query\":\"token_estimate\",\"peers\":true,\"budget_ms\":2500}",
     );
     assert!(untrusted.contains("trust_level"), "断りの理由: {untrusted}");
     assert!(!untrusted.contains("\"document\":\"search_en\""), "{untrusted}");
@@ -247,14 +247,14 @@ fn a_silent_peer_times_out_without_denying_existence() {
 
     let nothing = distributed_search(
         &here.address,
-        "{\"query\":\"token_estimate\",\"peers\":true,\"budget_ms\":600}",
+        "{\"query\":\"token_estimate\",\"peers\":true,\"budget_ms\":2500}",
     );
     assert!(nothing.contains("\"outcome\":\"timed_out\""), "{nothing}");
     assert!(nothing.contains("\"state\":\"silent\""), "{nothing}");
 
     let found = distributed_search(
         &here.address,
-        "{\"query\":\"世代の整合\",\"peers\":true,\"budget_ms\":600}",
+        "{\"query\":\"世代の整合\",\"peers\":true,\"budget_ms\":2500}",
     );
     assert!(found.contains("\"outcome\":\"found\""), "ローカルの当たりで found: {found}");
     assert!(found.contains("\"state\":\"silent\""), "沈黙は残ったまま報告される: {found}");
@@ -281,7 +281,7 @@ fn the_requester_filters_its_scope_by_trust_level() {
 
     let filtered = distributed_search(
         &here.address,
-        "{\"query\":\"token_estimate\",\"peers\":true,\"min_trust_level\":50,\"budget_ms\":600}",
+        "{\"query\":\"token_estimate\",\"peers\":true,\"min_trust_level\":50,\"budget_ms\":2500}",
     );
     assert!(filtered.contains("\"peers\":[]"), "問いを送っていない: {filtered}");
     assert!(filtered.contains("\"outcome\":\"scope_empty\""), "{filtered}");

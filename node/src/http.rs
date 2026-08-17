@@ -65,6 +65,13 @@ impl Response {
             shutdown_after: false,
         }
     }
+    /// 型を名乗るバイト列(PDF のページの写しのように、何であるかが octet-stream では
+    /// 足りない応答用)。型を決めるのは呼び手(node/src/rendition.rs のレシピ表)であり、
+    /// ここは受け取った字句をそのままヘッダに書く。&'static str なのは、名乗ってよい型を
+    /// 表に書かれたものに限るためである(要求の文字列がそのままヘッダへ抜ける道を作らない)。
+    pub fn bytes_typed(status: u16, content_type: &'static str, body: Vec<u8>) -> Response {
+        Response { status, content_type, body, shutdown_after: false }
+    }
 }
 
 fn status_reason(status: u16) -> &'static str {
@@ -78,6 +85,9 @@ fn status_reason(status: u16) -> &'static str {
         413 => "Payload Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",
+        // 設備が足りない(pdftotext や poppler が無い)ときの状態符号。導入すれば同じ
+        // 要求が通るので、理由句も「今は使えない」と読めるものにする。
+        503 => "Service Unavailable",
         _ => "Response",
     }
 }
@@ -234,11 +244,20 @@ fn write_response(writer: &mut TcpStream, response: &Response, close: bool) -> s
 /// そのまま信じて確保しないための歯止め。
 const MAX_CLIENT_BODY_BYTES: usize = MAX_BODY_BYTES;
 
-/// クライアントが読んだ応答。ヘッダは読み捨てる(呼び手が使うのは状態符号と本文だけ)。
+/// クライアントが読んだ応答。ヘッダのうち持ち帰るのは Content-Type だけである。
+///
+/// 中継する呼び手(RAG ビューワ node/src/viewer.rs)は、上流が名乗った型をそのまま
+/// 下流へ写す必要がある: ページの写しは image/jpeg や image/png で、octet-stream に
+/// 落とすとブラウザが絵として描けない。型を捨てていたときは、serve が image/jpeg を
+/// 返してもビューワ越しでは octet-stream になっていた(実測)。
+///
+/// Option なのは「相手が名乗らなかった」と「空だと名乗った」を区別するためである
+/// (名乗らない相手には、こちらが勝手に型を決めてよい)。
 #[derive(Debug)]
 pub struct ClientResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    pub content_type: Option<String>,
 }
 
 /// 応答の先頭だけを診断に載せる(全文をエラーメッセージに流し込まない)。相手が誤りを
@@ -349,6 +368,7 @@ fn read_client_response(reader: &mut impl BufRead) -> Result<ClientResponse, Str
         .ok_or_else(|| format!("応答ラインが不正: {status_line:?}"))?;
     let mut content_length: Option<usize> = None;
     let mut chunked = false;
+    let mut content_type: Option<String> = None;
     loop {
         let mut line = String::new();
         let read = reader.read_line(&mut line).map_err(|e| format!("ヘッダ読み取り: {e}"))?;
@@ -370,6 +390,10 @@ fn read_client_response(reader: &mut impl BufRead) -> Result<ClientResponse, Str
                 && value.to_ascii_lowercase().contains("chunked")
             {
                 chunked = true;
+            } else if name.eq_ignore_ascii_case("content-type") {
+                // 中継する呼び手が下流へそのまま写す(ClientResponse の説明)。値は
+                // 相手の名乗りをそのまま持ち帰り、こちらでは解釈しない。
+                content_type = Some(value.to_string());
             }
         }
     }
@@ -391,7 +415,7 @@ fn read_client_response(reader: &mut impl BufRead) -> Result<ClientResponse, Str
             .map_err(|e| format!("ボディ読み取り: {e}"))?;
         body
     };
-    Ok(ClientResponse { status, body })
+    Ok(ClientResponse { status, body, content_type })
 }
 
 /// chunked の本文を繋ぐ。長さ行(16進。`;` 以降の拡張は捨てる)、その長さのバイト列、
@@ -485,6 +509,8 @@ mod tests {
             post_json(&address, "/v1/embeddings", b"{\"input\":[\"x\"]}", TIMEOUT).expect("post");
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"{\"a\":1}");
+        // 相手が名乗った型は持ち帰る(中継する呼び手が下流へ写す)。
+        assert_eq!(response.content_type.as_deref(), Some("application/json"));
         let request = String::from_utf8(handle.join().expect("join")).expect("utf-8");
         assert!(request.starts_with("POST /v1/embeddings HTTP/1.1\r\n"), "{request:?}");
         assert!(request.contains("Content-Type: application/json\r\n"), "{request:?}");
@@ -515,6 +541,8 @@ mod tests {
         let response = get(&address, "/x", TIMEOUT).expect("get");
         assert_eq!(response.status, 500);
         assert_eq!(response.body, b"boom");
+        // 名乗らなかった相手には型が無い(中継する側が勝手に決めてよい)。
+        assert_eq!(response.content_type, None);
         handle.join().expect("join");
     }
 

@@ -1122,6 +1122,8 @@ mod tests {
             referrers: std::sync::Mutex::new(None),
             search: std::sync::Mutex::new(None),
             embedding: None,
+            reranker: None,
+            data_dir: dir.clone(),
         };
         (dir, StdioServer::new(Backend::Local(Box::new(context))))
     }

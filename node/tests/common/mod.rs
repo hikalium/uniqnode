@@ -87,6 +87,22 @@ pub fn require_pdftotext() {
     }
 }
 
+/// ページの写しのテストの前提確認。poppler 一式(pdftoppm・pdftocairo)が無い環境では
+/// 黙って飛ばさず、導入手順を示して失敗する(require_pdftotext と同じ扱い。飛ばして緑に
+/// すると、検証したのか検証を諦めたのかが結果から区別できなくなる)。
+///
+/// 探索は本番と同じ道(uniqnode::rendition::located_tool)を通す。この機械では PATH に
+/// pdftotext だけを symlink してあり、pdftoppm は pdftotext の実体の隣にしかない。
+/// Command::new("pdftoppm") で確かめると、serve は見つけられるのにテストだけが落ちる。
+pub fn require_poppler() {
+    require_pdftotext();
+    for tool in [uniqnode::rendition::Tool::Pdftoppm, uniqnode::rendition::Tool::Pdftocairo] {
+        if let Err(error) = uniqnode::rendition::located_tool(tool) {
+            panic!("ページの写しのテストには poppler 一式が必要: {error}");
+        }
+    }
+}
+
 /// 埋め込みのテストの前提確認。埋め込みサーバが無い環境では黙って飛ばさず、起動の手順を
 /// 示して失敗する(docs/design/TESTING.md の外部コマンドの規約。require_pdftotext と同じ
 /// 扱い)。飛ばして緑にすると、検証したのか検証を諦めたのかが結果から区別できなくなる。
@@ -185,6 +201,9 @@ pub fn start_server(name: &str) -> Server {
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    /// 名乗られた Content-Type(ヘッダが無ければ空)。ページの写しは何であるかを
+    /// 型で名乗るので、本文だけでなくヘッダも検証の対象になる。
+    pub content_type: String,
 }
 
 pub fn read_response(reader: &mut BufReader<TcpStream>) -> HttpResponse {
@@ -197,6 +216,7 @@ pub fn read_response(reader: &mut BufReader<TcpStream>) -> HttpResponse {
         .parse()
         .expect("numeric status");
     let mut content_length = 0usize;
+    let mut content_type = String::new();
     loop {
         let mut line = String::new();
         reader.read_line(&mut line).expect("header line");
@@ -208,11 +228,14 @@ pub fn read_response(reader: &mut BufReader<TcpStream>) -> HttpResponse {
             if name.trim().eq_ignore_ascii_case("content-length") {
                 content_length = value.trim().parse().expect("content length");
             }
+            if name.trim().eq_ignore_ascii_case("content-type") {
+                content_type = value.trim().to_string();
+            }
         }
     }
     let mut body = vec![0u8; content_length];
     reader.read_exact(&mut body).expect("body");
-    HttpResponse { status, body }
+    HttpResponse { status, body, content_type }
 }
 
 pub fn simple(address: &str, method: &str, path: &str, body: &[u8]) -> HttpResponse {

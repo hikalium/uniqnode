@@ -268,6 +268,13 @@ ANSWER { "query_id": …, "responder": <DBノードID>, "payload": …, "at": �
   応答側の共有ポリシー判定が要る kind:search から。既定の scope は data_dir/peers.json
   (`{"peers":[{"address":…}]}`。編集に再起動不要)。沈黙したピアには予算内で周期的に
   問い直してよい(MAY。沈黙は終端ではない)。
+- kind:search の具体化: 署名付き QUERY を `POST /v1/peer/query` で受け、応答は同じ HTTP 応答に
+  署名付き ANSWER で返す。署名対象は `sig` を除いた c1 正規形で、鍵は origin / responder の
+  DBノードID そのもの。ANSWER は得点を載せず順位だけを運ぶ(融合が順位ベースであり、
+  小数を持たなければ署名対象が c1 正規形のままで済む)。scope は線に載せず、要求側の
+  絞り込み(宛先の選択と trust_level 閾値)として送信前に効く。応答側の判定材料は
+  peers.json のピアレコード(`node_id` / `trust_level` / `share.collections`。§6.3)である。
+  実装は [docs/design/DISTRIBUTED_SEARCH.md](#e577f6db-659e-4eb8-a152-3b7780e4a9d1)。
 
 ### 7.2 開世界セマンティクス
 
@@ -399,12 +406,13 @@ uniqnode コアの上に応用層が載る。検索(RAG)層とその上の MCP �
 | `GET /v1/objects/{id}/referrers` | 逆引き(この ID を参照する既知オブジェクトの一覧。自分の知る範囲の導出データで、空は不在の言明ではない) |
 | `POST /v1/objects` | オブジェクト投入(べき等。ID を返す) |
 | `PUT /v1/collections/{c}/documents/{name}` | 文書の取り込み(本文は生バイト列。種別は name の拡張子で判定) |
-| `POST /v1/search` | 検索(method で bm25 / embedding / hybrid を選ぶ。既定は埋め込みサーバの設定があれば hybrid、無ければ bm25。索引もベクトルも導出データで、見え = collections/ 配下の現行文書のチャンクだけが対象。各件は出典を伴う: 文書名・位置・見出し・PDF はページ・取得日時 at = その版を見えに置いた ref レコードの時刻(§4.4)) |
+| `POST /v1/search` | 検索(method で bm25 / embedding / hybrid を選ぶ。既定は埋め込みサーバの設定があれば hybrid、無ければ bm25。索引もベクトルも導出データで、見え = collections/ 配下の現行文書のチャンクだけが対象。各件は出典を伴う: 文書名・位置・見出し・PDF はページ・取得日時 at = その版を見えに置いた ref レコードの時刻(§4.4)。`peers` を付けると登録ピアへ散布して順位を融合する(§7.1 の kind:search)) |
 | `GET /v1/refs` | ref の一覧(名前・target・seq・at) |
 | `GET /v1/refs/...` / `PUT /v1/refs/...` | ref の解決と更新(自DBノードの名前空間のみ書ける) |
 | `POST /v1/pins` / `GET /v1/pins` | pin の設定(発行者は同時に保持表明する)/ 一覧と保持者 |
 | `GET /v1/health/events` | 健全性の遷移イベント(遷移でのみ記録。should/0129) |
 | `POST /v1/query` | クエリ(ローカル、または scope 指定でネットワークへ) |
+| `POST /v1/peer/query` | ピアからの署名付き QUERY(kind:search)を受けて署名付き ANSWER を返す(§7.1) |
 | `GET /v1/queries/{id}` | クエリハンドル(回答の単調増加集合と、応答済み/沈黙ピアの一覧) |
 | `GET /v1/peers` | 設定済みピア(既定 scope)の一覧 |
 | `GET /v1/replication/signers` | 署名者と最終 seq の一覧(レプリケーションのカーソル) |

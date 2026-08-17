@@ -9,18 +9,13 @@
 ([docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580))、検索方式を差し替えて
 数値で比べる評価ハーネス([docs/design/EVAL.md](#1109a04b-923e-4493-8f00-d704047d6a2a))、
 search と fetch を LLM エージェントへ出す MCP アダプタ
-([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))まで実装済み。テスト179本、
-CLI + HTTP API + MCP。
+([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))、署名付き QUERY を登録ピアへ
+散布して順位を融合する分散検索
+([docs/design/DISTRIBUTED_SEARCH.md](#e577f6db-659e-4eb8-a152-3b7780e4a9d1))まで実装済み。
+テスト196本、CLI + HTTP API + MCP。
 「LLM から常用できる RAG ストレージ」というこの計画のゴールは、ここで成立している。
-以下は、その上に積む残りの作業項目を実行順に並べたものである(先頭は 6 の分散検索。
+以下は、その上に積む残りの作業項目を実行順に並べたものである(先頭は 7 の運用の仕上げ。
 済んで削除された項目の番号は再利用しない)。
-
-## 6. 分散検索(kind: search)
-
-QUERY メッセージ署名(要求者の認証)と応答側の trust_level フィルタを入れた上で、
-検索クエリを登録ピアへ散布し、各ノードのローカル top-k を RRF で統合する
-(順位ベースなのでノード間のスコア較正が不要)。
-完了条件: SPEC §7.1 の kind:search が動き、2ノードに分かれた知識が1クエリで返る。
 
 ## 7. 運用の仕上げ
 
@@ -38,7 +33,15 @@ LRU+参照カウント evict(SPEC §5.4)を有効化する。容量の小さい�
 
 現状は groups.json への手動配置。署名済み文書なので伝播交換に載せる素地はある。
 
-## 10. その先
+## 10. 分散検索の残り
+
+オブジェクト単位の共有ポリシー(現状の share.collections が限るのは検索からの見つけ方だけ
+で、チャンクの ID を知る相手は GET /v1/objects/{id} で読める。
+[docs/design/DISTRIBUTED_SEARCH.md](#e577f6db-659e-4eb8-a152-3b7780e4a9d1))、kind:search の
+クエリハンドル(回答の単調増加集合の観測。SPEC §7.2 の SHOULD)、MCP の search ツールから
+散布を頼めるようにすること(常用の口が 1 台に閉じたままなので、必要になってから決める)。
+
+## 11. その先
 
 Web スナップショット(rag_plan の W トラック)、mgcanvas 形式エクスポートによる可視化、
 Contextual Retrieval・リランカーなどの検索品質向上(評価ハーネスで測りながら)。

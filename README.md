@@ -14,11 +14,16 @@
 
 ## 状態
 
-適合レベル L0(単一DBノードのストア。SPEC §11)を実装済み。依存クレートなし。
+適合レベル L0〜L4(単一DBノードのストア・伝播交換・分散クエリ・レプリカ健全性・グループ鍵。
+SPEC §11)を実装済み。依存クレートなし。
 
 - node/: 実装本体。SHA-256/512、Ed25519(RFC 8032、openssl と相互検証済み)、
   正規化 JSON(c1)、pack セグメント+MANIFEST+署名付き reflog のストア、fsck、
-  CLI(`uniqnode init|status|put|get|set-ref|refs|fsck|serve`)、HTTP API。
+  CLI、HTTP API。その上に、文書の取り込み
+  ([docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b))、出典付きの検索
+  ([docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580))、LLM エージェント向けの
+  MCP アダプタ([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))、ピアへ問いを
+  散布する分散検索([docs/design/DISTRIBUTED_SEARCH.md](#e577f6db-659e-4eb8-a152-3b7780e4a9d1))。
 - sim/: レプリカ・健全性モデル(SPEC §8)の離散イベントシミュレータ。
 
 試す:
@@ -27,6 +32,13 @@
 cargo run -p uniqnode -- serve /tmp/uniqnode-data 127.0.0.1:7440
 curl -X POST --data-binary '{"v":1,"kind":"node","contents":"hello"}' http://127.0.0.1:7440/v1/objects
 curl http://127.0.0.1:7440/v1/status
+```
+
+知識を分けた 2 台へ 1 本の問いを投げるには、双方の `<データディレクトリ>/peers.json` に
+相手のアドレスと DBノードID(`GET /v1/status` の node_id)を書いてから、`peers` を付ける:
+
+```
+curl -X POST -d '{"query":"…","peers":true,"budget_ms":3000}' http://127.0.0.1:7440/v1/search
 ```
 
 serve と mcp のログは、何も指定しなくても `<データディレクトリ>/logs/` に残る(上の例なら

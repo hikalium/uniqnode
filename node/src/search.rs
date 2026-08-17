@@ -562,10 +562,22 @@ impl SearchIndex {
         scope: &CollectionScope,
         top_k: usize,
     ) -> Vec<ScoredChunk> {
+        self.ranked_lexical(query, scope, top_k).hits
+    }
+
+    /// BM25 の順位と、その順位がクエリの語をどれだけ覆っているか。被覆は呼び手(融合)が
+    /// 「語の一致がどれだけ効いているか」を判断するために要る。
+    pub fn ranked_lexical(
+        &self,
+        query: &str,
+        scope: &CollectionScope,
+        top_k: usize,
+    ) -> LexicalRanking {
         let mut query_terms = terms_of(query);
         query_terms.sort();
         query_terms.dedup();
-        let mut scores: BTreeMap<usize, f64> = BTreeMap::new();
+        // (得点の合計, 一致した異なりクエリ語の数)。
+        let mut scores: BTreeMap<usize, (f64, usize)> = BTreeMap::new();
         for term in &query_terms {
             let postings = self.postings_of(term);
             if postings.is_empty() {
@@ -577,22 +589,63 @@ impl SearchIndex {
                 if !scope.allows(&chunk.collection) {
                     continue;
                 }
-                *scores.entry(posting.chunk).or_insert(0.0) += bm25_term_score(
+                let entry = scores.entry(posting.chunk).or_insert((0.0, 0));
+                entry.0 += bm25_term_score(
                     posting.term_frequency,
                     document_frequency,
                     self.chunks.len(),
                     chunk.term_count,
                     self.average_length,
                 );
+                entry.1 += 1;
             }
         }
-        let mut ranked: Vec<(usize, f64)> = scores.into_iter().collect();
+        let query_term_count = query_terms.len();
+        // 被覆率を得点に掛ける(古典的な coord)。クエリ語の一部にしか当たっていない
+        // チャンクを、当たった語が稀だというだけで上位に置かないためである。文字 bigram の
+        // 索引では、この歪みが日本語の複合語で顕著に出る: 「割り込み」と「取り込み」は
+        // bigram を 2 つ共有し、英語コーパスの中では日本語 bigram の df が 1 なので idf が
+        // 跳ね上がって、無関係な文書が高得点で 1 位を取る(実測 2026-08-17。
+        // 20260817-japanese-partial-match (uuid:ff9299d5-3dfb-4ad0-9b3b-f5d597271cdc))。
+        let mut ranked: Vec<(usize, f64, usize)> = scores
+            .into_iter()
+            .map(|(position, (score, matched))| {
+                let coverage = matched as f64 / query_term_count.max(1) as f64;
+                (position, score * coverage, matched)
+            })
+            .collect();
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         ranked.truncate(top_k);
-        ranked
-            .into_iter()
-            .map(|(position, score)| ScoredChunk { position, score })
-            .collect()
+        // 返す順位の中で最もよく覆っているものを、その順位全体の被覆とする(融合に効かせる
+        // のは「語の一致がどれだけ当たったか」であり、下位の弱い件ではない)。
+        let best_matched = ranked.iter().map(|(_, _, matched)| *matched).max().unwrap_or(0);
+        LexicalRanking {
+            hits: ranked
+                .into_iter()
+                .map(|(position, score, _)| ScoredChunk { position, score })
+                .collect(),
+            matched_terms: best_matched,
+            query_terms: query_term_count,
+        }
+    }
+}
+
+/// BM25 の順位 1 回ぶんと、その被覆(クエリの異なり語のうち何語に当たったか)。
+pub struct LexicalRanking {
+    pub hits: Vec<ScoredChunk>,
+    /// 返した順位の中で最もよく覆っている件の、一致した異なりクエリ語の数。
+    pub matched_terms: usize,
+    /// クエリの異なり語の数(0 なら索引語の無いクエリ)。
+    pub query_terms: usize,
+}
+
+impl LexicalRanking {
+    /// 被覆率(0.0..=1.0)。語の無いクエリは 0。
+    pub fn coverage(&self) -> f64 {
+        if self.query_terms == 0 {
+            return 0.0;
+        }
+        self.matched_terms as f64 / self.query_terms as f64
     }
 }
 

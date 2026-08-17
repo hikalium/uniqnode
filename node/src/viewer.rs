@@ -178,6 +178,39 @@ mod tests {
         assert!(PAGE.contains("\">\": \"&gt;\""), "> のエスケープ");
     }
 
+    /// 入力欄と選択肢は、背景と文字を色の組で指定する。片方だけを指定すると、開いた
+    /// 選択肢が地の色を失って白地に白文字になる(暗い配色で実際に起きた)。開いた選択肢は
+    /// 別の描画面に出て頁の色を継がないので、option にも同じ組を与える。
+    #[test]
+    fn form_controls_set_both_background_and_foreground() {
+        assert!(
+            PAGE.contains("option { background: Canvas; color: CanvasText; }"),
+            "開いた選択肢に色の組が無い"
+        );
+        assert!(
+            !PAGE.contains("background: transparent"),
+            "地の色を持たない入力欄が残っている"
+        );
+        // 明暗のどちらでも噛み合わせるための宣言(システム色はこれに追従する)。
+        assert!(PAGE.contains("color-scheme: light dark"), "配色の申告が無い");
+    }
+
+    /// 頁は全文をチャンク ID そのままの道で取る。この API のパスは生のまま扱う規約
+    /// (パーセントデコードしない。node/src/http.rs)なので、`s256:` のコロンを %3A に
+    /// 直すと ID の形の検査に落ちて 404 になる(実際にそうなった)。
+    #[test]
+    fn the_page_asks_for_an_object_by_its_raw_id() {
+        assert!(PAGE.contains("`/v1/objects/${id}`"), "全文を取る道が ID そのままでない");
+        assert!(
+            !PAGE.contains("encodeURIComponent"),
+            "パーセント符号化した ID は、受け側の形の検査を通らない"
+        );
+        // 受け側が実際にその形を通すこと(頁と受け側が同じ形を見ている)。
+        let id = format!("s256:{}", "ab".repeat(32));
+        assert_eq!(object_path(&format!("/v1/objects/{id}")), Some(format!("/v1/objects/{id}")));
+        assert_eq!(object_path(&format!("/v1/objects/{}", id.replace(':', "%3A"))), None);
+    }
+
     /// 通す口は 5 つだけで、それ以外は 404 になる(素通しにしない)。
     #[test]
     fn only_the_five_endpoints_the_page_uses_are_forwarded() {

@@ -518,17 +518,23 @@ fn embedding_and_fusion_hold_the_recorded_baseline_on_the_fixed_corpus() {
         embedding.detail()
     );
 
-    // 融合: 語の一致が効く 13 対のうち 12 対を 1 位に保ったまま(埋め込み単独が落とした
-    // token_quarters をここで取り返す)、語彙が隔たる 6 対も全部 10 件以内に入れる。
+    // 融合: 19 対のうち 17 対を 1 位に、残りも 5 件以内に入れる。
+    //
+    // この数値は、語の一致に被覆率を効かせた(crate::embed::MIN_FUSION_COVERAGE)ときに
+    // 上がったものである。前の基準線は Recall@1 0.684・Recall@5 0.947・MRR 0.791 で、
+    // 融合が落としていたのは、クエリ語の一部にしか当たっていない文書が BM25 側の上位に
+    // 入り、意味検索の 1 位と同じ重みで先頭を争っていた対である。日本語のクエリは文字
+    // bigram に切れるので、複合語の断片が別の語に当たる(「割り込み」と「取り込み」)。
+    // 被覆の足りない順位を融合の入力から外すと、その混入が消えて 1 位が戻る。
     assert_eq!(
         per_mille(hybrid.mean_recall(1)),
-        684,
+        895,
         "融合の Recall@1 の基準線\n{}",
         hybrid.detail()
     );
     assert_eq!(
         per_mille(hybrid.mean_recall(5)),
-        947,
+        1000,
         "融合の Recall@5 の基準線\n{}",
         hybrid.detail()
     );
@@ -540,7 +546,7 @@ fn embedding_and_fusion_hold_the_recorded_baseline_on_the_fixed_corpus() {
     );
     assert_eq!(
         per_mille(hybrid.mean_reciprocal_rank),
-        791,
+        932,
         "融合の MRR の基準線\n{}",
         hybrid.detail()
     );
@@ -567,13 +573,17 @@ fn embedding_and_fusion_hold_the_recorded_baseline_on_the_fixed_corpus() {
         embedding.detail(),
         hybrid.detail()
     );
-    // 埋め込み単独がこの固定コーパスでは融合より高い。コーパスの成り立ちがそうさせて
-    // いる(19 対のうち 6 対が語彙の隔たりの対で、語の一致が原理的に効かない場を多めに
-    // 含む)。実データの分布を代表する数値ではないので、既定の方式をこの比較だけで
+    // 融合がこの固定コーパスでは埋め込み単独を上回る。被覆率を効かせる前は逆で
+    // (埋め込み MRR 0.896 対 融合 0.791)、融合を押し下げていたのは、クエリ語の一部に
+    // しか当たっていない文書が BM25 側の上位に混ざることだった。被覆の足りない順位を
+    // 融合の入力から外すと、語の一致が効く対の 1 位を保ったまま、その混入だけが消える。
+    //
+    // それでも、実データの分布を代表する数値ではない(19 対のうち 6 対が語彙の隔たりの
+    // 対で、語の一致が原理的に効かない場を多めに含む)。既定の方式をこの比較だけで
     // 決めない(EVAL (uuid:1109a04b-923e-4493-8f00-d704047d6a2a) の「既知の制約」)。
     assert!(
-        embedding.mean_reciprocal_rank > hybrid.mean_reciprocal_rank,
-        "この固定コーパスでは埋め込み単独の MRR が融合を上回る記録\n{}\n{}",
+        hybrid.mean_reciprocal_rank > embedding.mean_reciprocal_rank,
+        "被覆を効かせた後は融合の MRR が埋め込み単独を上回る記録\n{}\n{}",
         embedding.detail(),
         hybrid.detail()
     );

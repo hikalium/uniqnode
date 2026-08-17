@@ -25,10 +25,15 @@
   #node { color: var(--dim); font-size: .8rem; }
   form { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin: .9rem 0; }
   #query { flex: 1 1 22rem; }
+  /* 背景と文字は色の組で指定する。片方だけ(たとえば背景 transparent)にすると、
+     開いた選択肢が地の色を失い、暗い配色で白地に白文字になる。Canvas / CanvasText は
+     :root の color-scheme に追従するシステム色なので、明暗のどちらでも噛み合う。 */
   input, select, button { font: inherit; padding: .4rem .55rem;
                           border: 1px solid var(--line); border-radius: 6px;
-                          background: transparent; color: inherit; }
-  button { cursor: pointer; background: var(--panel); }
+                          background: Canvas; color: CanvasText; }
+  /* 開いた選択肢は別の描画面に出るので、頁の色は継がない。ここでも組で指定する。 */
+  option { background: Canvas; color: CanvasText; }
+  button { cursor: pointer; background: var(--panel); color: CanvasText; }
   button:disabled { opacity: .5; cursor: default; }
   label { display: flex; align-items: center; gap: .3rem; color: var(--dim); font-size: .85rem; }
   #notices:empty { display: none; }
@@ -197,7 +202,10 @@ async function showFull(id, div, event) {
   if (target.textContent) { target.textContent = ""; event.target.textContent = "全文"; return; }
   target.textContent = "取得中…";
   try {
-    const raw = await api(`/v1/objects/${encodeURIComponent(id)}`);
+    // ID はそのまま path に置く。API のパスは生のまま扱う規約(パーセントデコードしない)
+    // なので、`s256:` のコロンを %3A に直すと、ID の形の検査に落ちて 404 になる。
+    // 形(s256: と 16 進 64 桁)は受け側が確かめる。
+    const raw = await api(`/v1/objects/${id}`);
     let text = raw;
     try {
       const object = JSON.parse(raw);

@@ -58,6 +58,23 @@ pub const RRF_K: f64 = 60.0;
 /// 融合する形と釣り合う。
 pub const RRF_DEPTH: usize = 10;
 
+/// 融合に語の一致を入れる下限の被覆率(クエリの異なり語のうち、当たった語の割合)。
+/// これを下回る順位は融合の入力にしない。
+///
+/// 境目は実測で選んだ(実測 2026-08-17。20260817-japanese-partial-match
+/// (uuid:ff9299d5-3dfb-4ad0-9b3b-f5d597271cdc))。実データ(仕様書 PDF 25 本 + 論文 1 本)に
+/// 対する問いの被覆は、はっきり二つに割れる:
+/// - 英語の問い 7 本(2 語から 12 語まで): 0.90〜1.00。コーパスが英語なので、当たる
+///   チャンクは問いの語をほぼ全部持っている。
+/// - 日本語の部分一致: 0.25〜0.33。文字 bigram が複合語の断片として当たっている状態で、
+///   「割り込み」が「取り込み」に当たる型である。
+///
+/// 谷は 0.33 と 0.90 のあいだにあり、0.5 はその中に置いた値である。
+///
+/// 得点を下げるだけでは足りないので、融合の入力から外す。RRF は順位しか見ないため、
+/// 被覆の低い 1 件でも「BM25 の 1 位」として意味検索の 1 位と同じ重みを持ってしまう。
+pub const MIN_FUSION_COVERAGE: f64 = 0.5;
+
 /// 方式を指定しない要求で、埋め込みを備えた節点が embedding を選ぶ top_k の上限
 /// (これを超えたら hybrid)。
 ///
@@ -929,16 +946,36 @@ impl HybridSearch<'_> {
                 hits: semantic.into_iter().take(top_k).collect(),
             },
             _ => {
-                let lexical = self.lexical.search_positions(query, scope, fusion_depth(top_k));
-                // BM25 が 1 件も一致しないとき、融合の入力は片方だけになり、順位は埋め込み
-                // 単独とまったく同じ列になる。融合が効いているように見えたまま片肺で答えない
-                // ように、そう言う(黙って劣化しない。should/0128)。実データの純日本語の
-                // 問いでは 14/14 でこれが起きた(実測 2026-08-17)。
-                let one_sided = lexical.is_empty().then(|| {
-                    "BM25 が 1 語も一致せず、順位は埋め込み単独と同じである(融合は効いて\
-                     いない。文書が使う語をクエリに入れると語の一致も効く)"
-                        .to_string()
-                });
+                let lexical_ranking =
+                    self.lexical.ranked_lexical(query, scope, fusion_depth(top_k));
+                // 融合の入力が片方だけになるとき、順位は埋め込み単独とまったく同じ列に
+                // なる。融合が効いているように見えたまま片肺で答えないように、そう言う
+                // (黙って劣化しない。should/0128)。理由は二つある: 語が 1 つも当たら
+                // なかったときと、当たったのが問いの一部だけだったときである。
+                let one_sided = if lexical_ranking.hits.is_empty() {
+                    // 実データの純日本語の問いでは 14/14 でこれが起きた(実測 2026-08-17)。
+                    Some(
+                        "BM25 が 1 語も一致せず、順位は埋め込み単独と同じである(融合は効いて\
+                         いない。文書が使う語をクエリに入れると語の一致も効く)"
+                            .to_string(),
+                    )
+                } else if lexical_ranking.coverage() < MIN_FUSION_COVERAGE {
+                    Some(format!(
+                        "BM25 は問いの {} 語のうち最大 {} 語(被覆 {:.2})にしか当たらないので、\
+                         融合に入れていない。順位は埋め込み単独と同じである(文書が使う語を\
+                         クエリに入れると語の一致も効く)",
+                        lexical_ranking.query_terms,
+                        lexical_ranking.matched_terms,
+                        lexical_ranking.coverage()
+                    ))
+                } else {
+                    None
+                };
+                // 被覆の足りない順位は融合に入れない。入れると、クエリ語の一部にしか当たって
+                // いない 1 件が BM25 側の 1 位として、意味検索の 1 位と同じ重みで先頭を争う
+                // (RRF は順位しか見ないので、得点をいくら下げても順位は動かない)。
+                let lexical =
+                    if one_sided.is_some() { Vec::new() } else { lexical_ranking.hits };
                 let degraded = match (coverage, one_sided) {
                     (Some(coverage), Some(one_sided)) => Some(format!("{coverage}。{one_sided}")),
                     (found, None) | (None, found) => found,

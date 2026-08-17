@@ -288,7 +288,8 @@ impl HealthEngine {
             peer_entries.iter().map(|entry| entry.address.clone()).collect();
 
         // 生存確認(status)と署名レコードの伝播交換。期限は短く(沈黙の確定を速く)。
-        // 証明書付きエントリは、実際の node_id が証明書の主張と一致するときだけ受け入れる。
+        // node_id を主張するエントリ(明示の設定か証明書)は、実際の node_id が主張と
+        // 一致するときだけ受け入れる。
         for entry_config in &peer_entries {
             let address = &entry_config.address;
             let peer = HttpPeer::with_timeout(address.clone(), Duration::from_secs(2));
@@ -304,13 +305,13 @@ impl HealthEngine {
                 });
                 match &status {
                     Ok(view) => {
-                        let identity_matches = match &entry_config.certified_node_id {
+                        let identity_matches = match &entry_config.node_id {
                             None => true,
                             Some(expected) if *expected == view.node_id => true,
                             Some(expected) => {
                                 crate::log_line!(
-                                    "uniqnode: ピア {address} の node_id が証明書と一致しない\
-                                     (証明書 {expected}, 実際 {})",
+                                    "uniqnode: ピア {address} の node_id が設定と一致しない\
+                                     (設定 {expected}, 実際 {})",
                                     view.node_id
                                 );
                                 false

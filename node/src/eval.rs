@@ -14,7 +14,7 @@
 //! 同一応答内の順位付けにしか意味を持たず、方式をまたいで比べられないためである。
 
 use crate::embed::{Embedder, HybridSearch, QueryEmbedding, SearchMethod};
-use crate::search::SearchIndex;
+use crate::search::{CollectionScope, SearchIndex};
 
 /// 評価の中でチャンクを名指す名前(この作り方の家はここだけ。should/0135)。引用
 /// (INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の「文書モデル」節)の document と
@@ -58,7 +58,7 @@ impl Retrieval for Bm25Retrieval<'_> {
 
     fn ranked(&self, query: &str, top_k: usize) -> Vec<String> {
         self.index
-            .search(query, self.collection, top_k)
+            .search(query, &CollectionScope::of(self.collection), top_k)
             .into_iter()
             .map(|hit| chunk_name(&hit.chunk.document, hit.chunk.position))
             .collect()
@@ -107,7 +107,13 @@ impl Retrieval for HybridRetrieval<'_> {
     fn ranked(&self, query: &str, top_k: usize) -> Vec<String> {
         let embedding = QueryEmbedding::of(self.embedder, query);
         let outcome =
-            self.search.ranked(self.method, query, &embedding, self.collection, top_k);
+            self.search.ranked(
+                self.method,
+                query,
+                &embedding,
+                &CollectionScope::of(self.collection),
+                top_k,
+            );
         if outcome.method != self.method {
             panic!(
                 "方式 {} を測ろうとしたが {} に劣化した({})。劣化した順位を方式の数値として\

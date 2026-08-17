@@ -211,6 +211,15 @@ impl Store {
         &self.node_id_hex
     }
 
+    /// このDBノードの鍵でメッセージに署名する(SPEC §6.1: プロトコルメッセージは発行
+    /// DBノードの署名を持つ)。ref レコードの署名は append_own_record が内側で行うので、
+    /// この口を使うのはストアに残らないメッセージ、すなわち分散検索の QUERY と ANSWER
+    /// (DISTRIBUTED_SEARCH (uuid:e577f6db-659e-4eb8-a152-3b7780e4a9d1))である。秘密鍵は
+    /// ストアの外へ出さない: 署名する物を渡してもらい、署名だけを返す。
+    pub fn sign_message(&self, message: &[u8]) -> [u8; 64] {
+        ed25519::sign(&self.secret_seed, message)
+    }
+
     pub fn open(config: StoreConfig) -> Result<Store> {
         let dir = config.data_dir.clone();
         std::fs::create_dir_all(dir.join("packs"))?;

@@ -73,6 +73,7 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
         ("GET", "/healthz") => Response::text(200, "ok\n"),
         ("POST", "/v1/query") => handle_query(context, request),
         ("POST", "/v1/search") => handle_search(context, request),
+        ("POST", crate::distributed_search::PEER_QUERY_PATH) => handle_peer_query(context, request),
         ("GET", "/v1/peers") => {
             let peers: Vec<c1::Value> = context
                 .engine
@@ -329,6 +330,7 @@ fn handle_query(context: &ApiContext, request: &Request) -> Response {
 /// 検索要求(POST /v1/search のボディと、MCP の search ツールの引数は同じ形である)。
 /// 読み取りと検証の家は parse_search_request の一箇所で、REST も MCP もそこを通る
 /// (should/0135)。
+#[derive(Debug)]
 pub struct SearchRequest {
     pub query: String,
     /// 省略時は全コレクション。
@@ -348,6 +350,7 @@ pub struct SearchRequest {
 /// 「文書モデル」節): document は ref パスから collections/<コレクション名>/ を除いた
 /// 残り、position は chunks 列の添字、breadcrumbs は見出しの入れ子パス、PDF はさらに
 /// page、at はその版を見えに置いた ref レコードの時刻(取得日時。unix 秒)。
+#[derive(Clone, Debug)]
 pub struct Citation {
     pub collection: String,
     pub document: String,
@@ -458,9 +461,14 @@ fn with_current_index<T>(
 /// 埋め込みが使えないときは BM25 だけに劣化して答え、返り値の method(実際に使った
 /// 方式)と degraded(理由)がそれを語る。理由は標準エラーにも残すので、どちらの
 /// 呼び手から来ても劣化は観測できる(黙って劣化しない。should/0128)。
+/// share は応答側の共有ポリシー(この呼び手へ出してよいコレクション。SPEC §6.3)である。
+/// 自分のために引くとき(REST・MCP・分散検索のローカルぶん)は CollectionScope::All で、
+/// ピアの QUERY に答えるときだけ peers.json の share が入る。要求の collection とは
+/// ここで交差を取る(絞り込みの重ね合わせの家は 1 箇所。should/0135)。
 pub fn run_search(
     context: &ApiContext,
     request: &SearchRequest,
+    share: &crate::search::CollectionScope,
 ) -> Result<SearchResults, StoreError> {
     // 既定は装備と top_k に従う(決め方の家は crate::embed::default_method。実データで
     // 測った境目の根拠はそちらのコメントにある)。埋め込みを設定した節点で BM25 単独を
@@ -504,18 +512,14 @@ pub fn run_search(
             vector_cache = Some(guard);
         }
     }
+    // 要求の絞り込みと共有ポリシーの交差。どちらかが挙げていないコレクションは見ない。
+    let scope = crate::search::CollectionScope::of(request.collection.as_deref()).intersect(share);
     let mut outcome = with_current_index(context, &store, |index| {
         let search = crate::embed::HybridSearch {
             lexical: index,
             vectors: vector_cache.as_ref().and_then(|guard| guard.as_ref()),
         };
-        let ranked = search.ranked(
-            requested,
-            &request.query,
-            &embedding,
-            request.collection.as_deref(),
-            request.top_k,
-        );
+        let ranked = search.ranked(requested, &request.query, &embedding, &scope, request.top_k);
         // 低情報チャンク(目次の紙面・柱だけ・ページ番号だけ)は順位付けのあとで落とす。
         // 索引から外さないのは、外すと GET /v1/objects/{id} の引用も組めなくなり、
         // pdftotext が柱しか採れなかった図版のページが見えから消えるからである
@@ -552,6 +556,18 @@ pub fn run_search(
     // 何を直せばよいか読めない)。
     if load_failure.is_some() {
         outcome.degraded = load_failure;
+    }
+    // 共有ポリシーが 1 つもコレクションを許していないなら、空振りは「一致が無い」では
+    // なく「見ていない」である。黙って空を返すと、この二つが読み手から区別できない
+    // (must/0019 と同じ理由)。
+    if scope.is_empty() {
+        let reason = "共有ポリシーが許すコレクションが無いので、どの索引も見ていない\
+                      (peers.json の share)"
+            .to_string();
+        outcome.degraded = Some(match outcome.degraded.take() {
+            Some(earlier) => format!("{earlier}。{reason}"),
+            None => reason,
+        });
     }
     if let Some(reason) = &outcome.degraded {
         crate::log_line!(
@@ -626,10 +642,122 @@ fn handle_search(context: &ApiContext, request: &Request) -> Response {
         Ok(request) => request,
         Err(message) => return error_response(400, &message),
     };
-    match run_search(context, &search_request) {
-        Ok(results) => Response::json(200, search_response_body(&results)),
+    let scatter = match parse_scatter_options(&value) {
+        Ok(options) => options,
+        Err(message) => return error_response(400, &message),
+    };
+    // ローカルの順位は、散布するかどうかによらず自分で引く(自分もクエリの参加者で
+    // ある。SPEC §7.2)。
+    let local = match run_search(context, &search_request, &crate::search::CollectionScope::All) {
+        Ok(results) => results,
+        Err(e) => return store_error_response(e),
+    };
+    let Some(options) = scatter else {
+        return Response::json(200, search_response_body(&local));
+    };
+    let distributed = crate::distributed_search::search_across_peers(
+        &context.store,
+        &context.engine.peer_entries(),
+        &search_request,
+        &local,
+        &options,
+    );
+    Response::json(200, distributed_search_response_body(&local, &distributed))
+}
+
+/// ピアからの QUERY(kind:search)に答える(POST /v1/peer/query)。判断は三つの層に
+/// 分かれ、どれも 1 箇所にある: 封筒と署名の検証は verify_query、答える相手かどうかと
+/// 見せてよいコレクションは answer_policy(どちらも node/src/distributed_search.rs)、
+/// 検索そのものは run_search である。
+fn handle_peer_query(context: &ApiContext, request: &Request) -> Response {
+    let incoming = match crate::distributed_search::verify_query(
+        &request.body,
+        crate::clock::unix_now(),
+    ) {
+        Ok(incoming) => incoming,
+        Err(rejection) => {
+            crate::log_line!("uniqnode: ピアの QUERY を受けない: {}", rejection.reason);
+            return error_response(rejection.status, &rejection.reason);
+        }
+    };
+    let entries = context.engine.peer_entries();
+    let share = match crate::distributed_search::answer_policy(&entries, &incoming.origin) {
+        Ok(share) => share,
+        Err(rejection) => {
+            crate::log_line!(
+                "uniqnode: DBノード {} の検索要求に答えない: {}",
+                incoming.origin,
+                rejection.reason
+            );
+            return error_response(rejection.status, &rejection.reason);
+        }
+    };
+    match run_search(context, &incoming.request, &share) {
+        Ok(results) => {
+            // 他のDBノードが自分の索引を読んだことは記録に残す。断りだけを残すと、
+            // 「誰も来なかった」と「来て答えた」が記録から区別できない(should/0111)。
+            crate::log_line!(
+                "uniqnode: DBノード {} の検索要求に {} 件で答えた: {:?}",
+                incoming.origin,
+                results.results.len(),
+                incoming.request.query
+            );
+            let store = context.store.lock().expect("lock");
+            Response::json(
+                200,
+                crate::distributed_search::answer_message(&store, &incoming.query_id, &results),
+            )
+        }
         Err(e) => store_error_response(e),
     }
+}
+
+/// 散布の指定を読む(POST /v1/search のボディの peers・budget_ms・min_trust_level)。
+/// 返り値が None なら、この要求はローカルだけで答える(既定)。
+///
+/// peers は真偽値かアドレスの配列である。true は peers.json のスコープ全体、配列は
+/// その宛先だけを意味する。既定を「送らない」にしてあるのは、問いの文そのものが情報で
+/// あり、他のDBノードへ配るかどうかを呼び手が選ぶべきだからである。
+pub fn parse_scatter_options(
+    value: &c1::Value,
+) -> Result<Option<crate::distributed_search::ScatterOptions>, String> {
+    let c1::Value::Object(map) = value else {
+        return Err("要求はオブジェクトであるべき".to_string());
+    };
+    let addresses = match map.get("peers") {
+        None | Some(c1::Value::Null) | Some(c1::Value::Bool(false)) => return Ok(None),
+        Some(c1::Value::Bool(true)) => Vec::new(),
+        Some(c1::Value::Array(items)) => {
+            let mut addresses = Vec::new();
+            for item in items {
+                match item {
+                    c1::Value::Text(address) if !address.is_empty() => {
+                        addresses.push(address.clone())
+                    }
+                    _ => return Err("peers はアドレス文字列の配列".to_string()),
+                }
+            }
+            if addresses.is_empty() {
+                return Err(
+                    "peers が空の配列である(宛先を書かずに散布するには peers: true)"
+                        .to_string(),
+                );
+            }
+            addresses
+        }
+        Some(_) => return Err("peers は真偽値かアドレス文字列の配列".to_string()),
+    };
+    let budget_ms = match map.get("budget_ms") {
+        None | Some(c1::Value::Null) => crate::distributed_search::DEFAULT_BUDGET_MS,
+        Some(c1::Value::Integer(n)) if (0..=60_000).contains(n) => *n as u64,
+        Some(_) => return Err("budget_ms は 0..=60000 の整数".to_string()),
+    };
+    let min_trust_level = match map.get("min_trust_level") {
+        None | Some(c1::Value::Null) => 0,
+        Some(c1::Value::Integer(level)) => *level,
+        Some(_) => return Err("min_trust_level は整数".to_string()),
+    };
+    Ok(Some(crate::distributed_search::ScatterOptions { budget_ms, min_trust_level, addresses }))
 }
 
 /// JSON 文字列 1 個ぶんの直列化(引用符・エスケープ込み)。検索応答は score が小数で
@@ -649,16 +777,8 @@ fn json_text(text: &str) -> String {
 /// 応答をまたいだ比較や絶対値の閾値には使えない。degraded は、要求した方式で答えられ
 /// なかったときだけ現れる理由である。
 pub fn search_response_body(outcome: &SearchResults) -> Vec<u8> {
-    let mut results = Vec::new();
-    for result in &outcome.results {
-        let rendered = json_line(&citation_value(&result.citation));
-        results.push(format!(
-            "{{\"citation\":{rendered},\"id\":{},\"score\":{},\"snippet\":{}}}",
-            json_text(&result.id),
-            result.score,
-            json_text(&result.snippet),
-        ));
-    }
+    let results: Vec<String> =
+        outcome.results.iter().map(|result| result_json(result, None)).collect();
     let degraded = match &outcome.degraded {
         Some(reason) => format!("\"degraded\":{},", json_text(reason)),
         None => String::new(),
@@ -674,6 +794,81 @@ pub fn search_response_body(outcome: &SearchResults) -> Vec<u8> {
         outcome.method.as_str(),
         results.join(","),
         outcome.method.score_semantics(),
+    )
+    .into_bytes()
+}
+
+/// 検索結果 1 件の JSON(応答の results の要素)。ローカルだけの応答も、ピアと融合した
+/// 応答も、同じこの 1 箇所から出る(件の形を二重に実装しない。should/0135)。sources は
+/// 分散検索のときだけ載る(どのDBノードの順位に出た件なのか)。
+fn result_json(result: &SearchResult, sources: Option<&[String]>) -> String {
+    let citation = json_line(&citation_value(&result.citation));
+    let sources = match sources {
+        None => String::new(),
+        Some(sources) => {
+            let rendered: Vec<String> = sources.iter().map(|source| json_text(source)).collect();
+            format!(",\"sources\":[{}]", rendered.join(","))
+        }
+    };
+    format!(
+        "{{\"citation\":{citation},\"id\":{},\"score\":{},\"snippet\":{}{sources}}}",
+        json_text(&result.id),
+        result.score,
+        json_text(&result.snippet),
+    )
+}
+
+/// 分散検索の応答本文(POST /v1/search に peers を付けたとき)。ローカルだけの応答に
+/// 三つを足した形である: outcome(SPEC §7.2 の 3 値の決着)、peers(散布先ごとの経過)、
+/// 各件の sources(どのDBノードの順位に出たか)。
+///
+/// method と degraded と filtered_low_information は、このDBノードのローカルの検索に
+/// ついての報告である(ピアの側の劣化は peers の note が持つ)。score は順位から作った
+/// 融合得点なので、score_semantics は必ず "rrf" である。
+pub fn distributed_search_response_body(
+    local: &SearchResults,
+    distributed: &crate::distributed_search::Distributed,
+) -> Vec<u8> {
+    let results: Vec<String> = distributed
+        .results
+        .iter()
+        .map(|fused| result_json(&fused.result, Some(&fused.sources)))
+        .collect();
+    let peers: Vec<String> = distributed
+        .peers
+        .iter()
+        .map(|peer| {
+            let node_id = match &peer.node_id {
+                Some(node_id) => format!(",\"node_id\":{}", json_text(node_id)),
+                None => String::new(),
+            };
+            let note = match &peer.note {
+                Some(note) => format!(",\"note\":{}", json_text(note)),
+                None => String::new(),
+            };
+            format!(
+                "{{\"address\":{}{node_id},\"hits\":{}{note},\"state\":\"{}\"}}",
+                json_text(&peer.address),
+                peer.hit_count,
+                peer.state.as_str(),
+            )
+        })
+        .collect();
+    let degraded = match &local.degraded {
+        Some(reason) => format!("\"degraded\":{},", json_text(reason)),
+        None => String::new(),
+    };
+    let filtered = match local.filtered_low_information {
+        0 => String::new(),
+        count => format!("\"filtered_low_information\":{count},"),
+    };
+    format!(
+        "{{{degraded}{filtered}\"method\":\"{}\",\"outcome\":\"{}\",\"peers\":[{}],\
+         \"results\":[{}],\"score_semantics\":\"rrf\"}}",
+        local.method.as_str(),
+        distributed.outcome.as_str(),
+        peers.join(","),
+        results.join(","),
     )
     .into_bytes()
 }
@@ -764,6 +959,12 @@ pub fn citation_from_json(value: &Json) -> Result<Citation, String> {
 /// 一箇所なので、書き手もここ 1 箇所に置く。省略できる項は、省略時の既定を持つ側
 /// (parse_search_request)に任せず、決まった値をそのまま書く。
 pub fn search_request_body(request: &SearchRequest) -> Vec<u8> {
+    c1::to_canonical_bytes(&search_request_value(request))
+}
+
+/// 検索要求の c1 の値(search_request_body の中身)。分散検索の QUERY は、この値を
+/// payload に入れて署名する(要求の形を二重に定義しない。should/0135)。
+pub fn search_request_value(request: &SearchRequest) -> c1::Value {
     let mut map = BTreeMap::new();
     map.insert("query".to_string(), c1::Value::Text(request.query.clone()));
     if let Some(collection) = &request.collection {
@@ -776,7 +977,7 @@ pub fn search_request_body(request: &SearchRequest) -> Vec<u8> {
     if request.include_low_information {
         map.insert("include_low_information".to_string(), c1::Value::Bool(true));
     }
-    c1::to_canonical_bytes(&c1::Value::Object(map))
+    c1::Value::Object(map)
 }
 
 /// 検索応答を読む(search_response_body の裏返し)。score が小数なので c1 では読めず、

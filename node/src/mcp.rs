@@ -97,7 +97,10 @@ impl Backend {
     fn search(&self, request: &SearchRequest) -> Result<SearchResults, String> {
         match self {
             Backend::Local(context) => {
-                api::run_search(context, request).map_err(|error| format!("{error}"))
+                // 自分のために引くので、共有ポリシーの絞り込みは掛からない(絞りが要る
+                // のは、ピアの QUERY に答えるときだけである)。
+                api::run_search(context, request, &crate::search::CollectionScope::All)
+                    .map_err(|error| format!("{error}"))
             }
             Backend::Forward(client) => client.search(request),
         }

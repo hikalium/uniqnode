@@ -274,6 +274,52 @@ pub struct SearchHit<'a> {
     pub chunk: &'a IndexedChunk,
 }
 
+/// 検索が見てよいコレクションの範囲。要求側の絞り込み(collection を 1 つ指定する)と、
+/// 応答側の共有ポリシー(このピアへ出してよいコレクションの一覧。SPEC §6.3 の share)は
+/// どちらもこの型で表し、重ねるときは intersect で交差を取る。範囲の判定の家はここだけ
+/// である(should/0135)。
+///
+/// Only(空) は「見てよいコレクションが 1 つも無い」であり、All とは違う: どのチャンクも
+/// 通さない。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CollectionScope {
+    All,
+    Only(Vec<String>),
+}
+
+impl CollectionScope {
+    /// 要求の collection(省略時は全体)から作る。
+    pub fn of(collection: Option<&str>) -> CollectionScope {
+        match collection {
+            None => CollectionScope::All,
+            Some(name) => CollectionScope::Only(vec![name.to_string()]),
+        }
+    }
+
+    pub fn allows(&self, collection: &str) -> bool {
+        match self {
+            CollectionScope::All => true,
+            CollectionScope::Only(names) => names.iter().any(|name| name == collection),
+        }
+    }
+
+    /// 交差。要求の絞り込みと共有ポリシーを重ねると、両方が許すコレクションだけが残る。
+    pub fn intersect(&self, other: &CollectionScope) -> CollectionScope {
+        match (self, other) {
+            (CollectionScope::All, scope) | (scope, CollectionScope::All) => scope.clone(),
+            (CollectionScope::Only(mine), CollectionScope::Only(theirs)) => CollectionScope::Only(
+                mine.iter().filter(|name| theirs.contains(name)).cloned().collect(),
+            ),
+        }
+    }
+
+    /// どのチャンクも通さない範囲か(Only(空))。呼び手は、空振りの理由を「一致が無い」と
+    /// 混同せずに言える。
+    pub fn is_empty(&self) -> bool {
+        matches!(self, CollectionScope::Only(names) if names.is_empty())
+    }
+}
+
 /// 順位付けの途中の 1 件(索引内の位置と得点)。方式をまたいで順位を融合する側は、
 /// 引用を組む前のこの形で受け取る。
 #[derive(Clone, Copy)]
@@ -494,19 +540,18 @@ impl SearchIndex {
     pub fn search(
         &self,
         query: &str,
-        collection: Option<&str>,
+        scope: &CollectionScope,
         top_k: usize,
     ) -> Vec<SearchHit<'_>> {
-        self.search_positions(query, collection, top_k)
+        self.search_positions(query, scope, top_k)
             .into_iter()
             .map(|scored| SearchHit { score: scored.score, chunk: &self.chunks[scored.position] })
             .collect()
     }
 
-    /// BM25 で top_k 件を、索引内の位置と得点で返す。collection を指定するとその
-    /// コレクションだけに絞る(df は索引全体で数える。順位はどちらでも同一応答内でのみ
-    /// 意味を持つ)。同点は索引順(ref 名の昇順 → chunks 列の順)で安定に決める
-    /// (should/0125 の決定性)。
+    /// BM25 で top_k 件を、索引内の位置と得点で返す。scope で挙げたコレクションだけに
+    /// 絞る(df は索引全体で数える。順位はどちらでも同一応答内でのみ意味を持つ)。同点は
+    /// 索引順(ref 名の昇順 → chunks 列の順)で安定に決める(should/0125 の決定性)。
     ///
     /// 位置で返す形を持つのは、融合(node/src/embed.rs の RRF)がベクトル側の順位と
     /// 突き合わせるためである。引用を組むのは応答を作る側の仕事で、順位付けはここで
@@ -514,7 +559,7 @@ impl SearchIndex {
     pub fn search_positions(
         &self,
         query: &str,
-        collection: Option<&str>,
+        scope: &CollectionScope,
         top_k: usize,
     ) -> Vec<ScoredChunk> {
         let mut query_terms = terms_of(query);
@@ -529,7 +574,7 @@ impl SearchIndex {
             let document_frequency = postings.len();
             for posting in &postings {
                 let chunk = &self.chunks[posting.chunk];
-                if collection.is_some_and(|wanted| wanted != chunk.collection.as_str()) {
+                if !scope.allows(&chunk.collection) {
                     continue;
                 }
                 *scores.entry(posting.chunk).or_insert(0.0) += bm25_term_score(
@@ -715,7 +760,7 @@ mod tests {
         store.set_ref("scratch/memo", Some(&outcome.doc_rev_id)).expect("set_ref");
         let index = SearchIndex::build(&store).expect("build");
         assert!(index.is_current(&store));
-        let hits = index.search("合言葉", None, 10);
+        let hits = index.search("合言葉", &CollectionScope::All, 10);
         assert_eq!(hits.len(), 1, "合言葉を含む現行チャンクだけが返るべき");
         assert_eq!(hits[0].chunk.document, "memo");
         assert_eq!(hits[0].chunk.collection, "notes");
@@ -735,10 +780,10 @@ mod tests {
         assert!(!index.is_current(&store), "改版後の索引を最新と誤認してはならない");
         let rebuilt = SearchIndex::build(&store).expect("rebuild");
         assert!(
-            rebuilt.search("合言葉", None, 10).is_empty(),
+            rebuilt.search("合言葉", &CollectionScope::All, 10).is_empty(),
             "旧版のチャンクが索引に残っている"
         );
-        assert_eq!(rebuilt.search("改訂", None, 10).len(), 1);
+        assert_eq!(rebuilt.search("改訂", &CollectionScope::All, 10).len(), 1);
 
         // ref の張り替えだけの変化(tombstone)はオブジェクトを増やさないが、世代
         // (署名者ごとの最終 seq)がずれて作り直しになる。
@@ -747,7 +792,7 @@ mod tests {
         assert_eq!(store.object_count(), objects, "tombstone はオブジェクトを増やさない");
         assert!(!rebuilt.is_current(&store), "ref だけの変化を世代が検出できていない");
         let after = SearchIndex::build(&store).expect("rebuild");
-        assert!(after.search("改訂", None, 10).is_empty(), "tombstone 後も見えに残っている");
+        assert!(after.search("改訂", &CollectionScope::All, 10).is_empty(), "tombstone 後も見えに残っている");
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
@@ -759,7 +804,7 @@ mod tests {
         ingest_markdown(&mut store, "notes", "keys", "# 鍵\n\n暗号鍵を保管する。\n");
         ingest_markdown(&mut store, "notes", "other", "# 別\n\n関係の無い本文。\n");
         let index = SearchIndex::build(&store).expect("build");
-        let hits = index.search("鍵", None, 10);
+        let hits = index.search("鍵", &CollectionScope::All, 10);
         assert_eq!(hits.len(), 1, "鍵を含むチャンクだけが返るべき");
         assert_eq!(hits[0].chunk.document, "keys");
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -780,7 +825,7 @@ mod tests {
         );
         ingest_markdown(&mut store, "notes", "other", "# 別\n\n関係の無い本文。\n");
         let index = SearchIndex::build(&store).expect("build");
-        let hits = index.search("監査証跡", None, 10);
+        let hits = index.search("監査証跡", &CollectionScope::All, 10);
         assert_eq!(hits.len(), 1, "見出しにしかない語で本文のチャンクに届くべき");
         assert_eq!(hits[0].chunk.document, "manual");
         assert_eq!(hits[0].chunk.breadcrumbs, vec!["監査証跡".to_string()]);
@@ -802,7 +847,7 @@ mod tests {
         ingest_markdown(&mut store, "notes", "b", "共通の語だけの別の本文。\n");
         ingest_markdown(&mut store, "notes", "c", "共通の語に加えて特有の合図がある本文。\n");
         let index = SearchIndex::build(&store).expect("build");
-        let hits = index.search("共通 特有", None, 10);
+        let hits = index.search("共通 特有", &CollectionScope::All, 10);
         assert_eq!(hits.len(), 3, "共通の語で全チャンクが候補になる");
         assert_eq!(hits[0].chunk.document, "c", "希少語を含むチャンクが先頭に来るべき");
         assert!(hits[0].score > hits[1].score);

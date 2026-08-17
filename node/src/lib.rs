@@ -5,6 +5,7 @@ pub mod api;
 pub mod c1;
 pub mod clock;
 pub mod crc32;
+pub mod distributed_search;
 pub mod ed25519;
 pub mod embed;
 pub mod eval;

@@ -23,7 +23,7 @@
 use crate::c1;
 use crate::http;
 use crate::json::Json;
-use crate::search::{visit_indexable_chunks, Generation, ScoredChunk, SearchIndex};
+use crate::search::{visit_indexable_chunks, CollectionScope, Generation, ScoredChunk, SearchIndex};
 use crate::store::{Store, StoreError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -774,19 +774,19 @@ impl VectorIndex {
     }
 
     /// 全走査コサインで top_k 件。ベクトルは L2 正規化済みなので内積がそのままコサイン
-    /// である。collection の絞り込みは BM25 側の索引から引く(引用の情報を二重に持たない
+    /// である。コレクションの絞り込みは BM25 側の索引から引く(引用の情報を二重に持たない
     /// ため)。同点は位置の昇順で安定に決める(should/0125 の決定性)。
     pub fn search(
         &self,
         query_vector: &[f32],
         lexical: &SearchIndex,
-        collection: Option<&str>,
+        scope: &CollectionScope,
         top_k: usize,
     ) -> Vec<ScoredChunk> {
         let mut ranked: Vec<ScoredChunk> = Vec::new();
         for position in 0..self.offsets.len() {
             let Some(vector) = self.vector_at(position) else { continue };
-            if collection.is_some_and(|wanted| wanted != lexical.chunk(position).collection) {
+            if !scope.allows(&lexical.chunk(position).collection) {
                 continue;
             }
             let score: f64 = vector
@@ -891,23 +891,23 @@ impl HybridSearch<'_> {
         requested: SearchMethod,
         query: &str,
         embedding: &QueryEmbedding,
-        collection: Option<&str>,
+        scope: &CollectionScope,
         top_k: usize,
     ) -> RankedSearch {
         if requested == SearchMethod::Bm25 {
             return RankedSearch {
                 method: SearchMethod::Bm25,
                 degraded: None,
-                hits: self.lexical.search_positions(query, collection, top_k),
+                hits: self.lexical.search_positions(query, scope, top_k),
             };
         }
-        let semantic = match self.semantic_hits(embedding, collection, top_k) {
+        let semantic = match self.semantic_hits(embedding, scope, top_k) {
             Ok(hits) => hits,
             Err(reason) => {
                 return RankedSearch {
                     method: SearchMethod::Bm25,
                     degraded: Some(reason),
-                    hits: self.lexical.search_positions(query, collection, top_k),
+                    hits: self.lexical.search_positions(query, scope, top_k),
                 }
             }
         };
@@ -929,7 +929,7 @@ impl HybridSearch<'_> {
                 hits: semantic.into_iter().take(top_k).collect(),
             },
             _ => {
-                let lexical = self.lexical.search_positions(query, collection, fusion_depth(top_k));
+                let lexical = self.lexical.search_positions(query, scope, fusion_depth(top_k));
                 // BM25 が 1 件も一致しないとき、融合の入力は片方だけになり、順位は埋め込み
                 // 単独とまったく同じ列になる。融合が効いているように見えたまま片肺で答えない
                 // ように、そう言う(黙って劣化しない。should/0128)。実データの純日本語の
@@ -961,7 +961,7 @@ impl HybridSearch<'_> {
     fn semantic_hits(
         &self,
         embedding: &QueryEmbedding,
-        collection: Option<&str>,
+        scope: &CollectionScope,
         top_k: usize,
     ) -> Result<Vec<ScoredChunk>, String> {
         let Some(vectors) = self.vectors else {
@@ -980,7 +980,7 @@ impl HybridSearch<'_> {
             QueryEmbedding::Ready(vector) => vector,
             QueryEmbedding::Unavailable(reason) => return Err(reason.clone()),
         };
-        Ok(vectors.search(query_vector, self.lexical, collection, fusion_depth(top_k)))
+        Ok(vectors.search(query_vector, self.lexical, scope, fusion_depth(top_k)))
     }
 }
 

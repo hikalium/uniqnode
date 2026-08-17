@@ -38,12 +38,53 @@ pub enum PeerState {
     Answered,
 }
 
+impl PeerState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PeerState::Pending => "pending",
+            PeerState::Silent => "silent",
+            PeerState::Empty => "empty",
+            PeerState::Answered => "answered",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueryOutcome {
     Running,
     Found,
     ScopeEmpty,
     TimedOut,
+}
+
+impl QueryOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            QueryOutcome::Running => "running",
+            QueryOutcome::Found => "found",
+            QueryOutcome::ScopeEmpty => "scope_empty",
+            QueryOutcome::TimedOut => "timed_out",
+        }
+    }
+}
+
+/// 決着の判定(SPEC §7.2 の 3 値。判定の家はここだけである。should/0135)。
+/// スコープ内の全員が肯定的言明(empty / answered)で出揃えば予算前に決着してよく、
+/// 予算が切れたら沈黙を残したまま決着する。「存在しない」を表す決着値は無い。
+///
+/// まだ決着していなければ None。kind:object の「回答が 1 つ得られたら即 found」は
+/// この関数の外にある(そこだけは kind ごとの規則である)。
+pub fn settlement(states: &[PeerState], has_answer: bool, expired: bool) -> Option<QueryOutcome> {
+    let all_positive =
+        states.iter().all(|state| matches!(state, PeerState::Empty | PeerState::Answered));
+    if !all_positive && !expired {
+        return None;
+    }
+    Some(match (has_answer, all_positive) {
+        (true, _) => QueryOutcome::Found,
+        (false, true) => QueryOutcome::ScopeEmpty,
+        (false, false) => QueryOutcome::TimedOut,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -109,17 +150,33 @@ pub struct QueryEngine {
     peer_factory: PeerFactory,
 }
 
+/// ピアの既定の信頼度(peers.json が trust_level を書かないとき)。0 は「答えない」で
+/// あり、既定はその上の中間に置く。数値そのものの意味は運用者が決める(順序だけが
+/// プロトコルの意味を持つ)。
+pub const DEFAULT_TRUST_LEVEL: i64 = 50;
+
 /// 受け入れ済みのピア。手動エントリ(証明書なし)は信頼の根としてそのまま、
 /// 証明書付きエントリは groups.json の統一検証規則(SPEC §6.4)を通ったものだけ。
 #[derive(Clone, Debug)]
 pub struct PeerEntry {
     pub address: String,
-    /// 証明書が主張する node_id(証明書付きエントリのみ)。実際の接触で照合される。
-    pub certified_node_id: Option<String>,
+    /// このエントリが主張する相手の DBノードID(明示の node_id か、証明書の node_id)。
+    /// 出ていく側では実際の接触で照合され(健全性エンジン)、入ってくる側では要求者の
+    /// 認証に使う(DISTRIBUTED_SEARCH (uuid:e577f6db-659e-4eb8-a152-3b7780e4a9d1))。
+    /// 書かなければ相手を名指しで認証できないので、そのピアからの kind:search には
+    /// 答えられない。
+    pub node_id: Option<String>,
+    /// 信頼度(SPEC §6.3 の trust_level)。0 は「このピアには答えない」で、それ以外の
+    /// 数値の意味は運用者が決める。要求側は scope の min_trust_level 未満のピアへ問いを
+    /// 送らず、応答側は 0 のピアへ答えない(双方向フィルタ。SPEC §7.1)。
+    pub trust_level: i64,
+    /// このピアへ出してよいコレクション(SPEC §6.3 の share)。書かなければ全部。
+    pub share: crate::search::CollectionScope,
 }
 
 /// data_dir/peers.json から受け入れ済みピアを読む。
-/// `{"peers":[{"address":"host:port"}, {"address":"…","certificate":{…}}, …]}`
+/// `{"peers":[{"address":"host:port"}, {"address":"…","node_id":"…","trust_level":50,
+/// "share":{"collections":["notes"]}}, {"address":"…","certificate":{…}}, …]}`
 /// ファイルがなければ空。毎回読み直すので、編集に再起動は要らない(should/0118)。
 pub fn read_peer_entries(data_dir: &Path) -> Vec<PeerEntry> {
     let path = data_dir.join("peers.json");
@@ -142,38 +199,101 @@ pub fn read_peer_entries(data_dir: &Path) -> Vec<PeerEntry> {
             for item in items {
                 let c1::Value::Object(peer) = item else { continue };
                 let Some(c1::Value::Text(address)) = peer.get("address") else { continue };
-                match peer.get("certificate") {
-                    None => out.push(PeerEntry {
-                        address: address.clone(),
-                        certified_node_id: None,
-                    }),
+                let declared_node_id = match peer.get("node_id") {
+                    Some(c1::Value::Text(id)) => Some(id.clone()),
+                    _ => None,
+                };
+                let trust_level = match peer.get("trust_level") {
+                    Some(c1::Value::Integer(level)) => *level,
+                    None => DEFAULT_TRUST_LEVEL,
+                    Some(_) => {
+                        crate::log_line!(
+                            "uniqnode: ピア {address} の trust_level が整数でない(既定 \
+                             {DEFAULT_TRUST_LEVEL} として扱う)"
+                        );
+                        DEFAULT_TRUST_LEVEL
+                    }
+                };
+                let share = read_share(address, peer.get("share"));
+                let certified_node_id = match peer.get("certificate") {
+                    None => None,
                     Some(certificate) => {
                         match crate::groups::verify_membership(certificate, &groups, now) {
-                            Ok(_) => {
-                                let certified_node_id = match certificate {
-                                    c1::Value::Object(c) => match c.get("node_id") {
-                                        Some(c1::Value::Text(id)) => Some(id.clone()),
-                                        _ => None,
-                                    },
+                            Ok(_) => match certificate {
+                                c1::Value::Object(c) => match c.get("node_id") {
+                                    Some(c1::Value::Text(id)) => Some(id.clone()),
                                     _ => None,
-                                };
-                                out.push(PeerEntry {
-                                    address: address.clone(),
-                                    certified_node_id,
-                                });
-                            }
+                                },
+                                _ => None,
+                            },
                             Err(reason) => {
                                 crate::log_line!(
                                     "uniqnode: ピア {address} の証明書を受け入れない: {reason}"
                                 );
+                                // 証明書付きのエントリは、証明書が通らなければスコープに
+                                // 入らない(SPEC §6.3)。
+                                continue;
                             }
                         }
                     }
+                };
+                // 明示の node_id と証明書の主張が食い違うエントリは、どちらを信じるかを
+                // こちらで決めずに断る(黙って片方を採らない。must/0022)。
+                if let (Some(declared), Some(certified)) = (&declared_node_id, &certified_node_id) {
+                    if declared != certified {
+                        crate::log_line!(
+                            "uniqnode: ピア {address} の node_id が証明書と食い違う\
+                             (設定 {declared}, 証明書 {certified})。このエントリは使わない"
+                        );
+                        continue;
+                    }
                 }
+                out.push(PeerEntry {
+                    address: address.clone(),
+                    node_id: declared_node_id.or(certified_node_id),
+                    trust_level,
+                    share,
+                });
             }
         }
     }
     out
+}
+
+/// ピアエントリの share を読む。`{"collections":["notes", …]}` だけを読み、書かれて
+/// いなければ全コレクション。形が違えば、黙って全部を共有せずに何も共有しない側へ倒す
+/// (共有ポリシーの読み違いは、意図しない開示になるため。must/0022)。
+fn read_share(address: &str, share: Option<&c1::Value>) -> crate::search::CollectionScope {
+    let Some(share) = share else { return crate::search::CollectionScope::All };
+    let collections = match share {
+        c1::Value::Object(map) => map.get("collections"),
+        _ => None,
+    };
+    match collections {
+        Some(c1::Value::Array(items)) => {
+            let mut names = Vec::new();
+            for item in items {
+                match item {
+                    c1::Value::Text(name) => names.push(name.clone()),
+                    _ => {
+                        crate::log_line!(
+                            "uniqnode: ピア {address} の share.collections に文字列でない\
+                             要素がある。このエントリへは何も共有しない"
+                        );
+                        return crate::search::CollectionScope::Only(Vec::new());
+                    }
+                }
+            }
+            crate::search::CollectionScope::Only(names)
+        }
+        _ => {
+            crate::log_line!(
+                "uniqnode: ピア {address} の share が \
+                 {{\"collections\":[…]}} の形でない。このエントリへは何も共有しない"
+            );
+            crate::search::CollectionScope::Only(Vec::new())
+        }
+    }
 }
 
 /// 既定スコープ(受け入れ済みピアのアドレス)。
@@ -181,7 +301,9 @@ pub fn read_peer_addresses(data_dir: &Path) -> Vec<String> {
     read_peer_entries(data_dir).into_iter().map(|entry| entry.address).collect()
 }
 
-fn random_hex_id() -> String {
+/// 識別子(クエリハンドルの ID、分散検索の query_id)。セキュリティ境界ではないが、
+/// 重複すると別のクエリの答えと混ざるので乱数から採る。
+pub fn random_hex_id() -> String {
     use std::io::Read;
     let mut bytes = [0u8; 16];
     match std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)) {
@@ -228,6 +350,13 @@ impl QueryEngine {
 
     pub fn default_scope(&self) -> Vec<String> {
         read_peer_addresses(&self.data_dir)
+    }
+
+    /// 受け入れ済みのピア(信頼度と共有ポリシー込み)。分散検索は、散布先を選ぶのにも、
+    /// 入ってきた QUERY の要求者を引くのにも、この一覧を使う。毎回読み直すので、
+    /// peers.json の編集に再起動は要らない(should/0118)。
+    pub fn peer_entries(&self) -> Vec<PeerEntry> {
+        read_peer_entries(&self.data_dir)
     }
 
     /// クエリを開始する。返ったハンドルは即座に観測でき、期限までに必ず決着する。
@@ -391,35 +520,33 @@ fn peer_worker(
     }
 }
 
-/// 決着の判定を一箇所に集める(should/0135)。
-/// - object で回答が得られたら即 found。
-/// - スコープ全員が肯定的言明(empty / answered)で出揃ったら期限前に決着してよい。
-/// - 期限が来たら、沈黙(pending 含む)を silent に確定して timed_out(回答があれば found)。
+/// 決着まで待って、決着の規則(settlement)を適用する。
+/// - object で回答が得られたら即 found(kind:object にだけある規則。同じ内容がどのピアに
+///   あっても content-addressing で同一なので、1 つ得れば足りる)。
+/// - それ以外は settlement の 3 値に従う。期限が来たら沈黙(pending 含む)を silent に
+///   確定してから判定する。
 fn finalizer(shared: Arc<QueryShared>) {
     let mut guard = shared.state.lock().expect("query state lock");
     loop {
         if guard.outcome != QueryOutcome::Running {
             break;
         }
-        let found_object = guard.kind == QueryKind::Object && !guard.answers.is_empty();
-        let all_positive = guard
-            .peers
-            .iter()
-            .all(|p| matches!(p.state, PeerState::Empty | PeerState::Answered));
-        if found_object || all_positive {
-            guard.outcome =
-                if guard.answers.is_empty() { QueryOutcome::ScopeEmpty } else { QueryOutcome::Found };
+        if guard.kind == QueryKind::Object && !guard.answers.is_empty() {
+            guard.outcome = QueryOutcome::Found;
             break;
         }
         let remaining = shared.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        let expired = remaining.is_zero();
+        if expired {
             for peer in guard.peers.iter_mut() {
                 if peer.state == PeerState::Pending {
                     peer.state = PeerState::Silent;
                 }
             }
-            guard.outcome =
-                if guard.answers.is_empty() { QueryOutcome::TimedOut } else { QueryOutcome::Found };
+        }
+        let states: Vec<PeerState> = guard.peers.iter().map(|peer| peer.state).collect();
+        if let Some(outcome) = settlement(&states, !guard.answers.is_empty(), expired) {
+            guard.outcome = outcome;
             break;
         }
         let (next, _) = shared
@@ -448,18 +575,7 @@ pub fn state_to_json(state: &QueryState) -> Vec<u8> {
     );
     map.insert("target".to_string(), c1::Value::Text(state.target.clone()));
     map.insert("budget_ms".to_string(), c1::Value::Integer(state.budget_ms as i64));
-    map.insert(
-        "outcome".to_string(),
-        c1::Value::Text(
-            match state.outcome {
-                QueryOutcome::Running => "running",
-                QueryOutcome::Found => "found",
-                QueryOutcome::ScopeEmpty => "scope_empty",
-                QueryOutcome::TimedOut => "timed_out",
-            }
-            .to_string(),
-        ),
-    );
+    map.insert("outcome".to_string(), c1::Value::Text(state.outcome.as_str().to_string()));
     let answers: Vec<c1::Value> = state
         .answers
         .iter()
@@ -494,18 +610,7 @@ pub fn state_to_json(state: &QueryState) -> Vec<u8> {
         .map(|peer| {
             let mut entry = BTreeMap::new();
             entry.insert("address".to_string(), c1::Value::Text(peer.address.clone()));
-            entry.insert(
-                "state".to_string(),
-                c1::Value::Text(
-                    match peer.state {
-                        PeerState::Pending => "pending",
-                        PeerState::Silent => "silent",
-                        PeerState::Empty => "empty",
-                        PeerState::Answered => "answered",
-                    }
-                    .to_string(),
-                ),
-            );
+            entry.insert("state".to_string(), c1::Value::Text(peer.state.as_str().to_string()));
             c1::Value::Object(entry)
         })
         .collect();

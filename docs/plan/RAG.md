@@ -9,10 +9,11 @@
 ([docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580))、検索方式を差し替えて
 数値で比べる評価ハーネス([docs/design/EVAL.md](#1109a04b-923e-4493-8f00-d704047d6a2a))、
 search と fetch を LLM エージェントへ出す MCP アダプタ
-([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))、署名付き QUERY を登録ピアへ
-散布して順位を融合する分散検索
+([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))、ブラウザから引く 1 枚の
+RAG ビューワ([docs/design/VIEWER.md](#4cd4c71a-ecf3-44a8-a97b-bb2c8d8fe847))、署名付き
+QUERY を登録ピアへ散布して順位を融合する分散検索
 ([docs/design/DISTRIBUTED_SEARCH.md](#e577f6db-659e-4eb8-a152-3b7780e4a9d1))まで実装済み。
-テスト196本、CLI + HTTP API + MCP。
+テスト205本、CLI + HTTP API + MCP + ビューワ。
 「LLM から常用できる RAG ストレージ」というこの計画のゴールは、ここで成立している。
 以下は、その上に積む残りの作業項目を実行順に並べたものである(先頭は 7 の運用の仕上げ。
 済んで削除された項目の番号は再利用しない)。

@@ -21,3 +21,4 @@ pub mod search;
 pub mod sha2;
 pub mod store;
 pub mod sync;
+pub mod viewer;

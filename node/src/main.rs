@@ -47,6 +47,13 @@ fn usage() -> ! {
                                       claude mcp add --transport stdio uniqnode --\n\
                                       <この実行ファイル> mcp <dir>\n\
                                       --serve-url http://127.0.0.1:7440\n\
+           viewer <dir> <addr> [--serve-url <url>] [ログの指定]\n\
+                                      RAG ビューワ(1枚のHTML)をブラウザへ出す\n\
+                                      (例: 127.0.0.1:7450、:0 で自動割当)。頁が呼ぶ\n\
+                                      /v1/* は走っている serve へ転送するので、自分では\n\
+                                      ストアを開かない(排他錠を取らないため、serve が\n\
+                                      常駐したまま起こせる)。--serve-url の既定は\n\
+                                      http://127.0.0.1:7440\n\
            selfcheck                  この実行ファイルが健全であることを標準出力の1行で\n\
                                       言う(mcp が自分を exec で差し替える前に、新しい\n\
                                       イメージを子プロセスとして起こして確かめる用)\n\
@@ -845,6 +852,51 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             };
             let handler: std::sync::Arc<uniqnode::http::Handler> =
                 std::sync::Arc::new(move |request| uniqnode::api::handle(&context, request));
+            uniqnode::http::serve(listener, handler);
+        }
+        // RAG ビューワ(VIEWER (uuid:4cd4c71a-ecf3-44a8-a97b-bb2c8d8fe847))。1 枚の HTML を
+        // 出し、その頁が呼ぶ /v1/* は走っている serve へ転送する。ストアを開かないので、
+        // serve が常駐したまま起こせる。
+        "viewer" => {
+            let address = rest.first().map(String::as_str).unwrap_or_else(|| usage());
+            let options = parse_mcp_options(&rest[1..]);
+            start_logging(dir, uniqnode::log::VIEWER_ROLE, &options.run.log);
+            if options.run.embed.requested {
+                uniqnode::log_line!(
+                    "uniqnode: viewer: --embed はビューワの引数ではない\
+                     (埋め込みを装備するのは転送先の serve である)"
+                );
+                std::process::exit(2);
+            }
+            let serve_url = options
+                .serve_url
+                .unwrap_or_else(|| uniqnode::viewer::DEFAULT_SERVE_URL.to_string());
+            let viewer = match uniqnode::viewer::Viewer::new(&serve_url, dir) {
+                Ok(viewer) => viewer,
+                Err(message) => {
+                    uniqnode::log_line!("uniqnode: viewer: {message}");
+                    std::process::exit(2);
+                }
+            };
+            // 束縛より先にログを開いてある。「そのアドレスを使えない」も残したい記録である。
+            let listener = match std::net::TcpListener::bind(address) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    uniqnode::log_line!("uniqnode: viewer: {address} に束縛できない: {error}");
+                    std::process::exit(1);
+                }
+            };
+            let bound = listener.local_addr()?;
+            // serve と同じ取り決め: 実際の束縛先を標準出力の 1 行で言う(:0 で起こした
+            // テストや起動スクリプトが読む)。
+            println!("listening on {bound}");
+            std::io::stdout().flush()?;
+            uniqnode::log_line!(
+                "uniqnode: viewer: http://{bound} で待ち受ける(検索は {} へ転送する)",
+                viewer.serve_url()
+            );
+            let handler: std::sync::Arc<uniqnode::http::Handler> =
+                std::sync::Arc::new(move |request| viewer.handle(request));
             uniqnode::http::serve(listener, handler);
         }
         "pin" => {

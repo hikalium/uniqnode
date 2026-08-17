@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<!-- RAG ビューワの 1 枚。uniqnode viewer が / でこのまま返す。
+     外部資源(CDN・フォント・画像)を一切参照しないので、繋がっていない機械でも開ける。
+     問い合わせ先は同じ生成元の /v1/* だけで、その先は viewer が serve へ転送する。 -->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uniqnode viewer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --line: color-mix(in srgb, currentColor 18%, transparent);
+    --dim: color-mix(in srgb, currentColor 62%, transparent);
+    --panel: color-mix(in srgb, currentColor 5%, transparent);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto; padding: 1.2rem; max-width: 60rem;
+    font: 15px/1.65 system-ui, -apple-system, "Noto Sans JP", sans-serif;
+  }
+  h1 { font-size: 1.1rem; margin: 0; }
+  header { display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap;
+           border-bottom: 1px solid var(--line); padding-bottom: .6rem; }
+  #node { color: var(--dim); font-size: .8rem; }
+  form { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin: .9rem 0; }
+  #query { flex: 1 1 22rem; }
+  input, select, button { font: inherit; padding: .4rem .55rem;
+                          border: 1px solid var(--line); border-radius: 6px;
+                          background: transparent; color: inherit; }
+  button { cursor: pointer; background: var(--panel); }
+  button:disabled { opacity: .5; cursor: default; }
+  label { display: flex; align-items: center; gap: .3rem; color: var(--dim); font-size: .85rem; }
+  #notices:empty { display: none; }
+  .notice { border-left: 3px solid var(--line); padding: .35rem .6rem; margin: .35rem 0;
+            background: var(--panel); font-size: .87rem; }
+  .hit { border-top: 1px solid var(--line); padding: .8rem 0; }
+  .cite { display: flex; gap: .5rem; flex-wrap: wrap; align-items: baseline; }
+  .doc { font-weight: 600; }
+  .meta, .crumbs, .chunk { color: var(--dim); font-size: .82rem; }
+  .chunk { font-family: ui-monospace, monospace; word-break: break-all; }
+  .snippet { margin: .35rem 0 .45rem; white-space: pre-wrap; }
+  .full { white-space: pre-wrap; background: var(--panel); border-radius: 6px;
+          padding: .7rem; margin-top: .5rem; font-size: .92rem; }
+  .full:empty { display: none; }
+  footer { color: var(--dim); font-size: .8rem; border-top: 1px solid var(--line);
+           margin-top: 1.4rem; padding-top: .6rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>uniqnode viewer</h1>
+  <span id="node">読み込み中…</span>
+</header>
+
+<form id="form">
+  <input id="query" placeholder="問い(文書が使う語をそのまま入れると当たりやすい)" autofocus>
+  <select id="collection"><option value="">全コレクション</option></select>
+  <select id="method">
+    <option value="">方式: 既定</option>
+    <option value="bm25">bm25(語の一致)</option>
+    <option value="embedding">embedding(意味の近さ)</option>
+    <option value="hybrid">hybrid(RRF 融合)</option>
+  </select>
+  <label>件数 <input id="topk" type="number" value="10" min="1" max="100" style="width:4.5rem"></label>
+  <label><input id="lowinfo" type="checkbox"> 低情報も出す</label>
+  <button id="go">検索</button>
+</form>
+
+<div id="notices"></div>
+<div id="results"></div>
+
+<footer>
+  出典の取得日時は、その版をこのDBノードの見えに置いた ref レコードの時刻(原典が書かれた
+  時刻ではない)。得点は同じ応答の中の順位付けにだけ意味があり、応答をまたいだ比較には使えない。
+</footer>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+// 応答の JSON を取る。誤りは呼び手が画面に出す(黙って空を返さない)。
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const text = await response.text();
+  if (!response.ok) throw new Error(`${path} が ${response.status}: ${text.slice(0, 200)}`);
+  return text;
+}
+
+function escapeText(value) {
+  return String(value).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+
+// unix 秒を UTC で描く(MCP アダプタと同じ描き方)。
+function formatTime(seconds) {
+  return new Date(seconds * 1000).toISOString().replace(/\.\d+Z$/, "Z");
+}
+
+function notice(text) {
+  const div = document.createElement("div");
+  div.className = "notice";
+  div.textContent = text;
+  $("notices").append(div);
+}
+
+// 起動時: このDBノードの素性と、コレクションの一覧を出す。
+async function loadNode() {
+  try {
+    const status = JSON.parse(await api("/v1/status"));
+    $("node").textContent =
+      `node ${status.node_id.slice(0, 12)}… / オブジェクト ${status.objects.toLocaleString()} 件`;
+    const refs = JSON.parse(await api("/v1/refs")).refs || [];
+    const collections = new Set();
+    for (const ref of refs) {
+      if (!ref.target) continue;                       // tombstone は見えにない
+      const path = ref.name.split("/").slice(1).join("/");
+      if (path.startsWith("collections/")) collections.add(path.split("/")[1]);
+    }
+    for (const name of [...collections].sort()) {
+      const option = document.createElement("option");
+      option.value = option.textContent = name;
+      $("collection").append(option);
+    }
+  } catch (error) {
+    $("node").textContent = "serve に届かない";
+    notice(`${error.message}(uniqnode serve <dir> <addr> で起こす)`);
+  }
+}
+
+// 検索 1 回。判断(方式の既定・劣化・引用)は serve の側にあり、ここは描くだけである。
+async function search(event) {
+  event.preventDefault();
+  const query = $("query").value.trim();
+  if (!query) return;
+  $("notices").textContent = "";
+  $("results").textContent = "検索中…";
+  $("go").disabled = true;
+  const request = { query, top_k: Number($("topk").value) || 10 };
+  if ($("collection").value) request.collection = $("collection").value;
+  if ($("method").value) request.method = $("method").value;
+  if ($("lowinfo").checked) request.include_low_information = true;
+  try {
+    const body = JSON.parse(await api("/v1/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    }));
+    render(body);
+  } catch (error) {
+    $("results").textContent = "";
+    notice(error.message);
+  } finally {
+    $("go").disabled = false;
+  }
+}
+
+function render(body) {
+  const hits = body.results || [];
+  notice(`方式 ${body.method}(得点の意味 ${body.score_semantics})、${hits.length} 件`);
+  // 黙って劣化しない・黙って捨てない: serve が言ったことをそのまま画面にも出す。
+  if (body.degraded) notice(`劣化: ${body.degraded}`);
+  if (body.filtered_low_information) {
+    notice(`低情報チャンク ${body.filtered_low_information} 件を応答から落とした`
+           + "(目次の紙面・柱だけ・ページ番号だけ。「低情報も出す」で戻る)");
+  }
+  $("results").textContent = "";
+  if (hits.length === 0) {
+    $("results").textContent = "一致なし。ここに無いことは、世界に無いことを意味しない。";
+    return;
+  }
+  hits.forEach((hit, index) => {
+    const cite = hit.citation || {};
+    const page = cite.page === undefined ? "" : ` p.${cite.page}`;
+    const crumbs = (cite.breadcrumbs || []).join(" > ");
+    const div = document.createElement("div");
+    div.className = "hit";
+    div.innerHTML = `
+      <div class="cite">
+        <span class="doc">${index + 1}. ${escapeText(cite.collection)}/${escapeText(cite.document)}${escapeText(page)}</span>
+        <span class="meta">位置 ${cite.position} / 取得 ${formatTime(cite.at)} / 得点 ${hit.score.toFixed(4)}</span>
+      </div>
+      ${crumbs ? `<div class="crumbs">見出し: ${escapeText(crumbs)}</div>` : ""}
+      <div class="snippet">${escapeText(hit.snippet)}</div>
+      <div class="cite">
+        <button type="button">全文</button>
+        <span class="chunk">${escapeText(hit.id)}</span>
+      </div>
+      <div class="full"></div>`;
+    div.querySelector("button").addEventListener("click", (event) => showFull(hit.id, div, event));
+    $("results").append(div);
+  });
+}
+
+// 全文はチャンクのオブジェクトそのものを取り、本文だけを出す(チャンクでなければ生のまま)。
+async function showFull(id, div, event) {
+  const target = div.querySelector(".full");
+  if (target.textContent) { target.textContent = ""; event.target.textContent = "全文"; return; }
+  target.textContent = "取得中…";
+  try {
+    const raw = await api(`/v1/objects/${encodeURIComponent(id)}`);
+    let text = raw;
+    try {
+      const object = JSON.parse(raw);
+      if (object && typeof object.text === "string") text = object.text;
+    } catch { /* チャンクでない・c1 でないものは生のまま出す */ }
+    target.textContent = text;
+    event.target.textContent = "閉じる";
+  } catch (error) {
+    target.textContent = error.message;
+  }
+}
+
+$("form").addEventListener("submit", search);
+loadNode();
+</script>
+</body>
+</html>

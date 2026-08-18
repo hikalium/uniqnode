@@ -269,6 +269,35 @@ impl EvalReport {
         self.mean_recalls[position]
     }
 
+    /// 取りこぼしの件数(打ち切り k までに正解が 1 件も入らなかったクエリの数)。
+    ///
+    /// 判定の第一の基準は「取りこぼさないこと」である(EVAL
+    /// (uuid:72106edc-2c58-44d3-91c6-7b2a3dd7dfda) の「何を良いとするか」)。消費者は LLM で、
+    /// 上位 10 件をまとめて読むので、10 件の中に入ってさえいれば読める。平均の Recall では
+    /// 「1 問が圏外に落ちた」と「5 問が 2 位から 3 位へ下がった」が同じ大きさに見えることが
+    /// あるので、取りこぼしは平均に混ぜず件数で数える。
+    pub fn misses(&self, k: usize) -> usize {
+        self.queries
+            .iter()
+            .filter(|outcome| match outcome.first_relevant_rank {
+                Some(rank) => rank > k,
+                None => true,
+            })
+            .count()
+    }
+
+    /// 取りこぼしたクエリの名前(どれが落ちたのかを名指しするため)。
+    pub fn missed_queries(&self, k: usize) -> Vec<&str> {
+        self.queries
+            .iter()
+            .filter(|outcome| match outcome.first_relevant_rank {
+                Some(rank) => rank > k,
+                None => true,
+            })
+            .map(|outcome| outcome.query.as_str())
+            .collect()
+    }
+
     /// クエリ 1 件の内訳を引く(基準線が動いたときに、どのクエリが動いたのかを名指し
     /// で調べるため)。
     pub fn outcome_of(&self, query: &str) -> &QueryOutcome {
@@ -288,13 +317,24 @@ impl EvalReport {
             .zip(&self.mean_recalls)
             .map(|(k, value)| format!("Recall@{k} {value:.3}"))
             .collect();
+        // 取りこぼしを先頭に出す(判定の第一の基準。EVAL
+        // (uuid:72106edc-2c58-44d3-91c6-7b2a3dd7dfda))。読む側が最初に見るべき数はこれで
+        // ある。打ち切りは評価した中で最大のもの = 読み手が実際に取る件数とみなす。
+        let widest = self.cutoffs.iter().copied().max().unwrap_or(0);
+        let missed = self.missed_queries(widest);
         let mut lines = vec![format!(
-            "方式 {}: {} クエリ、MRR {:.3}、{}",
+            "方式 {}: {} クエリ、取りこぼし {}/{}(@{})、MRR {:.3}、{}",
             self.method,
             self.queries.len(),
+            missed.len(),
+            self.queries.len(),
+            widest,
             self.mean_reciprocal_rank,
             averages.join("、")
         )];
+        if !missed.is_empty() {
+            lines.push(format!("  取りこぼした問い: {}", missed.join(" / ")));
+        }
         for outcome in &self.queries {
             let place = match outcome.first_relevant_rank {
                 Some(rank) => format!("{rank} 位"),

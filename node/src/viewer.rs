@@ -407,6 +407,20 @@ mod tests {
     }
 
     /// 頁は写しの道を自分で組み立てる。この形は serve 側の口の契約そのものなので、
+    /// 応答から来た道(source_url)は、頁が形を検めてから href に入る。検めないと、
+    /// `javascript:` を返す相手に繋いだ頁の上でそれが走る。
+    #[test]
+    fn the_page_checks_the_shape_of_the_path_it_was_told() {
+        assert!(
+            PAGE.contains("sameOriginPath(hit.source_url)"),
+            "応答の道を検めずに使っている"
+        );
+        assert!(
+            PAGE.contains("url.startsWith(\"/v1/objects/\")"),
+            "検めの条件が同じ生成元の口に絞られていない"
+        );
+    }
+
     /// 字面で固定する(統合テストは頁の JavaScript を走らせないため、頁が
     /// encodeURIComponent していた事故を一度見逃している。should/0138)。
     #[test]

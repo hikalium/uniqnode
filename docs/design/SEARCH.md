@@ -250,12 +250,21 @@ MCP の fetch ツールも別経路ではなく、同じ store の呼び出し�
   "results": [
     { "citation": { "at": 1786904557, "breadcrumbs": ["分散設計", "世代の整合"],
         "collection": "notes", "document": "search_ja", "position": 1 },
-      "id": "s256:…", "score": 2.94, "snippet": "転置索引は導出データであり…" } ],
+      "id": "s256:…", "score": 2.94, "snippet": "転置索引は導出データであり…",
+      "source_url": "/v1/objects/s256:…/rendition/source" } ],
   "score_semantics": "bm25" }
 ```
 
 - snippet はチャンク本文の先頭 200 文字(定数 SNIPPET_CHAR_LIMIT。文字境界で切る)。
   全文は id(チャンクのオブジェクト ID)から既存の GET /v1/objects/{id} で取る。
+- source_url は原本(このチャンクの出た文書そのもの)を取る道である。写しの恒等レシピ
+  ([docs/design/RENDITION.md](#6046eeca-1d95-4d47-87da-13f86c7710dc))の URL で、HTML なら
+  紙面 1 枚、PDF ならまるごと、markdown なら原文が返る。抜粋の周りを読むには文書へ行く道が
+  要るのに、これまでは写しの目録をもう一度引かないと分からず、読み手によって道があったり
+  無かったりしていた(ビューワは上位の数件しか目録を引かず、MCP は引かない)。恒等レシピは
+  何も生成しないので、道の有無は要求の前に決まる: doc_rev に source のある件にだけ載り、
+  無い件では欄そのものが出ない(空文字を作らない)。分散検索で他のDBノードから来た件にも
+  載らない。そのチャンクは相手のストアにあり、こちらの URL では取れないからである。
 - citation は取り込み層の引用規則([docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b)
   の「文書モデル」の節)のとおり: collection はコレクション名、document は ref パスから
   collections/<コレクション名>/ を除いた残り、position は chunks 列の添字、breadcrumbs は

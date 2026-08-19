@@ -245,7 +245,7 @@ function render(body) {
       </div>`;
     div.querySelector("button").addEventListener("click", (event) => showFull(hit.id, div, event));
     $("results").append(div);
-    entries.push({ id: hit.id, page: cite.page, div });
+    entries.push({ id: hit.id, page: cite.page, sourceUrl: sameOriginPath(hit.source_url), div });
   });
   // 写しは描き終えてから足す(検索結果そのものは、写しの口が無くても出る)。
   attachRenditions(entries);
@@ -279,7 +279,7 @@ function renditionUrls(id) {
 // (どうするかは呼び手が決める)。
 async function loadCatalog(id) {
   const catalog = JSON.parse(await api(renditionUrls(id).catalog));
-  if (catalog.media !== "pdf" && catalog.media !== "html") return null;
+  if (catalog.media !== "pdf") return null;
   const views = {};
   for (const view of catalog.views || []) views[view.alias] = view;
   return { media: catalog.media, views };
@@ -347,26 +347,34 @@ function renditionBox(entry, views) {
   return box;
 }
 
-// 1 件ぶんの、保存した紙面への口。HTML の原本は外部を参照しない 1 枚として取り込んで
-// あるので、開けば取り込んだときの姿がそのまま出る(網へは出ない)。
-function savedPageBox(entry, views) {
+// 1 件ぶんの、原本(文書そのもの)への口。道は serve が検索の応答で言ったものをそのまま
+// serve が言った道のうち、頁が開いてよい形だけを通す。応答から来た文字列をそのまま
+// href に置くと、`javascript:` の類が頁の上で走る。組み立てるのは serve だが、頁は
+// 受け取った字面を検めてから使う(本文を escapeText に通すのと同じ規律)。
+function sameOriginPath(url) {
+  return typeof url === "string" && url.startsWith("/v1/objects/") ? url : null;
+}
+
+// 1 件ぶんの、原本(文書そのもの)への口。道は serve が検索の応答で言ったものを使う
+// (こちらで組み立てない。言われていない件には道を出さない)。HTML の紙面は外部を
+// 参照しない 1 枚として取り込んであるので、開けば取り込んだときの姿がそのまま出る。
+function sourceBox(entry) {
   const box = document.createElement("div");
   box.className = "media";
-  const source = views.source || {};
-  if (source.state === "unavailable") {
-    box.append(why("保存した紙面を出せない", source.reason));
-    return box;
-  }
-  box.append(pageLink(renditionUrls(entry.id).source, "保存した紙面を開く"));
+  box.append(pageLink(entry.sourceUrl, "原本(文書全体)を開く"));
   return box;
 }
 
 // 描き終えた結果に写しを足す。目録の口が無い serve(旧版)では何も足さず、従来どおりの
 // 画面のままにする(壊れた見た目を作らない)。
 async function attachRenditions(entries) {
-  // PDF 由来の徴は引用のページ番号である(markdown・text の件には page が無い)。
+  // PDF 由来でない件の原本は、目録を引かずに足せる(道は応答が言っている)。件数の上限も
+  // 要らない: 何も生成しないし、要求も飛ばないためである。
+  for (const entry of entries) {
+    if (entry.page === undefined && entry.sourceUrl) entry.div.prepend(sourceBox(entry));
+  }
+  // PDF 由来の徴は引用のページ番号である(markdown・text・html の件には page が無い)。
   const pdf = entries.filter((entry) => entry.page !== undefined);
-  const others = entries.filter((entry) => entry.page === undefined);
   let shape = null;
   for (const entry of pdf.slice(0, RENDITION_PROBE_LIMIT)) {
     let catalog;
@@ -378,18 +386,6 @@ async function attachRenditions(entries) {
     if (!catalog) continue;   // PDF 由来でない件
     shape = shape || catalog.views;
     entry.div.prepend(renditionBox(entry, catalog.views));
-  }
-  // ページ番号の無い件は、HTML の紙面だけが写しを持つ。件ごとに media が違いうるので
-  // 形は使い回さず、上限の数だけ目録を引く。
-  for (const entry of others.slice(0, RENDITION_PROBE_LIMIT)) {
-    let catalog;
-    try {
-      catalog = await loadCatalog(entry.id);
-    } catch {
-      break;
-    }
-    if (!catalog || catalog.media !== "html") continue;
-    entry.div.prepend(savedPageBox(entry, catalog.views));
   }
   if (!shape) return;
   // 残りの件は目録を引かない。どの写しが出せるか(と、出せない理由)はレシピと機械の

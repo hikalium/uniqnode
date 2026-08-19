@@ -561,6 +561,15 @@ pub struct FusedResult {
 ///
 /// 同一視の鍵はチャンクのオブジェクト ID である。content-addressed なので、同じ本文の
 /// チャンクは、どのDBノードから来ても同じ ID を持つ。
+/// 融合のあいだ覚えておく、チャンク 1 件の見え方。原本への道(source_url)は手元の件から
+/// しか採らない: ピアの件はそのピアのストアにあるので、こちらの URL では取れない。
+struct Seen {
+    snippet: String,
+    citation: Citation,
+    source_url: Option<String>,
+    sources: Vec<String>,
+}
+
 pub fn fuse(
     local: &[SearchResult],
     answers: &[(String, Vec<RemoteHit>)],
@@ -569,20 +578,23 @@ pub fn fuse(
     let mut rankings: Vec<Vec<String>> = Vec::new();
     // 各チャンクの見え方(抜粋と引用)と、どこから来たか。最初に見た側のものを使う
     // (ローカルを先に入れるので、手元にあるチャンクは手元の引用で答える)。
-    let mut seen: BTreeMap<String, (String, Citation, Vec<String>)> = BTreeMap::new();
-    let mut note = |id: &str, snippet: &str, citation: &Citation, source: &str| {
-        let entry = seen.entry(id.to_string()).or_insert_with(|| {
-            (snippet.to_string(), citation.clone(), Vec::new())
+    let mut seen: BTreeMap<String, Seen> = BTreeMap::new();
+    let mut note = |id: &str, snippet: &str, citation: &Citation, url: Option<&String>, source: &str| {
+        let entry = seen.entry(id.to_string()).or_insert_with(|| Seen {
+            snippet: snippet.to_string(),
+            citation: citation.clone(),
+            source_url: url.cloned(),
+            sources: Vec::new(),
         });
-        if !entry.2.iter().any(|known| known == source) {
-            entry.2.push(source.to_string());
+        if !entry.sources.iter().any(|known| known == source) {
+            entry.sources.push(source.to_string());
         }
     };
     rankings.push(
         local
             .iter()
             .map(|hit| {
-                note(&hit.id, &hit.snippet, &hit.citation, "local");
+                note(&hit.id, &hit.snippet, &hit.citation, hit.source_url.as_ref(), "local");
                 hit.id.clone()
             })
             .collect(),
@@ -591,7 +603,7 @@ pub fn fuse(
         rankings.push(
             hits.iter()
                 .map(|hit| {
-                    note(&hit.id, &hit.snippet, &hit.citation, source);
+                    note(&hit.id, &hit.snippet, &hit.citation, None, source);
                     hit.id.clone()
                 })
                 .collect(),
@@ -600,15 +612,16 @@ pub fn fuse(
     fuse_by_rank(&rankings, top_k)
         .into_iter()
         .filter_map(|fused| {
-            let (snippet, citation, sources) = seen.get(&fused.item)?;
+            let seen = seen.get(&fused.item)?;
             Some(FusedResult {
                 result: SearchResult {
                     id: fused.item.clone(),
                     score: fused.score,
-                    snippet: snippet.clone(),
-                    citation: citation.clone(),
+                    snippet: seen.snippet.clone(),
+                    citation: seen.citation.clone(),
+                    source_url: seen.source_url.clone(),
                 },
-                sources: sources.clone(),
+                sources: seen.sources.clone(),
             })
         })
         .collect()
@@ -700,6 +713,7 @@ mod tests {
             score: 1.0,
             snippet: format!("{id} の抜粋"),
             citation: citation("memo", 0),
+            source_url: Some(format!("/v1/objects/{id}/rendition/source")),
         }
     }
 

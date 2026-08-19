@@ -388,6 +388,15 @@ pub struct SearchResult {
     pub score: f64,
     pub snippet: String,
     pub citation: Citation,
+    /// 原本(このチャンクの出た文書そのもの)を取る道。写しの恒等レシピの URL で、
+    /// HTML なら紙面 1 枚、PDF なら PDF まるごと、markdown なら原文が返る。生成を伴わない
+    /// ので、道があると言い切れる件にだけ載る(doc_rev に source がある件)。
+    ///
+    /// なぜ検索の応答に載せるか: 抜粋の周りを読むには文書そのものへ行く道が要るのに、
+    /// これまでは目録(GET /v1/objects/{id}/rendition)をもう 1 度引かないと分からなかった。
+    /// ビューワは上位の数件しか目録を引かず、MCP は引かないので、読み手によって道が
+    /// あったり無かったりしていた。
+    pub source_url: Option<String>,
 }
 
 /// 検索 1 回の答え。method は実際に使った方式、degraded は要求した方式で答えられな
@@ -582,6 +591,7 @@ pub fn run_search(
                     score: hit.score,
                     snippet: chunk.snippet.clone(),
                     citation: Citation::of(chunk),
+                    source_url: source_url_of(chunk),
                 }
             })
             .collect();
@@ -891,6 +901,13 @@ pub fn search_response_body(outcome: &SearchResults) -> Vec<u8> {
     .into_bytes()
 }
 
+/// 原本(文書そのもの)を取る道。恒等レシピは何も生成しないので、doc_rev に source の
+/// ある件では必ず開ける。無い件(壊れた・他実装が書いた doc_rev)には道を約束しない。
+fn source_url_of(chunk: &crate::search::IndexedChunk) -> Option<String> {
+    chunk.source.as_ref()?;
+    Some(format!("/v1/objects/{}/rendition/source", chunk.id))
+}
+
 /// 検索結果 1 件の JSON(応答の results の要素)。ローカルだけの応答も、ピアと融合した
 /// 応答も、同じこの 1 箇所から出る(件の形を二重に実装しない。should/0135)。sources は
 /// 分散検索のときだけ載る(どのDBノードの順位に出た件なのか)。
@@ -903,8 +920,14 @@ fn result_json(result: &SearchResult, sources: Option<&[String]>) -> String {
             format!(",\"sources\":[{}]", rendered.join(","))
         }
     };
+    // 原本への道は、道があると言い切れる件にだけ載せる(空の欄を作らない。degraded と
+    // 同じ扱い)。鍵の並びは c1 の規約どおり辞書順である。
+    let source_url = match &result.source_url {
+        Some(url) => format!(",\"source_url\":{}", json_text(url)),
+        None => String::new(),
+    };
     format!(
-        "{{\"citation\":{citation},\"id\":{},\"score\":{},\"snippet\":{}{sources}}}",
+        "{{\"citation\":{citation},\"id\":{},\"score\":{},\"snippet\":{}{source_url}{sources}}}",
         json_text(&result.id),
         result.score,
         json_text(&result.snippet),
@@ -1121,7 +1144,10 @@ pub fn parse_search_response(body: &[u8]) -> Result<SearchResults, String> {
             Some(found) => citation_from_json(found)?,
             None => return Err("results の要素に citation がない".to_string()),
         };
-        results.push(SearchResult { id, score, snippet, citation });
+        // 相手が道を言わなければ載せない(こちらで組み立てると、手元に無いチャンクへの
+        // 道を約束してしまう)。
+        let source_url = item.field("source_url").and_then(Json::text).map(|url| url.to_string());
+        results.push(SearchResult { id, score, snippet, citation, source_url });
     }
     Ok(SearchResults { method, degraded, results, filtered_low_information, reranked: false })
 }
@@ -1788,6 +1814,9 @@ mod tests {
                         breadcrumbs: vec!["分散設計".to_string(), "世代の整合".to_string()],
                         at: 1_786_904_557,
                     },
+                    // 道は「原本があると言い切れる件」にだけ載る。往復で消えないこと
+                    // (と、無い件では欄そのものが出ないこと)を両方の件で見る。
+                    source_url: Some(format!("/v1/objects/s256:{}/rendition/source", "1".repeat(64))),
                 },
                 SearchResult {
                     id: format!("s256:{}", "2".repeat(64)),
@@ -1801,6 +1830,7 @@ mod tests {
                         breadcrumbs: Vec::new(),
                         at: 1_786_904_600,
                     },
+                    source_url: None,
                 },
             ],
             filtered_low_information: 2,
@@ -1837,6 +1867,13 @@ mod tests {
         assert_eq!(read.results[0].citation.at, 1_786_904_557);
         assert_eq!(read.results[1].citation.page, Some(2));
         assert!(read.results[1].citation.breadcrumbs.is_empty());
+        // 原本への道は往復で消えず、無い件には欄そのものが出ない(空文字を作らない)。
+        assert_eq!(
+            read.results[0].source_url.as_deref(),
+            Some(format!("/v1/objects/s256:{}/rendition/source", "1".repeat(64))).as_deref()
+        );
+        assert_eq!(read.results[1].source_url, None);
+        assert!(!text.contains("\"source_url\":\"\""), "{text}");
 
         // 欠けた形は黙って通さない(must/0022)。
         let missing =

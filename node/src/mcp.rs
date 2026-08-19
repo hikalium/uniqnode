@@ -855,6 +855,11 @@ fn render_search(request: &SearchRequest, outcome: &SearchResults) -> String {
         out.push_str(&format!("   チャンク ID: {}\n", result.id));
         out.push_str(&format!("   得点: {:.4}\n", result.score));
         out.push_str(&format!("   抜粋: {}\n", result.snippet));
+        // 原本(文書そのもの)への道。serve が言った件にだけ出す。相対の道であり、
+        // 根は問い合わせ先の serve である。
+        if let Some(url) = &result.source_url {
+            out.push_str(&format!("   原本(文書全体): {url}\n"));
+        }
     }
     out.push_str(&format!("\n{FETCH_HINT}\n"));
     out

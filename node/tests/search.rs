@@ -132,6 +132,31 @@ fn pdf_search_citations_carry_the_page_number() {
     assert!(body.contains("\"breadcrumbs\":[]"), "PDF は breadcrumbs を持たない: {body}");
 }
 
+/// 検索の応答は、件ごとに原本(文書そのもの)への道を言う。道はチャンクの周りを読むために
+/// 要るもので、読み手(ビューワ・MCP・素の API)が写しの目録を引き直さずに済む。
+#[test]
+fn every_result_carries_the_way_to_the_whole_document() {
+    let server = start_server("search-source-url");
+    let page = "<!DOCTYPE html><html><head><title>紙面</title></head><body>\
+                <h2>節</h2><p>抜粋に出る本文。ここには紙面の主題が書いてあり、\
+                読み手は抜粋の周りを読むために原本へ行く。</p>\
+                <p>二つ目の段落。取り込みは札を落として本文だけを索引に載せる。</p>\
+                </body></html>";
+    put_document(&server.address, "site", "page.html", page.as_bytes());
+    let response = search(&server.address, "{\"query\":\"抜粋に出る本文\",\"top_k\":1}");
+    assert_eq!(response.status, 200, "{}", body_text(&response));
+    let body = body_text(&response);
+    let chunk_id = json_text_field(&body, "id").unwrap_or_else(|| panic!("チャンク ID: {body}"));
+    let expected = format!("/v1/objects/{chunk_id}/rendition/source");
+    assert!(body.contains(&format!("\"source_url\":\"{expected}\"")), "{body}");
+
+    // 言われた道は実際に開き、返るのはチャンクではなく文書そのものである。
+    let whole = simple(&server.address, "GET", &expected, b"");
+    assert_eq!(whole.status, 200, "{}", body_text(&whole));
+    assert_eq!(whole.content_type, "text/html; charset=utf-8");
+    assert_eq!(whole.body, page.as_bytes(), "紙面まるごとが返る");
+}
+
 /// collection の絞り込み: 指定すればそのコレクションだけ、省略すれば全コレクション。
 #[test]
 fn a_collection_filter_narrows_the_search_scope() {

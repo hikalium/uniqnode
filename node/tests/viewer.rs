@@ -167,6 +167,47 @@ fn the_viewer_forwards_the_rendition_paths_and_refuses_unknown_aliases() {
     assert!(body_text(&bad).contains(refusal));
 }
 
+/// 取り込んだ紙面(HTML)は、ビューワを通しても型を保ち、砂場の印つきで届く。
+/// 型を失うとブラウザが紙面として開かず、印を失うと取り込んだ文書が同じ生成元で走る。
+#[test]
+fn the_viewer_relays_a_stored_page_as_sandboxed_html() {
+    let server = start_server("viewer-html");
+    let serve_url = format!("http://{}", server.address);
+    let viewer = start_viewer(server.dir.to_str().expect("utf-8"), &serve_url);
+    let page = "<!DOCTYPE html><html><head><title>紙面</title></head>\
+                <body><p>保存した本文。</p></body></html>";
+    let response = simple(
+        &server.address,
+        "PUT",
+        "/v1/collections/site/documents/page.html",
+        page.as_bytes(),
+    );
+    assert_eq!(response.status, 200, "{}", body_text(&response));
+    let doc_rev = json_text_field(&body_text(&response), "doc_rev").expect("doc_rev");
+    let doc = body_text(&simple(&server.address, "GET", &format!("/v1/objects/{doc_rev}"), b""));
+    let chunk_id = doc
+        .split("\"chunks\":[\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("chunk id");
+
+    let relayed = simple(
+        &viewer.address,
+        "GET",
+        &format!("/v1/objects/{chunk_id}/rendition/source"),
+        b"",
+    );
+    assert_eq!(relayed.status, 200, "{}", body_text(&relayed));
+    assert_eq!(relayed.content_type, "text/html; charset=utf-8");
+    assert_eq!(relayed.content_security_policy, "sandbox allow-scripts");
+    assert_eq!(relayed.body, page.as_bytes(), "原本そのものが届く");
+
+    // ビューワ自身の頁は砂場に入れない(自分の生成元の /v1/* を叩けないと検索が動かない)。
+    let own = simple(&viewer.address, "GET", "/", b"");
+    assert_eq!(own.content_type, "text/html; charset=utf-8");
+    assert_eq!(own.content_security_policy, "", "頁は取り込んだ文書ではない");
+}
+
 /// 写しの口を持たない serve(旧版)に繋いだときも、頁と検索は従来どおり動く。頁は写しの
 /// 目録が 404 なら何も足さないので(単体試験 a_serve_without_the_catalog_leaves_the_page_as_it_was)、
 /// ここでは土台のほう — 目録が無くても頁と検索が壊れないこと — を見る。

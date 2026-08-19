@@ -83,6 +83,55 @@ fn put_document_and_resolve_a_citation_then_reput_is_noop() {
     assert_eq!(response.status, 400, "{}", body_text(&response));
 }
 
+/// HTML を 1 枚入れると、チャンクは札の落ちた本文になり、原本はそのまま blob に残る。
+/// 原本を取り出す道(写しの恒等レシピ)は text/html を名乗るので、そのまま開ける。
+#[test]
+fn put_html_document_is_chunked_as_text_and_served_back_as_html() {
+    let server = start_server("ingest-html");
+    let page = "<!-- 取得の記録 -->\n<!DOCTYPE html><html><head><title>紙面</title>\
+                <style>body { color: red }</style></head><body><h2>節</h2>\
+                <p>検索に載る本文。</p><ul><li>項目</li></ul>\
+                <script>var a = 1;</script></body></html>";
+
+    let response = simple(
+        &server.address,
+        "PUT",
+        "/v1/collections/site/documents/page.html",
+        page.as_bytes(),
+    );
+    assert_eq!(response.status, 200, "{}", body_text(&response));
+    let doc_rev = json_text_field(&body_text(&response), "doc_rev").expect("doc_rev");
+
+    // ref 名に拡張子は残らない。
+    let refs = body_text(&simple(&server.address, "GET", "/v1/refs", b""));
+    assert!(refs.contains("collections/site/page"), "{refs}");
+
+    let doc = body_text(&simple(&server.address, "GET", &format!("/v1/objects/{doc_rev}"), b""));
+    assert!(doc.contains("\"media\":\"html\""), "{doc}");
+    assert!(!doc.contains("extractor"), "外部委譲が無いので extractor は付かない: {doc}");
+    let chunk_id = chunk_ids_of(&doc).into_iter().next().expect("chunk id");
+    let chunk = body_text(&simple(&server.address, "GET", &format!("/v1/objects/{chunk_id}"), b""));
+    assert!(chunk.contains("検索に載る本文。"), "{chunk}");
+    assert!(chunk.contains("- 項目"), "箇条書きは行頭の印になる: {chunk}");
+    assert!(!chunk.contains("<p>") && !chunk.contains("var a"), "札と script は落ちる: {chunk}");
+    assert!(chunk.contains("\"breadcrumbs\":[\"紙面\",\"節\"]"), "{chunk}");
+
+    // 原本は 1 バイトも変わらず、HTML として返る。
+    let response = simple(
+        &server.address,
+        "GET",
+        &format!("/v1/objects/{chunk_id}/rendition/source"),
+        b"",
+    );
+    assert_eq!(response.status, 200);
+    assert_eq!(response.content_type, "text/html; charset=utf-8");
+    assert_eq!(
+        response.content_security_policy, "sandbox allow-scripts",
+        "取り込んだ紙面は不透明な生成元で描かせる(同じ生成元の /v1/* を叩かせない)"
+    );
+    assert_eq!(response.body, page.as_bytes(), "原本そのものが返る");
+}
+
 /// CLI がディレクトリを再帰で取り込み、対象外を黙って捨てずに報告すること。
 #[test]
 fn cli_ingest_walks_a_directory_and_reports_skipped_files() {

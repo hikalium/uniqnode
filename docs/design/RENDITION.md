@@ -18,7 +18,7 @@
 
 | 別名 | 中身 | 型 | 実測(sdm_vol2 1414 ページ目) |
 |---|---|---|---|
-| source | 原本 PDF そのもの | application/pdf | 0.03 秒・生成しない |
+| source | 原本そのもの(PDF・HTML・素文) | 中身で決まる | 0.03 秒・生成しない |
 | thumb | 一覧用のサムネ | image/jpeg | 0.21 秒・70 KB |
 | page | 拡大用の紙面 | image/png | 0.48 秒・371 KB |
 | pagepdf | そのページだけの PDF | application/pdf | 0.17 秒・65 KB |
@@ -111,7 +111,18 @@ GET /v1/objects/{チャンクID}/rendition/{別名}   -> レシピが決める�
 
 既存の `GET /v1/objects/{id}` は 1 バイトも変えていない(生のバイト列を octet-stream で
 返す口のまま)。`source` の型だけは中身で決める: 許可表の application/pdf を無条件に
-名乗ると、markdown の原文を PDF だと嘘をつくためである。
+名乗ると、markdown の原文を PDF だと嘘をつくためである。判定は 4 通りで、`%PDF-` で
+始まれば application/pdf、頭が `<!doctype html` か `<html` なら text/html、ほかの UTF-8 は
+text/plain、UTF-8 でなければ octet-stream になる。HTML を text/plain で返すと紙面が札のまま
+出てしまうので、HTML と名乗れる原本だけ text/html にする。外部を参照しない 1 枚として
+取り込んだ紙面([docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b) の HTML 抽出)は、
+この道でそのままブラウザに出せる。
+
+HTML の原本だけは `Content-Security-Policy: sandbox allow-scripts` を添えて返す(serve も、
+それを写すビューワも)。取り込んだ紙面はよそから来た文書であって、この生成元の `/v1/*` を
+叩ける権限を渡してよいものではない。`allow-same-origin` は与えないので紙面は不透明な生成元で
+描かれ、スクリプトだけは動く(保存した紙面を、保存したときの姿で見せるため)。ビューワ自身の
+頁には印を付けない。自分の生成元の `/v1/*` を叩けないと検索が動かないからである。
 
 ## 既知の癖
 

@@ -11,6 +11,7 @@ pub mod embed;
 pub mod eval;
 pub mod groups;
 pub mod health;
+pub mod html;
 pub mod http;
 pub mod ingest;
 pub mod json;

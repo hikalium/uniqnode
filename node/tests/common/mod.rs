@@ -204,6 +204,9 @@ pub struct HttpResponse {
     /// 名乗られた Content-Type(ヘッダが無ければ空)。ページの写しは何であるかを
     /// 型で名乗るので、本文だけでなくヘッダも検証の対象になる。
     pub content_type: String,
+    /// 名乗られた Content-Security-Policy(ヘッダが無ければ空)。取り込んだ紙面を
+    /// 砂場で描かせる印なので、これも検証の対象になる。
+    pub content_security_policy: String,
 }
 
 pub fn read_response(reader: &mut BufReader<TcpStream>) -> HttpResponse {
@@ -217,6 +220,7 @@ pub fn read_response(reader: &mut BufReader<TcpStream>) -> HttpResponse {
         .expect("numeric status");
     let mut content_length = 0usize;
     let mut content_type = String::new();
+    let mut content_security_policy = String::new();
     loop {
         let mut line = String::new();
         reader.read_line(&mut line).expect("header line");
@@ -231,11 +235,14 @@ pub fn read_response(reader: &mut BufReader<TcpStream>) -> HttpResponse {
             if name.trim().eq_ignore_ascii_case("content-type") {
                 content_type = value.trim().to_string();
             }
+            if name.trim().eq_ignore_ascii_case("content-security-policy") {
+                content_security_policy = value.trim().to_string();
+            }
         }
     }
     let mut body = vec![0u8; content_length];
     reader.read_exact(&mut body).expect("body");
-    HttpResponse { status, body, content_type }
+    HttpResponse { status, body, content_type, content_security_policy }
 }
 
 pub fn simple(address: &str, method: &str, path: &str, body: &[u8]) -> HttpResponse {

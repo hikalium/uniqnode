@@ -43,11 +43,17 @@ pub struct Response {
     /// 応答を書き切った後にプロセスを正常終了する(POST /v1/admin/shutdown 用。
     /// 正常終了はカバレッジのプロファイル書き出しも保証する)。
     pub shutdown_after: bool,
+    /// 取り込んだ紙面をそのまま返す応答に付ける印(HTML の原本。INGEST の HTML 抽出)。
+    /// 付けると Content-Security-Policy: sandbox allow-scripts が載り、紙面は不透明な
+    /// 生成元で描かれる。取り込んだ HTML は「よそから来た文書」であって、この生成元の
+    /// 権限(同じ生成元の /v1/* を叩ける権限)を渡してよいものではない。スクリプトは
+    /// 動かす — 保存した紙面を保存したときの姿で見せるのが目的だからである。
+    pub sandbox: bool,
 }
 
 impl Response {
     pub fn json(status: u16, body: Vec<u8>) -> Response {
-        Response { status, content_type: "application/json", body, shutdown_after: false }
+        Response { status, content_type: "application/json", body, shutdown_after: false, sandbox: false }
     }
     pub fn text(status: u16, text: &str) -> Response {
         Response {
@@ -55,6 +61,7 @@ impl Response {
             content_type: "text/plain; charset=utf-8",
             body: text.into(),
             shutdown_after: false,
+            sandbox: false,
         }
     }
     pub fn bytes(status: u16, body: Vec<u8>) -> Response {
@@ -63,6 +70,7 @@ impl Response {
             content_type: "application/octet-stream",
             body,
             shutdown_after: false,
+            sandbox: false,
         }
     }
     /// 型を名乗るバイト列(PDF のページの写しのように、何であるかが octet-stream では
@@ -70,7 +78,7 @@ impl Response {
     /// ここは受け取った字句をそのままヘッダに書く。&'static str なのは、名乗ってよい型を
     /// 表に書かれたものに限るためである(要求の文字列がそのままヘッダへ抜ける道を作らない)。
     pub fn bytes_typed(status: u16, content_type: &'static str, body: Vec<u8>) -> Response {
-        Response { status, content_type, body, shutdown_after: false }
+        Response { status, content_type, body, shutdown_after: false, sandbox: false }
     }
 }
 
@@ -224,13 +232,19 @@ fn read_request(
     Ok(Some(ReadOutcome::Ok(Request { body, ..request_head })))
 }
 
+/// 取り込んだ紙面に付ける印。不透明な生成元で描かせ、スクリプトだけは動かす。
+/// allow-same-origin は与えない: 与えると砂場の意味が無くなる(同じ生成元の /v1/* を
+/// そのまま叩ける)。
+const SANDBOX_HEADER: &str = "Content-Security-Policy: sandbox allow-scripts\r\n";
+
 fn write_response(writer: &mut TcpStream, response: &Response, close: bool) -> std::io::Result<()> {
     let head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}Connection: {}\r\n\r\n",
         response.status,
         status_reason(response.status),
         response.content_type,
         response.body.len(),
+        if response.sandbox { SANDBOX_HEADER } else { "" },
         if close { "close" } else { "keep-alive" },
     );
     writer.write_all(head.as_bytes())?;

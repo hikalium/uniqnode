@@ -1229,9 +1229,12 @@ fn rendition_error_response(error: crate::rendition::RenditionError) -> Response
 }
 
 /// 用意できた写しをそのまま返す。Content-Type はレシピ(恒等レシピだけは原本の中身)が
-/// 決めたものである。
+/// 決めたものである。HTML の原本には砂場の印を付ける: 取り込んだ紙面はよそから来た文書
+/// であって、この生成元の /v1/* を叩ける権限を渡してよいものではない(node/src/http.rs)。
 fn rendition_response(rendition: crate::rendition::Rendition) -> Response {
-    Response::bytes_typed(200, rendition.content_type, rendition.bytes)
+    let mut response = Response::bytes_typed(200, rendition.content_type, rendition.bytes);
+    response.sandbox = rendition.content_type.starts_with("text/html");
+    response
 }
 
 /// 席 1 つの JSON。状態の判断は rendition::inspect にあり、ここは URL を足して写すだけ。
@@ -1701,10 +1704,10 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
             return error_response(400, "コレクション名と文書名が要る");
         }
         let Some((stem, extension)) = name.rsplit_once('.') else {
-            return error_response(400, "文書名に拡張子が要る(.md/.markdown/.txt/.pdf)");
+            return error_response(400, "文書名に拡張子が要る(.md/.markdown/.txt/.html/.htm/.pdf)");
         };
         let Some(media) = crate::ingest::media_for_extension(extension) else {
-            return error_response(400, "対象外の拡張子(.md/.markdown/.txt/.pdf のみ)");
+            return error_response(400, "対象外の拡張子(.md/.markdown/.txt/.html/.htm/.pdf のみ)");
         };
         let extracted;
         let mut extractor_label = None;

@@ -274,14 +274,15 @@ function renditionUrls(id) {
   };
 }
 
-// 目録 1 件。別名で引ける形に直して返す。PDF 由来でない件は null(出せないものの席を
-// 作らない)。届かない・口が無いときは投げる(どうするかは呼び手が決める)。
+// 目録 1 件。別名で引ける形に直し、media と一緒に返す。写しの席が無い件(markdown や
+// text の原文)は null(出せないものの席を作らない)。届かない・口が無いときは投げる
+// (どうするかは呼び手が決める)。
 async function loadCatalog(id) {
   const catalog = JSON.parse(await api(renditionUrls(id).catalog));
-  if (catalog.media !== "pdf") return null;
+  if (catalog.media !== "pdf" && catalog.media !== "html") return null;
   const views = {};
   for (const view of catalog.views || []) views[view.alias] = view;
-  return views;
+  return { media: catalog.media, views };
 }
 
 // serve から来た文言(出せない理由・注記)は、地の文としてその場に出す。値はテキストの
@@ -346,22 +347,49 @@ function renditionBox(entry, views) {
   return box;
 }
 
+// 1 件ぶんの、保存した紙面への口。HTML の原本は外部を参照しない 1 枚として取り込んで
+// あるので、開けば取り込んだときの姿がそのまま出る(網へは出ない)。
+function savedPageBox(entry, views) {
+  const box = document.createElement("div");
+  box.className = "media";
+  const source = views.source || {};
+  if (source.state === "unavailable") {
+    box.append(why("保存した紙面を出せない", source.reason));
+    return box;
+  }
+  box.append(pageLink(renditionUrls(entry.id).source, "保存した紙面を開く"));
+  return box;
+}
+
 // 描き終えた結果に写しを足す。目録の口が無い serve(旧版)では何も足さず、従来どおりの
 // 画面のままにする(壊れた見た目を作らない)。
 async function attachRenditions(entries) {
   // PDF 由来の徴は引用のページ番号である(markdown・text の件には page が無い)。
   const pdf = entries.filter((entry) => entry.page !== undefined);
+  const others = entries.filter((entry) => entry.page === undefined);
   let shape = null;
   for (const entry of pdf.slice(0, RENDITION_PROBE_LIMIT)) {
-    let views;
+    let catalog;
     try {
-      views = await loadCatalog(entry.id);
+      catalog = await loadCatalog(entry.id);
     } catch {
       return;                 // 目録の口が無い(旧 serve)・届かない: 何も足さない
     }
-    if (!views) continue;     // PDF 由来でない件
-    shape = shape || views;
-    entry.div.prepend(renditionBox(entry, views));
+    if (!catalog) continue;   // PDF 由来でない件
+    shape = shape || catalog.views;
+    entry.div.prepend(renditionBox(entry, catalog.views));
+  }
+  // ページ番号の無い件は、HTML の紙面だけが写しを持つ。件ごとに media が違いうるので
+  // 形は使い回さず、上限の数だけ目録を引く。
+  for (const entry of others.slice(0, RENDITION_PROBE_LIMIT)) {
+    let catalog;
+    try {
+      catalog = await loadCatalog(entry.id);
+    } catch {
+      break;
+    }
+    if (!catalog || catalog.media !== "html") continue;
+    entry.div.prepend(savedPageBox(entry, catalog.views));
   }
   if (!shape) return;
   // 残りの件は目録を引かない。どの写しが出せるか(と、出せない理由)はレシピと機械の

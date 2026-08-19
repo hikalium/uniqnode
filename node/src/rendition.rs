@@ -537,9 +537,25 @@ pub fn identity_content_type(bytes: &[u8]) -> &'static str {
         return "application/pdf";
     }
     match std::str::from_utf8(bytes) {
+        Ok(text) if looks_like_html(text) => "text/html; charset=utf-8",
         Ok(_) => "text/plain; charset=utf-8",
         Err(_) => "application/octet-stream",
     }
+}
+
+/// HTML の原本かどうか。text/plain で返すと紙面が札のまま出るので、HTML と名乗れるもの
+/// だけ text/html にする。見るのは頭だけである(本文の途中に出る "<html" という文字列
+/// ではなく、紙面そのものの始まりを見たい)。
+fn looks_like_html(text: &str) -> bool {
+    let mut head = text.trim_start_matches('\u{feff}').trim_start();
+    // 頭のコメント(取得の記録やライセンスの断り書き)は読み飛ばす。飛ばさないと、
+    // 断り書きを 1 行付けただけの紙面が素文だと名乗ってしまう。
+    while let Some(rest) = head.strip_prefix("<!--") {
+        let Some(end) = rest.find("-->") else { return false };
+        head = rest[end + 3..].trim_start();
+    }
+    let head: String = head.chars().take(64).collect::<String>().to_ascii_lowercase();
+    head.starts_with("<!doctype html") || head.starts_with("<html")
 }
 
 // ---- 三段(錠の規律) ----
@@ -1683,6 +1699,32 @@ mod tests {
         assert_eq!(store.object_count(), objects_before + 1, "2 度目は増えない");
         assert_eq!(store.last_seq(), seq_before + 1, "2 度目は書かない");
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 恒等レシピの Content-Type は中身で決まる。HTML の原本を text/plain で返すと
+    /// 紙面が札のまま出てしまうので、頭を見て text/html と名乗る。
+    #[test]
+    fn the_identity_recipe_names_html_as_html() {
+        assert_eq!(identity_content_type(b"%PDF-1.7\n..."), "application/pdf");
+        assert_eq!(
+            identity_content_type(b"<!DOCTYPE html><html><body>x</body></html>"),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            identity_content_type("\n  <html lang=\"ja\">…".as_bytes()),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(identity_content_type("# 見出し\n\n本文".as_bytes()), "text/plain; charset=utf-8");
+        assert_eq!(
+            identity_content_type("本文に <html> と書いてあるだけの素文".as_bytes()),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            identity_content_type("<!-- 取得の記録 -->\n<!DOCTYPE html><html></html>".as_bytes()),
+            "text/html; charset=utf-8",
+            "頭の断り書きで素文に見えてはいけない"
+        );
+        assert_eq!(identity_content_type(&[0xff, 0xfe, 0x00]), "application/octet-stream");
     }
 
     /// 表の 3 つのレシピが、それぞれ名乗った型のバイト列を出すこと。単ページ PDF は

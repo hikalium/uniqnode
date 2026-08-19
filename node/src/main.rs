@@ -66,7 +66,7 @@ fn usage() -> ! {
            sync <dir> <peer_addr>     相手から pull で同期する(serve 停止中のストア用。\n\
                                       serve 中は POST /v1/sync を使う)\n\
            ingest <dir> <collection> <path> [--pdftotext <exe>]\n\
-                                      文書を取り込む(.md/.markdown/.txt/.pdf。ディレクトリ\n\
+                                      文書を取り込む(.md/.markdown/.txt/.html/.htm/.pdf。ディレクトリ\n\
                                       は再帰。serve 停止中のストア用。serve 中は\n\
                                       PUT /v1/collections/{{c}}/documents/{{name}} を使う。\n\
                                       PDF の抽出は pdftotext に委譲し、--pdftotext の明示\n\

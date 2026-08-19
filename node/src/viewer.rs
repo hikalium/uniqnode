@@ -78,6 +78,9 @@ impl Viewer {
                 content_type: "text/html; charset=utf-8",
                 body: PAGE.as_bytes().to_vec(),
                 shutdown_after: false,
+                // 頁は自分自身であって取り込んだ文書ではない。自分の生成元の /v1/* を
+                // 叩けなければ検索そのものが動かないので、砂場には入れない。
+                sandbox: false,
             },
             ("GET", "/healthz") => Response::text(200, "ok\n"),
             // 検索。要求の本文はそのまま渡す(読み取りと検証の家は serve 側の
@@ -115,11 +118,15 @@ impl Viewer {
 /// image/jpeg と言った写しがブラウザに届く頃には型を失い、頁の <img> も PDF の埋め込みも
 /// 動かない。ビューワは運ぶだけの層なので、途中で名乗りを書き換えない。
 fn relay(response: http::ClientResponse) -> Response {
+    let content_type = relayed_content_type(upstream_content_type(&response));
     Response {
         status: response.status,
-        content_type: relayed_content_type(upstream_content_type(&response)),
+        content_type,
         body: response.body,
         shutdown_after: false,
+        // 取り込んだ紙面は、この生成元の権限を持たせずに描く(serve が同じ印を付ける
+        // のと同じ理由。node/src/http.rs の sandbox)。
+        sandbox: content_type.starts_with("text/html"),
     }
 }
 
@@ -137,11 +144,12 @@ fn upstream_content_type(response: &http::ClientResponse) -> Option<&str> {
 /// 表と照合してから載せる理由は二つある。写し先の http::Response が持つのが
 /// &'static str であること、そして上流の言い分をそのまま応答ヘッダの字面にしないこと
 /// (相手の文字列を自分のヘッダに素通しさせない)である。
-const RELAYED_CONTENT_TYPES: [&str; 5] = [
+const RELAYED_CONTENT_TYPES: [&str; 6] = [
     "application/json",
     "application/pdf",
     "image/jpeg",
     "image/png",
+    "text/html; charset=utf-8",
     "text/plain; charset=utf-8",
 ];
 
@@ -472,6 +480,11 @@ mod tests {
         assert_eq!(relayed_content_type(Some("application/json")), "application/json");
         assert_eq!(relayed_content_type(Some(" image/jpeg ")), "image/jpeg");
         assert_eq!(relayed_content_type(Some("IMAGE/JPEG")), "image/jpeg");
+        // 取り込んだ紙面は型を保って運ぶ(砂場の印は relay が付ける)。
+        assert_eq!(
+            relayed_content_type(Some("text/html; charset=utf-8")),
+            "text/html; charset=utf-8"
+        );
         // 表に無い型は、その字面のまま応答ヘッダに載せない。
         assert_eq!(relayed_content_type(Some("text/html")), "application/octet-stream");
         assert_eq!(

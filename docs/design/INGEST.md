@@ -22,7 +22,7 @@ blob(原文そのもの)・chunk(検索と引用の単位)・doc_rev(版)・ref(
 { "v": 1, "kind": "chunk", "text": "…",
   "meta": { "breadcrumbs": ["5 …", "5.2.3.2 …"] } }
 
-// doc_rev: 原文 blob と順序付きチャンク列を束ねる版。media は markdown | text | pdf。
+// doc_rev: 原文 blob と順序付きチャンク列を束ねる版。media は markdown | text | html | pdf。
 // extractor は PDF のときだけ(PDF 抽出の節)。previous は前版の doc_rev(初版はキー
 // なし)。
 { "v": 1, "kind": "doc_rev", "source": "s256:<blob>",
@@ -32,8 +32,8 @@ blob(原文そのもの)・chunk(検索と引用の単位)・doc_rev(版)・ref(
 ```
 
 - 文書名は取り込み起点からの相対パスから拡張子を除いたもの(acpi_6_4.pdf なら acpi_6_4)。
-  種別は入力ファイル名の拡張子で判定し(.md / .markdown は markdown、.txt は text、.pdf は
-  pdf)、拡張子を ref 名には残さない。
+  種別は入力ファイル名の拡張子で判定し(.md / .markdown は markdown、.txt は text、
+  .html / .htm は html、.pdf は pdf)、拡張子を ref 名には残さない。
 - ref `collections/<コレクション名>/<文書名>` が現行の doc_rev を指す。文書一覧は既存の
   refs 一覧(GET /v1/refs)で足りるので、専用の一覧 API は無い。
 - 引用は doc_rev 側から組み立てる: 文書名は ref パスから `collections/<コレクション名>/` を
@@ -90,6 +90,31 @@ blob(原文そのもの)・chunk(検索と引用の単位)・doc_rev(版)・ref(
   になるだけで、旧 doc_rev は旧抽出についての真のまま残る(I1)。
 - blob になるのは PDF バイナリそのもので、チャンクは抽出テキスト(form feed 区切り)から
   作る。
+
+## HTML 抽出
+
+- blob になるのは HTML の原本そのもので、チャンクは札を落とした本文から作る(PDF と同じ
+  分け方)。抽出は自前で、家は node/src/html.rs である。pdftotext のような「どこにでもある
+  委譲先」が HTML には無い(lynx も pandoc も前提にできない)ので、外部プロセスを増やさずに
+  済む範囲だけを引き受ける。
+- 引き受けるのは 3 つ。人が読まない部分(script・style・svg・noscript・template の中身と
+  コメント)を落とす。見出しと箇条書きを Markdown の記法へ写す。実体参照を文字へ戻す。
+  写したあとは Markdown のチャンカーをそのまま通すので、見出しの入れ子が meta.breadcrumbs に
+  なる。title 要素は紙面の題として最上位の見出しに写る。
+- 落ちるものも決めてある: リンク先の URL、画像(alt も)、表の罫線と列の対応、装飾。表は
+  セルを空白 1 つ、行を改行に落とすだけである。落ちたものが要るときは blob を読む
+  (原本は無傷で残っている)。
+- 見出しの階を飛ばした紙面(h1 の次が h3 で、その h3 が何本も並ぶ形)は HTML では普通に
+  ある。チャンカーは見出しを階数つきで積み、同じ階かそれより浅い見出しが来たら積みを
+  戻すので、並んだ h3 は兄弟のまま経路に載る。
+- ナビゲーションや脚のような、どの紙面にも出る定型は本文に入る。「ここからが本文」を当てる
+  規則は生成器ごとに違うので当てない。定型は短く、チャンクの大半は本文になる。
+- doc_rev.meta.extractor は付かない。外部へ委譲していないので、記録すべき外部の版が無い
+  (抽出の変化はこの木の版が持つ)。
+- 原本を返す道は写しの恒等レシピ(source)で、Content-Type は中身の頭で決まる
+  ([docs/design/RENDITION.md](#6046eeca-1d95-4d47-87da-13f86c7710dc))。HTML と名乗れる原本は
+  text/html で出るので、ブラウザでそのまま開ける。網に取りに行かない紙面を入れておけば、
+  ストアの中の 1 枚がそのまま読める紙面になる。
 
 ## 注釈の取り込みと照合
 
@@ -216,7 +241,7 @@ CLI は排他ロックのため serve 停止中のストア用であり、serve 
 sync サブコマンドと同じ扱い)。形の正典は node/src/main.rs の usage と node/src/api.rs。
 
 - `uniqnode ingest <dir> <コレクション名> <パス> [--pdftotext <exe>]`: 文書の取り込み。
-  ディレクトリは再帰(名前順)。対象の拡張子は .md / .markdown / .txt / .pdf のみで、
+  ディレクトリは再帰(名前順)。対象の拡張子は .md / .markdown / .txt / .html / .htm / .pdf のみで、
   それ以外は取り込まず、対象外の一覧を最後に印字する(黙って捨てない)。
 - `uniqnode ingest-annotations <dir> <コレクション名> <data.md> [--manual <承認リスト>]`:
   注釈索引の取り込み(注釈の取り込みと照合の節)。

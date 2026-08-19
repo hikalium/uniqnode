@@ -139,12 +139,17 @@ fn heading_of(line: &str) -> Option<(usize, &str)> {
 /// 見出しの入れ子パスを各チャンクの breadcrumbs に写す。
 pub fn chunk_markdown(text: &str) -> Vec<Chunk> {
     let mut chunks = Vec::new();
-    let mut breadcrumbs: Vec<String> = Vec::new();
+    // 見出しは階数つきで積む。階数を持たずに深さだけで切ると、階を飛ばした紙面
+    // (h1 の次が h3 で、その h3 が何本も並ぶ形。HTML から来る紙面によくある)で
+    // 兄弟が親子に見えてしまう。
+    let mut stack: Vec<(usize, String)> = Vec::new();
     let mut section_lines: Vec<&str> = Vec::new();
     let mut in_fence = false;
-    let flush_section = |lines: &mut Vec<&str>, breadcrumbs: &[String], out: &mut Vec<Chunk>| {
+    let flush_section = |lines: &mut Vec<&str>, stack: &[(usize, String)], out: &mut Vec<Chunk>| {
+        let breadcrumbs: Vec<String> =
+            stack.iter().map(|(_, title)| title.clone()).collect();
         let paragraphs = paragraphs_of(lines);
-        pack_paragraphs(&paragraphs, breadcrumbs, None, out);
+        pack_paragraphs(&paragraphs, &breadcrumbs, None, out);
         lines.clear();
     };
     for line in text.lines() {
@@ -155,15 +160,17 @@ pub fn chunk_markdown(text: &str) -> Vec<Chunk> {
         }
         if !in_fence {
             if let Some((level, title)) = heading_of(line) {
-                flush_section(&mut section_lines, &breadcrumbs, &mut chunks);
-                breadcrumbs.truncate(level - 1);
-                breadcrumbs.push(title.to_string());
+                flush_section(&mut section_lines, &stack, &mut chunks);
+                while stack.last().is_some_and(|(open, _)| *open >= level) {
+                    stack.pop();
+                }
+                stack.push((level, title.to_string()));
                 continue;
             }
         }
         section_lines.push(line);
     }
-    flush_section(&mut section_lines, &breadcrumbs, &mut chunks);
+    flush_section(&mut section_lines, &stack, &mut chunks);
     chunks
 }
 
@@ -203,15 +210,18 @@ pub fn media_for_extension(extension: &str) -> Option<&'static str> {
         "md" | "markdown" => Some("markdown"),
         "txt" => Some("text"),
         "pdf" => Some("pdf"),
+        "html" | "htm" => Some("html"),
         _ => None,
     }
 }
 
 /// media に応じたチャンカー。PDF の text は pdftotext の抽出テキスト
-/// (form feed 区切り)であって PDF バイナリではない。
+/// (form feed 区切り)であって PDF バイナリではない。HTML は原本そのもので、素文への
+/// 変換(node/src/html.rs)はここで一度だけ行う(should/0135)。
 pub fn chunk_for_media(media: &str, text: &str) -> Vec<Chunk> {
     match media {
         "markdown" => chunk_markdown(text),
+        "html" => chunk_markdown(&crate::html::to_text(text)),
         "pdf" => chunk_pdf_text(text),
         _ => chunk_plain_text(text),
     }
@@ -1944,5 +1954,29 @@ mod tests {
         assert!(!again.ref_updated);
         assert_eq!(again.new_objects, 0);
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 階を飛ばした見出し(h1 の次が h3)で、並んだ h3 が親子にならない。
+    #[test]
+    fn sibling_headings_do_not_nest_when_a_level_is_skipped() {
+        let chunks = chunk_markdown("# 題\n\n### あ\n\n本文あ\n\n### い\n\n本文い\n");
+        let paths: Vec<Vec<String>> =
+            chunks.iter().map(|chunk| chunk.breadcrumbs.clone()).collect();
+        assert_eq!(paths, vec![vec!["題", "あ"], vec!["題", "い"]]);
+    }
+
+    /// HTML は原本のまま渡され、チャンクは札の落ちた本文になる(見出しは経路に写る)。
+    #[test]
+    fn html_is_chunked_from_its_text_not_from_its_tags() {
+        assert_eq!(media_for_extension("html"), Some("html"));
+        assert_eq!(media_for_extension("htm"), Some("html"));
+        let page = "<!DOCTYPE html><html><head><title>題</title>\
+                    <style>p { color: red }</style></head><body>\
+                    <h2>節</h2><p>本文&amp;続き</p><script>var a = 1;</script></body></html>";
+        let chunks = chunk_for_media("html", page);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "本文&続き");
+        assert_eq!(chunks[0].breadcrumbs, vec!["題".to_string(), "節".to_string()]);
+        assert!(chunks[0].page.is_none(), "HTML に紙面の番号は無い");
     }
 }

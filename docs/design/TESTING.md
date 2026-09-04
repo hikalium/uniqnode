@@ -2,18 +2,19 @@
 
 <a id="267326f7-e919-48f2-9737-fe0c0daec9d5"></a>
 
-uniqnode のテストは6層ある。すべて `cargo test` で走り、決定論的である(乱数は種付き自前
+uniqnode のテストは 8 層ある。すべて `cargo test` で走り、決定論的である(乱数は種付き自前
 生成器のみ、時刻への依存なし、待ちは条件ポーリング)。
 
 | 層 | 場所 | 検証するもの |
 |---|---|---|
 | ユニット | node/src/*.rs の `#[cfg(test)]` | 純関数層: 暗号(RFC 8032・FIPS ベクタ、openssl 相互検証)、c1 正規形、CRC、ストアの回復・取り込みの成功系と拒否系 |
-| 統合(API・MCP) | node/tests/api.rs, sync.rs, mcp.rs | 実プロセスの serve に対し、curl が組み立てる形の生 HTTP/1.1 で往復する(should/0138)。レプリケーションの受け入れ基準(複製が読める・停止に耐える・復旧で収束)を含む。MCP は実プロセスの `uniqnode mcp` に Claude Code が実際に送る形の JSON-RPC を標準入力から流し、応答の出典と、標準出力に JSON-RPC 以外の行が 1 行も混ざらないことを検査する([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9)) |
+| 統合(API・MCP) | node/tests/api.rs, ingest.rs, search.rs, rendition.rs, viewer.rs, query.rs, groups.rs, health.rs, sync.rs, distributed_search.rs, mcp.rs | 実プロセスの serve に対し、curl が組み立てる形の生 HTTP/1.1 で往復する(should/0138)。レプリケーションの受け入れ基準(複製が読める・停止に耐える・復旧で収束)を含む。MCP は実プロセスの `uniqnode mcp` に Claude Code が実際に送る形の JSON-RPC を標準入力から流し、応答の出典と、標準出力に JSON-RPC 以外の行が 1 行も混ざらないことを検査する([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9)) |
 | 運用ログ | node/tests/logging.rs | 実プロセスの serve に本番の呼び手と同じ POST /v1/search を投げ、データディレクトリに残った記録を読む: 既定でファイルが作られること、内容が標準エラーと一致すること、行頭に UTC の時刻が付くこと、小さな上限を注入して実際に回転し古い世代が消えること、開けない道を指したとき理由を言って提供は続けること([docs/design/LOGGING.md](#14a4e260-70af-4c52-9f19-1c116bddd004)) |
 | クラッシュ | node/tests/crash.rs | 書き込み中の実プロセスを位置を変えて5回 SIGKILL し、毎回の回復と fsck 全件パス |
 | モデル(実装) | node/tests/sync_model.rs | 実装そのもの(Store + sync の核)を種付き乱数で駆動: 書き込み・tombstone・意図的 dangling・同期・再起動を無作為に交錯させ、全対同期後の収束・閉包完全性・fsck 健全を検証する |
 | モデル(仕様) | sim/ | 仕様 §8(レプリカ・健全性)の離散イベントシミュレーション。実装に先行して規則の安全性を検証した([docs/analysis/20260815-replica-model-simulation.md](#31e38823-b783-4dfe-bc7c-3cd268f5e7b4)) |
 | 評価(順位の質) | node/tests/eval.rs | 固定の小コーパスと「クエリ → 正解チャンク」対で検索方式の Recall@k と MRR を測り、現在の実測値を基準線として固定する。方式を差し替えて数値を比べる差し替え点も同じ層にある([docs/design/EVAL.md](#1109a04b-923e-4493-8f00-d704047d6a2a)) |
+| 文書の衛生 | node/tests/repo_hygiene.rs | 追跡している散文そのものを機械で検める: policy 集の形と retired stub、SPEC・docs・ソースからのポリシー参照が実在の番号を指すこと、docs の UUID アンカーが定義され一意で解決し、文書名を名乗るリンクの字面が行き先と一致すること、強調の太字を使っていないこと |
 
 敵対系も欠かさない: 改竄レコード(署名不正)、seq の飛び、要求 ID と異なるバイト列を返す
 不正ピア、封印済みセグメントの破損、二重オープン。これらは「拒否されること」をテストする。
@@ -22,8 +23,9 @@ uniqnode のテストは6層ある。すべて `cargo test` で走り、決定�
 導入手順を示して失敗する。飛ばして緑にすると、検証したのか検証を諦めたのかが結果から区別
 できなくなる(should/0128)。
 
-外部サービスを前提とするテストも同じ規約に従う。埋め込みサーバを要するテストは 3 つ(順位の
-基準線と、語彙の隔たる対が意味検索で届くことの確認と、API 越しに言い換えのクエリを引くもの)で、
+外部サービスを前提とするテストも同じ規約に従う。埋め込みサーバを要するテストは 4 つ(順位の
+基準線と、語彙の隔たる対が意味検索で届くことの確認と、API 越しに言い換えのクエリを引くものと、
+hybrid で BM25 が一件も一致しなかったときに片肺の融合を応答が言うことの確認)で、
 環境変数や feature で切り替えるのではなく、実際に 1 本埋め込んでみて届かなければ、待ち受ける
 べきアドレスと llama-server の起動コマンドを示して落ちる。生存の判定を実際の埋め込みで行うのは、
 llama-server の GET /v1/models の capabilities が埋め込み対応の判定に使えないため

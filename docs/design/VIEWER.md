@@ -30,7 +30,7 @@ uniqnode viewer <data_dir> <host:port> [--serve-url <url>] [ログの指定]
 - 誤った `--serve-url`(根を指さない・https)は起動時に断る。ブラウザを開いてから 500 を
   見るより、起動時に落ちる方が早く直せる。
 
-## 転送する口は 5 つだけ
+## 転送する口は 7 つだけ
 
 | 頁がすること | 口 |
 |---|---|
@@ -39,6 +39,8 @@ uniqnode viewer <data_dir> <host:port> [--serve-url <url>] [ログの指定]
 | 検索 | `POST /v1/search` |
 | 「全文」ボタン | `GET /v1/objects/{id}` |
 | 出典の照合 | `GET /v1/objects/{id}/citation` |
+| 写しの目録(PDF の件に何が出せるか) | `GET /v1/objects/{id}/rendition` |
+| 写しそのもの(サムネ・紙面・そのページの PDF・原本) | `GET /v1/objects/{id}/rendition/{別名}` |
 
 - これ以外はすべて 404 で、断り方に「何なら通るのか」を書く(must/0022)。
   「`/v1/` で始まれば何でも通す」にすると、ビューワの口がストア API 全体への素通しに
@@ -70,7 +72,7 @@ uniqnode viewer <data_dir> <host:port> [--serve-url <url>] [ログの指定]
   「チャンク ID」と、全文を開くボタンである。全文はチャンクのオブジェクトを取って本文だけを
   出し、チャンクでない・c1 でないものは生のまま出す。
 - PDF 由来でない件には「原本(文書全体)を開く」が付く。道は検索の応答が言った source_url
-  ([docs/design/SEARCH.md](#1109a04b-923e-4493-8f00-d704047d6a2a) の POST /v1/search)を
+  ([docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580) の POST /v1/search)を
   そのまま使い、頁は形(`/v1/objects/` で始まる同じ生成元の道)だけを検めて href に置く。
   応答から来た字面をそのまま href にすると `javascript:` の類が頁の上で走るためである。
   目録を引かないので件数の上限も要らない。

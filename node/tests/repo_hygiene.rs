@@ -291,8 +291,9 @@ fn docs_anchors_are_defined_unique_and_resolvable() {
         }
     }
 
-    // 参照: #uuid 形式のリンクは定義済みアンカーに解決する。docs/ 配下 .md への
-    // パスリンクは禁止(アンカーで参照する)。
+    // 参照: #uuid 形式のリンクは定義済みアンカーに解決し、文書名を名乗る字面はその
+    // アンカーを定義した文書と一致する。docs/ 配下 .md へのパスリンクは禁止(アンカーで
+    // 参照する)。
     let uuid_like = |s: &str| {
         s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
     };
@@ -309,9 +310,22 @@ fn docs_anchors_are_defined_unique_and_resolvable() {
             let rest = &text[position + 2..];
             let target = &rest[..rest.find(')').unwrap_or(0)];
             if let Some(fragment) = target.strip_prefix('#') {
-                if uuid_like(fragment) && !defined.contains_key(fragment) {
+                if !uuid_like(fragment) {
+                    continue;
+                }
+                let Some(home) = defined.get(fragment) else {
                     failures.push(format!(
                         "{}: アンカー参照 #{fragment} が未定義",
+                        display(&path)
+                    ));
+                    continue;
+                };
+                // リンクの字面が文書名を名乗るなら、その文書がアンカーの住み処である
+                // こと。字面と行き先が食い違うと、読み手は開くまで気づけない。
+                let label = text[..position].rsplit('[').next().unwrap_or("");
+                if label.ends_with(".md") && !home.ends_with(label) {
+                    failures.push(format!(
+                        "{}: リンクの字面 {label} と、アンカー #{fragment} の住み処 {home} が食い違う",
                         display(&path)
                     ));
                 }

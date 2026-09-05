@@ -745,6 +745,14 @@ mod tests {
 
     /// ロックの探り: ストアを開いている間は「別プロセスが開いている」になり、閉じれば戻る。
     /// 無いディレクトリは誰も開けないので false。
+    ///
+    /// 「閉じれば false」は drop の直後ではなく、上限付きで false になるまで待って見る。
+    /// 同じテストプロセスの別スレッドが子プロセスを spawn している最中だと、fork→exec の窓で
+    /// ロックの FD の複製が子に渡り、drop したロックの名前をその複製が一瞬握り続けるので、
+    /// 探りは本当に「持ち主が居る」を見る(docs/analysis/20260816-lock-inheritance-race.md。
+    /// 複製の解放まで実測最悪 3.6ms)。探りの側は持ち主の正体を見分けられないので、待つのは
+    /// テストの側である。上限は acquire_lock と同じ 250ms(実測最悪値の約 70 倍)で、条件が
+    /// 立った瞬間に進み、上限まで塞がっていれば本物の取り残しとして落とす(should/0104)。
     #[test]
     fn the_lock_probe_sees_an_open_store_and_a_closed_one() {
         let dir = std::env::temp_dir().join(format!(
@@ -764,10 +772,17 @@ mod tests {
             "開いている間は true"
         );
         drop(held);
-        assert!(
-            !store::opened_by_another_process(&dir).expect("probe"),
-            "閉じれば false"
-        );
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            if !store::opened_by_another_process(&dir).expect("probe") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "閉じれば false(250ms 待っても別プロセスが開いていると見える)"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

@@ -67,12 +67,14 @@ impl StoreConfig {
     }
 }
 
+/// オブジェクトの置き場所(索引の値)。gc が pack ごとの集計に読む(GC
+/// (uuid:9b1ceac3-f3cf-4595-87cb-6e40ce0900e5))。
 #[derive(Clone, Copy, Debug)]
-struct ObjectLocation {
-    pack_number: u64,
+pub struct ObjectLocation {
+    pub pack_number: u64,
     /// レコードのペイロード先頭のファイル内オフセット。
-    payload_offset: u64,
-    payload_length: u32,
+    pub payload_offset: u64,
+    pub payload_length: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -858,6 +860,17 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// 誰か(自分でも他ノードでも)が held=true を表明している root。held=false しか残って
+    /// いない root(撤回済み)は含めない。gc の根の一つ(GC
+    /// (uuid:9b1ceac3-f3cf-4595-87cb-6e40ce0900e5))。
+    pub fn held_attested_roots(&self) -> Vec<String> {
+        self.attests
+            .iter()
+            .filter(|(_, by_holder)| by_holder.values().any(|held| *held))
+            .map(|(root, _)| root.clone())
+            .collect()
+    }
+
     /// 自分が held=true を表明している root(確約層)。
     pub fn own_attested_roots(&self) -> Vec<String> {
         self.attests
@@ -933,6 +946,23 @@ impl Store {
         self.object_index.keys()
     }
 
+    /// 全オブジェクトの ID と置き場所(ID 昇順)。gc が pack ごとに生きているバイト数と
+    /// 孤児のバイト数を集計するのに読む。索引は重複追記を最初の 1 つだけ数えるので、
+    /// ここに出る合計は used_bytes と同じ会計である。
+    pub fn object_locations(&self) -> impl Iterator<Item = (&String, &ObjectLocation)> {
+        self.object_index.iter()
+    }
+
+    /// 封印済み pack の番号(MANIFEST の写し。昇順)。
+    pub fn sealed_pack_numbers(&self) -> &[u64] {
+        &self.sealed_packs
+    }
+
+    /// 追記中の pack の番号。封印済みでない唯一の pack で、gc はこれに触れない。
+    pub fn active_pack_number(&self) -> u64 {
+        self.active_pack_number
+    }
+
     /// 自分の名前空間の最終 seq。
     pub fn last_seq(&self) -> u64 {
         self.signer_last_seq.get(&self.node_id_hex).copied().unwrap_or(0)
@@ -1000,9 +1030,23 @@ impl Store {
     /// root から c1 参照(SPEC §4.3)を辿って到達可能な閉包を返す。
     /// ローカルに存在しない参照先は結果に含めない(開世界: dangling は無害)。
     pub fn reachable_closure(&self, root: &str) -> Result<Vec<String>> {
+        Ok(self
+            .reachable_closure_of_roots(std::iter::once(root))?
+            .into_iter()
+            .collect())
+    }
+
+    /// 複数の根からまとめて辿った到達閉包(ローカルに在る分。ID 昇順)。1 本ずつ
+    /// reachable_closure を呼ぶと共有される部分木を根の数だけ辿り直すので、gc の
+    /// 「生きている集合」はこちらで 1 回の走査にする。参照の規約と dangling の扱いは
+    /// reachable_closure と同じ 1 つの実装である(should/0135)。
+    pub fn reachable_closure_of_roots<'a>(
+        &self,
+        roots: impl IntoIterator<Item = &'a str>,
+    ) -> Result<std::collections::BTreeSet<String>> {
         let mut seen = std::collections::BTreeSet::new();
-        let mut present = Vec::new();
-        let mut queue = vec![root.to_string()];
+        let mut present = std::collections::BTreeSet::new();
+        let mut queue: Vec<String> = roots.into_iter().map(str::to_string).collect();
         while let Some(id) = queue.pop() {
             if !seen.insert(id.clone()) {
                 continue;
@@ -1022,9 +1066,8 @@ impl Store {
                     }
                 }
             }
-            present.push(id);
+            present.insert(id);
         }
-        present.sort();
         Ok(present)
     }
 

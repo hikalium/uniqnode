@@ -20,6 +20,13 @@ fn usage() -> ! {
                                       backup_dir へ写し(増分: 写し済みの封印済みセグメントは\n\
                                       写さない)、写し先を開いて fsck まで通す。錠を取らない\n\
                                       ので serve と同時に走れる(異常があれば非0で終了)\n\
+           gc <dir> --dry-run [--threshold <割合>]\n\
+                                      pack ごとに、生きているバイト数と孤児(どの ref・pin・\n\
+                                      保持表明からも辿れないオブジェクト)のバイト数を数え、\n\
+                                      孤児率が閾値(既定 {default_gc_threshold})を超えた封印済み\n\
+                                      pack を回収の対象と言う。何も書かない。錠を取るので\n\
+                                      serve が開いているストアには走れない。--dry-run 無しの\n\
+                                      回収は未実装で、2 で終わる(docs/plan/PACK_GC.md)\n\
            pin <dir> <root> <min>     root の到達閉包に min_replicas を要求する(0 で解除)\n\
            admin-keygen <keyfile>     グループ管理者鍵を生成する(公開鍵を表示)\n\
            cert-make <node_id> <group_id> <days>\n\
@@ -131,6 +138,7 @@ fn usage() -> ! {
                                       まで残す(それより古いものは消える)\n\
          ログは標準エラーとファイルの両方に同じ行が出る。行頭は UTC の時刻と pid",
         default_reranker = uniqnode::rerank::DEFAULT_RERANKER_ID,
+        default_gc_threshold = uniqnode::gc::DEFAULT_THRESHOLD,
         default_listen = uniqnode::install::DEFAULT_LISTEN,
         default_viewer_listen = uniqnode::install::DEFAULT_VIEWER_LISTEN,
         default_max_bytes = uniqnode::log::DEFAULT_MAX_BYTES,
@@ -392,6 +400,43 @@ impl EmbedOptions {
             false => self.rerank_flag(),
         }
     }
+}
+
+/// gc の指定。--dry-run の有無と、--threshold <割合>(0 以上 1 以下)。
+struct GcOptions {
+    dry_run: bool,
+    threshold: f64,
+}
+
+/// gc の引数を読む。知らない引数と、割合として読めない・範囲外の閾値は黙って捨てず
+/// usage で落とす。
+fn parse_gc_options(rest: &[String]) -> GcOptions {
+    let mut options = GcOptions {
+        dry_run: false,
+        threshold: uniqnode::gc::DEFAULT_THRESHOLD,
+    };
+    let mut at = 0;
+    while at < rest.len() {
+        match rest[at].as_str() {
+            "--dry-run" => {
+                options.dry_run = true;
+                at += 1;
+            }
+            "--threshold" => {
+                let text = rest.get(at + 1).unwrap_or_else(|| usage());
+                match text.parse::<f64>() {
+                    Ok(value) if (0.0..=1.0).contains(&value) => options.threshold = value,
+                    _ => {
+                        eprintln!("uniqnode: --threshold は 0 以上 1 以下の割合: {text}");
+                        usage();
+                    }
+                }
+                at += 2;
+            }
+            _ => usage(),
+        }
+    }
+    options
 }
 
 /// --embed <url> と --embedder <id> を読む。知らない引数は黙って捨てず usage で落とす。
@@ -785,6 +830,49 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             if !report.is_clean() {
                 std::process::exit(3);
             }
+        }
+        "gc" => {
+            let options = parse_gc_options(rest);
+            if !options.dry_run {
+                eprintln!(
+                    "uniqnode: gc の回収(pack の書き直し)はまだ実装していない。--dry-run で \
+                     対象の pack と戻る量だけを見る(docs/plan/PACK_GC.md)"
+                );
+                std::process::exit(2);
+            }
+            let store = open_existing(dir);
+            let plan = uniqnode::gc::plan(&store, options.threshold)?;
+            for pack in &plan.packs {
+                println!(
+                    "pack {:06} {}: objects {} bytes {}, live {}, garbage {} ({:.1}%) -> {}",
+                    pack.number,
+                    if pack.sealed { "sealed" } else { "active" },
+                    pack.objects,
+                    pack.bytes,
+                    pack.live_bytes,
+                    pack.garbage_bytes(),
+                    pack.garbage_ratio() * 100.0,
+                    if pack.compact { "compact" } else { "keep" }
+                );
+            }
+            println!(
+                "gc: packs {} (sealed {}, compact {}), objects {} live {} garbage {}, \
+                 garbage bytes {} (compact would reclaim {}), roots {}",
+                plan.packs.len(),
+                plan.sealed_packs(),
+                plan.compact_packs(),
+                plan.objects,
+                plan.live_objects,
+                plan.garbage_objects(),
+                plan.garbage_bytes(),
+                plan.compact_bytes(),
+                plan.roots
+            );
+            println!(
+                "gc: live set computed in {} ms (threshold {}, dry-run: nothing written)",
+                plan.live_set_elapsed.as_millis(),
+                plan.threshold
+            );
         }
         "sync" => {
             let peer_address = rest.first().map(String::as_str).unwrap_or_else(|| usage());

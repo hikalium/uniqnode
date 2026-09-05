@@ -10,6 +10,7 @@ pub mod distributed_search;
 pub mod ed25519;
 pub mod embed;
 pub mod eval;
+pub mod gc;
 pub mod groups;
 pub mod health;
 pub mod html;

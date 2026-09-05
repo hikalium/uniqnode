@@ -100,6 +100,7 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
             response.shutdown_after = true;
             response
         }
+        ("POST", "/v1/admin/gc") => handle_admin_gc(context, request),
         ("GET", "/v1/status") => {
             let mut fields = {
                 let store = store.lock().expect("lock");
@@ -270,6 +271,138 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
         }
         _ => handle_with_path_argument(context, request),
     }
+}
+
+/// POST /v1/admin/gc。ボディ(省略可): {threshold?: 0 以上 1 以下, dry_run?: bool}。走っている
+/// serve のストアに対して pack の回収を 1 回走らせる(CLI の `gc` と同じ gc::run。
+/// GC (uuid:9b1ceac3-f3cf-4595-87cb-6e40ce0900e5))。ロックを持つのは S・A・C の間だけで、
+/// その他の相の間は他の要求が答える。既に走っていれば 409。応答は報告をそのまま JSON にしたもの。
+fn handle_admin_gc(context: &ApiContext, request: &Request) -> Response {
+    let mut options = crate::gc::GcOptions {
+        threshold: crate::gc::DEFAULT_THRESHOLD,
+        dry_run: false,
+    };
+    if !request.body.is_empty() {
+        let body_text = match std::str::from_utf8(&request.body) {
+            Ok(t) => t,
+            Err(_) => return error_response(400, "ボディが UTF-8 でない"),
+        };
+        let value = match c1::parse(body_text) {
+            Ok(v) => v,
+            Err(e) => return error_response(400, &format!("JSON が不正: {e}")),
+        };
+        let c1::Value::Object(map) = &value else {
+            return error_response(400, "ボディはオブジェクトであるべき");
+        };
+        // c1 は小数を持たない(整数と文字列だけ)ので、割合は "0.25" のような文字列か、0 か 1 の
+        // 整数で受ける。
+        let threshold = match map.get("threshold") {
+            None => None,
+            Some(c1::Value::Text(t)) => t.parse::<f64>().ok(),
+            Some(c1::Value::Integer(n)) => Some(*n as f64),
+            Some(_) => None,
+        };
+        match (map.get("threshold"), threshold) {
+            (None, _) => {}
+            (Some(_), Some(value)) if (0.0..=1.0).contains(&value) => options.threshold = value,
+            (Some(_), _) => {
+                return error_response(400, "threshold は 0 以上 1 以下の割合(\"0.25\" のような文字列)")
+            }
+        }
+        match map.get("dry_run") {
+            None => {}
+            Some(c1::Value::Bool(b)) => options.dry_run = *b,
+            Some(_) => return error_response(400, "dry_run は真偽値"),
+        }
+    }
+    let report = match crate::gc::run(&context.store, options) {
+        Ok(report) => report,
+        Err(StoreError::Invalid(m)) if m == crate::gc::GC_ALREADY_RUNNING => {
+            return error_response(409, &m)
+        }
+        Err(e) => {
+            crate::log_line!("uniqnode: gc: 失敗: {e}");
+            return store_error_response(e);
+        }
+    };
+    crate::log_line!(
+        "uniqnode: gc: {} threshold {} packs {} compact {} -> compacted [{}] new {:?} reclaimed {} \
+         revived {}; locked {} ms (S {} A {} C {}), P {} B {} D {} ms",
+        if report.dry_run { "dry-run" } else { "run" },
+        report.threshold,
+        report.packs.len(),
+        report.compact_packs(),
+        report.compacted.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" "),
+        report.new_pack,
+        report.reclaimed_bytes,
+        report.revived_objects,
+        report.phases.locked().as_millis(),
+        report.phases.seal.as_millis(),
+        report.phases.analyze.as_millis(),
+        report.phases.commit.as_millis(),
+        report.phases.table.as_millis(),
+        report.phases.copy.as_millis(),
+        report.phases.delete.as_millis()
+    );
+    Response::json(200, gc_report_json(&report))
+}
+
+fn gc_report_json(report: &crate::gc::GcReport) -> Vec<u8> {
+    let integer = |n: u64| c1::Value::Integer(n as i64);
+    let optional = |n: Option<u64>| n.map(integer).unwrap_or(c1::Value::Null);
+    let numbers = |ns: &[u64]| c1::Value::Array(ns.iter().map(|n| integer(*n)).collect());
+    let packs: Vec<c1::Value> = report
+        .packs
+        .iter()
+        .map(|pack| {
+            let mut map = BTreeMap::new();
+            map.insert("number".to_string(), integer(pack.number));
+            map.insert("sealed".to_string(), c1::Value::Bool(pack.sealed));
+            map.insert("objects".to_string(), integer(pack.objects as u64));
+            map.insert("bytes".to_string(), integer(pack.bytes));
+            map.insert("live_objects".to_string(), integer(pack.live_objects as u64));
+            map.insert("live_bytes".to_string(), integer(pack.live_bytes));
+            map.insert("garbage_bytes".to_string(), integer(pack.garbage_bytes()));
+            map.insert("compact".to_string(), c1::Value::Bool(pack.compact));
+            c1::Value::Object(map)
+        })
+        .collect();
+    let phases = &report.phases;
+    let phases_ms = c1::Value::Object(
+        [
+            ("S", phases.seal),
+            ("P", phases.table),
+            ("A", phases.analyze),
+            ("B", phases.copy),
+            ("C", phases.commit),
+            ("D", phases.delete),
+            ("locked", phases.locked()),
+        ]
+        .into_iter()
+        .map(|(name, duration)| (name.to_string(), integer(duration.as_millis() as u64)))
+        .collect(),
+    );
+    json_object(vec![
+        ("v", c1::Value::Integer(1)),
+        ("dry_run", c1::Value::Bool(report.dry_run)),
+        ("threshold", c1::Value::Text(report.threshold.to_string())),
+        ("packs", c1::Value::Array(packs)),
+        ("roots", integer(report.roots as u64)),
+        ("objects", integer(report.objects as u64)),
+        ("live_objects", integer(report.live_objects as u64)),
+        ("garbage_bytes", integer(report.garbage_bytes())),
+        ("compact_bytes", integer(report.compact_bytes())),
+        ("sealed_in_seal_phase", optional(report.sealed_in_seal_phase)),
+        ("tables_built", integer(report.tables_built as u64)),
+        ("tables_reused", integer(report.tables_reused as u64)),
+        ("compacted", numbers(&report.compacted)),
+        ("sealed_active", optional(report.sealed_active)),
+        ("new_pack", optional(report.new_pack)),
+        ("revived_objects", integer(report.revived_objects as u64)),
+        ("reclaimed_bytes", integer(report.reclaimed_bytes)),
+        ("disk_bytes_freed", integer(report.disk_bytes_freed)),
+        ("phases_ms", phases_ms),
+    ])
 }
 
 /// POST /v1/query。ボディ: {kind, target, budget_ms?, scope?, wait?}。

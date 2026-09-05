@@ -20,13 +20,16 @@ fn usage() -> ! {
                                       backup_dir へ写し(増分: 写し済みの封印済みセグメントは\n\
                                       写さない)、写し先を開いて fsck まで通す。ロックを取らない\n\
                                       ので serve と同時に走れる(異常があれば非0で終了)\n\
-           gc <dir> --dry-run [--threshold <割合>]\n\
+           gc <dir> [--dry-run] [--threshold <割合>]\n\
                                       pack ごとに、生きているバイト数と孤児(どの ref・pin・\n\
                                       保持表明からも辿れないオブジェクト)のバイト数を数え、\n\
                                       孤児率が閾値(既定 {default_gc_threshold})を超えた封印済み\n\
-                                      pack を回収の対象と言う。何も書かない。ロックを取るので\n\
-                                      serve が開いているストアには走れない。--dry-run 無しの\n\
-                                      回収は未実装で、2 で終わる(docs/plan/PACK_GC.md)\n\
+                                      pack を、生きているものだけを写した新しい pack で置き\n\
+                                      換えて孤児のバイト列をディスクから取り戻す。--dry-run は\n\
+                                      数えるだけで、ストアのデータには何も書かない(参照表\n\
+                                      derived/refs/ だけは作る)。ロックを取るので serve が\n\
+                                      開いているストアには走れない(走っている serve には\n\
+                                      POST /v1/admin/gc を打つ。docs/design/GC.md)\n\
            pin <dir> <root> <min>     root の到達閉包に min_replicas を要求する(0 で解除)\n\
            admin-keygen <keyfile>     グループ管理者鍵を生成する(公開鍵を表示)\n\
            cert-make <node_id> <group_id> <days>\n\
@@ -402,16 +405,10 @@ impl EmbedOptions {
     }
 }
 
-/// gc の指定。--dry-run の有無と、--threshold <割合>(0 以上 1 以下)。
-struct GcOptions {
-    dry_run: bool,
-    threshold: f64,
-}
-
-/// gc の引数を読む。知らない引数と、割合として読めない・範囲外の閾値は黙って捨てず
-/// usage で落とす。
-fn parse_gc_options(rest: &[String]) -> GcOptions {
-    let mut options = GcOptions {
+/// gc の引数を読む(--dry-run の有無と、--threshold <割合>。0 以上 1 以下)。知らない引数と、
+/// 割合として読めない・範囲外の閾値は黙って捨てず usage で落とす。
+fn parse_gc_options(rest: &[String]) -> uniqnode::gc::GcOptions {
+    let mut options = uniqnode::gc::GcOptions {
         dry_run: false,
         threshold: uniqnode::gc::DEFAULT_THRESHOLD,
     };
@@ -437,6 +434,83 @@ fn parse_gc_options(rest: &[String]) -> GcOptions {
         }
     }
     options
+}
+
+/// gc の報告を出力する。pack ごとに 1 行、集計、回収したなら何を書き直したか、各相の所要
+/// (S・A・C がロックの中)。読み方は docs/design/GC.md。
+fn print_gc_report(report: &uniqnode::gc::GcReport) {
+    for pack in &report.packs {
+        println!(
+            "pack {:06} {}: objects {} bytes {}, live {}, garbage {} ({:.1}%) -> {}",
+            pack.number,
+            if pack.sealed { "sealed" } else { "active" },
+            pack.objects,
+            pack.bytes,
+            pack.live_bytes,
+            pack.garbage_bytes(),
+            pack.garbage_ratio() * 100.0,
+            if pack.compact { "compact" } else { "keep" }
+        );
+    }
+    println!(
+        "gc: packs {} (sealed {}, compact {}), objects {} live {} garbage {}, \
+         garbage bytes {} (compact would reclaim {}), roots {}",
+        report.packs.len(),
+        report.sealed_packs(),
+        report.compact_packs(),
+        report.objects,
+        report.live_objects,
+        report.garbage_objects(),
+        report.garbage_bytes(),
+        report.compact_bytes(),
+        report.roots
+    );
+    let pack_list = |numbers: &[u64]| -> String {
+        numbers.iter().map(|n| format!("{n:06}")).collect::<Vec<_>>().join(" ")
+    };
+    let optional = |number: Option<u64>| -> String {
+        number.map(|n| format!("{n:06}")).unwrap_or_else(|| "none".to_string())
+    };
+    if report.dry_run {
+        println!(
+            "gc: live set computed in {} ms (threshold {}, dry-run: nothing written)",
+            report.live_set_elapsed().as_millis(),
+            report.threshold
+        );
+    } else if report.compacted.is_empty() {
+        println!(
+            "gc: nothing to compact (threshold {}, sealed in S: {})",
+            report.threshold,
+            optional(report.sealed_in_seal_phase)
+        );
+    } else {
+        println!(
+            "gc: compacted packs {} -> new pack {}, reclaimed {} bytes (disk {} bytes), \
+             revived {} objects, sealed in S: {}, sealed in C: {} (threshold {})",
+            pack_list(&report.compacted),
+            optional(report.new_pack),
+            report.reclaimed_bytes,
+            report.disk_bytes_freed,
+            report.revived_objects,
+            optional(report.sealed_in_seal_phase),
+            optional(report.sealed_active),
+            report.threshold
+        );
+    }
+    let phases = &report.phases;
+    println!(
+        "gc: phases S {} ms, P {} ms (tables built {} reused {}), A {} ms, B {} ms, C {} ms, \
+         D {} ms; locked (S+A+C) {} ms",
+        phases.seal.as_millis(),
+        phases.table.as_millis(),
+        report.tables_built,
+        report.tables_reused,
+        phases.analyze.as_millis(),
+        phases.copy.as_millis(),
+        phases.commit.as_millis(),
+        phases.delete.as_millis(),
+        phases.locked().as_millis()
+    );
 }
 
 /// --embed <url> と --embedder <id> を読む。知らない引数は黙って捨てず usage で落とす。
@@ -774,6 +848,17 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 report.refs_checked,
                 report.errors.len()
             );
+            if !report.unlisted_packs.is_empty() {
+                println!(
+                    "unlisted packs (MANIFEST に無く最後でもない。事実であってエラーではない): {}",
+                    report
+                        .unlisted_packs
+                        .iter()
+                        .map(|n| format!("{n:06}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            }
             for error in &report.errors {
                 eprintln!("fsck: {error}");
             }
@@ -833,46 +918,9 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
         }
         "gc" => {
             let options = parse_gc_options(rest);
-            if !options.dry_run {
-                eprintln!(
-                    "uniqnode: gc の回収(pack の書き直し)はまだ実装していない。--dry-run で \
-                     対象の pack と戻る量だけを見る(docs/plan/PACK_GC.md)"
-                );
-                std::process::exit(2);
-            }
-            let store = open_existing(dir);
-            let plan = uniqnode::gc::plan(&store, options.threshold)?;
-            for pack in &plan.packs {
-                println!(
-                    "pack {:06} {}: objects {} bytes {}, live {}, garbage {} ({:.1}%) -> {}",
-                    pack.number,
-                    if pack.sealed { "sealed" } else { "active" },
-                    pack.objects,
-                    pack.bytes,
-                    pack.live_bytes,
-                    pack.garbage_bytes(),
-                    pack.garbage_ratio() * 100.0,
-                    if pack.compact { "compact" } else { "keep" }
-                );
-            }
-            println!(
-                "gc: packs {} (sealed {}, compact {}), objects {} live {} garbage {}, \
-                 garbage bytes {} (compact would reclaim {}), roots {}",
-                plan.packs.len(),
-                plan.sealed_packs(),
-                plan.compact_packs(),
-                plan.objects,
-                plan.live_objects,
-                plan.garbage_objects(),
-                plan.garbage_bytes(),
-                plan.compact_bytes(),
-                plan.roots
-            );
-            println!(
-                "gc: live set computed in {} ms (threshold {}, dry-run: nothing written)",
-                plan.live_set_elapsed.as_millis(),
-                plan.threshold
-            );
+            let store = std::sync::Mutex::new(open_existing(dir));
+            let report = uniqnode::gc::run(&store, options)?;
+            print_gc_report(&report);
         }
         "sync" => {
             let peer_address = rest.first().map(String::as_str).unwrap_or_else(|| usage());

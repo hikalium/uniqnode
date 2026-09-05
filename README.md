@@ -71,8 +71,11 @@ node_id を返し backup の写しが fsck で緑であることを見てから�
 `uniqnode backup <写し先> <新しい dir>` してから `uniqnode fsck` で確かめる。何を写す根拠と、
 写しが壊れていたときの直し方は [docs/mop/BACKUP.md](#e026a5e7-1ece-4f4e-b6b8-ee96c62883a2)。
 
-`uniqnode gc <dir> --dry-run` で、どの ref・pin・保持表明からも辿れなくなったオブジェクト
-(孤児)が pack ごとにどれだけあり、回収すれば何バイト戻るかが分かる。何も書かない。ロックを
-取るので serve を止めて(または写しに対して)打つ。定義と出力の読み方は
-[docs/design/GC.md](#9b1ceac3-f3cf-4595-87cb-6e40ce0900e5)。回収そのものは未実装
-([docs/plan/PACK_GC.md](#f272eeda-8664-42da-9e5c-ef354bc3f3a7))。
+`uniqnode gc <dir>` で、どの ref・pin・保持表明からも辿れなくなったオブジェクト(孤児)を
+含む封印済み pack を、生きているものだけを写した新しい pack で置き換え、孤児のバイト列を
+ディスクから取り戻せる。`--dry-run` は数えるだけ(pack ごとの孤児のバイト数と、回収すれば
+何バイト戻るか)で、ストアのデータには何も書かない。ロックを取るので serve を止めて(または
+写しに対して)打ち、走っている serve には `POST /v1/admin/gc` を打つ(ロックを持つのは短い
+3 つの相だけで、その間も他の要求は答える)。定義・手順・出力の読み方は
+[docs/design/GC.md](#9b1ceac3-f3cf-4595-87cb-6e40ce0900e5)。消す判断(機会層の evict)は
+未実装([docs/plan/PACK_GC.md](#f272eeda-8664-42da-9e5c-ef354bc3f3a7))。

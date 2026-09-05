@@ -426,3 +426,224 @@ fn restoring_is_a_backup_in_the_other_direction_followed_by_fsck() {
     std::fs::remove_dir_all(&destination).expect("cleanup");
     std::fs::remove_dir_all(&restored).expect("cleanup");
 }
+
+/// 回収(gc)が写し元に残す姿を作る: 封印済み pack `number` を写し元の MANIFEST から外し、
+/// ファイルを消す。gc の本体はまだ無いので、その結果(MANIFEST に無く、packs/ にも無い番号)
+/// だけをここで作る。写し元のストアは閉じてから呼ぶ(開いたままだと、次の封印で手元の一覧が
+/// 書き戻される)。
+fn reclaim_pack_from_source(source: &Path, number: u64) {
+    let manifest_path = source.join("MANIFEST");
+    let text = std::fs::read_to_string(&manifest_path).expect("MANIFEST を読む");
+    let mut value = uniqnode::c1::parse(&text).expect("MANIFEST は c1");
+    let uniqnode::c1::Value::Object(map) = &mut value else {
+        panic!("MANIFEST はオブジェクト");
+    };
+    let Some(uniqnode::c1::Value::Array(sealed)) = map.get_mut("sealed_packs") else {
+        panic!("sealed_packs がある");
+    };
+    let before = sealed.len();
+    sealed.retain(|v| *v != uniqnode::c1::Value::Integer(number as i64));
+    assert_eq!(sealed.len(), before - 1, "pack {number} は封印済みだった前提");
+    std::fs::write(&manifest_path, uniqnode::c1::to_canonical_bytes(&value)).expect("MANIFEST");
+    std::fs::remove_file(source.join("packs").join(format!("pack-{number:06}.pack")))
+        .expect("回収された pack を消す");
+}
+
+/// 残骸のテストの共通の準備: 20 件(1 pack に 2 件、pack 1〜9 封印済み、10 がアクティブ)を
+/// 投入して 1 回目の backup を取り、pack 5 の 2 件(i=8,9)の ref を tombstone してから
+/// 写し元で pack 5 を回収する。返り値は (写し元, 写し先, 回収された 2 件の ID)。写し先には
+/// 1 回目に写った pack-000005.pack が残骸として残っている。
+fn source_with_pack_5_reclaimed_after_first_backup(
+    name: &str,
+) -> (PathBuf, PathBuf, Vec<String>) {
+    let source = temp_dir(&format!("{name}-source"));
+    let destination = temp_dir(&format!("{name}-destination"));
+    let ids = {
+        let mut store = Store::open(small_config(&source)).expect("open source");
+        let ids = fill(&mut store, 0, 20);
+        let first = backup(&source, &destination);
+        assert_eq!(first.status, 0, "{}\n{}", first.stdout, first.stderr);
+        store.set_ref("notes/8", None).expect("tombstone");
+        store.set_ref("notes/9", None).expect("tombstone");
+        ids
+    };
+    reclaim_pack_from_source(&source, 5);
+    let reclaimed = vec![ids[8].clone(), ids[9].clone()];
+    let store = Store::open(small_config(&source)).expect("回収後の写し元が開ける");
+    assert_eq!(store.object_count(), 18, "pack 5 の 2 件が消えている前提");
+    assert!(
+        reclaimed.iter().all(|id| !store.has_object(id)),
+        "i=8,9 が pack 5 に居た前提(1 pack に 2 件)"
+    );
+    assert!(store.fsck().expect("fsck").errors.is_empty());
+    drop(store);
+    assert!(
+        destination.join("packs").join("pack-000005.pack").exists(),
+        "1 回目の写しが残骸として残っている前提"
+    );
+    (source, destination, reclaimed)
+}
+
+/// 2 回目の backup が残骸を消して名を言い、写し先のオブジェクト数が写し元と一致し
+/// (残骸の中身が生き返っていない)、fsck が緑であることを見る。写し元は開いたまま(serve 相当)。
+fn assert_remnant_removed_by_second_backup(
+    source: &Path,
+    destination: &Path,
+    reclaimed: &[String],
+) {
+    let store = Store::open(small_config(source)).expect("open source");
+    let second = backup(source, destination);
+    assert_eq!(
+        second.status, 0,
+        "残骸を持つ写し先への backup は緑で終わるべき\nstdout:\n{}\nstderr:\n{}",
+        second.stdout, second.stderr
+    );
+    assert!(
+        second
+            .stdout
+            .contains("removed packs/pack-000005.pack (not in source MANIFEST)\n"),
+        "消した残骸を名で言う: {}",
+        second.stdout
+    );
+    assert!(
+        second
+            .stdout
+            .contains("backup: sealed copied 0 unchanged 8, active 2, removed 1,"),
+        "{}",
+        second.stdout
+    );
+    assert!(
+        second.stdout.contains("verify: objects 18 refs 20 errors 0"),
+        "残骸の 2 件は生き返らない: {}",
+        second.stdout
+    );
+    assert!(
+        !destination.join("packs").join("pack-000005.pack").exists(),
+        "残骸が消えている"
+    );
+    let copy = Store::open(StoreConfig::new(destination)).expect("写し先が開ける");
+    assert_eq!(copy.object_count(), 18, "写し元と同じオブジェクト数");
+    assert!(
+        reclaimed.iter().all(|id| !copy.has_object(id)),
+        "回収済みのオブジェクトが写し先で生き返っていない"
+    );
+    assert!(
+        copy.fsck().expect("fsck").errors.is_empty(),
+        "写し先の fsck は緑"
+    );
+    drop(copy);
+    drop(store);
+}
+
+/// (7) 回収の後の backup: 写し元の MANIFEST から消えた番号の pack が写し先に残っていたら、
+/// 2 回目の backup がそれを消して報告に名を出し、写し先のオブジェクト数は写し元と一致する。
+/// 消さなければ、残骸は未封印として走査され、回収前の孤児が写し先で生き返る。
+#[test]
+fn a_pack_the_source_manifest_no_longer_lists_is_removed_from_the_backup_and_named() {
+    let (source, destination, reclaimed) =
+        source_with_pack_5_reclaimed_after_first_backup("reclaimed-intact");
+    assert_remnant_removed_by_second_backup(&source, &destination, &reclaimed);
+    std::fs::remove_dir_all(&source).expect("cleanup");
+    std::fs::remove_dir_all(&destination).expect("cleanup");
+}
+
+/// (8) 残骸が torn tail を持っていても同じ。消さなければ、写し先を開くとき「封印済みでも
+/// 最後でもない pack が尻切れ」として破損と誤判定され、backup が赤になる道。
+#[test]
+fn a_remnant_pack_with_a_torn_tail_is_removed_instead_of_being_mistaken_for_corruption() {
+    let (source, destination, reclaimed) =
+        source_with_pack_5_reclaimed_after_first_backup("reclaimed-torn");
+    let remnant = destination.join("packs").join("pack-000005.pack");
+    let length = std::fs::metadata(&remnant).expect("metadata").len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&remnant)
+        .expect("open")
+        .set_len(length - 3)
+        .expect("末尾を 3 バイト切る");
+    assert_remnant_removed_by_second_backup(&source, &destination, &reclaimed);
+    std::fs::remove_dir_all(&source).expect("cleanup");
+    std::fs::remove_dir_all(&destination).expect("cleanup");
+}
+
+/// (9) 写し先だけにある設定ファイルは pack と違って消さない: 写し元で消した peers.json は
+/// `only in backup` で言うだけで残る。
+#[test]
+fn a_settings_file_only_in_the_backup_is_kept_and_named() {
+    let source = temp_dir("settings-only-source");
+    let destination = temp_dir("settings-only-destination");
+    let mut store = Store::open(small_config(&source)).expect("open source");
+    fill(&mut store, 0, 4);
+    std::fs::write(source.join("peers.json"), b"[]").expect("write");
+    let first = backup(&source, &destination);
+    assert_eq!(first.status, 0, "{}\n{}", first.stdout, first.stderr);
+    assert!(destination.join("peers.json").exists(), "設定は写る前提");
+
+    std::fs::remove_file(source.join("peers.json")).expect("写し元で消す");
+    let second = backup(&source, &destination);
+    assert_eq!(second.status, 0, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stdout.contains("only in backup peers.json"),
+        "消していないことを言う: {}",
+        second.stdout
+    );
+    assert!(
+        destination.join("peers.json").exists(),
+        "写し先だけの設定ファイルは消さない"
+    );
+    drop(store);
+    std::fs::remove_dir_all(&source).expect("cleanup");
+    std::fs::remove_dir_all(&destination).expect("cleanup");
+}
+
+/// (10) 境界: 写し元に MANIFEST が無い(一度も封印していない)ときは、封印済みの一覧という
+/// 権威が無いので、写し先だけの pack を消さず `only in backup` で言う。reflog は MANIFEST が
+/// あっても無くても消さない(回収が無い)。
+#[test]
+fn without_a_source_manifest_extra_packs_and_reflogs_in_the_backup_are_kept_and_named() {
+    let source = temp_dir("no-manifest-source");
+    let destination = temp_dir("no-manifest-destination");
+    let mut store = Store::open(small_config(&source)).expect("open source");
+    fill(&mut store, 0, 1);
+    assert!(
+        !source.join("MANIFEST").exists(),
+        "1 件では封印されず MANIFEST が無い前提"
+    );
+    let first = backup(&source, &destination);
+    assert_eq!(first.status, 0, "{}\n{}", first.stdout, first.stderr);
+    let packs = destination.join("packs");
+    let reflog = destination.join("reflog");
+    std::fs::copy(
+        packs.join("pack-000001.pack"),
+        packs.join("pack-000002.pack"),
+    )
+    .expect("写し先だけの pack を置く");
+    std::fs::copy(
+        reflog.join("reflog-000001.log"),
+        reflog.join("reflog-000002.log"),
+    )
+    .expect("写し先だけの reflog を置く");
+
+    let second = backup(&source, &destination);
+    assert_eq!(second.status, 0, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stdout.contains("only in backup packs/pack-000002.pack"),
+        "MANIFEST の無い写し元では pack を消さずに言う: {}",
+        second.stdout
+    );
+    assert!(
+        second.stdout.contains("only in backup reflog/reflog-000002.log"),
+        "reflog は消さずに言う: {}",
+        second.stdout
+    );
+    assert!(
+        second.stdout.contains("active 2, removed 0,") && !second.stdout.contains("removed packs/"),
+        "何も消していない: {}",
+        second.stdout
+    );
+    assert!(packs.join("pack-000002.pack").exists());
+    assert!(reflog.join("reflog-000002.log").exists());
+    drop(store);
+    std::fs::remove_dir_all(&source).expect("cleanup");
+    std::fs::remove_dir_all(&destination).expect("cleanup");
+}

@@ -805,15 +805,22 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             for name in &report.settings_only_in_backup {
                 println!("only in backup {name} (写し元には無い。消していない)");
             }
+            for name in &report.packs_removed {
+                println!("removed {name} (not in source MANIFEST)");
+            }
+            for name in &report.segments_only_in_backup {
+                println!("only in backup {name} (写し元には無い。消していない)");
+            }
             for (name, bytes) in &report.torn_tails_cut {
                 println!("cut {name} ({bytes} bytes の書き込み途中の尻尾を検証で切り詰めた)");
             }
             println!(
-                "backup: sealed copied {} unchanged {}, active {}, settings {}, bytes {}, \
-                 not copied: {}",
+                "backup: sealed copied {} unchanged {}, active {}, removed {}, settings {}, \
+                 bytes {}, not copied: {}",
                 report.sealed_copied.len(),
                 report.sealed_unchanged.len(),
                 report.active_copied.len(),
+                report.packs_removed.len(),
                 report.settings_copied.len(),
                 report.copied_bytes,
                 report.not_copied.join(" ")

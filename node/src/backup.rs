@@ -163,9 +163,11 @@ fn refuse_wrong_destination(source: &Path, destination: &Path) -> store::Result<
 
 /// 写し先をストアとして開き(未封印の尻尾はここで切り詰められる)、fsck する。写しが健全か
 /// という判断はここ 1 箇所にあり、backup 命令の最後の検証と、install が timer の unit を
-/// 1 回走らせた後に写し先を見る確認が同じ答えを見る(should/0135)。
+/// 1 回走らせた後に写し先を見る確認が同じ答えを見る(should/0135)。開くのは在るストア
+/// だけの道: 写しが写っていなければ(install が unit を走らせたのに写し先が空、など)、
+/// 空のストアを作って緑と言うのではなく、ストアではないと断る。
 pub fn verify_copy(destination: &Path) -> store::Result<FsckReport> {
-    let backup_store = Store::open(StoreConfig::new(destination))?;
+    let backup_store = Store::open_existing(StoreConfig::new(destination))?;
     backup_store.fsck()
 }
 
@@ -173,13 +175,7 @@ pub fn verify_copy(destination: &Path) -> store::Result<FsckReport> {
 /// 走っていてよい)。写し先の異常は Err ではなく報告の verification に載る(fsck 命令と
 /// 同じ扱い)。開けないほど壊れていれば Err。
 pub fn run(source: &Path, destination: &Path) -> store::Result<BackupReport> {
-    if !source.join(NODE_KEY_NAME).exists() || !source.join(PACK.directory).is_dir() {
-        return Err(StoreError::Invalid(format!(
-            "{} はストアのデータディレクトリではない({NODE_KEY_NAME} と {}/ が要る)",
-            source.display(),
-            PACK.directory
-        )));
-    }
+    store::require_store_dir(source)?;
     std::fs::create_dir_all(destination.join("tmp"))?;
     refuse_wrong_destination(source, destination)?;
 

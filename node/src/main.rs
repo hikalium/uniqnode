@@ -60,9 +60,10 @@ fn usage() -> ! {
                                       転送する(ストアの排他ロックを取らないので、常駐した\n\
                                       まま ingest・embed が通る。埋め込みと順位の取り直し\n\
                                       を装備するのは転送先の serve なので、--embed・\n\
-                                      --rerank とは併用しない)。無指定ならストアを直接\n\
-                                      開く(serve 停止中のストア用。--embed・--rerank は\n\
-                                      serve と同じ意味で、この形だけが受ける)。\n\
+                                      --embedder・--rerank・--reranker とは併用しない)。\n\
+                                      無指定ならストアを直接開く(serve 停止中のストア用。\n\
+                                      --embed・--embedder・--rerank・--reranker は serve\n\
+                                      と同じ意味で、この形だけが受ける)。\n\
                                       登録例:\n\
                                       claude mcp add --transport stdio uniqnode --\n\
                                       <この実行ファイル> mcp <dir>\n\
@@ -369,6 +370,11 @@ struct EmbedOptions {
     /// --embed が明示されたか。serve は明示されたときだけ埋め込みを装備する
     /// (既定で外部プロセスに依存させない)。
     requested: bool,
+    /// --embedder が明示されたか。装備の可否は --embed だけで決まるが、装備する口を持たない
+    /// 転送する形(mcp・viewer)が「指定を受けたのに効かせていない」ことを言えるように、
+    /// 明示されたことだけは覚えておく(reranker_named と同型)。embed 命令では --embedder
+    /// は正当な指定なので、そこはこの欄を見ない。
+    embedder_named: bool,
     /// 順位を取り直すリランカーの URL(--rerank)。
     rerank_url: String,
     reranker_id: String,
@@ -393,11 +399,12 @@ impl EmbedOptions {
     }
 
     /// 転送する形(mcp・viewer)に渡された、転送先の serve でしか効かない装備の指定。
-    /// 埋め込みが先、次に順位の取り直しである。
+    /// 埋め込み(--embed か --embedder)が先、次に順位の取り直しである。
     fn misplaced_equipment_flag(&self) -> Option<&'static str> {
-        match self.requested {
-            true => Some("--embed"),
-            false => self.rerank_flag(),
+        match (self.requested, self.embedder_named) {
+            (true, _) => Some("--embed"),
+            (false, true) => Some("--embedder"),
+            (false, false) => self.rerank_flag(),
         }
     }
 }
@@ -445,6 +452,7 @@ fn parse_embed_options(rest: &[String]) -> EmbedOptions {
         url: uniqnode::embed::DEFAULT_EMBEDDING_URL.to_string(),
         embedder_id: uniqnode::embed::DEFAULT_EMBEDDER_ID.to_string(),
         requested: false,
+        embedder_named: false,
         rerank_url: uniqnode::rerank::DEFAULT_RERANK_URL.to_string(),
         reranker_id: uniqnode::rerank::DEFAULT_RERANKER_ID.to_string(),
         rerank_requested: false,
@@ -458,7 +466,10 @@ fn parse_embed_options(rest: &[String]) -> EmbedOptions {
                 options.url = value();
                 options.requested = true;
             }
-            "--embedder" => options.embedder_id = value(),
+            "--embedder" => {
+                options.embedder_id = value();
+                options.embedder_named = true;
+            }
             // 順位の取り直しは埋め込みと同じ流儀で装備する: 明示されたときだけ繋ぎ、
             // 起動時に相手の生存は確かめない(should/0114)。届かなければ融合の順位の
             // まま答え、理由が応答の degraded に出る。

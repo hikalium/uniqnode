@@ -91,9 +91,10 @@ search ツールは、要求の読み取り(parse_search_request)から順位付
   単体試験 rest_search_bodies_survive_a_round_trip が確かめる。
 - 検索の判断は転送する形でも serve 側の run_search が 1 回だけ行う。MCP 側は判断せず、応答の
   method・degraded・citation をそのまま描く。劣化の理由も serve の言葉のまま出る。
-- 埋め込みも順位の取り直しも、装備するのは転送先の serve である。転送する形に `--embed` や
-  `--rerank`(`--reranker` も)を渡すのは矛盾なので、併用は起動時に理由を標準エラーへ出して
-  exit 2 で断る(黙って無視しない。must/0022)。同じ理由で、ベクトルを作るだけの `embed`
+- 埋め込みも順位の取り直しも、装備するのは転送先の serve である。転送する形に `--embed`
+  (`--embedder` も)や `--rerank`(`--reranker` も)を渡すのは矛盾なので、併用は起動時に
+  理由を標準エラーへ出して exit 2 で断る(黙って無視しない。must/0022。viewer も同じ判定で
+  断る)。同じ理由で、ベクトルを作るだけの `embed`
   命令も `--rerank` / `--reranker` を受けない(読み手を serve と共有しているので字面は通るが、
   効かせる先が無い指定は断る)。
 - serve に届かないときは、原因(接続できない、など)と起動コマンドを添えて、ツールの結果

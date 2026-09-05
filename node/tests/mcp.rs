@@ -632,6 +632,32 @@ fn the_forwarding_form_refuses_a_reranker_it_cannot_equip() {
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 
+/// --embedder だけを転送する形に渡すのも同じ矛盾である(装備の可否は --embed だけで
+/// 決まるが、模型名を明示した運用者は「その模型で装備した」つもりになる)。--embed と
+/// --rerank / --reranker は断るのに --embedder だけが黙って通っていた穴を、同じ形で塞ぐ。
+#[test]
+fn the_forwarding_form_refuses_an_embedder_it_cannot_equip() {
+    let dir = unique_dir("mcp-forward-embedder");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let text = dir.to_str().expect("utf-8");
+    let output = cli_output(&[
+        "mcp",
+        text,
+        "--serve-url",
+        "http://127.0.0.1:7440",
+        "--embedder",
+        "multilingual-e5-large",
+    ]);
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "--embedder を受けて起動している: {error}");
+    assert!(output.stdout.is_empty(), "標準出力はプロトコル専用: {:?}", output.stdout);
+    assert!(
+        error.contains("--serve-url と --embedder は併用しない"),
+        "断りの理由が標準エラーに無い: {error}"
+    );
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
 /// embed は serve と引数の読み手を共有するので --rerank も字面としては通るが、ベクトルを
 /// 作るだけの命令に順位の取り直しの口は無い。受けて捨てずに、ストアを開く前に理由を
 /// 言って exit 2 で終わる(標準出力に cache の行が出ていれば、断らずに仕事を始めている)。

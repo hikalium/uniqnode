@@ -320,6 +320,23 @@ pub fn opened_by_another_process(dir: &Path) -> Result<bool> {
     }
 }
 
+/// このディレクトリをストアのデータディレクトリと認めるか。認めなければ、何が要るかを
+/// 言う Invalid を返す。条件は node_key と packs/ が在ること: node_key はストアを一度でも
+/// 開けば在り、MANIFEST は最初の封印まで書かれないので条件にできない(小さなストアは
+/// MANIFEST を持たないまま正しく動いている)。「ストアであるか」の判断はここ 1 箇所にあり、
+/// 在るストアだけを開く open_existing と、写し元を検める backup が同じ答えを見る
+/// (should/0135)。
+pub fn require_store_dir(dir: &Path) -> Result<()> {
+    if dir.join(NODE_KEY_NAME).exists() && dir.join(PACK.directory).is_dir() {
+        return Ok(());
+    }
+    Err(StoreError::Invalid(format!(
+        "{} はストアのデータディレクトリではない({NODE_KEY_NAME} と {}/ が要る)",
+        dir.display(),
+        PACK.directory
+    )))
+}
+
 impl Store {
     pub fn node_id_hex(&self) -> &str {
         &self.node_id_hex
@@ -365,6 +382,16 @@ impl Store {
         };
         store.recover()?;
         Ok(store)
+    }
+
+    /// 既に在るストアだけを開く。ストアでない場所(空のディレクトリ・存在しない道)には、
+    /// 何も作らずに require_store_dir の理由で断る。open は無ければ初期化する(serve の
+    /// 初回起動や init はそれでよい)が、検査や閲覧の命令がその道を通ると、検査が状態を
+    /// 作ってしまう: 復元先を先に fsck した写しが別ノードの node_key を持ち、backup に
+    /// 断られる、という形で現れた。
+    pub fn open_existing(config: StoreConfig) -> Result<Store> {
+        require_store_dir(&config.data_dir)?;
+        Self::open(config)
     }
 
     /// 二重オープンの防止。抽象名前空間ソケットはプロセス終了(kill -9 を含む)で
@@ -1202,6 +1229,62 @@ mod tests {
             assert_eq!(store.object_count(), 20);
             assert!(store.fsck().expect("fsck").errors.is_empty());
         }
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 在るストアだけを開く道は、空のディレクトリを初期化しない。断った後にディレクトリが
+    /// 空のままであることまで見る(node_key が 1 つ作られれば、そこは別のノードになる)。
+    #[test]
+    fn open_existing_refuses_an_empty_directory_and_leaves_it_empty() {
+        let dir = temp_dir("open-existing-empty");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        match Store::open_existing(StoreConfig::new(&dir)) {
+            Err(StoreError::Invalid(message)) => {
+                assert!(message.contains("データディレクトリではない"), "{message}")
+            }
+            Ok(_) => panic!("空のディレクトリを開いてはならない(初期化してしまう)"),
+            Err(other) => panic!("断りの種類が違う: {other}"),
+        }
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert!(left.is_empty(), "断ったのに何か作られている: {left:?}");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 存在しない道にも同じく断り、ディレクトリを作らない。
+    #[test]
+    fn open_existing_refuses_a_missing_directory_and_does_not_create_it() {
+        let dir = temp_dir("open-existing-missing");
+        assert!(!dir.exists());
+        assert!(
+            matches!(
+                Store::open_existing(StoreConfig::new(&dir)),
+                Err(StoreError::Invalid(_))
+            ),
+            "存在しない道は Invalid で断る"
+        );
+        assert!(!dir.exists(), "断ったのにディレクトリが作られている");
+    }
+
+    /// 一度でも開いたストアは、封印が起きておらず MANIFEST が無くても在るストアである。
+    #[test]
+    fn open_existing_opens_a_store_that_has_no_manifest_yet() {
+        let dir = temp_dir("open-existing-no-manifest");
+        let (id, node_id) = {
+            let mut store = Store::open(StoreConfig::new(&dir)).expect("init");
+            let (id, _) = store.put_object(b"one object, no seal").expect("put");
+            (id, store.node_id_hex().to_string())
+        };
+        assert!(
+            !dir.join(MANIFEST_NAME).exists(),
+            "封印前に MANIFEST は無い"
+        );
+        let store = Store::open_existing(StoreConfig::new(&dir)).expect("在るストアは開ける");
+        assert_eq!(store.node_id_hex(), node_id, "同じノードとして開く");
+        assert!(store.has_object(&id));
+        drop(store);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

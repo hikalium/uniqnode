@@ -9,12 +9,13 @@ fn usage() -> ! {
         "usage: uniqnode <command> <data_dir> [args]\n\
          commands:\n\
            init <dir>                 ストアを初期化し node id を表示する\n\
-           status <dir>               件数・seq・node id を表示する\n\
+           status <dir>               件数・seq・node id を表示する(在るストアだけ)\n\
            put <dir>                  標準入力をオブジェクトとして投入し id を表示する\n\
            get <dir> <id>             オブジェクトを標準出力へ書く\n\
            set-ref <dir> <path> <id>  自名前空間の ref を設定する(id が '-' なら tombstone)\n\
            refs <dir>                 ref を一覧する\n\
-           fsck <dir>                 全再ハッシュ検査(異常があれば非0で終了)\n\
+           fsck <dir>                 全再ハッシュ検査(異常があれば非0で終了。在るストア\n\
+                                      だけを開き、ストアでない場所は初期化せず断る)\n\
            backup <dir> <backup_dir>  封印済みセグメント・MANIFEST・node_key・設定を\n\
                                       backup_dir へ写し(増分: 写し済みの封印済みセグメントは\n\
                                       写さない)、写し先を開いて fsck まで通す。錠を取らない\n\
@@ -300,10 +301,25 @@ fn run_ingest_annotations(
     Ok(())
 }
 
-/// ストアを開く。開けない理由(別のプロセスが錠を持っている、など)はログの出口を
-/// 通す: mcp がこれで落ちたとき、標準エラーは登録した相手の中で消えるためである。
+/// ストアを開く(無ければ初期化する)。開けない理由(別のプロセスが錠を持っている、
+/// など)はログの出口を通す: mcp がこれで落ちたとき、標準エラーは登録した相手の中で
+/// 消えるためである。この道を通るのは、状態を作ることが役目の命令(init、put・set-ref・
+/// pin・ingest・correct・sync・flood の書き込み系、serve・mcp・embed の初回起動で
+/// ディレクトリを用意する常駐と派生の作成)。検査と閲覧は open_existing を通る。
 fn open(dir: &str) -> Store {
-    match Store::open(StoreConfig::new(dir)) {
+    exit_unless_opened(Store::open(StoreConfig::new(dir)))
+}
+
+/// 在るストアだけを開く。ストアでない場所(空のディレクトリ・存在しない道)には何も作らず
+/// 理由を言って 1 で終わる。fsck・status・get・refs はこちら: 検査や閲覧が空のディレクトリ
+/// を新しいノードとして初期化すると、復元先を先に fsck した写しが別の node_key を持って
+/// backup に断られる(BACKUP.md の「復元」)。
+fn open_existing(dir: &str) -> Store {
+    exit_unless_opened(Store::open_existing(StoreConfig::new(dir)))
+}
+
+fn exit_unless_opened(opened: Result<Store, StoreError>) -> Store {
+    match opened {
         Ok(s) => s,
         Err(e) => {
             uniqnode::log_line!("uniqnode: ストアを開けない: {e}");
@@ -538,7 +554,12 @@ fn embedder_from(options: &EmbedOptions) -> uniqnode::embed::Embedder {
 fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
     match command {
         "init" | "status" => {
-            let store = open(dir);
+            // init は無ければ作り、status は在るものを見るだけ。表示は同じ。
+            let store = if command == "init" {
+                open(dir)
+            } else {
+                open_existing(dir)
+            };
             println!("node_id: {}", store.node_id_hex());
             println!("objects: {}", store.object_count());
             println!("last_seq: {}", store.last_seq());
@@ -551,7 +572,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             println!("{id}{}", if new { "" } else { " (existing)" });
         }
         "get" => {
-            let store = open(dir);
+            let store = open_existing(dir);
             let id = rest.first().map(String::as_str).unwrap_or_else(|| usage());
             match store.get_object(id)? {
                 Some(bytes) => std::io::stdout().write_all(&bytes)?,
@@ -573,7 +594,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             println!("seq: {seq}");
         }
         "refs" => {
-            let store = open(dir);
+            let store = open_existing(dir);
             for (name, state) in store.list_refs() {
                 let target = state.target.as_deref().unwrap_or("(tombstone)");
                 println!("{name} -> {target} (seq {})", state.seq);
@@ -635,7 +656,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             );
         }
         "fsck" => {
-            let store = open(dir);
+            let store = open_existing(dir);
             let report = store.fsck()?;
             println!(
                 "objects: {} refs: {} errors: {}",

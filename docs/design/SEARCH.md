@@ -359,9 +359,12 @@ MCP の fetch ツールも別経路ではなく、同じ store の呼び出し�
 
 <a id="6df75ea0-ad86-460a-be04-29660201a7fb"></a>
 
-- serve に `--rerank <url>` を与えたときだけ装備する(既定では動かない)。問いと本文の組を
+- serve(と、ストアを直接開く形の mcp。組み立ては同じ関数 reranker_from を通る)に
+  `--rerank <url>` を与えたときだけ装備する(既定では動かない)。問いと本文の組を
   そのまま模型に読ませて採点し直す層で、実装は node/src/rerank.rs にある。手元の既定は
-  llama-server + bge-reranker-v2-m3(FP16、VRAM 1.1 GB)。
+  llama-server + bge-reranker-v2-m3(FP16、VRAM 1.1 GB)。転送する形の mcp・viewer・embed は
+  装備する口を持たないので、この引数を受けたら起動時に断る
+  ([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))。
 - 採点し直すのは融合の上位 DEFAULT_RERANK_DEPTH(30)件で、送るのは索引が持つ抜粋(200 文字)
   である。同じ問いで抜粋と全文を較べたところ上位の並びが一致したので、全文を取りに行く往復を
   足していない。抜粋に節見出しの経路を前置してから送る(その紙面が何の節かを模型に見せる)。

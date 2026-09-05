@@ -572,6 +572,89 @@ fn the_forwarding_form_holds_no_store_lock_so_the_cli_can_ingest_and_embed() {
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 
+/// ストアを直接開く形は serve と同じ装備を受ける。--rerank を受けておきながら装備して
+/// いなければ、届かないリランカーを指しても応答は何も言わず、運用者は装備したつもりで
+/// 装備の無い順位を読む(明示された指定の黙殺。must/0022 の同型)。届かない先を指して
+/// 検索し、劣化の理由(どのリランカーに届かなかったか)が応答に出ることで装備を確かめる
+/// (SEARCH の劣化の経路)。リランカーは要らない: 誰も待ち受けていないポートを指す。
+#[test]
+fn the_local_form_equips_the_reranker_and_says_when_it_cannot_reach_it() {
+    let dir = store_with("mcp-rerank", &["search_ja.md"]);
+    let mut mcp = McpProcess::start(&dir, &["--rerank", "http://127.0.0.1:1/v1/rerank"]);
+
+    // 候補が 2 件無いと取り直しは往復しない(1 件では順位が動かない)ので、2 つの節に
+    // 当たる問いを選ぶ。
+    let searched = mcp.call(1, "search", "{\"query\":\"レプリカ 世代\"}");
+    assert!(searched.contains("\"isError\":false"), "{searched}");
+    assert!(searched.contains("2 件"), "候補が 2 件無いと取り直しを試みない: {searched}");
+    assert!(searched.contains("劣化:"), "届かないリランカーを黙っている: {searched}");
+    assert!(
+        searched.contains("127.0.0.1:1"),
+        "どのリランカーに届かなかったかを言うべき: {searched}"
+    );
+    assert!(searched.contains("接続できない"), "劣化の理由が読めるべき: {searched}");
+    // 取り直せなくても一次検索の結果はそのまま返る(検索を失敗させない)。
+    assert!(searched.contains("方式 bm25"), "{searched}");
+    assert!(searched.contains("チャンク ID: s256:"), "{searched}");
+
+    // 装備したことは起動時に標準エラーへ言う(serve と同じ行)。
+    let exit = mcp.finish();
+    assert!(
+        exit.stderr.contains("uniqnode: rerank: bge-reranker-v2-m3 (http://127.0.0.1:1/v1/rerank)"),
+        "装備の知らせが標準エラーに無い: {}",
+        exit.stderr
+    );
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// 転送する形に --rerank / --reranker を渡すのは --embed と同じ矛盾である(順位の取り直し
+/// を装備するのは転送先の serve)。受けて捨てると、装備したつもりの運用者が装備の無い
+/// 検索を読む。理由を標準エラーへ出して exit 2 で終わり、標準出力には何も書かない
+/// (MCP の標準出力はプロトコル専用)。
+#[test]
+fn the_forwarding_form_refuses_a_reranker_it_cannot_equip() {
+    let dir = unique_dir("mcp-forward-rerank");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let text = dir.to_str().expect("utf-8");
+    let arguments =
+        [("--rerank", "http://127.0.0.1:1/v1/rerank"), ("--reranker", "bge-reranker-v2-m3")];
+    for (flag, value) in arguments {
+        let output =
+            cli_output(&["mcp", text, "--serve-url", "http://127.0.0.1:7440", flag, value]);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{flag} を受けて起動している: {error}");
+        assert!(output.stdout.is_empty(), "標準出力はプロトコル専用: {:?}", output.stdout);
+        assert!(
+            error.contains(&format!("--serve-url と {flag} は併用しない")),
+            "断りの理由が標準エラーに無い: {error}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// embed は serve と引数の読み手を共有するので --rerank も字面としては通るが、ベクトルを
+/// 作るだけの命令に順位の取り直しの口は無い。受けて捨てずに、ストアを開く前に理由を
+/// 言って exit 2 で終わる(標準出力に cache の行が出ていれば、断らずに仕事を始めている)。
+#[test]
+fn embed_refuses_the_reranker_arguments_instead_of_ignoring_them() {
+    let dir = store_with("embed-rerank", &["search_ja.md"]);
+    let text = dir.to_str().expect("utf-8");
+    let arguments =
+        [("--rerank", "http://127.0.0.1:1/v1/rerank"), ("--reranker", "bge-reranker-v2-m3")];
+    for (flag, value) in arguments {
+        let output = cli_output(&["embed", text, flag, value]);
+        let out = String::from_utf8_lossy(&output.stdout);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{flag} を受けて進んでいる: {out} {error}");
+        assert!(out.is_empty(), "断る前に仕事を始めている: {out}");
+        assert!(
+            error.contains(&format!("{flag} は embed の引数ではない")),
+            "断りの理由が標準エラーに無い: {error}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
 /// 自己置換(バイナリの更新を検出して自分を exec で差し替える)。実プロセスで、
 /// 差し替えの前後で応答がどちらのイメージから来ているのかを見る。壊れたイメージを
 /// 置いたときは差し替えず、旧イメージのまま答え続ける(負例。発火を一度も見ていない

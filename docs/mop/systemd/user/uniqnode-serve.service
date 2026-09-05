@@ -21,6 +21,9 @@ Type=exec
 #                           Environment="UNIQNODE_SERVE_OPTIONS=--embed http://127.0.0.1:8083/v1/embeddings"
 # UNIQNODE_SERVE_OPTIONS だけ ${} で囲まないのは、空のときに引数 0 個に消えるため
 # (${} で囲むと空文字列 1 個の引数になり、usage で落ちる)。
+# PATH はここには書かない(systemd の既定 /usr/local/sbin:…:/bin のまま)。取り込みが起こす
+# pdftotext・pdftohtml・pdftoppm・curl が ~/.local/bin などにあるときは、`uniqnode install` が
+# それを見つけたディレクトリを前に足した Environment=PATH= を drop-in に書く(SYSTEMD.md の表)。
 Environment=UNIQNODE_DATA_DIR=%S/uniqnode
 Environment=UNIQNODE_LISTEN=127.0.0.1:7440
 Environment=UNIQNODE_SERVE_OPTIONS=

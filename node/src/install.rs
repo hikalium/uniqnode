@@ -18,6 +18,7 @@
 use crate::http;
 use crate::json::Json;
 use crate::store::{self, FsckReport};
+use crate::{fetch, outline, rendition};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,6 +61,123 @@ pub const DEFAULT_VIEWER_LISTEN: &str = "127.0.0.1:7450";
 /// PrivateTmp=yes の unit からは見えない置き場。ここにストアや写し先を指されたら断る
 /// (unit は自分だけの空の /tmp を見るので、起こしても「ストアが無い」で落ちる)。
 pub const PRIVATE_TMP_ROOTS: [&str; 2] = ["/tmp", "/var/tmp"];
+
+/// user 単位の service が Environment=PATH= を書かれないときに受け取る PATH。ログイン
+/// シェルの PATH(~/.local/bin や ~/.cargo/bin を足したもの)ではなく、systemd が組み込みで
+/// 持つこの値である(実測 2026-09-05、systemd 249: `systemctl --user show-environment` にも
+/// 載らず、unit から `echo $PATH` させるとこの並びが出る)。`systemd-path` などで機械ごとに
+/// 引かないのは、値が systemd のコンパイル時定数で、この並び以外を返す配布を見ていないため。
+/// 万一違っても、この並びは /usr と / の標準の置き場を全て含むので、前に足す形なら害が無い。
+pub const SYSTEMD_DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// serve が PATH から引く外部の道具。名前は探す側の定数を指す(must/0023: 同じ字句を 2 箇所に
+/// 書かない)。無いときに起きることは、install が報告に書く文言である。
+#[derive(Debug, PartialEq)]
+pub struct Delegate {
+    pub binary: &'static str,
+    /// この道具が無い機械で何が起きるか(報告の 1 行に添える)。
+    pub lost_without: &'static str,
+    /// poppler の一式か。serve は poppler の道具を PATH の次に pdftotext の実体の隣でも探す
+    /// (rendition::candidate_commands)ので、そこにあれば PATH に足さなくても届く。
+    pub poppler: bool,
+}
+
+pub const DELEGATES: [Delegate; 4] = [
+    Delegate {
+        binary: rendition::Tool::Pdftotext.binary(),
+        lost_without: "PDF の取り込みは 503 になる",
+        poppler: true,
+    },
+    Delegate {
+        binary: outline::PDFTOHTML,
+        lost_without: "PDF のしおりから見出しを取れない(語の高さからの推定に落ちる)",
+        poppler: true,
+    },
+    Delegate {
+        binary: rendition::Tool::Pdftoppm.binary(),
+        lost_without: "PDF のページの写しは 503 になる",
+        poppler: true,
+    },
+    Delegate {
+        binary: fetch::CURL,
+        lost_without: "URL の取り込みは 503 になる",
+        poppler: false,
+    },
+];
+
+/// unit に書く PATH と、その判断の根拠。
+#[derive(Debug, PartialEq)]
+pub struct ToolPath {
+    /// `Environment=PATH=` の値: 道具が見つかったディレクトリ(PATH の順、重複なし、systemd の
+    /// 既定に含まれるものは除く)を SYSTEMD_DEFAULT_PATH の前に置いたもの。
+    pub value: String,
+    /// install の PATH でも pdftotext の隣でも見つからなかった道具。
+    pub missing: Vec<&'static Delegate>,
+    /// PATH には無いが pdftotext の実体の隣にあった道具と、その場所。serve はそこも探すので
+    /// PATH には足さない。
+    pub beside_pdftotext: Vec<(&'static Delegate, PathBuf)>,
+}
+
+/// install を走らせている自分の PATH(path_env)で DELEGATES を探し、unit の serve が同じ
+/// 道具を見つけられる PATH を組む。
+///
+/// なぜ要るか: unit の PATH は SYSTEMD_DEFAULT_PATH であり、ログインシェルが足した
+/// ~/.local/bin などを含まない。手で起こした serve が見つけていた pdftotext を unit の serve は
+/// 見つけず、PDF の取り込みが 503 で失敗する(実測 2026-09-05)。install はそれを据える時点で
+/// 判じ、見つかった場所を drop-in に書く。symlink の先ではなく PATH 上のディレクトリを書く
+/// のは、操作者が置いた場所がそこであり、実体を置き直しても symlink を張り直せば済むため。
+///
+/// PATH の相対の項(`.` など)は見ない。unit は作業ディレクトリを持たず、相対の道は unit の
+/// 中で別の場所を指すので、そこにしか無い道具は unit からは無いのと同じである。
+///
+/// PATH をプロセスの環境からではなく引数で受け取るのは純関数にするため(環境を読むのは
+/// run の 1 箇所)。探し方は serve のもの(rendition::candidate_commands)を使う(should/0135)。
+pub fn tool_path(path_env: &str) -> ToolPath {
+    let searchable: Vec<PathBuf> = std::env::split_paths(path_env)
+        .filter(|dir| dir.is_absolute())
+        .collect();
+    // 絶対の項だけを繋ぎ直す。split_paths が返す項は区切り文字を含まないので join は失敗しない。
+    let searchable_env =
+        std::env::join_paths(&searchable).expect("split_paths の項は join_paths で繋げる");
+    let mut wanted: Vec<PathBuf> = Vec::new();
+    let mut missing = Vec::new();
+    let mut beside_pdftotext = Vec::new();
+    for delegate in &DELEGATES {
+        // candidate_commands は PATH の当たりを先頭に、poppler の道具なら pdftotext の実体の隣を
+        // 続けて返す。curl は fetch.rs が PATH でしか探さないので隣は見ない。
+        let candidates = rendition::candidate_commands(
+            delegate.binary,
+            None,
+            Some(searchable_env.as_os_str()),
+        );
+        let parent_of = |command: &Path| command.parent().map(Path::to_path_buf);
+        let in_path = candidates
+            .iter()
+            .find_map(|command| parent_of(command).filter(|dir| searchable.contains(dir)));
+        match (in_path, candidates.first().and_then(|c| parent_of(c))) {
+            (Some(dir), _) => wanted.push(dir),
+            (None, Some(dir)) if delegate.poppler => beside_pdftotext.push((delegate, dir)),
+            _ => missing.push(delegate),
+        }
+    }
+    let default_dirs: Vec<PathBuf> = std::env::split_paths(SYSTEMD_DEFAULT_PATH).collect();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for dir in &searchable {
+        if wanted.contains(dir) && !default_dirs.contains(dir) && !dirs.contains(dir) {
+            dirs.push(dir.clone());
+        }
+    }
+    dirs.extend(default_dirs);
+    let value = std::env::join_paths(&dirs)
+        .expect("PATH の項は join_paths で繋げる")
+        .to_string_lossy()
+        .into_owned();
+    ToolPath {
+        value,
+        missing,
+        beside_pdftotext,
+    }
+}
 
 pub struct Options {
     pub data_dir: PathBuf,
@@ -180,8 +298,12 @@ fn unit_text(name: &str) -> &'static str {
 }
 
 /// 3 つの service の drop-in を描く: (unit 名, override.conf の中身)。ExecStart= と
-/// ReadWritePaths= は追記型なので、空の行で unit の値を一度消してから書く。
-pub fn drop_ins(options: &Options) -> Result<Vec<(&'static str, String)>, String> {
+/// ReadWritePaths= は追記型なので、空の行で unit の値を一度消してから書く。tool_path は
+/// tool_path() の value(Environment=PATH= に書く値)。
+pub fn drop_ins(
+    options: &Options,
+    tool_path: &str,
+) -> Result<Vec<(&'static str, String)>, String> {
     let data_dir = options.data_dir.to_string_lossy();
     let backup_dir = options.backup_dir.to_string_lossy();
     let binary = unit_word(&options.binary.to_string_lossy())?;
@@ -190,7 +312,13 @@ pub fn drop_ins(options: &Options) -> Result<Vec<(&'static str, String)>, String
                   [Service]\n";
     let mut rendered = Vec::new();
     for unit in [SERVE_UNIT, VIEWER_UNIT, BACKUP_UNIT] {
-        let mut lines = vec![environment_line("UNIQNODE_DATA_DIR", &data_dir)?];
+        // PATH は 3 つとも同じ値。外部の道具(DELEGATES)を起こすのは serve だけだが、unit ごとに
+        // 違う PATH を書くと「どの unit がどの道具を見るか」を読み手が unit ごとに追うことになる。
+        // 同じ値なら drop-in を 1 つ読めば全部が分かる。
+        let mut lines = vec![
+            environment_line("PATH", tool_path)?,
+            environment_line("UNIQNODE_DATA_DIR", &data_dir)?,
+        ];
         let mut writable: Vec<&str> = Vec::new();
         match unit {
             SERVE_UNIT => {
@@ -471,8 +599,33 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         say(out, &format!("unit {}", path.display()))?;
     }
 
-    // (3) drop-in と、ReadWritePaths= が要求する在るディレクトリ。
-    for (unit, content) in drop_ins(&options)? {
+    // (3) drop-in と、ReadWritePaths= が要求する在るディレクトリ。unit の PATH は systemd の
+    // 既定なので、自分の PATH で見つけた道具の場所を前に足す。無い道具は 1 行ずつ言う
+    // (黙って進めない。must/0022)が、止めない: 道具が無くても serve は起き、無い機能だけが
+    // 503 で答える(should/0114 と同じ扱い)。環境から PATH を読むのはここだけ。
+    let path_env = std::env::var_os("PATH").unwrap_or_default();
+    let tools = tool_path(&path_env.to_string_lossy());
+    say(out, &format!("PATH={}(serve が起こす外部の道具の探し先)", tools.value))?;
+    for (delegate, dir) in &tools.beside_pdftotext {
+        say(
+            out,
+            &format!(
+                "{} は PATH に無いが pdftotext の実体の隣({})にあり、serve はそこも探す",
+                delegate.binary,
+                dir.display()
+            ),
+        )?;
+    }
+    for delegate in &tools.missing {
+        say(
+            out,
+            &format!(
+                "{} は PATH に無い({})",
+                delegate.binary, delegate.lost_without
+            ),
+        )?;
+    }
+    for (unit, content) in drop_ins(&options, &tools.value)? {
         let path = options
             .unit_dir
             .join(format!("{unit}.d"))
@@ -611,7 +764,7 @@ mod tests {
     }
 
     fn drop_in_for(unit: &str, options: &Options) -> String {
-        drop_ins(options)
+        drop_ins(options, SYSTEMD_DEFAULT_PATH)
             .expect("描ける")
             .into_iter()
             .find(|(name, _)| *name == unit)
@@ -625,6 +778,7 @@ mod tests {
     fn the_serve_drop_in_quotes_options_resets_exec_start_and_keeps_the_argument_order() {
         let text = drop_in_for(SERVE_UNIT, &sample_options());
         let expected = "[Service]\n\
+                        Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n\
                         Environment=UNIQNODE_DATA_DIR=/home/op/store\n\
                         Environment=UNIQNODE_LISTEN=127.0.0.1:7443\n\
                         Environment=\"UNIQNODE_SERVE_OPTIONS=--embed http://127.0.0.1:8083/v1/embeddings\"\n\
@@ -729,6 +883,108 @@ mod tests {
         options.listen = "127.0.0.1:0".to_string();
         let message = normalize(options).err().expect("断る");
         assert!(message.contains("ポートは固定する"), "{message}");
+    }
+
+    /// 偽の道具(実行できる空のファイル)を置いた一時ディレクトリ。
+    fn tool_dir(name: &str, binaries: &[&str]) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "uniqnode-install-unit-{}-tools-{name}",
+            std::process::id()
+        ));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        for binary in binaries {
+            let path = dir.join(binary);
+            std::fs::write(&path, "").expect("write");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        dir
+    }
+
+    fn names(delegates: &[&Delegate]) -> Vec<&'static str> {
+        delegates.iter().map(|d| d.binary).collect()
+    }
+
+    /// (a) PATH の一時ディレクトリに pdftotext があれば、3 つの drop-in の PATH はその
+    /// ディレクトリを systemd の既定の前に置く。(c) 同じディレクトリに 2 つ(pdftotext と curl)
+    /// あっても、PATH にそのディレクトリが 2 度出ても、書くのは 1 回。既定に含まれる /usr/bin
+    /// は、そこで何が見つかっても前には足さない(見つかった道具の名は機械の poppler の有無で
+    /// 変わるので、ここでは pdftotext と curl が「無い」に挙がらないことだけを見る)。
+    #[test]
+    fn tools_found_in_path_put_their_directory_before_the_systemd_default_once() {
+        let dir = tool_dir("found", &["pdftotext", "curl"]);
+        let path_env = format!("{0}:/usr/bin:{0}", dir.display());
+        let tools = tool_path(&path_env);
+        assert_eq!(
+            tools.value,
+            format!(
+                "{}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                dir.display()
+            )
+        );
+        let missing = names(&tools.missing);
+        assert!(!missing.contains(&"pdftotext"), "{missing:?}");
+        assert!(!missing.contains(&"curl"), "{missing:?}");
+        let rendered = drop_ins(&sample_options(), &tools.value).expect("描ける");
+        assert_eq!(rendered.len(), 3);
+        for (unit, text) in &rendered {
+            assert!(
+                text.contains(&format!(
+                    "\n[Service]\nEnvironment=PATH={}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n",
+                    dir.display()
+                )),
+                "{unit} の drop-in にも同じ PATH:\n{text}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// (b) 何も見つからない PATH では既定だけになり、4 つとも見つからなかった道具として名が
+    /// 挙がる。相対の項(`.` や空の項)は unit からは別の場所を指すので見ない。
+    #[test]
+    fn a_path_without_any_tool_yields_the_default_alone_and_names_every_missing_tool() {
+        let dir = tool_dir("empty", &[]);
+        let tools = tool_path(&format!("{}:.:", dir.display()));
+        assert_eq!(tools.value, SYSTEMD_DEFAULT_PATH);
+        assert_eq!(
+            names(&tools.missing),
+            vec!["pdftotext", "pdftohtml", "pdftoppm", "curl"]
+        );
+        assert!(tools.beside_pdftotext.is_empty());
+        assert_eq!(tool_path("").value, SYSTEMD_DEFAULT_PATH);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// PATH には pdftotext の symlink だけがあり、poppler の一式は別の場所に展開してある
+    /// 置き方(この機械の姿)では、PATH に足すのは symlink のあるディレクトリで、隣にある
+    /// pdftoppm・pdftohtml は「無い」ではなく「隣にある」と判じる。curl は隣を見ない。
+    #[test]
+    fn poppler_next_to_the_real_pdftotext_is_reachable_without_being_added_to_path() {
+        let real = tool_dir("real", &["pdftotext", "pdftoppm", "pdftohtml", "curl"]);
+        let linked = tool_dir("linked", &[]);
+        std::os::unix::fs::symlink(real.join("pdftotext"), linked.join("pdftotext"))
+            .expect("symlink");
+        let tools = tool_path(&linked.display().to_string());
+        assert!(
+            tools.value.starts_with(&format!("{}:/usr/local/sbin:", linked.display())),
+            "{}",
+            tools.value
+        );
+        assert!(!tools.value.contains(&real.display().to_string()), "{}", tools.value);
+        assert_eq!(
+            tools
+                .beside_pdftotext
+                .iter()
+                .map(|(d, dir)| (d.binary, dir.clone()))
+                .collect::<Vec<_>>(),
+            vec![("pdftohtml", real.clone()), ("pdftoppm", real.clone())]
+        );
+        assert_eq!(names(&tools.missing), vec!["curl"]);
+        std::fs::remove_dir_all(&real).expect("cleanup");
+        std::fs::remove_dir_all(&linked).expect("cleanup");
     }
 
     /// ExecStart= の差し替えは先頭の道だけを替え、残りの並びを unit から写す。

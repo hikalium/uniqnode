@@ -817,8 +817,9 @@ fn pdftohtml() -> Result<&'static Pdftohtml, String> {
     ))
 }
 
-/// pdftohtml の実行ファイル名。探す側と誤りに出す側が同じ字句を見る(must/0023)。
-const PDFTOHTML: &str = "pdftohtml";
+/// pdftohtml の実行ファイル名。探す側と誤りに出す側、そして unit の PATH に足す側
+/// (install::DELEGATES)が同じ字句を見る(must/0023)。
+pub const PDFTOHTML: &str = "pdftohtml";
 
 /// 見つかった pdftohtml。rendition::LocatedTool を借りないのは、あれが tool:
 /// rendition::Tool を持っており、その列挙に pdftohtml が無いからである。他の道具の

@@ -45,7 +45,9 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub fn binary(self) -> &'static str {
+    /// 実行ファイル名。const fn なのは、install が unit の PATH に足す道具の表
+    /// (install::DELEGATES)がこの名前をコンパイル時に参照するため(must/0023)。
+    pub const fn binary(self) -> &'static str {
         match self {
             Tool::Pdftoppm => "pdftoppm",
             Tool::Pdftocairo => "pdftocairo",
@@ -295,8 +297,10 @@ pub fn find_in_path(binary: &str, path_env: Option<&OsStr>) -> Option<PathBuf> {
 /// PdfExtractor::locate と同じ扱い)。
 ///
 /// PATH をプロセスの環境からではなく引数で受け取るのは、探索の順序を環境を触らずに
-/// 試せるようにするためである(単体テスト poppler_is_found_next_to_pdftotext)。
-fn candidate_commands(
+/// 試せるようにするためである(単体テスト poppler_is_found_next_to_pdftotext)。pub なのは、
+/// install が「unit の serve はこの道具を見つけられるか」を同じ探し方で判じるため
+/// (install::tool_path。should/0135)。
+pub fn candidate_commands(
     binary: &str,
     explicit: Option<&Path>,
     path_env: Option<&OsStr>,

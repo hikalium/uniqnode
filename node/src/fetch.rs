@@ -33,6 +33,10 @@ const MAX_NAME_CHARS: usize = 100;
 /// 切ったときに残す先頭の長さ(文字)。
 const TRUNCATED_NAME_CHARS: usize = 80;
 
+/// curl の実行ファイル名。探す側(locate)と、unit の PATH に足す側(install::DELEGATES)が
+/// 同じ字句を見る(must/0023)。
+pub const CURL: &str = "curl";
+
 /// curl が見つからないときに示す導入手順。
 const CURL_INSTALL_HINT: &str =
     "導入例: apt-get install curl(Debian/Ubuntu)。sudo なしなら apt-get download curl と \
@@ -135,7 +139,7 @@ impl Curl {
     /// PATH の curl を見つけて版を確かめる。見つからないときは導入手順を示して失敗する
     /// (黙って空を取り込まない。must/0022)。
     pub fn locate() -> Result<Curl, FetchError> {
-        let command = PathBuf::from("curl");
+        let command = PathBuf::from(CURL);
         let probe = Command::new(&command)
             .arg("--version")
             .output()

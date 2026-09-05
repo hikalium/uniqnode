@@ -60,6 +60,7 @@ unit ファイルは差し替えても drop-in は残る。
 | UNIQNODE_SERVE_URL | viewer | http://127.0.0.1:7440 | 転送先。UNIQNODE_LISTEN を変えたらここも |
 | UNIQNODE_VIEWER_OPTIONS | viewer | 空 | 追加の引数(ログの指定など) |
 | UNIQNODE_BACKUP_DIR | backup | system: /var/backups/uniqnode、user: %h/uniqnode-backup | 写し先。変えるときは ReadWritePaths= も(下) |
+| PATH | serve(install は 3 つに同じ値) | systemd の既定 /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin | pdftotext・pdftohtml・pdftoppm・curl を探す道。unit には書かず、install が自分の PATH で見つけた場所を前に足して drop-in に書く(下) |
 
 - 埋め込みは既定で装備しない。serve は `--embed` を明示したときだけ埋め込みサーバに繋ぎ、
   何も指定しなければ他のプロセスに依存せず BM25 だけで答える。装備するなら drop-in に
@@ -114,8 +115,25 @@ unit ファイルは差し替えても drop-in は残る。
   PrivateNetwork= を使わないのは、抽象名前空間の socket がネットワーク名前空間ごとに別に
   なり、外の CLI と unit が互いのロックを見られなくなる(二重起動を検出できなくなる)からで
   ある。viewer と mcp が loopback で serve に届く必要もある。
-- pdftotext など取り込みが呼ぶ外部プロセスは PATH から引く。閉じ込めは /usr の実行を
-  妨げない。
+- pdftotext・pdftohtml・pdftoppm(PDF の取り込み・見出し・写し)と curl(URL の取り込み)は
+  PATH から引く。閉じ込めは /usr の実行を妨げず、ProtectHome=read-only は home の下の
+  実行も妨げない。ただし unit の PATH はログインシェルのものではなく systemd の既定
+  `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` で、~/.local/bin を含まない。
+  そこに symlink した pdftotext を手で起こした serve は見つけ、unit の serve は見つけず、
+  `POST /v1/collections/web/fetch` の PDF が 503「PDF の取り込みには pdftotext コマンドが
+  必要」で失敗した(実測 2026-09-05。HTML は通る)。install は据える時点の自分の PATH で
+  4 つの道具を探し、見つかったディレクトリを既定の前に置いた `Environment=PATH=…` を
+  drop-in に書く(下の表の PATH)。手で置いた unit や、後から別の場所に道具を置いたときは、
+  同じ 1 行を drop-in に書く:
+
+  ```
+  [Service]
+  Environment=PATH=/home/op/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  ```
+
+  poppler の一式(pdftohtml・pdftoppm)は PATH に無くても pdftotext の実体の隣にあれば
+  serve が見つける(node/src/rendition.rs の candidate_commands)ので、PATH に要るのは
+  pdftotext と curl の場所である。
 
 ## 準備
 
@@ -235,13 +253,17 @@ install は次を 1 手順 1 命令で行う。unit は docs/mop/systemd/user/ �
    cp docs/mop/systemd/user/uniqnode-*.service docs/mop/systemd/user/uniqnode-*.timer ~/.config/systemd/user/
    ```
 
-3. 3 つの service に drop-in `<unit>.d/override.conf` を書く。中身は「unit の読み方」の
-   環境変数と、ReadWritePaths=(ストアと写し先。空の行で unit の値を消してから)、
+3. 3 つの service に drop-in `<unit>.d/override.conf` を書く。中身は PATH(install 自身の
+   PATH で pdftotext・pdftohtml・pdftoppm・curl を探し、見つかったディレクトリを systemd の
+   既定の前に置く。見つからない道具は「install: <名> は PATH に無い(…)」と 1 行ずつ言うが
+   止まらない: 道具が無くても serve は起き、その機能だけが 503 で答える)、「unit の読み方」の
+   環境変数、ReadWritePaths=(ストアと写し先。空の行で unit の値を消してから)、
    ExecStart=(空の行で消してから、`--bin` の道で書き直す。引数の並びは unit の ExecStart=
    行を読んでバイナリの道だけ替える)。serve の drop-in はこの形になる:
 
    ```
    [Service]
+   Environment=PATH=/home/op/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
    Environment=UNIQNODE_DATA_DIR=/home/op/uniqnode-store
    Environment=UNIQNODE_LISTEN=127.0.0.1:7440
    Environment=UNIQNODE_SERVE_OPTIONS=

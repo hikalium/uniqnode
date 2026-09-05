@@ -38,8 +38,15 @@ struct CommandOutcome {
 }
 
 fn uniqnode(arguments: &[&str]) -> CommandOutcome {
+    uniqnode_with_path(arguments, &std::env::var("PATH").expect("PATH"))
+}
+
+/// PATH を差し替えて走らせる(install は自分の PATH で外部の道具を探し、その場所を drop-in
+/// に書く)。
+fn uniqnode_with_path(arguments: &[&str], path: &str) -> CommandOutcome {
     let output = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
         .args(arguments)
+        .env("PATH", path)
         .output()
         .expect("spawn uniqnode");
     CommandOutcome {
@@ -77,6 +84,21 @@ fn install_without_start_places_the_binary_the_units_and_the_drop_ins() {
     let backup_dir = work.join("copy");
     let unit_dir = work.join("units");
     let binary = work.join("bin").join("uniqnode");
+    // 偽の pdftotext(実行できる空のファイル)を PATH の先頭のディレクトリに置く。install は
+    // これを見つけ、そのディレクトリを unit の PATH の前に足すはずである。
+    let tools = work.join("tools");
+    std::fs::create_dir_all(&tools).expect("mkdir");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = tools.join("pdftotext");
+        std::fs::write(&fake, "").expect("write");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let path = format!(
+        "{}:{}",
+        tools.display(),
+        std::env::var("PATH").expect("PATH")
+    );
     let arguments = [
         "install",
         data_dir.to_str().expect("utf-8"),
@@ -94,7 +116,7 @@ fn install_without_start_places_the_binary_the_units_and_the_drop_ins() {
         unit_dir.to_str().expect("utf-8"),
         "--no-start",
     ];
-    let outcome = uniqnode(&arguments);
+    let outcome = uniqnode_with_path(&arguments, &path);
     assert_eq!(
         outcome.status, 0,
         "install は 0 で終わるべき\nstdout:\n{}\nstderr:\n{}",
@@ -153,6 +175,17 @@ fn install_without_start_places_the_binary_the_units_and_the_drop_ins() {
     );
     assert!(
         serve.contains("\nEnvironment=UNIQNODE_LISTEN=127.0.0.1:7443\n"),
+        "{serve}"
+    );
+    // unit の PATH は systemd の既定であり、install はその前に、自分の PATH で pdftotext を
+    // 見つけたディレクトリを足す。足す先頭のディレクトリは偽の pdftotext を置いた所。
+    assert!(
+        serve.contains(&format!(
+            "\nEnvironment=PATH={}:",
+            tools.display()
+        )) && serve
+            .lines()
+            .any(|line| line.starts_with("Environment=PATH=") && line.ends_with(":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")),
         "{serve}"
     );
     assert!(
@@ -237,7 +270,7 @@ fn install_without_start_places_the_binary_the_units_and_the_drop_ins() {
     );
 
     // 再実行は更新: 同じ 0 で終わり、置かれたものは同じ。
-    let again = uniqnode(&arguments);
+    let again = uniqnode_with_path(&arguments, &path);
     assert_eq!(again.status, 0, "{}\n{}", again.stdout, again.stderr);
     assert_eq!(
         text(

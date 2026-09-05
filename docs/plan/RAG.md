@@ -20,6 +20,8 @@
 
 pack の書き直しで evict 済みオブジェクトのディスクを回収し、その上で min_replicas=0 の
 LRU+参照カウント evict(SPEC §5.4)を有効化する。容量の小さいノードを本格運用する前提。
+設計草案と未決事項は [docs/plan/PACK_GC.md](#f272eeda-8664-42da-9e5c-ef354bc3f3a7)(段階 1 の
+物理回収を先に、その dry-run で実測を取ってから段階 2 の evict)。
 同じ層の残りとして、`renditions/` の輸出除外がある(写しは伝播交換にそのまま載るので、
 他ノードへ配りたくない運用では外せる必要がある。
 [docs/design/RENDITION.md](#6046eeca-1d95-4d47-87da-13f86c7710dc))。

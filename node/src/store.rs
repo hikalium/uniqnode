@@ -128,12 +128,67 @@ pub struct Store {
     _lock: std::os::unix::net::UnixListener,
 }
 
+/// 封印済みセグメントの一覧を持つファイル(SPEC §5.2)。
+pub(crate) const MANIFEST_NAME: &str = "MANIFEST";
+
+/// ノード鍵(ed25519 の秘密シード 32 バイト)。ストアのデータではないが、失うとこのノードの
+/// 名前空間の ref に二度と署名できなくなる。
+pub(crate) const NODE_KEY_NAME: &str = "node_key";
+
+/// 追記専用セグメントの種類(pack と reflog)。置き場・名前の形・番号の列挙を 1 箇所で
+/// 決め、回復とバックアップが同じ答えを読む(should/0135)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SegmentKind {
+    /// データディレクトリ直下のサブディレクトリ名。
+    pub(crate) directory: &'static str,
+    prefix: &'static str,
+    suffix: &'static str,
+}
+
+pub(crate) const PACK: SegmentKind =
+    SegmentKind { directory: "packs", prefix: "pack-", suffix: ".pack" };
+pub(crate) const REFLOG: SegmentKind =
+    SegmentKind { directory: "reflog", prefix: "reflog-", suffix: ".log" };
+
+impl SegmentKind {
+    pub(crate) fn file_name(&self, number: u64) -> String {
+        format!("{}{number:06}{}", self.prefix, self.suffix)
+    }
+
+    pub(crate) fn path(&self, dir: &Path, number: u64) -> PathBuf {
+        dir.join(self.directory).join(self.file_name(number))
+    }
+
+    /// データディレクトリにあるこの種類のセグメント番号を昇順で返す。名前の形に合わない
+    /// ファイルは破損として拒む(黙って飛ばすと、写し忘れや取り違えが見えなくなる)。
+    pub(crate) fn numbers(&self, dir: &Path) -> Result<Vec<u64>> {
+        let mut numbers = Vec::new();
+        for entry in std::fs::read_dir(dir.join(self.directory))? {
+            let name = entry?.file_name().to_string_lossy().to_string();
+            if let Some(rest) = name.strip_prefix(self.prefix) {
+                if let Some(number_text) = rest.strip_suffix(self.suffix) {
+                    match number_text.parse::<u64>() {
+                        Ok(n) => numbers.push(n),
+                        Err(_) => {
+                            return Err(StoreError::Corruption(format!(
+                                "解釈できないファイル名: {name}"
+                            )))
+                        }
+                    }
+                }
+            }
+        }
+        numbers.sort_unstable();
+        Ok(numbers)
+    }
+}
+
 fn pack_path(dir: &Path, number: u64) -> PathBuf {
-    dir.join("packs").join(format!("pack-{number:06}.pack"))
+    PACK.path(dir, number)
 }
 
 fn reflog_path(dir: &Path, number: u64) -> PathBuf {
-    dir.join("reflog").join(format!("reflog-{number:06}.log"))
+    REFLOG.path(dir, number)
 }
 
 /// 追記レコード: [u32 len][u32 crc32][payload]、いずれもリトルエンディアン。
@@ -192,7 +247,35 @@ fn scan_records(path: &Path, max_record_bytes: u32) -> Result<RecordScan> {
     })
 }
 
-fn atomic_write(dir: &Path, target: &Path, content: &[u8]) -> Result<()> {
+/// MANIFEST の本文から (封印済み pack 番号, 封印済み reflog 番号) を読む。開くときと
+/// バックアップが同じ読み方をする(should/0135)。
+pub(crate) fn parse_manifest(bytes: &[u8]) -> Result<(Vec<u64>, Vec<u64>)> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| StoreError::Corruption("MANIFEST が UTF-8 でない".into()))?;
+    let value = c1::parse(text)
+        .map_err(|e| StoreError::Corruption(format!("MANIFEST が読めない: {e}")))?;
+    let map = match &value {
+        c1::Value::Object(m) => m,
+        _ => return Err(StoreError::Corruption("MANIFEST がオブジェクトでない".into())),
+    };
+    let numbers = |key: &str| -> Result<Vec<u64>> {
+        match map.get(key) {
+            None => Ok(Vec::new()),
+            Some(c1::Value::Array(items)) => items
+                .iter()
+                .map(|v| match v {
+                    c1::Value::Integer(n) if *n >= 0 => Ok(*n as u64),
+                    _ => Err(StoreError::Corruption(format!("MANIFEST {key} が不正"))),
+                })
+                .collect(),
+            Some(_) => Err(StoreError::Corruption(format!("MANIFEST {key} が不正"))),
+        }
+    };
+    Ok((numbers("sealed_packs")?, numbers("sealed_reflogs")?))
+}
+
+/// `dir/tmp/` に書いて fsync し、rename で target に据える(SPEC §5.2 の MANIFEST の規律)。
+pub(crate) fn atomic_write(dir: &Path, target: &Path, content: &[u8]) -> Result<()> {
     let tmp_dir = dir.join("tmp");
     let tmp_path = tmp_dir.join(format!("write-{}", std::process::id()));
     {
@@ -222,8 +305,8 @@ impl Store {
 
     pub fn open(config: StoreConfig) -> Result<Store> {
         let dir = config.data_dir.clone();
-        std::fs::create_dir_all(dir.join("packs"))?;
-        std::fs::create_dir_all(dir.join("reflog"))?;
+        std::fs::create_dir_all(dir.join(PACK.directory))?;
+        std::fs::create_dir_all(dir.join(REFLOG.directory))?;
         std::fs::create_dir_all(dir.join("tmp"))?;
         let lock = Self::acquire_lock(&dir)?;
 
@@ -288,7 +371,7 @@ impl Store {
     }
 
     fn load_or_create_key(dir: &Path) -> Result<[u8; 32]> {
-        let key_path = dir.join("node_key");
+        let key_path = dir.join(NODE_KEY_NAME);
         if key_path.exists() {
             let bytes = std::fs::read(&key_path)?;
             if bytes.len() != 32 {
@@ -312,31 +395,11 @@ impl Store {
     }
 
     fn load_manifest(dir: &Path) -> Result<(Vec<u64>, Vec<u64>)> {
-        let manifest_path = dir.join("MANIFEST");
+        let manifest_path = dir.join(MANIFEST_NAME);
         if !manifest_path.exists() {
             return Ok((Vec::new(), Vec::new()));
         }
-        let text = std::fs::read_to_string(&manifest_path)?;
-        let value = c1::parse(&text)
-            .map_err(|e| StoreError::Corruption(format!("MANIFEST が読めない: {e}")))?;
-        let map = match &value {
-            c1::Value::Object(m) => m,
-            _ => return Err(StoreError::Corruption("MANIFEST がオブジェクトでない".into())),
-        };
-        let numbers = |key: &str| -> Result<Vec<u64>> {
-            match map.get(key) {
-                None => Ok(Vec::new()),
-                Some(c1::Value::Array(items)) => items
-                    .iter()
-                    .map(|v| match v {
-                        c1::Value::Integer(n) if *n >= 0 => Ok(*n as u64),
-                        _ => Err(StoreError::Corruption(format!("MANIFEST {key} が不正"))),
-                    })
-                    .collect(),
-                Some(_) => Err(StoreError::Corruption(format!("MANIFEST {key} が不正"))),
-            }
-        };
-        Ok((numbers("sealed_packs")?, numbers("sealed_reflogs")?))
+        parse_manifest(&std::fs::read(&manifest_path)?)
     }
 
     fn write_manifest(&self) -> Result<()> {
@@ -359,36 +422,16 @@ impl Store {
             ),
         );
         let content = c1::to_canonical_bytes(&c1::Value::Object(map));
-        atomic_write(&self.config.data_dir, &self.config.data_dir.join("MANIFEST"), &content)
+        atomic_write(&self.config.data_dir, &self.config.data_dir.join(MANIFEST_NAME), &content)
     }
 
     /// 起動時回復。封印済みセグメントは完全でなければならず(破損は Corruption)、
     /// 未封印(アクティブ)セグメントは最後の1つに限り torn tail を切り詰めてよい。
     fn recover(&mut self) -> Result<()> {
         let dir = self.config.data_dir.clone();
-        let list = |sub: &str, prefix: &str, suffix: &str| -> Result<Vec<u64>> {
-            let mut numbers = Vec::new();
-            for entry in std::fs::read_dir(dir.join(sub))? {
-                let name = entry?.file_name().to_string_lossy().to_string();
-                if let Some(rest) = name.strip_prefix(prefix) {
-                    if let Some(number_text) = rest.strip_suffix(suffix) {
-                        match number_text.parse::<u64>() {
-                            Ok(n) => numbers.push(n),
-                            Err(_) => {
-                                return Err(StoreError::Corruption(format!(
-                                    "解釈できないファイル名: {name}"
-                                )))
-                            }
-                        }
-                    }
-                }
-            }
-            numbers.sort_unstable();
-            Ok(numbers)
-        };
 
         // pack の走査(オブジェクト索引の再構築 = 導出データ、I4)。
-        let pack_numbers = list("packs", "pack-", ".pack")?;
+        let pack_numbers = PACK.numbers(&dir)?;
         for (position, number) in pack_numbers.iter().enumerate() {
             let sealed = self.sealed_packs.contains(number);
             let is_last = position == pack_numbers.len() - 1;
@@ -433,7 +476,7 @@ impl Store {
         }
 
         // reflog の再生。
-        let reflog_numbers = list("reflog", "reflog-", ".log")?;
+        let reflog_numbers = REFLOG.numbers(&dir)?;
         for (position, number) in reflog_numbers.iter().enumerate() {
             let sealed = self.sealed_reflogs.contains(number);
             let is_last = position == reflog_numbers.len() - 1;

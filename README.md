@@ -9,6 +9,7 @@
 
 - 仕様: [SPEC.md](SPEC.md)
 - 計画: docs/plan/
+- 運用手順: docs/mop/
 - 検証・分析: docs/analysis/ と sim/(プロトコルシミュレータ)
 - プロジェクトポリシー: [policy/](policy/README.md)(RFC 2119 レベル別)
 
@@ -50,6 +51,19 @@ cargo run -p uniqnode -- viewer /tmp/uniqnode-data 127.0.0.1:7450
 curl -X POST -d '{"query":"…","peers":true,"budget_ms":3000}' http://127.0.0.1:7440/v1/search
 ```
 
-serve と mcp のログは、何も指定しなくても `<データディレクトリ>/logs/` に残る(上の例なら
-`/tmp/uniqnode-data/logs/serve.log`)。標準エラーにも同じ行が出る。行の形・回転・保存先の
+serve・mcp・viewer のログは、何も指定しなくても `<データディレクトリ>/logs/` に残る(上の例
+なら `/tmp/uniqnode-data/logs/serve.log`)。標準エラーにも同じ行が出る。行の形・回転・保存先の
 変え方は [docs/design/LOGGING.md](#14a4e260-70af-4c52-9f19-1c116bddd004)。
+
+## 運用
+
+常駐は systemd に任せる。serve と viewer の unit の例と、起動・停止・更新・二重起動の手順は
+[docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2)。
+
+バックアップは `uniqnode backup <dir> <写し先>` で取る。serve を止めずに取れ(錠を取らない)、
+増分で(写し済みの封印済みセグメントは写さない)、写した後に写し先をストアとして開いて fsck
+まで通す。写さないのは `derived/`・`logs/`・`tmp/`(作り直せる導出データ・運用ログ・作業場)。
+毎日取るなら SYSTEMD.md の timer の unit を使う。復元は、写しをそのまま
+`uniqnode serve <写し先> …` に渡すか、空のディレクトリへ逆向きに
+`uniqnode backup <写し先> <新しい dir>` してから `uniqnode fsck` で確かめる。何を写す根拠と、
+写しが壊れていたときの直し方は [docs/mop/BACKUP.md](#e026a5e7-1ece-4f4e-b6b8-ee96c62883a2)。

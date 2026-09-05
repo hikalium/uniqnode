@@ -1,16 +1,17 @@
 //! 運用ログの出口(should/0135: どこへ、どんな形で出すかの判断はこの module にしかない)。
 //!
-//! serve と mcp は常駐し、そこに出る診断の行は後から読むためのデバッグ資料である。
+//! serve・mcp・viewer は常駐し、そこに出る診断の行は後から読むためのデバッグ資料である。
 //! 標準エラーだけに出すと、前景を離れた瞬間に失われる。mcp の標準エラーは登録した
 //! LLM クライアント(Claude Code など)が吸うので、利用者の目には最初から触れない。
-//! そこで、この 2 つの命令は既定でファイルにも残す。シェルのリダイレクトを忘れたら
+//! そこで、この 3 つの命令は既定でファイルにも残す。シェルのリダイレクトを忘れたら
 //! 失われる、という置き方をしない。
 //!
 //! 出す側は log_line! だけを使う。行の前に立つ時刻と pid も、標準エラーとファイルの
 //! どちらへ出すかも、回転の時機も、ここでしか決めない。
 //!
-//! 使い分け: 常駐する serve と mcp の診断は log_line! を通す。usage の説明文と、
-//! 一回きりの命令が返す結果の行(fsck の異常一覧、sync の集計、cert-verify の判定)は
+//! 使い分け: 常駐する serve・mcp・viewer の診断は log_line! を通す。usage の説明文と、
+//! 一回きりの命令が返す結果の行(fsck の異常一覧、backup の写した一覧と検証、sync の集計、
+//! cert-verify の判定)は
 //! その命令の出力であってログではないので、これまで通り println!/eprintln! で出す。
 
 use crate::clock;
@@ -24,7 +25,7 @@ pub const DIRECTORY_NAME: &str = "logs";
 /// serve のログの役割名(そのままファイル名になる)。
 pub const SERVE_ROLE: &str = "serve";
 
-/// mcp のログの役割名。同じデータディレクトリに対して serve と mcp が同時に走るので、
+/// mcp のログの役割名。同じデータディレクトリに対して serve・mcp・viewer が同時に走るので、
 /// 役割ごとに別のファイルへ書く。
 pub const MCP_ROLE: &str = "mcp";
 
@@ -171,7 +172,7 @@ fn rename_if_present(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// 運用の記録を 1 行出す(標準エラーと、開いていればログファイルの両方へ)。常駐する
-/// serve と mcp の診断は eprintln! ではなくこれを使う。
+/// serve・mcp・viewer の診断は eprintln! ではなくこれを使う。
 #[macro_export]
 macro_rules! log_line {
     ($($argument:tt)*) => {

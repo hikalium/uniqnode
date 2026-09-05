@@ -1,0 +1,60 @@
+# uniqnode serve を user 単位で常駐させる unit。置き場は ~/.config/systemd/user/。
+# 読み方と手順は docs/mop/SYSTEMD.md(uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2)。
+# ../system/ の同名ファイルとの違いは 3 点だけ: User=/Group= が無い(user 単位では
+# 指定すると exit 217 で起動できない)、閉じ込めのために PrivateUsers=yes がある
+# (無いと ProtectSystem= などは user 単位では黙って効かない)、WantedBy= が default.target。
+
+[Unit]
+Description=uniqnode serve (knowledge store HTTP API)
+After=network.target
+
+[Service]
+Type=exec
+# 運用者が変えるものはすべて環境変数にしてある。変えるときはこのファイルを編集せず
+# `systemctl --user edit uniqnode-serve` の drop-in に Environment= を書く。
+#   UNIQNODE_DATA_DIR       ストアのデータディレクトリ。既定は下の StateDirectory
+#                           (user 単位の %S は $XDG_CONFIG_HOME、新しい systemd では
+#                           $XDG_STATE_HOME。実際の道は起動時のログの行が言う)。
+#   UNIQNODE_LISTEN         HTTP API の待ち受け(README と同じ 7440)。
+#   UNIQNODE_SERVE_OPTIONS  追加の引数(空白で分ける)。既定は空で、serve は他のプロセスに
+#                           依存しない。埋め込みを装備するなら drop-in に例えば
+#                           Environment="UNIQNODE_SERVE_OPTIONS=--embed http://127.0.0.1:8083/v1/embeddings"
+# UNIQNODE_SERVE_OPTIONS だけ ${} で囲まないのは、空のときに引数 0 個に消えるため
+# (${} で囲むと空文字列 1 個の引数になり、usage で落ちる)。
+Environment=UNIQNODE_DATA_DIR=%S/uniqnode
+Environment=UNIQNODE_LISTEN=127.0.0.1:7440
+Environment=UNIQNODE_SERVE_OPTIONS=
+ExecStart=/usr/local/bin/uniqnode serve ${UNIQNODE_DATA_DIR} ${UNIQNODE_LISTEN} $UNIQNODE_SERVE_OPTIONS
+
+# %S/uniqnode を作る。ストアの錠・ログ(logs/)・導出データ(derived/)はすべてこの下に
+# 書かれる。
+StateDirectory=uniqnode
+StateDirectoryMode=0750
+
+# 落ちたら起こし直す。ストアの錠は抽象名前空間の unix socket なので、プロセスが死ねば
+# カーネルが解放し、次の起動は書き込み途中で裂かれていても fsck なしで回復する
+# (node/tests/crash.rs)。起動時に分かる誤りは再起動で直らないので、1 回で止めて理由を
+# journal に残す: 1 はアドレスが塞がっている・別プロセスがストアを開いている、2 は引数の誤り。
+# POST /v1/admin/shutdown による終了(0)は意図した停止なので起こし直さない。
+Restart=on-failure
+RestartSec=2s
+RestartPreventExitStatus=1 2
+
+# 閉じ込め。書けるのは StateDirectory の下だけになる。ストアの錠が unix socket なので
+# AF_UNIX を残す。PrivateNetwork= は使わない(錠はネットワーク名前空間ごとに別になり、
+# 外の CLI と二重起動を検出し合えなくなる。viewer と mcp も loopback で serve に届く必要がある)。
+PrivateUsers=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

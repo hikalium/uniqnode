@@ -15,6 +15,10 @@ fn usage() -> ! {
            set-ref <dir> <path> <id>  自名前空間の ref を設定する(id が '-' なら tombstone)\n\
            refs <dir>                 ref を一覧する\n\
            fsck <dir>                 全再ハッシュ検査(異常があれば非0で終了)\n\
+           backup <dir> <backup_dir>  封印済みセグメント・MANIFEST・node_key・設定を\n\
+                                      backup_dir へ写し(増分: 写し済みの封印済みセグメントは\n\
+                                      写さない)、写し先を開いて fsck まで通す。錠を取らない\n\
+                                      ので serve と同時に走れる(異常があれば非0で終了)\n\
            pin <dir> <root> <min>     root の到達閉包に min_replicas を要求する(0 で解除)\n\
            admin-keygen <keyfile>     グループ管理者鍵を生成する(公開鍵を表示)\n\
            cert-make <node_id> <group_id> <days>\n\
@@ -23,13 +27,18 @@ fn usage() -> ! {
            cert-verify <dir>          標準入力の証明書を <dir>/groups.json で検証する\n\
            revoke-make <node_id> <group_id>\n\
                                       失効文の本体を標準出力へ(署名なし)\n\
-           serve <dir> <addr> [--embed <url>] [--embedder <id>] [ログの指定]\n\
+           serve <dir> <addr> [--embed <url>] [--embedder <id>] [--rerank <url>]\n\
+                              [--reranker <id>] [ログの指定]\n\
                                       HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)。\n\
                                       --embed を与えると POST /v1/search の既定が BM25 と\n\
                                       埋め込みの RRF 融合になる。ベクトルは embed で作った\n\
                                       キャッシュから読むので、検索が模型の計算を待つことは\n\
                                       ない。届かなければ BM25 だけに劣化して答え、応答の\n\
                                       method と degraded がそれを言う。\n\
+                                      --rerank を与えると上位候補の順位をリランカー\n\
+                                      (--reranker で模型名、既定 {default_reranker})で\n\
+                                      取り直す。届かなければ融合の順位のまま答え、\n\
+                                      degraded がそれを言う。\n\
                                       ログは既定で <dir>/logs/serve.log にも残す(下記)\n\
            mcp <dir> [--serve-url <url>] [--embed <url>] [--embedder <id>] [ログの指定]\n\
                                       標準入出力で MCP(Model Context Protocol)を話す。\n\
@@ -53,7 +62,8 @@ fn usage() -> ! {
                                       /v1/* は走っている serve へ転送するので、自分では\n\
                                       ストアを開かない(排他錠を取らないため、serve が\n\
                                       常駐したまま起こせる)。--serve-url の既定は\n\
-                                      http://127.0.0.1:7440\n\
+                                      http://127.0.0.1:7440。ログは既定で\n\
+                                      <dir>/logs/viewer.log にも残す(下記)\n\
            selfcheck                  この実行ファイルが健全であることを標準出力の1行で\n\
                                       言う(mcp が自分を exec で差し替える前に、新しい\n\
                                       イメージを子プロセスとして起こして確かめる用)\n\
@@ -87,13 +97,14 @@ fn usage() -> ! {
                                       serve 停止中のストア用)\n\
            flood <dir>                書き込み続ける(クラッシュ試験用の内部コマンド)\n\
          \n\
-         serve と mcp のログの指定(常駐する 2 つだけが持つ。既定は保存する):\n\
-           --log <path>               保存先を変える(既定 <dir>/logs/<serve|mcp>.log)\n\
+         serve・mcp・viewer のログの指定(常駐する命令だけが持つ。既定は保存する):\n\
+           --log <path>               保存先を変える(既定 <dir>/logs/<serve|mcp|viewer>.log)\n\
            --no-log                   ファイルへ残さず標準エラーだけに出す\n\
            --log-max-bytes <n>        1 世代の上限(既定 {default_max_bytes})。越えたら\n\
                                       <path>.1 へ送って新しい世代を開き、{generations} 世代\n\
                                       まで残す(それより古いものは消える)\n\
          ログは標準エラーとファイルの両方に同じ行が出る。行頭は UTC の時刻と pid",
+        default_reranker = uniqnode::rerank::DEFAULT_RERANKER_ID,
         default_max_bytes = uniqnode::log::DEFAULT_MAX_BYTES,
         generations = uniqnode::log::RETAINED_GENERATIONS,
     );
@@ -348,7 +359,7 @@ fn parse_embed_options(rest: &[String]) -> EmbedOptions {
     options
 }
 
-/// ログの指定(常駐する serve と mcp が持つ)。既定は保存する。ログは重要なデバッグ
+/// ログの指定(常駐する serve・mcp・viewer が持つ)。既定は保存する。ログは重要なデバッグ
 /// 資料であり、シェルのリダイレクトを忘れたら失われる、という置き方をしない。
 struct LogOptions {
     /// 保存先(--log)。無指定なら <data_dir>/logs/<役割>.log。
@@ -359,7 +370,7 @@ struct LogOptions {
     max_bytes: u64,
 }
 
-/// 常駐する命令(serve・mcp)の指定。
+/// 常駐する命令(serve・mcp・viewer)の指定。
 struct RunOptions {
     embed: EmbedOptions,
     log: LogOptions,
@@ -581,6 +592,56 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 eprintln!("fsck: {error}");
             }
             if !report.errors.is_empty() {
+                std::process::exit(3);
+            }
+        }
+        "backup" => {
+            let backup_dir = rest.first().map(String::as_str).unwrap_or_else(|| usage());
+            if rest.len() > 1 {
+                usage();
+            }
+            let report = uniqnode::backup::run(
+                std::path::Path::new(dir),
+                std::path::Path::new(backup_dir),
+            )?;
+            for name in &report.sealed_copied {
+                println!("copied {name}");
+            }
+            for name in &report.sealed_unchanged {
+                println!("unchanged {name}");
+            }
+            for name in &report.active_copied {
+                println!("copied {name} (active)");
+            }
+            for name in &report.settings_copied {
+                println!("copied {name}");
+            }
+            for name in &report.settings_only_in_backup {
+                println!("only in backup {name} (写し元には無い。消していない)");
+            }
+            for (name, bytes) in &report.torn_tails_cut {
+                println!("cut {name} ({bytes} bytes の書き込み途中の尻尾を検証で切り詰めた)");
+            }
+            println!(
+                "backup: sealed copied {} unchanged {}, active {}, settings {}, bytes {}, \
+                 not copied: {}",
+                report.sealed_copied.len(),
+                report.sealed_unchanged.len(),
+                report.active_copied.len(),
+                report.settings_copied.len(),
+                report.copied_bytes,
+                report.not_copied.join(" ")
+            );
+            println!(
+                "verify: objects {} refs {} errors {}",
+                report.verification.objects_checked,
+                report.verification.refs_checked,
+                report.verification.errors.len()
+            );
+            for error in &report.verification.errors {
+                eprintln!("verify: {error}");
+            }
+            if !report.is_clean() {
                 std::process::exit(3);
             }
         }

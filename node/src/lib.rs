@@ -2,6 +2,7 @@
 //! L0(単一DBノードのストア)から実装している。
 
 pub mod api;
+pub mod backup;
 pub mod c1;
 pub mod clock;
 pub mod crc32;

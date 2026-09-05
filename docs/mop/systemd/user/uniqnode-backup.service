@@ -1,0 +1,48 @@
+# uniqnode backup を user 単位の timer から一回きりの命令として走らせる unit。置き場は
+# ~/.config/systemd/user/。起こすのは同名の uniqnode-backup.timer で、手で 1 回取るなら
+# `systemctl --user start uniqnode-backup.service`。
+# 読み方と手順は docs/mop/SYSTEMD.md(uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2)、
+# 何を写すかと復元は docs/mop/BACKUP.md(uuid:e026a5e7-1ece-4f4e-b6b8-ee96c62883a2)。
+# ../system/ の同名ファイルとの違いは 3 点だけ: User=/Group= が無い(user 単位では
+# 指定すると exit 217 で起動できない)、閉じ込めのために PrivateUsers=yes がある
+# (無いと ProtectSystem= などは user 単位では黙って効かない)、写し先の既定が home の下。
+
+[Unit]
+Description=uniqnode backup (incremental copy of the store, verified by fsck)
+
+[Service]
+Type=oneshot
+# 運用者が変えるものはすべて環境変数にしてある。変えるときはこのファイルを編集せず
+# `systemctl --user edit uniqnode-backup` の drop-in に Environment= を書く。
+#   UNIQNODE_DATA_DIR    写し元のストア。serve の unit と同じ既定。
+#   UNIQNODE_BACKUP_DIR  写し先。別のディスクや外付けを指すのが本来で、既定は置き場の例に
+#                        すぎない。変えるときは下の ReadWritePaths= も同じ道に変える(閉じ込め
+#                        で書けるのは StateDirectory= の下と ReadWritePaths= だけで、環境変数は
+#                        ReadWritePaths= に展開されない)。ディレクトリは先に作っておく
+#                        (ReadWritePaths= は無い道を作らず、無ければ起動に失敗する)。
+Environment=UNIQNODE_DATA_DIR=%S/uniqnode
+Environment=UNIQNODE_BACKUP_DIR=%h/uniqnode-backup
+ExecStart=/usr/local/bin/uniqnode backup ${UNIQNODE_DATA_DIR} ${UNIQNODE_BACKUP_DIR}
+ReadWritePaths=%h/uniqnode-backup
+
+# serve と同じストアを読む。錠は取らないので serve が走っていてよい。
+StateDirectory=uniqnode
+StateDirectoryMode=0750
+
+# 一回きりなので Restart= は無い。写せない・開けない(1)と検証の異常(3)は failed として
+# journal に残り、次の timer の刻みでまた走る。写しが壊れているときの直し方は BACKUP.md。
+
+# 閉じ込め(serve の unit と同じ行)。写し先を開いて検証するときの錠が unix socket なので
+# AF_UNIX を残す。
+PrivateUsers=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native

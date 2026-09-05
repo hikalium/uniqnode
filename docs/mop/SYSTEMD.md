@@ -342,24 +342,30 @@ restart で新しいものに替わる。restart は停止と同じく SIGTERM �
 - 行頭の `2026-09-05T04:48:45Z [pid 176927]` は uniqnode 自身が付ける UTC の時刻と pid で、
   journal の時刻(ローカル)と別に付く。2 つの記録を突き合わせるのはこの部分で行う。
 - `listening on <addr>` の 1 行だけは標準出力(起動スクリプトとの取り決め)で、journal に
-  はあるがファイルには無い。ファイルには代わりに「<addr> で待ち受ける」がある。
+  はあるがファイルには無い。ファイルには代わりに「<addr> で待ち受ける」がある。この行は
+  ストアを開き、埋め込み・リランカーを装備し、アドレスを束縛した後に出るので、出た時点で
+  要求を受け付けている(起動確認はこの行を待ってよい)。
 - ファイルの回転(8 MiB × 5 世代)と `--log`・`--no-log` は
   [docs/design/LOGGING.md](#14a4e260-70af-4c52-9f19-1c116bddd004)。journal の保持は
   journald の設定による。
-- 起動に失敗した理由(アドレスが塞がっている・ストアを開けない)は journal に残る。ログの
-  ファイルはアドレスの束縛より先に開くので、そちらにも残る。
+- 起動に失敗した理由(ストアを開けない・アドレスが塞がっている)は journal に残る。ログの
+  ファイルはストアを開くより先に開くので、そちらにも残る。
 - backup の `copied …`・`backup: …`・`verify: …` は一回きりの命令の結果であってログではない
   ので、journal にだけある(`journalctl --user -u uniqnode-backup`)。写せなかった・検証が赤
   だったときは unit が failed になり、`systemctl --user list-units --failed` に並ぶ。
 
 ## 二重起動したときの症状
 
-serve は起動時にまずアドレスを束縛し、次にストアを開く。どちらで衝突したかで出る行が違う。
+serve は起動時にまずストアを開き、次にアドレスを束縛し、最後に `listening on` を出す。
+どちらで衝突したかで出る行が違うが、どちらの場合も `listening on` は出ず、何も束縛しないまま
+終わる(node/tests/api.rs の
+a_serve_that_cannot_take_the_store_lock_never_says_listening_on)。
 
 | 状況 | 出る行 | 終了 |
 |---|---|---|
-| 同じアドレスに 2 本目 | `uniqnode: serve: 127.0.0.1:7440 に束縛できない: Address already in use (os error 98)` | 1 |
-| 同じストアに 2 本目(アドレスは別) | `listening on …` の後 250 ms して `uniqnode: ストアを開けない: invalid: <dir> は別プロセスが開いている` | 1 |
+| 同じストアに 2 本目(アドレスは別) | 錠の判別の 250 ms の後に `uniqnode: ストアを開けない: invalid: <dir> は別プロセスが開いている` | 1 |
+| 同じアドレスに 2 本目(ストアは別) | ストアを開いた後に `uniqnode: serve: 127.0.0.1:7440 に束縛できない: Address already in use (os error 98)` | 1 |
+| 同じストアかつ同じアドレスに 2 本目 | 先に見るのはストアなので、上の「別プロセスが開いている」 | 1 |
 
 - 錠はデータディレクトリの正規化した道から名付けるので、unit と CLI、unit と別の unit の
   どの組でも互いに検出する。閉じ込めの中で走る unit と外の CLI の間でも同じである

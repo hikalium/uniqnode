@@ -5,6 +5,7 @@ mod common;
 use common::*;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
+use std::process::Command;
 
 #[test]
 fn object_and_ref_round_trip_over_http() {
@@ -125,4 +126,75 @@ fn expect_100_continue_is_honored() {
     stream.write_all(body).expect("body");
     let response = read_response(&mut reader);
     assert_eq!(response.status, 201);
+}
+
+/// 錠を取れない serve は `listening on` を一度も言わずに終わる。標準出力のこの 1 行は
+/// 「出たら要求を受け付ける」という起動スクリプトとの取り決めで、束縛してから開く順だと、
+/// 錠を持つ別のプロセスがいるときにこの行を出した後で exit 1 し、行を待つ側が騙される
+/// (2026-09-05 に systemd の据え付けで観測。docs/mop/SYSTEMD.md の二重起動の症状)。
+#[test]
+fn a_serve_that_cannot_take_the_store_lock_never_says_listening_on() {
+    let holder = start_server("lock-holder");
+    // 2 本目に渡すアドレスは、いま空いているポートを一度束縛して知る。:0 だと、2 本目が
+    // 終わった後に「そこで何も受け付けていない」を確かめる相手が分からない。
+    let spare = std::net::TcpListener::bind("127.0.0.1:0").expect("bind spare");
+    let address = spare.local_addr().expect("local addr").to_string();
+    drop(spare);
+
+    let second = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
+        .args(["serve", holder.dir.to_str().expect("utf-8"), &address])
+        .output()
+        .expect("spawn second serve");
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        !stdout.contains("listening on"),
+        "錠を取れないのに待ち受けると言った: stdout={stdout:?} stderr={stderr}"
+    );
+    assert_eq!(
+        second.status.code(),
+        Some(1),
+        "錠を取れない serve の終了コードは 1(unit は起こし直さない): stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("別プロセスが開いている"),
+        "錠を取れなかった理由を言っていない: {stderr}"
+    );
+    // 終わった後に、渡したアドレスで何も受け付けていない(束縛したまま残していない)。
+    assert!(
+        TcpStream::connect(&address).is_err(),
+        "2 本目が終わった後も {address} で何かが受け付けている"
+    );
+    // 錠を持つ 1 本目は影響を受けずに答え続ける。
+    let status = simple(&holder.address, "GET", "/v1/status", b"");
+    assert_eq!(status.status, 200, "{}", body_text(&status));
+}
+
+/// 装備の誤り(誤った --rerank の URL)も `listening on` の前に落ちる。装備の表示と断りが
+/// 待ち受けの表示より後にあると、行を待つ側が受け付けていない serve を生きていると読む。
+#[test]
+fn a_serve_with_a_bad_rerank_url_stops_before_it_says_listening_on() {
+    let dir = unique_dir("bad-rerank");
+    let output = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
+        .args([
+            "serve",
+            dir.to_str().expect("utf-8"),
+            "127.0.0.1:0",
+            "--rerank",
+            "https://127.0.0.1:1/v1/rerank",
+        ])
+        .output()
+        .expect("spawn serve");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout.contains("listening on"),
+        "装備できないのに待ち受けると言った: stdout={stdout:?} stderr={stderr}"
+    );
+    assert_eq!(output.status.code(), Some(2), "引数の誤りの終了コードは 2: stderr={stderr}");
+    assert!(
+        stderr.contains("uniqnode: rerank:") && stderr.contains("https は未対応"),
+        "装備できなかった理由を言っていない: {stderr}"
+    );
+    std::fs::remove_dir_all(&dir).expect("cleanup");
 }

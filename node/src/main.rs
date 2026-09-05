@@ -928,23 +928,14 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
         "serve" => {
             let address = rest.first().map(String::as_str).unwrap_or_else(|| usage());
             let options = parse_run_options(&rest[1..]);
-            // 束縛より先にログを開く。「そのアドレスを使えない」も残したい記録である。
+            // ストアを開くより先にログを開く。「開けない」「そのアドレスを使えない」も
+            // 残したい記録である。
             start_logging(dir, uniqnode::log::SERVE_ROLE, &options.log);
-            let listener = match std::net::TcpListener::bind(address) {
-                Ok(listener) => listener,
-                Err(error) => {
-                    uniqnode::log_line!("uniqnode: serve: {address} に束縛できない: {error}");
-                    std::process::exit(1);
-                }
-            };
-            // テストや起動スクリプトが実際のポートを知れるように、束縛先を必ず表示する。
-            let bound = listener.local_addr()?;
-            println!("listening on {bound}");
-            use std::io::Write as _;
-            std::io::stdout().flush()?;
-            // 標準出力の 1 行は起動スクリプトとの取り決めなので形を変えない。ログにも
-            // 残すのは、後から「いつ、どのアドレスで起きたか」を読めるようにするため。
-            uniqnode::log_line!("uniqnode: serve: {bound} で待ち受ける");
+            // 順序は「ストアを開く → 装備する → 束縛する → listening on」。標準出力の
+            // この 1 行は起動スクリプトとの取り決めで、待つ側は「出たら要求を受け付ける」
+            // と信じてよい。ここから束縛までの間で落ちるもの(錠を持つ別プロセス、誤った
+            // URL)は、何も束縛しないうちに理由を言って終わる。束縛してから開くと、待つ側
+            // は騙され、その後で exit 1 する(2026-09-05 に systemd の据え付けで観測)。
             let data_dir = std::path::PathBuf::from(dir);
             let (capacity_bytes, health_params) = uniqnode::health::read_node_config(&data_dir);
             let mut store_config = uniqnode::store::StoreConfig::new(&data_dir);
@@ -1005,6 +996,21 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                     }
                 },
             };
+            let listener = match std::net::TcpListener::bind(address) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    uniqnode::log_line!("uniqnode: serve: {address} に束縛できない: {error}");
+                    std::process::exit(1);
+                }
+            };
+            // テストや起動スクリプトが実際のポートを知れるように、束縛先を必ず表示する。
+            let bound = listener.local_addr()?;
+            println!("listening on {bound}");
+            use std::io::Write as _;
+            std::io::stdout().flush()?;
+            // 標準出力の 1 行は起動スクリプトとの取り決めなので形を変えない。ログにも
+            // 残すのは、後から「いつ、どのアドレスで起きたか」を読めるようにするため。
+            uniqnode::log_line!("uniqnode: serve: {bound} で待ち受ける");
             let context = uniqnode::api::ApiContext {
                 store,
                 engine,

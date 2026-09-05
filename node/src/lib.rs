@@ -15,6 +15,7 @@ pub mod health;
 pub mod html;
 pub mod http;
 pub mod ingest;
+pub mod install;
 pub mod json;
 pub mod log;
 pub mod mcp;

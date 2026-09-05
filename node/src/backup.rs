@@ -161,6 +161,14 @@ fn refuse_wrong_destination(source: &Path, destination: &Path) -> store::Result<
     Ok(())
 }
 
+/// 写し先をストアとして開き(未封印の尻尾はここで切り詰められる)、fsck する。写しが健全か
+/// という判断はここ 1 箇所にあり、backup 命令の最後の検証と、install が timer の unit を
+/// 1 回走らせた後に写し先を見る確認が同じ答えを見る(should/0135)。
+pub fn verify_copy(destination: &Path) -> store::Result<FsckReport> {
+    let backup_store = Store::open(StoreConfig::new(destination))?;
+    backup_store.fsck()
+}
+
 /// バックアップを 1 回行い、写し先を開いて fsck した結果まで返す。錠は取らない(serve が
 /// 走っていてよい)。写し先の異常は Err ではなく報告の verification に載る(fsck 命令と
 /// 同じ扱い)。開けないほど壊れていれば Err。
@@ -232,8 +240,7 @@ pub fn run(source: &Path, destination: &Path) -> store::Result<BackupReport> {
             Ok((relative.clone(), length))
         })
         .collect::<store::Result<_>>()?;
-    let backup_store = Store::open(StoreConfig::new(destination))?;
-    report.verification = backup_store.fsck()?;
+    report.verification = verify_copy(destination)?;
     for (relative, before) in active_lengths {
         let after = std::fs::metadata(destination.join(&relative))?.len();
         if after < before {

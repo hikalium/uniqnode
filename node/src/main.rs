@@ -96,6 +96,25 @@ fn usage() -> ! {
                                       annotations/<collection> に訂正の項が足される。\n\
                                       serve 停止中のストア用)\n\
            flood <dir>                書き込み続ける(クラッシュ試験用の内部コマンド)\n\
+           install <dir> [--listen <addr>] [--viewer-listen <addr>]\n\
+                         [--serve-options \"<引数列>\"] [--backup-dir <dir>] [--bin <path>]\n\
+                         [--unit-dir <dir>] [--no-start]\n\
+                                      serve・viewer・毎日の backup を user 単位の systemd に\n\
+                                      据える(docs/mop/SYSTEMD.md)。走っている自分自身を\n\
+                                      --bin(既定 ~/.local/bin/uniqnode)へ写し、unit 4 本と\n\
+                                      drop-in 3 本を --unit-dir(既定 ~/.config/systemd/user)\n\
+                                      に書き、daemon-reload、enable と restart、\n\
+                                      loginctl enable-linger の後、serve と viewer 経由の\n\
+                                      /v1/status が同じ node_id を返すことと、backup を 1 回\n\
+                                      走らせた写し先(--backup-dir、既定 ~/uniqnode-backup)\n\
+                                      が fsck で緑であることまで確かめる。--listen の既定は\n\
+                                      {default_listen}、--viewer-listen は {default_viewer_listen}。\n\
+                                      --serve-options は serve の追加の引数(--embed など)を\n\
+                                      1 つの文字列で。--no-start は daemon-reload までで\n\
+                                      止める。再実行は更新(写し直し・書き直し・restart)。\n\
+                                      <dir> は /tmp の下に置けない(unit の PrivateTmp)。\n\
+                                      system 単位(/etc/systemd/system)は未実装で、\n\
+                                      SYSTEMD.md の手順で行う\n\
          \n\
          serve・mcp・viewer のログの指定(常駐する命令だけが持つ。既定は保存する):\n\
            --log <path>               保存先を変える(既定 <dir>/logs/<serve|mcp|viewer>.log)\n\
@@ -105,6 +124,8 @@ fn usage() -> ! {
                                       まで残す(それより古いものは消える)\n\
          ログは標準エラーとファイルの両方に同じ行が出る。行頭は UTC の時刻と pid",
         default_reranker = uniqnode::rerank::DEFAULT_RERANKER_ID,
+        default_listen = uniqnode::install::DEFAULT_LISTEN,
+        default_viewer_listen = uniqnode::install::DEFAULT_VIEWER_LISTEN,
         default_max_bytes = uniqnode::log::DEFAULT_MAX_BYTES,
         generations = uniqnode::log::RETAINED_GENERATIONS,
     );
@@ -467,6 +488,40 @@ fn parse_mcp_options(rest: &[String]) -> McpOptions {
         at += 1;
     }
     McpOptions { serve_url, run: parse_run_options(&others) }
+}
+
+/// install の指定。既定は home の下(node/src/install.rs の Options::defaults)。知らない
+/// 引数は黙って捨てず usage で落とす。
+fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Options {
+    let home = match std::env::var_os("HOME") {
+        Some(home) if !home.is_empty() => std::path::PathBuf::from(home),
+        _ => {
+            eprintln!("uniqnode: install: HOME が無いので既定の置き場を決められない");
+            std::process::exit(2);
+        }
+    };
+    let mut options =
+        uniqnode::install::Options::defaults(std::path::PathBuf::from(dir), &home);
+    let mut at = 0;
+    while at < rest.len() {
+        let value = || rest.get(at + 1).cloned().unwrap_or_else(|| usage());
+        match rest[at].as_str() {
+            "--listen" => options.listen = value(),
+            "--viewer-listen" => options.viewer_listen = value(),
+            "--serve-options" => options.serve_options = value(),
+            "--backup-dir" => options.backup_dir = std::path::PathBuf::from(value()),
+            "--bin" => options.binary = std::path::PathBuf::from(value()),
+            "--unit-dir" => options.unit_dir = std::path::PathBuf::from(value()),
+            "--no-start" => {
+                options.start = false;
+                at += 1;
+                continue;
+            }
+            _ => usage(),
+        }
+        at += 2;
+    }
+    options
 }
 
 /// 指定から埋め込みクライアントを組む(誤った指定はここで落とす)。
@@ -1025,6 +1080,16 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 store.set_attest(root, true)?;
             }
             println!("seq: {seq}");
+        }
+        // systemd に据える(SYSTEMD (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2))。手順ごとに
+        // 1 行を出し、失敗は理由を言って 1 で終わる(途中まで置いたものはそのまま残る。
+        // 再実行が更新になるので、直して同じ命令を打てばよい)。
+        "install" => {
+            let options = parse_install_options(dir, rest);
+            if let Err(message) = uniqnode::install::run(options, &mut std::io::stdout()) {
+                eprintln!("uniqnode: install: {message}");
+                std::process::exit(1);
+            }
         }
         "flood" => {
             // クラッシュ試験用: kill されるまで最速で書き続ける(fsync 済み書き込みの

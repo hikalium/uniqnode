@@ -2,7 +2,7 @@
 
 <a id="267326f7-e919-48f2-9737-fe0c0daec9d5"></a>
 
-uniqnode のテストは 9 層ある。すべて `cargo test` で走り、決定論的である(乱数は種付き自前
+uniqnode のテストは 10 層ある。すべて `cargo test` で走り、決定論的である(乱数は種付き自前
 生成器のみ、時刻への依存なし、待ちは条件ポーリング)。
 
 | 層 | 場所 | 検証するもの |
@@ -11,6 +11,7 @@ uniqnode のテストは 9 層ある。すべて `cargo test` で走り、決定
 | 統合(API・MCP) | node/tests/api.rs, ingest.rs, search.rs, rendition.rs, viewer.rs, query.rs, groups.rs, health.rs, sync.rs, distributed_search.rs, mcp.rs | 実プロセスの serve に対し、curl が組み立てる形の生 HTTP/1.1 で往復する(should/0138)。レプリケーションの受け入れ基準(複製が読める・停止に耐える・復旧で収束)を含む。MCP は実プロセスの `uniqnode mcp` に Claude Code が実際に送る形の JSON-RPC を標準入力から流し、応答の出典と、標準出力に JSON-RPC 以外の行が 1 行も混ざらないことを検査する([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9)) |
 | 運用ログ | node/tests/logging.rs | 実プロセスの serve に本番の呼び手と同じ POST /v1/search を投げ、データディレクトリに残った記録を読む: 既定でファイルが作られること、内容が標準エラーと一致すること、行頭に UTC の時刻が付くこと、小さな上限を注入して実際に回転し古い世代が消えること、開けない道を指したとき理由を言って提供は続けること([docs/design/LOGGING.md](#14a4e260-70af-4c52-9f19-1c116bddd004)) |
 | バックアップ | node/tests/backup.rs | 本番の入口 `uniqnode backup` を子プロセスとして走らせ、写し先をストアとして開いて観測する: 錠を持ったまま開いてあるストアの隣で取った写しが全オブジェクトを持ち fsck が緑であること、2 回目が封印済みセグメントを写さず未封印だけ写し直すこと、写し先の封印済み pack を壊すと赤になり消せば写し直されること、derived・logs・tmp を写さず報告に名を出すこと、未封印の尻尾の切り詰めを `cut` で言うこと、逆向きの backup と fsck で復元できること([docs/mop/BACKUP.md](#e026a5e7-1ece-4f4e-b6b8-ee96c62883a2)) |
+| 据え付け | node/tests/install.rs | 本番の入口 `uniqnode install` を `--unit-dir`(作業ディレクトリ)と `--no-start` で子プロセスとして走らせ、置かれたものを観測する: バイナリが走らせた実行ファイルと同じ中身で実行でき、unit 4 本が docs/mop/systemd/user/ の現物と一致し、drop-in 3 本に指定した値と置いたバイナリを指す ExecStart= が載り、再実行しても同じ結果になること。/tmp の下のストアは何も置かずに断ること、知らない引数は usage で落ちること、錠の探りが実プロセスの serve が開いているストアを見分けること。daemon-reload まで行う設計なので systemctl が PATH に無い機械ではその 1 本だけが前提を出力して戻る(should/0128 の規約からの逸脱で、理由はテストの冒頭に記す)([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2)) |
 | クラッシュ | node/tests/crash.rs | 書き込み中の実プロセスを位置を変えて5回 SIGKILL し、毎回の回復と fsck 全件パス |
 | モデル(実装) | node/tests/sync_model.rs | 実装そのもの(Store + sync の核)を種付き乱数で駆動: 書き込み・tombstone・意図的 dangling・同期・再起動を無作為に交錯させ、全対同期後の収束・閉包完全性・fsck 健全を検証する |
 | モデル(仕様) | sim/ | 仕様 §8(レプリカ・健全性)の離散イベントシミュレーション。実装に先行して規則の安全性を検証した([docs/analysis/20260815-replica-model-simulation.md](#31e38823-b783-4dfe-bc7c-3cd268f5e7b4)) |

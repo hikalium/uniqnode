@@ -270,8 +270,9 @@ pub struct LocatedTool {
     pub version: String,
 }
 
-/// PATH(または与えられた path_env)から実行できるファイルを探す。
-fn find_in_path(binary: &str, path_env: Option<&OsStr>) -> Option<PathBuf> {
+/// PATH(または与えられた path_env)から実行できるファイルを探す。pub なのは、systemctl の
+/// 有無を前提として見るテスト(node/tests/install.rs)が同じ探し方を使うため(should/0135)。
+pub fn find_in_path(binary: &str, path_env: Option<&OsStr>) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let path_env = path_env?;
     for dir in std::env::split_paths(path_env) {

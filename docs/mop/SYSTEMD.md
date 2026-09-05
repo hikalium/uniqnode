@@ -126,7 +126,7 @@ sudo install -m 0755 target/release/uniqnode /usr/local/bin/uniqnode
 
 unit の ExecStart= は /usr/local/bin/uniqnode を指す。別の道に置くなら drop-in で
 `ExecStart=` を空にしてから書き直す(ExecStart= は上書きでなく追記なので、空の行で一度
-消す):
+消す。user 単位の `uniqnode install` はこれを自分で書く):
 
 ```
 [Service]
@@ -167,20 +167,107 @@ claude mcp add --transport stdio uniqnode -- /usr/local/bin/uniqnode mcp /var/li
 
 ## user 単位で起こす
 
+第一の道は 1 命令である。ビルドした実行ファイルで、ストアにするディレクトリを指して打つ:
+
 ```
-mkdir -p ~/.config/systemd/user ~/uniqnode-backup
-cp docs/mop/systemd/user/uniqnode-*.service docs/mop/systemd/user/uniqnode-*.timer ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now uniqnode-serve.service uniqnode-viewer.service uniqnode-backup.timer
+cargo build --release -p uniqnode
+target/release/uniqnode install ~/uniqnode-store
 ```
 
-ログアウトしても走らせ続けるには `loginctl enable-linger $USER`。無ければ、最後の
-セッションが閉じたときに user 単位のマネージャごと止まり、backup の timer の刻みも来ない。
+これで serve(127.0.0.1:7440)・viewer(127.0.0.1:7450)・毎日 0 時の backup
+(~/uniqnode-backup)が user 単位の systemd に載り、命令は効果を見てから戻る。待ち受け・
+写し先・置き場は引数で変える:
 
-データディレクトリの既定は %S/uniqnode で、実際にどこへ置かれたかは起動時のログの行
-「ログを <dir>/logs/serve.log に残す」が言う(`journalctl --user -u uniqnode-serve`)。
-ProtectHome=read-only なので、home の下の別の場所を使うなら ReadWritePaths= を添える
-(上の「unit の読み方」)。
+```
+uniqnode install <dir> [--listen <addr>] [--viewer-listen <addr>] [--serve-options "<引数列>"]
+                       [--backup-dir <dir>] [--bin <path>] [--unit-dir <dir>] [--no-start]
+```
+
+| 引数 | 既定 | 意味 |
+|---|---|---|
+| `<dir>` | (必須) | ストア。/tmp の下は断る(unit の PrivateTmp=yes から見えない) |
+| `--listen` | 127.0.0.1:7440 | serve の待ち受け。viewer の転送先もここから導く |
+| `--viewer-listen` | 127.0.0.1:7450 | viewer の待ち受け |
+| `--serve-options` | 空 | serve の追加の引数を 1 つの文字列で(例 `"--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank"`) |
+| `--backup-dir` | ~/uniqnode-backup | 写し先 |
+| `--bin` | ~/.local/bin/uniqnode | 実行ファイルの置き場。走っている自分自身をここへ写す |
+| `--unit-dir` | ~/.config/systemd/user | unit と drop-in の置き場(テスト用) |
+| `--no-start` | — | daemon-reload までで止める(unit を置くだけ) |
+
+出力は手順ごとに 1 行で、最後に確認した観測(serve と viewer 経由の /v1/status が返した
+node_id、backup の写し先の fsck の件数)と backup の次の刻みが出る。実測(2026-09-05、
+`--listen 127.0.0.1:7443 --viewer-listen 127.0.0.1:7453`):
+
+```
+install: バイナリ /home/op/uniqnode-install-probe-bin/uniqnode ← …/target/debug/uniqnode(32219056 bytes)
+install: unit /home/op/.config/systemd/user/uniqnode-serve.service
+…
+install: systemctl --user daemon-reload: 済み
+install: uniqnode-serve.service: enable、起こした(直前は inactive)
+…
+install: loginctl enable-linger: 済み
+install: 確認: http://127.0.0.1:7443/v1/status と viewer http://127.0.0.1:7453 経由が同じ node_id 2dce4e60… を返した(1 ms)
+install: 確認: uniqnode-backup.service を 1 回走らせ、写し先 /home/op/uniqnode-install-probe-backup を開いて fsck: objects 0 refs 0 errors 0
+install: 次の刻み: Sun 2026-09-06 00:00:00 JST 6h left … uniqnode-backup.timer uniqnode-backup.service
+```
+
+失敗は理由を標準エラーに出して 1 で終わり、途中まで置いたものはそのまま残る。直して同じ命令
+を打てばよい: 再実行は更新である(バイナリを写し直し、unit と drop-in を書き直し、
+daemon-reload して restart する)。ストアを別のプロセス(手で起こした serve や CLI)が
+開いていると、unit を起こす前に「別プロセスが開いている」と言って止まる(unit は exit 1 で
+起こし直さないので、起こしてから journal を読ませるより先に言う)。system 単位
+(/etc/systemd/system、専用ユーザー)は install が扱わないので、上の節の手順で行う。
+
+### 中で何をしているか(手で同じことをするなら)
+
+install は次を 1 手順 1 命令で行う。unit は docs/mop/systemd/user/ の現物を実行ファイルに
+埋め込んだもの(include_str!)なので、置かれるものはこのリポジトリのファイルと同じである。
+
+1. 走っている自分自身を `--bin` へ写す。隣に書いてから rename するので、走行中の実行ファイル
+   を上書きしない(cp の Text file busy を避ける)。
+2. unit 4 本(serve・viewer・backup の service と backup の timer)を `--unit-dir` に書く。
+   手でなら:
+
+   ```
+   mkdir -p ~/.config/systemd/user ~/uniqnode-backup
+   cp docs/mop/systemd/user/uniqnode-*.service docs/mop/systemd/user/uniqnode-*.timer ~/.config/systemd/user/
+   ```
+
+3. 3 つの service に drop-in `<unit>.d/override.conf` を書く。中身は「unit の読み方」の
+   環境変数と、ReadWritePaths=(ストアと写し先。空の行で unit の値を消してから)、
+   ExecStart=(空の行で消してから、`--bin` の道で書き直す。引数の並びは unit の ExecStart=
+   行を読んでバイナリの道だけ替える)。serve の drop-in はこの形になる:
+
+   ```
+   [Service]
+   Environment=UNIQNODE_DATA_DIR=/home/op/uniqnode-store
+   Environment=UNIQNODE_LISTEN=127.0.0.1:7440
+   Environment=UNIQNODE_SERVE_OPTIONS=
+   ReadWritePaths=
+   ReadWritePaths=/home/op/uniqnode-store
+   ExecStart=
+   ExecStart=/home/op/.local/bin/uniqnode serve ${UNIQNODE_DATA_DIR} ${UNIQNODE_LISTEN} $UNIQNODE_SERVE_OPTIONS
+   ```
+
+   ストアと写し先のディレクトリを作る(ReadWritePaths= は無い道を作らない)。
+4. `systemctl --user daemon-reload`。`--no-start` はここで止まる。
+5. ストアの錠を探り、別のプロセスが開いていれば止まる。
+6. `systemctl --user enable` と `systemctl --user restart` を uniqnode-serve.service、
+   uniqnode-viewer.service、uniqnode-backup.timer に(restart は止まっている unit も起こす
+   ので、初回と更新で同じ手順)。手でなら
+   `systemctl --user enable --now uniqnode-serve.service uniqnode-viewer.service uniqnode-backup.timer`。
+7. `loginctl enable-linger`。取れなければ警告して続ける。無ければ、最後のセッションが閉じた
+   ときに user 単位のマネージャごと止まり、backup の timer の刻みも来ない。
+8. 確認(下の「効いていることの確かめ方」と同じ観測): serve の /v1/status と viewer 経由の
+   /v1/status が同じ node_id を返すまで短い間隔で待ち(上限 30 秒。serve の unit が failed
+   に落ちたら待たずに言う)、`systemctl --user start uniqnode-backup.service` を 1 回走らせ、
+   写し先をストアとして開いて fsck する(backup 命令の最後の検証と同じ関数)。
+9. `systemctl --user list-timers uniqnode-backup.timer` の表を載せる。
+
+unit だけを手で置いたときのデータディレクトリの既定は %S/uniqnode で、実際にどこへ
+置かれたかは起動時のログの行「ログを <dir>/logs/serve.log に残す」が言う
+(`journalctl --user -u uniqnode-serve`)。ProtectHome=read-only なので、home の下の別の場所
+を使うなら ReadWritePaths= を添える(上の「unit の読み方」。install はこれを drop-in に書く)。
 
 ## 効いていることの確かめ方
 
@@ -230,14 +317,17 @@ backup を止めるのは timer である(`systemctl --user stop uniqnode-backup
 
 ## 更新
 
+user 単位なら、ビルドしてから同じ引数で `uniqnode install` を打ち直す(バイナリを写し直し、
+unit と drop-in を書き直し、restart し、確認まで通す)。system 単位は手で:
+
 ```
 cargo build --release -p uniqnode
 sudo install -m 0755 target/release/uniqnode /usr/local/bin/uniqnode
 sudo systemctl restart uniqnode-serve uniqnode-viewer
 ```
 
-install は走っている実行ファイルを一度 unlink してから置くので、走行中に差し替えられる
-(cp は Text file busy で断られる)。走っているプロセスは古いイメージのまま動き続けるので、
+install(1) は走っている実行ファイルを一度 unlink してから置くので、走行中に差し替えられる
+(cp は Text file busy で断られる。`uniqnode install` は隣に書いて rename する)。走っているプロセスは古いイメージのまま動き続けるので、
 restart で新しいものに替わる。restart は停止と同じく SIGTERM で落として起こし直す。
 
 ## ログの見方

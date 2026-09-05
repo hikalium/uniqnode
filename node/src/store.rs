@@ -289,6 +289,37 @@ pub(crate) fn atomic_write(dir: &Path, target: &Path, content: &[u8]) -> Result<
     Ok(())
 }
 
+/// ストアの錠の名前。データディレクトリの正規化した道の SHA-256 から名付けた抽象名前空間の
+/// unix socket で、同じディレクトリを指すどの道からでも(unit の中と外の CLI でも)同じ錠に
+/// なる。錠を取る側(Store::open)と、取らずに持ち主の有無だけを調べる側
+/// (opened_by_another_process)が同じ名前を見るための一箇所(should/0135)。
+fn lock_address(dir: &Path) -> Result<std::os::unix::net::SocketAddr> {
+    use std::os::linux::net::SocketAddrExt;
+    let canonical = std::fs::canonicalize(dir)?;
+    let name = format!(
+        "uniqnode-lock-{}",
+        sha2::hex(&sha2::sha256(canonical.as_os_str().as_encoded_bytes()))
+    );
+    Ok(std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())?)
+}
+
+/// 別のプロセスがこのディレクトリのストアを開いている(錠を持っている)か。錠を取らずに
+/// 調べる: 錠の socket へ connect し、繋がれば持ち主が居る(listen しているが accept は
+/// しないので、接続は backlog に載って成功する)、ECONNREFUSED なら居ない。ディレクトリが
+/// 無ければ誰も開けないので false。install が unit を起こす前に「起こしても別プロセスが
+/// 開いている、で落ちる」を先に言うために使う。
+pub fn opened_by_another_process(dir: &Path) -> Result<bool> {
+    if !dir.exists() {
+        return Ok(false);
+    }
+    let address = lock_address(dir)?;
+    match std::os::unix::net::UnixStream::connect_addr(&address) {
+        Ok(_holder) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 impl Store {
     pub fn node_id_hex(&self) -> &str {
         &self.node_id_hex
@@ -339,13 +370,7 @@ impl Store {
     /// 二重オープンの防止。抽象名前空間ソケットはプロセス終了(kill -9 を含む)で
     /// カーネルが解放するため、クラッシュ後に錠が残らない。
     fn acquire_lock(dir: &Path) -> Result<std::os::unix::net::UnixListener> {
-        use std::os::linux::net::SocketAddrExt;
-        let canonical = std::fs::canonicalize(dir)?;
-        let name = format!(
-            "uniqnode-lock-{}",
-            sha2::hex(&sha2::sha256(canonical.as_os_str().as_encoded_bytes()))
-        );
-        let address = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())?;
+        let address = lock_address(dir)?;
         // AddrInUse は短い有界の再試行で判別する。子プロセス生成(Command)は fork→exec の
         // 窓の間、親の全FD(CLOEXEC 付きを含む)の複製を子に持たせるため(CLOEXEC が閉じるのは
         // exec の瞬間)、同プロセスの別スレッドが spawn 中だと、直前に解放した錠の抽象

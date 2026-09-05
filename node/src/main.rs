@@ -40,7 +40,8 @@ fn usage() -> ! {
                                       取り直す。届かなければ融合の順位のまま答え、\n\
                                       degraded がそれを言う。\n\
                                       ログは既定で <dir>/logs/serve.log にも残す(下記)\n\
-           mcp <dir> [--serve-url <url>] [--embed <url>] [--embedder <id>] [ログの指定]\n\
+           mcp <dir> [--serve-url <url>] [--embed <url>] [--embedder <id>] [--rerank <url>]\n\
+                     [--reranker <id>] [ログの指定]\n\
                                       標準入出力で MCP(Model Context Protocol)を話す。\n\
                                       LLM エージェント(Claude Code など)に search と\n\
                                       fetch の2ツールを出す。標準出力はプロトコル専用で、\n\
@@ -49,9 +50,11 @@ fn usage() -> ! {
                                       読める記録になる)。--serve-url を与えると、\n\
                                       自分でストアを開かず、走っている serve の REST へ\n\
                                       転送する(ストアの排他錠を取らないので、常駐した\n\
-                                      まま ingest・embed が通る。埋め込みを装備するのは\n\
-                                      転送先の serve なので --embed とは併用しない)。\n\
-                                      無指定ならストアを直接開く(serve 停止中のストア用)。\n\
+                                      まま ingest・embed が通る。埋め込みと順位の取り直し\n\
+                                      を装備するのは転送先の serve なので、--embed・\n\
+                                      --rerank とは併用しない)。無指定ならストアを直接\n\
+                                      開く(serve 停止中のストア用。--embed・--rerank は\n\
+                                      serve と同じ意味で、この形だけが受ける)。\n\
                                       登録例:\n\
                                       claude mcp add --transport stdio uniqnode --\n\
                                       <この実行ファイル> mcp <dir>\n\
@@ -332,7 +335,7 @@ fn main() {
     }
 }
 
-/// 埋め込みの指定(serve と embed が共用する読み取り。should/0135)。
+/// 埋め込みの指定(serve・mcp・embed が共用する読み取り。should/0135)。
 struct EmbedOptions {
     url: String,
     embedder_id: String,
@@ -344,6 +347,32 @@ struct EmbedOptions {
     reranker_id: String,
     /// --rerank が明示されたか。
     rerank_requested: bool,
+    /// --reranker が明示されたか。装備の可否は --rerank だけで決まる(--embedder と
+    /// --embed の関係と同じ)が、装備する口を持たない命令が「指定を受けたのに効かせて
+    /// いない」ことを言えるように、明示されたことだけは覚えておく。
+    reranker_named: bool,
+}
+
+impl EmbedOptions {
+    /// 順位の取り直しの指定(--rerank か --reranker)が明示されていれば、その引数の
+    /// 名前を返す。装備する口を持たない命令(embed・転送する形の mcp・viewer)が、
+    /// 受け取った指定を黙って捨てずに断るために問う(must/0022 の同型)。
+    fn rerank_flag(&self) -> Option<&'static str> {
+        match (self.rerank_requested, self.reranker_named) {
+            (true, _) => Some("--rerank"),
+            (false, true) => Some("--reranker"),
+            (false, false) => None,
+        }
+    }
+
+    /// 転送する形(mcp・viewer)に渡された、転送先の serve でしか効かない装備の指定。
+    /// 埋め込みが先、次に順位の取り直しである。
+    fn misplaced_equipment_flag(&self) -> Option<&'static str> {
+        match self.requested {
+            true => Some("--embed"),
+            false => self.rerank_flag(),
+        }
+    }
 }
 
 /// --embed <url> と --embedder <id> を読む。知らない引数は黙って捨てず usage で落とす。
@@ -355,6 +384,7 @@ fn parse_embed_options(rest: &[String]) -> EmbedOptions {
         rerank_url: uniqnode::rerank::DEFAULT_RERANK_URL.to_string(),
         reranker_id: uniqnode::rerank::DEFAULT_RERANKER_ID.to_string(),
         rerank_requested: false,
+        reranker_named: false,
     };
     let mut at = 0;
     while at < rest.len() {
@@ -372,7 +402,10 @@ fn parse_embed_options(rest: &[String]) -> EmbedOptions {
                 options.rerank_url = value();
                 options.rerank_requested = true;
             }
-            "--reranker" => options.reranker_id = value(),
+            "--reranker" => {
+                options.reranker_id = value();
+                options.reranker_named = true;
+            }
             _ => usage(),
         }
         at += 2;
@@ -530,6 +563,30 @@ fn embedder_from(options: &EmbedOptions) -> uniqnode::embed::Embedder {
         Ok(embedder) => embedder,
         Err(message) => {
             uniqnode::log_line!("uniqnode: {message}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// 指定からリランカーを組む(serve と、ストアを直接開く形の mcp が同じ組み立てを使う。
+/// should/0135)。埋め込みと同じ扱いで、明示されたときだけ装備し、起動時に相手の生存は
+/// 確かめない(should/0114)。誤った URL や識別子はここで落とす: 検索のたびに同じ誤りを
+/// 言うより、起動時に一度言うほうが直しやすい。
+fn reranker_from(options: &EmbedOptions) -> Option<uniqnode::rerank::Reranker> {
+    if !options.rerank_requested {
+        return None;
+    }
+    match uniqnode::rerank::Reranker::new(&options.rerank_url, &options.reranker_id) {
+        Ok(reranker) => {
+            uniqnode::log_line!(
+                "uniqnode: rerank: {} ({})",
+                reranker.reranker_id(),
+                reranker.endpoint()
+            );
+            Some(reranker)
+        }
+        Err(message) => {
+            uniqnode::log_line!("uniqnode: rerank: {message}");
             std::process::exit(2);
         }
     }
@@ -796,6 +853,16 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
         }
         "embed" => {
             let options = parse_embed_options(rest);
+            // 読み手を serve と共有しているので --rerank も字面としては通る。この命令は
+            // ベクトルを作るだけで順位の取り直しに口を持たないから、受けて捨てずに断る
+            // (must/0022 の同型)。ストアを開く前に言う。
+            if let Some(flag) = options.rerank_flag() {
+                eprintln!(
+                    "uniqnode: embed: {flag} は embed の引数ではない(順位の取り直しは検索の\
+                     層のもので、装備するのは serve と、ストアを直接開く形の mcp である)"
+                );
+                std::process::exit(2);
+            }
             let embedder = embedder_from(&options);
             let store = open(dir);
             let path = uniqnode::embed::VectorCache::path_for(
@@ -862,10 +929,13 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 // 転送する形: 走っている serve の REST へ回す。ストアを開かない
                 // (排他錠を取らない)ので、常駐したまま ingest・embed が通る。
                 Some(url) => {
-                    if options.run.embed.requested {
+                    // 埋め込みも順位の取り直しも、装備するのは転送先の serve である。
+                    // ここで受けても効かせる先が無いので、黙って捨てずに断る
+                    // (must/0022 の同型)。
+                    if let Some(flag) = options.run.embed.misplaced_equipment_flag() {
                         uniqnode::log_line!(
-                            "uniqnode: mcp: --serve-url と --embed は併用しない\
-                             (埋め込みを装備するのは転送先の serve である)"
+                            "uniqnode: mcp: --serve-url と {flag} は併用しない\
+                             (埋め込みと順位の取り直しを装備するのは転送先の serve である)"
                         );
                         std::process::exit(2);
                     }
@@ -898,6 +968,10 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                         );
                         uniqnode::embed::EmbeddingService::new(&data_dir, embedder)
                     });
+                    // 順位の取り直しも serve と同じ組み立てで装備する。--rerank を受けて
+                    // おきながら None を置くと、運用者は装備したつもりで装備の無い検索を
+                    // 読む(明示された指定の黙殺。must/0022 の同型)。
+                    let reranker = reranker_from(&options.run.embed);
                     uniqnode::mcp::Backend::Local(Box::new(uniqnode::api::ApiContext {
                         store,
                         engine,
@@ -905,7 +979,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                         referrers: std::sync::Mutex::new(None),
                         search: std::sync::Mutex::new(None),
                         embedding,
-                        reranker: None,
+                        reranker,
                         data_dir,
                     }))
                 }
@@ -983,28 +1057,8 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 uniqnode::embed::EmbeddingService::new(std::path::Path::new(dir), embedder)
             });
             // 順位の取り直しも埋め込みと同じ扱い(明示されたときだけ・起動時に生存を
-            // 確かめない)。誤った URL はここで落とす: 検索のたびに同じ誤りを言うより、
-            // 起動時に一度言うほうが直しやすい。
-            let reranker = match options.embed.rerank_requested {
-                false => None,
-                true => match uniqnode::rerank::Reranker::new(
-                    &options.embed.rerank_url,
-                    &options.embed.reranker_id,
-                ) {
-                    Ok(reranker) => {
-                        uniqnode::log_line!(
-                            "uniqnode: rerank: {} ({})",
-                            reranker.reranker_id(),
-                            reranker.endpoint()
-                        );
-                        Some(reranker)
-                    }
-                    Err(message) => {
-                        uniqnode::log_line!("uniqnode: rerank: {message}");
-                        std::process::exit(2);
-                    }
-                },
-            };
+            // 確かめない)。組み立てはストアを直接開く形の mcp と共用する。
+            let reranker = reranker_from(&options.embed);
             let context = uniqnode::api::ApiContext {
                 store,
                 engine,
@@ -1028,10 +1082,10 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             let address = rest.first().map(String::as_str).unwrap_or_else(|| usage());
             let options = parse_mcp_options(&rest[1..]);
             start_logging(dir, uniqnode::log::VIEWER_ROLE, &options.run.log);
-            if options.run.embed.requested {
+            if let Some(flag) = options.run.embed.misplaced_equipment_flag() {
                 uniqnode::log_line!(
-                    "uniqnode: viewer: --embed はビューワの引数ではない\
-                     (埋め込みを装備するのは転送先の serve である)"
+                    "uniqnode: viewer: {flag} はビューワの引数ではない\
+                     (埋め込みと順位の取り直しを装備するのは転送先の serve である)"
                 );
                 std::process::exit(2);
             }

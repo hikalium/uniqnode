@@ -21,11 +21,14 @@ search ツールは、要求の読み取り(parse_search_request)から順位付
 ## 起動と標準入出力の規律
 
 - 起動は CLI のサブコマンドである:
-  `uniqnode mcp <data_dir> [--serve-url <url>] [--embed <url>] [--embedder <id>] [ログの指定]`。
+  `uniqnode mcp <data_dir> [--serve-url <url>] [--embed <url>] [--embedder <id>] [--rerank <url>] [--reranker <id>] [ログの指定]`。
   `--serve-url` を与えれば走っている serve へ転送し、与えなければ serve と同じ ApiContext を
   組んでストアを直接開く。どちらも HTTP の代わりに標準入出力で話す。ストアを直接開く形で
-  埋め込みを装備するのは `--embed` を明示したときだけで、起動時に相手の生存は確かめない
-  (serve と同じ。should/0114)。
+  埋め込みを装備するのは `--embed` を明示したときだけ、順位の取り直し
+  ([docs/design/SEARCH.md](#6df75ea0-ad86-460a-be04-29660201a7fb))を装備するのは `--rerank` を
+  明示したときだけで、どちらも起動時に相手の生存は確かめない(serve と同じ。should/0114)。
+  組み立ても serve と同じ関数(node/src/main.rs の embedder_from・reranker_from)を通るので、
+  serve で効く指定はこの形でも同じ意味で効く。
 - 標準出力はプロトコル専用である(MCP の stdio 転送の規定)。1 行が 1 メッセージで、ログが 1 行
   でも混ざれば相手の解析はその行で壊れる。起動の知らせも、劣化の理由も、知らない通知の記録も、
   すべて標準エラーへ出す。同じ行は既定で `<data_dir>/logs/mcp.log` にも残る。登録した相手が
@@ -88,8 +91,11 @@ search ツールは、要求の読み取り(parse_search_request)から順位付
   単体試験 rest_search_bodies_survive_a_round_trip が確かめる。
 - 検索の判断は転送する形でも serve 側の run_search が 1 回だけ行う。MCP 側は判断せず、応答の
   method・degraded・citation をそのまま描く。劣化の理由も serve の言葉のまま出る。
-- 埋め込みを装備するのは転送先の serve である。転送する形に `--embed` を渡すのは矛盾なので、
-  併用は起動時に断る(黙って無視しない。must/0022)。
+- 埋め込みも順位の取り直しも、装備するのは転送先の serve である。転送する形に `--embed` や
+  `--rerank`(`--reranker` も)を渡すのは矛盾なので、併用は起動時に理由を標準エラーへ出して
+  exit 2 で断る(黙って無視しない。must/0022)。同じ理由で、ベクトルを作るだけの `embed`
+  命令も `--rerank` / `--reranker` を受けない(読み手を serve と共有しているので字面は通るが、
+  効かせる先が無い指定は断る)。
 - serve に届かないときは、原因(接続できない、など)と起動コマンドを添えて、ツールの結果
   (isError: true)と標準エラーの両方に出す。転送する形の 1 要求の期限は 60 秒である(初回の
   検索は serve 側の索引構築を待つため、クエリ埋め込みの 15 秒より長く採る)。
@@ -221,19 +227,20 @@ claude mcp add --transport stdio uniqnode -- /path/to/uniqnode mcp /path/to/data
   --serve-url http://127.0.0.1:7440
 ```
 
-転送先の serve は別に起こしておく。埋め込みを装備するのはこちらである:
+転送先の serve は別に起こしておく。埋め込みと順位の取り直しを装備するのはこちらである:
 
 ```
-uniqnode serve /path/to/data 127.0.0.1:7440 --embed http://127.0.0.1:8083/v1/embeddings
+uniqnode serve /path/to/data 127.0.0.1:7440 --embed http://127.0.0.1:8083/v1/embeddings \
+  --rerank http://127.0.0.1:8084/v1/rerank
 ```
 
-serve を走らせないときは、ストアを直接開く形で登録する(この形に限り、埋め込みの引数を
-そのまま後ろに足せる):
+serve を走らせないときは、ストアを直接開く形で登録する(この形に限り、埋め込みと順位の
+取り直しの引数を serve と同じ意味でそのまま後ろに足せる):
 
 ```
 claude mcp add --transport stdio uniqnode -- /path/to/uniqnode mcp /path/to/data
 claude mcp add --transport stdio uniqnode -- /path/to/uniqnode mcp /path/to/data \
-  --embed http://127.0.0.1:8083/v1/embeddings
+  --embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank
 ```
 
 リポジトリに置いて共有する `.mcp.json` の形:

@@ -58,6 +58,15 @@ uniqnode backup <data_dir> <backup_dir>
   写し先の MANIFEST を最後に据えるので、途中で止まっても写し先は「前回の写し + 未封印の
   セグメント」として開ける。各ファイルは写し先の `tmp/` に書いて fsync してから rename で
   据えるので、据えた名前の下に不完全なファイルは現れない。
+- 写し先にあって写し元に無い pack は消す。手元の MANIFEST が封印済みと言わず、写し元の
+  `packs/` にも無い番号は、回収(gc。[docs/plan/PACK_GC.md](#f272eeda-8664-42da-9e5c-ef354bc3f3a7))
+  で書き直された後の残骸である。残しておくと、写し先を開くときそれが未封印として走査され、
+  尻切れがあれば破損と誤判定され、回収前の孤児が写し先で生き返る。MANIFEST が権威なので
+  消してよく、消すのは写し先の MANIFEST を据える前(据えた後に残骸だけ残って止まる順序を
+  作らない)。1 本ずつ `removed` の行で言い、黙って消さない。写し元に MANIFEST が無い(一度も
+  封印していない)ときは権威が無いので消さず、`only in backup` の行で言う。reflog は消さない:
+  reflog の回収は無く、封印もまだ無いので、pack の規則を対称に当てると署名済みの ref の記録を
+  根拠なく消すことになる。在れば同じく `only in backup` で言う。
 - 写した後に写し先をストアとして開き、fsck(全オブジェクトの再ハッシュと ref の整合)まで
   通す。検証の実装は開くときの回復と `uniqnode fsck` そのものであり、バックアップ専用の検証は
   無い(should/0135)。異常があれば理由を標準エラーに言って非 0 で終わる。
@@ -71,18 +80,21 @@ uniqnode backup <data_dir> <backup_dir>
   作らずに「ストアのデータディレクトリではない」と言って 1 で終わる(node/tests/fsck.rs の
   a_restore_destination_checked_first_by_fsck_is_still_accepted_by_backup がこの順を通す)。
 
-出力は写したものを 1 行ずつ言い、最後に集計と検証の 2 行を出す。
+出力は写したもの・消したもの・消さずに残したものを 1 行ずつ言い、最後に集計と検証の 2 行を
+出す。
 
 ```
 copied packs/pack-000001.pack
 copied packs/pack-000002.pack (active)
 copied reflog/reflog-000001.log (active)
 copied node_key
-backup: sealed copied 1 unchanged 0, active 2, settings 1, bytes 377389679, not copied: derived logs tmp
+backup: sealed copied 1 unchanged 0, active 2, removed 0, settings 1, bytes 377389679, not copied: derived logs tmp
 verify: objects 55433 refs 204 errors 0
 ```
 
 2 回目は `unchanged packs/pack-000001.pack` になり、写すのは未封印の 2 本と設定だけになる。
+回収の後の写しでは `removed packs/pack-000005.pack (not in source MANIFEST)` のように消した
+残骸が並び、集計の `removed` にその本数が出る。
 `not copied:` は写し元の直下にあって写さなかった項目の列挙で、derived・logs・tmp 以外の名前が
 並んだら、それはこの手順が知らないファイルである。
 
@@ -125,8 +137,10 @@ rsync は写し先を検証しないので、取った後に必ず `uniqnode fsc
 ので、意味検索を使うなら `uniqnode embed <new_data_dir>` で埋め込みを作り直す。BM25 の検索と
 取り込み・取得は埋め込み無しでも動く。
 
-写し戻す先は空にしておく。中身のある data_dir へ写すと、写しに無い新しいセグメントが残って
-混ざり、どの時点の状態でもないストアになる。空であることを `uniqnode fsck <new_data_dir>` で
+写し戻す先は空にしておく。backup は写し元(ここでは写し)を権威として写し先を揃えるので、
+中身のある data_dir へ写すと、写しの MANIFEST に無い pack はそこに新しく書かれたものでも
+`removed` の行を出して消され、reflog と設定は消されずに残って混ざり、どの時点の状態でもない
+ストアになる。空であることを `uniqnode fsck <new_data_dir>` で
 確かめてもよい: 空のディレクトリや存在しない道には「ストアのデータディレクトリではない」と
 言って 1 で終わり、何も作らない(緑が出たら、そこには既にストアがある)。
 
@@ -180,5 +194,7 @@ a_corrupted_sealed_pack_in_the_backup_turns_fsck_red_and_is_recopied_after_remov
 - 世代の保持(日ごとの写しを何日ぶん残す、など)。写し先を日付ごとに分ければ済み、
   封印済みセグメントは不変なので世代間の重複はハードリンクや重複排除で潰せる。
 - 検証を省く指定。上の理由による。
-- 写し先だけにある設定ファイルの削除。写し元で消した `peers.json` が写し先に残っていたら、
-  `only in backup` の行で言うだけで消さない。写しから物を消すのは人の判断にしておく。
+- 写し先だけにある設定ファイルと reflog の削除。写し元で消した `peers.json` が写し先に残って
+  いたら、`only in backup` の行で言うだけで消さない。写し元に MANIFEST が無いときの pack も同じ。
+  これらには「写し元に無い」を判定する権威が無く、写しから物を消すのは人の判断にしておく。
+  消すのは、MANIFEST が権威として答えを持つ pack の残骸だけである(「取り方」)。

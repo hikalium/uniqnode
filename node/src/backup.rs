@@ -13,6 +13,14 @@
 //! 写し先の MANIFEST を最後に据えるのは、途中で止まったときに写し先が「前回の写し +
 //! 未封印のセグメント」として開けるようにするためである。
 //!
+//! 写し先にあって写し元に無い pack は、写し元に MANIFEST が在るときだけ削除する。封印済みの
+//! 一覧は MANIFEST に完全に書かれているので、そこに無く写し元の packs/ にも無い番号は、
+//! 回収(gc)で書き直された後の残骸である。残しておくと、写し先を開くときそれが未封印として
+//! 走査され、torn tail があれば破損と誤判定され、回収前の孤児が写し先で生き返る。削除は
+//! 写し先の MANIFEST を据える前に行う(据えた後に残骸が残ったまま止まると、写し先の回復が
+//! 残骸を走査する)。黙って消さず、1 本ずつ名を言う(must/0022)。設定ファイルと reflog は
+//! 消さない(理由は `reconcile_only_in_backup`)。
+//!
 //! 写した後は写し先をストアとして開き、fsck(全オブジェクトの再ハッシュ)まで通す。検証の
 //! 実装は開くときと fsck そのものであり、バックアップ専用の検証は持たない(should/0135)。
 //! 手順は [docs/mop/BACKUP.md](uuid:e026a5e7-1ece-4f4e-b6b8-ee96c62883a2)。
@@ -46,6 +54,11 @@ pub struct BackupReport {
     pub settings_copied: Vec<String>,
     /// 写し元には無く写し先だけに残っている設定ファイル(消さずに言う)。
     pub settings_only_in_backup: Vec<String>,
+    /// 写し元の MANIFEST に無く packs/ にも無いので、写し先から削除した pack(回収済みの残骸)。
+    pub packs_removed: Vec<String>,
+    /// 写し元には無く写し先だけに残っているセグメントのうち、消さなかったもの: 写し元に
+    /// MANIFEST が無い(権威が無い)ときの pack と、reflog のすべて。
+    pub segments_only_in_backup: Vec<String>,
     /// 写し元の直下にあって写さなかった項目(derived/ logs/ tmp/ と、知らない名前)。
     pub not_copied: Vec<String>,
     /// 今回書いたバイト数。
@@ -95,14 +108,15 @@ fn copy_into_place(source: &Path, destination_dir: &Path, relative: &Path) -> st
 
 /// 種類ごとのセグメントを写す。sealed は写し元の MANIFEST(手元に留めた写し)が封印済みと
 /// 言う番号。封印済みで写し先に同じ大きさのものが在れば写さない(封印後は不変で、内容は
-/// 後の fsck が読み直す)。未封印のものは毎回まるごと写す。
+/// 後の fsck が読み直す)。未封印のものは毎回まるごと写す。返り値は写し元にあった番号
+/// (封印済みをすべて含むことを確かめてある)で、写し先に在るべきセグメントの全体である。
 fn copy_segments(
     kind: SegmentKind,
     source: &Path,
     destination: &Path,
     sealed: &[u64],
     report: &mut BackupReport,
-) -> store::Result<()> {
+) -> store::Result<Vec<u64>> {
     std::fs::create_dir_all(destination.join(kind.directory))?;
     let present = kind.numbers(source)?;
     for number in sealed {
@@ -113,7 +127,7 @@ fn copy_segments(
             )));
         }
     }
-    for number in present {
+    for number in present.iter().copied() {
         let relative = PathBuf::from(kind.directory).join(kind.file_name(number));
         let label = relative.display().to_string();
         let source_path = source.join(&relative);
@@ -134,6 +148,48 @@ fn copy_segments(
             report.copied_bytes += copy_into_place(&source_path, destination, &relative)?;
             report.active_copied.push(label);
         }
+    }
+    Ok(present)
+}
+
+/// 写し先にあって写し元に無いセグメントを、削除するか名を言うだけにする。`in_source` は
+/// copy_segments が返した写し元の番号(封印済みとアクティブの全体)。
+///
+/// pack は `remove` のとき(写し元に MANIFEST が在るとき)削除する。封印済みの一覧が MANIFEST
+/// に完全に書かれているので、そこに無く写し元にも無い番号は回収済みの残骸で、MANIFEST が
+/// 権威である。MANIFEST が無い(初回封印前の)写し元には権威が無いので消さず、名を言う
+/// (PACK_GC.md の回復の規則と同じ場合分け)。
+///
+/// reflog は消さない。reflog に回収は無く(PACK_GC.md 未決事項 8 で別の問題)、封印も
+/// まだ実装されていない(sealed_reflogs は常に空)ので、「MANIFEST に無い」は reflog の
+/// 全部に当たり、pack と同じ規則を対称のために当てると署名済みの ref の記録を根拠なく
+/// 消すことになる。残骸を作る仕組みが無いところで消す規則を持たず、在れば名を言う。
+fn reconcile_only_in_backup(
+    kind: SegmentKind,
+    destination: &Path,
+    in_source: &[u64],
+    remove: bool,
+    report: &mut BackupReport,
+) -> store::Result<()> {
+    let mut removed_any = false;
+    for number in kind.numbers(destination)? {
+        if in_source.contains(&number) {
+            continue;
+        }
+        let relative = PathBuf::from(kind.directory).join(kind.file_name(number));
+        let label = relative.display().to_string();
+        if remove {
+            std::fs::remove_file(destination.join(&relative))?;
+            removed_any = true;
+            report.packs_removed.push(label);
+        } else {
+            report.segments_only_in_backup.push(label);
+        }
+    }
+    if removed_any {
+        // 削除を MANIFEST の rename より先に永続化する(MANIFEST が据わった後に残骸だけ
+        // 戻ってくる順序を作らない)。
+        std::fs::File::open(destination.join(kind.directory))?.sync_all()?;
     }
     Ok(())
 }
@@ -197,8 +253,18 @@ pub fn run(source: &Path, destination: &Path) -> store::Result<BackupReport> {
     }
 
     let mut report = BackupReport::default();
-    copy_segments(PACK, source, destination, &sealed_packs, &mut report)?;
-    copy_segments(REFLOG, source, destination, &sealed_reflogs, &mut report)?;
+    let packs_in_source = copy_segments(PACK, source, destination, &sealed_packs, &mut report)?;
+    let reflogs_in_source =
+        copy_segments(REFLOG, source, destination, &sealed_reflogs, &mut report)?;
+    // 残骸の削除は写し先の MANIFEST を据える前に行う(モジュール冒頭)。
+    reconcile_only_in_backup(
+        PACK,
+        destination,
+        &packs_in_source,
+        manifest.is_some(),
+        &mut report,
+    )?;
+    reconcile_only_in_backup(REFLOG, destination, &reflogs_in_source, false, &mut report)?;
 
     for name in SETTINGS_FILES {
         let source_path = source.join(name);

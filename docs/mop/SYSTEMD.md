@@ -76,9 +76,9 @@ unit ファイルは差し替えても drop-in は残る。
   `${UNIQNODE_SERVE_OPTIONS}` と書くと空文字列 1 個の引数になり、serve は usage で落ちる。
 - データディレクトリを別の場所にするときは、UNIQNODE_DATA_DIR と一緒に
   `ReadWritePaths=<その道>` を drop-in に書く。閉じ込めで書けるのは StateDirectory= の下
-  だけなので、それが無いとストアも logs/ も書けない(serve はログを書けないことを標準
-  エラーで言って走り続けるが、ストアが書けないので起動に失敗する)。ディレクトリは先に
-  作っておく(ReadWritePaths= は無い道を作らない)。
+  だけなので、それが無いとストアも logs/ も書けない(serve はログを倒せる先へ倒すか、
+  それも無ければ書けないことを標準エラーで言って走り続けるが、ストアが書けないので起動に
+  失敗する)。ディレクトリは先に作っておく(ReadWritePaths= は無い道を作らない)。
 - backup の写し先(UNIQNODE_BACKUP_DIR)を変えるときは、環境変数と一緒に ReadWritePaths= も
   drop-in で差し替える。環境変数は ReadWritePaths= に展開されないので、道は 2 箇所に書く。
   ReadWritePaths= は ExecStart= と同じく追記なので、空の行で unit 既定の道を一度消す:
@@ -157,12 +157,14 @@ REST(`PUT /v1/collections/{c}/documents/{name}`)で行い、CLI が要る作業�
 で行う。root で走らせると root 所有のファイルがストアに残り、次の serve が書けなくなる。
 
 LLM クライアントから使うときの mcp は、それを起こす人間の権限で走る。転送する形は
-ストアを開かないが、ログの既定は `<dir>/logs/mcp.log` なので、0750 のディレクトリには
-書けず、標準エラーだけで続ける(クライアントが吸うので読めない)。`--log` で自分の書ける
-道を指す:
+ストアを開かないので 0750 のディレクトリを指したまま起こせるが、ログの既定の道
+`<dir>/logs/mcp.log` には書けない。このとき mcp は `$XDG_STATE_HOME/uniqnode/logs/mcp.log`
+(無ければ `~/.local/state/uniqnode/logs/mcp.log`)へ倒し、最初の行で両方の道を言う
+([docs/design/LOGGING.md](#14a4e260-70af-4c52-9f19-1c116bddd004))。標準エラーは
+クライアントが吸うので、mcp の記録を読むのはそのファイルである。登録に `--log` は要らない:
 
 ```
-claude mcp add --transport stdio uniqnode -- /usr/local/bin/uniqnode mcp /var/lib/uniqnode --serve-url http://127.0.0.1:7440 --log ~/.local/state/uniqnode/mcp.log
+claude mcp add --transport stdio uniqnode -- /usr/local/bin/uniqnode mcp /var/lib/uniqnode --serve-url http://127.0.0.1:7440
 ```
 
 ## user 単位で起こす

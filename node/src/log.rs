@@ -59,13 +59,76 @@ pub fn generation_path(path: &Path, number: u32) -> PathBuf {
 /// 開いているログファイル。プロセスに 1 つだけ持つ。
 static DESTINATION: Mutex<Option<Destination>> = Mutex::new(None);
 
-/// ログの保存を始める。開けなければ理由を返す(呼び手が、黙って落とさずに知らせる。
-/// must/0022)。
+/// 明示された道(--log)にログの保存を始める。開けなければ理由を返す(呼び手が、黙って
+/// 落とさずに知らせる。must/0022)。明示された道は別の場所へ倒さない: 利用者が指した道を
+/// 黙って変えると、指した所を読みに行った者が何も見つけられない。倒すのは既定の道のとき
+/// だけである(open_default)。
 pub fn open(path: &Path, max_bytes: u64) -> Result<(), String> {
     let destination = Destination::open(path.to_path_buf(), max_bytes)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     *lock() = Some(destination);
     Ok(())
+}
+
+/// 既定の道(<data_dir>/logs/<役割>.log)にログの保存を始め、実際に開いた道を返す。
+///
+/// 既定の道が開けないとき(ディレクトリを作れない・書けない)は、利用者の書ける場所
+/// (fallback_path)へ倒す。system 単位のストア(0750、所有者 uniqnode)に人間の権限で mcp を
+/// 起こすと既定の道には書けず、標準エラーだけにするとそれは LLM クライアントが吸うので誰も
+/// 読めない、という穴を塞ぐ。倒したときはその事実と両方の道を、この走行の最初の 1 行として
+/// 標準エラーとファイルの双方に出す(どこに残したかが、どちらの記録からも読める)。
+///
+/// どちらにも開けなければ理由を返す(両方の道とそれぞれの失敗)。倒す先を決めるのも、
+/// 倒すか否かの判断も、ここにしかない(should/0135。serve・mcp・viewer が同じ関数を呼ぶ)。
+pub fn open_default(data_dir: &Path, role: &str, max_bytes: u64) -> Result<PathBuf, String> {
+    let preferred = default_path(data_dir, role);
+    let refused = match Destination::open(preferred.clone(), max_bytes) {
+        Ok(destination) => {
+            *lock() = Some(destination);
+            return Ok(preferred);
+        }
+        Err(error) => error,
+    };
+    let Some(fallback) = fallback_path(role) else {
+        return Err(format!(
+            "{}: {refused}。倒す先も無い(XDG_STATE_HOME も HOME も取れない)",
+            preferred.display()
+        ));
+    };
+    let destination = Destination::open(fallback.clone(), max_bytes).map_err(|error| {
+        format!("{}: {refused}。倒す先 {}: {error}", preferred.display(), fallback.display())
+    })?;
+    *lock() = Some(destination);
+    write_line(format_args!(
+        "uniqnode: {role}: 既定のログ先 {} に書けない({refused})ので {} に残す",
+        preferred.display(),
+        fallback.display()
+    ));
+    Ok(fallback)
+}
+
+/// 既定の道が開けないときに倒す先。$XDG_STATE_HOME/uniqnode/logs/<役割>.log、無ければ
+/// ~/.local/state/uniqnode/logs/<役割>.log(systemd の user 単位の %S と同じ決め方。
+/// 状態の置き場として利用者が既に持っている場所であり、新しい規約を増やさない)。
+/// HOME も取れなければ None(呼び手は従来どおり標準エラーだけで続ける)。
+pub fn fallback_path(role: &str) -> Option<PathBuf> {
+    fallback_path_from(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"), role)
+}
+
+/// fallback_path の判断そのもの(環境を引数にした純関数。テストから環境を差し替えずに
+/// 呼べる)。空の値は無いものとして扱う(XDG の規約)。
+fn fallback_path_from(
+    xdg_state_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    role: &str,
+) -> Option<PathBuf> {
+    let state_home = match xdg_state_home.filter(|value| !value.is_empty()) {
+        Some(state_home) => PathBuf::from(state_home),
+        None => PathBuf::from(home.filter(|value| !value.is_empty())?)
+            .join(".local")
+            .join("state"),
+    };
+    Some(state_home.join("uniqnode").join(DIRECTORY_NAME).join(format!("{role}.log")))
 }
 
 /// 1 行出す(log_line! の実体)。標準エラーへは常に出し、ログファイルが開いていれば
@@ -256,6 +319,30 @@ mod tests {
         let written = std::fs::read_to_string(&path).expect("read");
         assert_eq!(written, "前回の走行\n今回の走行\n", "追記になっていない: {written}");
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 倒す先の決め方: XDG_STATE_HOME があればその下、無ければ(空も無いとみなして)
+    /// HOME/.local/state、どちらも無ければ倒す先は無い。期待値はリテラルで書く。
+    #[test]
+    fn the_fallback_follows_xdg_state_home_then_home_then_nothing() {
+        let os = |text: &str| Some(std::ffi::OsString::from(text));
+        assert_eq!(
+            fallback_path_from(os("/state"), os("/home/op"), MCP_ROLE),
+            Some(PathBuf::from("/state/uniqnode/logs/mcp.log")),
+            "XDG_STATE_HOME があるのにそこへ倒していない"
+        );
+        assert_eq!(
+            fallback_path_from(None, os("/home/op"), MCP_ROLE),
+            Some(PathBuf::from("/home/op/.local/state/uniqnode/logs/mcp.log")),
+            "XDG_STATE_HOME が無いとき HOME/.local/state へ倒していない"
+        );
+        assert_eq!(
+            fallback_path_from(os(""), os("/home/op"), SERVE_ROLE),
+            Some(PathBuf::from("/home/op/.local/state/uniqnode/logs/serve.log")),
+            "空の XDG_STATE_HOME を「無い」と扱っていない"
+        );
+        assert_eq!(fallback_path_from(None, None, MCP_ROLE), None, "HOME が無いのに倒す先がある");
+        assert_eq!(fallback_path_from(None, os(""), MCP_ROLE), None, "空の HOME を道にしている");
     }
 
     /// 開けない道は理由つきで断る(呼び手がそれを知らせる。must/0022)。

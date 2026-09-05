@@ -152,6 +152,16 @@ pub fn start_server_with_env(name: &str, envs: &[(&str, &str)]) -> Server {
     start_server_at_with(unique_dir(name), envs, &[], false)
 }
 
+/// 環境変数と引数を与え、標準エラーを捕まえて起こす(XDG_STATE_HOME を差し替えて
+/// ログの倒れ先を観測するテスト用)。
+pub fn start_server_capturing_stderr_with_env(
+    name: &str,
+    envs: &[(&str, &str)],
+    args: &[&str],
+) -> Server {
+    start_server_at_with(unique_dir(name), envs, args, true)
+}
+
 /// serve に追加の引数を与えて起動する(--embed など)。
 pub fn start_server_with_args(name: &str, args: &[&str]) -> Server {
     start_server_at_with(unique_dir(name), &[], args, false)

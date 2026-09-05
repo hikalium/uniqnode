@@ -117,7 +117,10 @@ fn usage() -> ! {
                                       SYSTEMD.md の手順で行う\n\
          \n\
          serve・mcp・viewer のログの指定(常駐する命令だけが持つ。既定は保存する):\n\
-           --log <path>               保存先を変える(既定 <dir>/logs/<serve|mcp|viewer>.log)\n\
+           --log <path>               保存先を変える(既定 <dir>/logs/<serve|mcp|viewer>.log。\n\
+                                      既定の道に書けなければ $XDG_STATE_HOME/uniqnode/logs/、\n\
+                                      無ければ ~/.local/state/uniqnode/logs/ へ倒し、その旨を\n\
+                                      最初の行で言う。--log で指した道は倒さない)\n\
            --no-log                   ファイルへ残さず標準エラーだけに出す\n\
            --log-max-bytes <n>        1 世代の上限(既定 {default_max_bytes})。越えたら\n\
                                       <path>.1 へ送って新しい世代を開き、{generations} 世代\n\
@@ -439,20 +442,25 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
     RunOptions { embed: parse_embed_options(&others), log }
 }
 
-/// ログの保存を始める(既定で有効)。開けなければ理由を言って標準エラーだけで続ける。
-/// 黙って落とさない(must/0022)が、ログを書けないことは serve や mcp を止める理由には
-/// しない: 提供できる仕事があるのに、記録の都合で断る方が損である(should/0114)。
+/// ログの保存を始める(既定で有効)。既定の道が開けなければ利用者の書ける場所へ倒し、
+/// --log で明示された道が開けなければ倒さずに理由を言って標準エラーだけで続ける(どちらの
+/// 判断も uniqnode::log にある。should/0135)。黙って落とさない(must/0022)が、ログを
+/// 書けないことは serve や mcp を止める理由にはしない: 提供できる仕事があるのに、記録の
+/// 都合で断る方が損である(should/0114)。
 fn start_logging(dir: &str, role: &str, options: &LogOptions) {
     if !options.enabled {
         eprintln!("uniqnode: {role}: --no-log によりログはファイルに残さない(標準エラーだけ)");
         return;
     }
-    let path = match &options.path {
-        Some(given) => std::path::PathBuf::from(given),
-        None => uniqnode::log::default_path(std::path::Path::new(dir), role),
+    let opened = match &options.path {
+        Some(given) => {
+            let path = std::path::PathBuf::from(given);
+            uniqnode::log::open(&path, options.max_bytes).map(|()| path)
+        }
+        None => uniqnode::log::open_default(std::path::Path::new(dir), role, options.max_bytes),
     };
-    match uniqnode::log::open(&path, options.max_bytes) {
-        Ok(()) => uniqnode::log_line!(
+    match opened {
+        Ok(path) => uniqnode::log_line!(
             "uniqnode: {role}: ログを {} に残す(1 世代 {} バイト、{} 世代まで保持)",
             path.display(),
             options.max_bytes,

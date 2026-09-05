@@ -98,7 +98,7 @@ pub fn to_text(html: &str) -> String {
 }
 
 /// 閉じ札 </name> まで読み飛ばす。閉じ札が無ければ末尾まで(壊れた HTML でも落ちない)。
-fn skip_element<'a>(mut rest: &'a str, name: &str) -> &'a str {
+pub(crate) fn skip_element<'a>(mut rest: &'a str, name: &str) -> &'a str {
     loop {
         let Some(position) = rest.find('<') else { return "" };
         let tail = &rest[position..];
@@ -111,16 +111,16 @@ fn skip_element<'a>(mut rest: &'a str, name: &str) -> &'a str {
 }
 
 /// 読めた札。rest は札の直後。
-struct Tag<'a> {
-    name: String,
-    closing: bool,
-    self_closing: bool,
-    rest: &'a str,
+pub(crate) struct Tag<'a> {
+    pub(crate) name: String,
+    pub(crate) closing: bool,
+    pub(crate) self_closing: bool,
+    pub(crate) rest: &'a str,
 }
 
 impl<'a> Tag<'a> {
     /// '<' から始まる文字列を札として読む。読めなければ None(本文の '<' として扱う)。
-    fn parse(text: &'a str) -> Option<Tag<'a>> {
+    pub(crate) fn parse(text: &'a str) -> Option<Tag<'a>> {
         let body = text.strip_prefix('<')?;
         if let Some(comment) = body.strip_prefix("!--") {
             let rest = match comment.find("-->") {

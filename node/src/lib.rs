@@ -30,3 +30,4 @@ pub mod store;
 pub mod sync;
 pub mod translit;
 pub mod viewer;
+pub mod web;

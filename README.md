@@ -37,6 +37,13 @@ curl -X POST --data-binary '{"v":1,"kind":"node","contents":"hello"}' http://127
 curl http://127.0.0.1:7440/v1/status
 ```
 
+ウェブページや PDF は URL を渡せばノードが取りに行く(取りに行くのは curl で、HTML は外部への
+依存を落とした自足する 1 枚にしてから収める。文書名を省くと URL から導く):
+
+```
+curl -X POST -d '{"url":"https://arxiv.org/abs/2401.00001"}' http://127.0.0.1:7440/v1/collections/papers/fetch
+```
+
 ブラウザから引くには、serve を起こしたままビューワを足す(ストアのロックを取らないので同時に
 走る)。`http://127.0.0.1:7450` を開けば、検索・出典・全文が 1 枚の頁で辿れる:
 

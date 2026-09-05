@@ -87,6 +87,18 @@ pub fn require_pdftotext() {
     }
 }
 
+/// URL からの取り込みのテストの前提確認。curl が無い環境では黙って飛ばさず、導入手順を
+/// 示して失敗する(require_pdftotext と同じ扱い。should/0128)。
+pub fn require_curl() {
+    if let Err(error) = Command::new("curl").arg("--version").output() {
+        panic!(
+            "URL からの取り込みのテストには curl コマンドが必要({error})。\
+             導入例: apt-get install curl(Debian/Ubuntu)。sudo なしなら apt-get download curl と \
+             dpkg -x で ~/opt/curl/ へ展開し、PATH の通ったディレクトリへ symlink を置く"
+        );
+    }
+}
+
 /// ページの写しのテストの前提確認。poppler 一式(pdftoppm・pdftocairo)が無い環境では
 /// 黙って飛ばさず、導入手順を示して失敗する(require_pdftotext と同じ扱い。飛ばして緑に
 /// すると、検証したのか検証を諦めたのかが結果から区別できなくなる)。

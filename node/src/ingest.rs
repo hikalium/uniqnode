@@ -363,6 +363,10 @@ pub struct DocumentInput<'a> {
     pub chunks: &'a [Chunk],
     /// 抽出器の名前と版(PDF のとき。例 "pdftotext 22.02")。
     pub extractor: Option<&'a str>,
+    /// doc_rev.meta に足す鍵(URL からの取り込みの出所。組むのは node/src/fetch.rs で、
+    /// INGEST の「URL からの取り込み」節)。name・media・extractor と同じ鍵は上書き
+    /// できない。ファイルからの取り込みは空。
+    pub extra_meta: &'a [(String, Value)],
 }
 
 pub struct IngestOutcome {
@@ -462,6 +466,9 @@ pub fn ingest_document(store: &mut Store, input: &DocumentInput) -> Result<Inges
     meta.insert("media".to_string(), text_value(input.media));
     if let Some(extractor) = input.extractor {
         meta.insert("extractor".to_string(), text_value(extractor));
+    }
+    for (key, value) in input.extra_meta {
+        meta.entry(key.clone()).or_insert_with(|| value.clone());
     }
     object.insert("meta".to_string(), Value::Object(meta));
     if let Some(previous) = &current_target {
@@ -1395,6 +1402,7 @@ mod tests {
                 media: "markdown",
                 chunks: &chunks,
                 extractor: None,
+                extra_meta: &[],
             },
         )
         .expect("ingest")
@@ -1566,6 +1574,7 @@ mod tests {
                 media: "pdf",
                 chunks: &chunks,
                 extractor: Some("pdftotext test"),
+                extra_meta: &[],
             },
         )
         .expect("ingest")
@@ -1758,6 +1767,7 @@ mod tests {
                 media: "pdf",
                 chunks: &chunks,
                 extractor: Some("pdftotext test"),
+                extra_meta: &[],
             },
         )
         .expect("ingest")

@@ -1643,6 +1643,7 @@ mod tests {
                 media: "pdf",
                 chunks: &chunks,
                 extractor: Some(&extractor.extractor),
+                extra_meta: &[],
             },
         )
         .expect("ingest");

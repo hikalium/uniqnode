@@ -149,6 +149,7 @@ fn indexed_corpus_with(
                 media: "markdown",
                 chunks: &chunks,
                 extractor: None,
+                extra_meta: &[],
             },
         )
         .expect("ingest");

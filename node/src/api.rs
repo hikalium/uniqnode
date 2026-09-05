@@ -1612,6 +1612,88 @@ fn handle_rendition(context: &ApiContext, chunk_id: &str, alias: &str) -> Respon
     }
 }
 
+/// POST /v1/collections/{collection}/fetch。ボディ: {"url": "...", "name"?: "..."}。URL を
+/// curl で取り、種別を見て取り込む(判断は node/src/fetch.rs、書き込みはファイルからの
+/// 取り込みと同じ ingest_document)。応答は PUT documents と同じ doc_rev・new_objects・
+/// ref_updated に、final_url・name・media と、HTML なら dropped(自足化で落としたものの
+/// 数)を足したもの。
+///
+/// ロックの規律(node/src/sync.rs・node/src/rendition.rs と同じ): curl と pdftotext を
+/// 待つあいだストアのロックを持たない。取ってから、ロックを取って書く。
+fn handle_fetch(context: &ApiContext, collection: &str, request: &Request) -> Response {
+    let body_text = match std::str::from_utf8(&request.body) {
+        Ok(t) => t,
+        Err(_) => return error_response(400, "ボディが UTF-8 でない"),
+    };
+    let value = match c1::parse(body_text) {
+        Ok(v) => v,
+        Err(e) => return error_response(400, &format!("JSON が不正: {e}")),
+    };
+    let c1::Value::Object(map) = &value else {
+        return error_response(400, "ボディはオブジェクトであるべき");
+    };
+    let url = match map.get("url") {
+        Some(c1::Value::Text(url)) if !url.is_empty() => url.as_str(),
+        _ => return error_response(400, "url がない(空でない文字列)"),
+    };
+    let name = match map.get("name") {
+        None | Some(c1::Value::Null) => None,
+        Some(c1::Value::Text(name)) if !name.is_empty() => Some(name.as_str()),
+        _ => return error_response(400, "name は空でない文字列(省けば URL から導く)"),
+    };
+    let fetch_request = crate::fetch::FetchRequest {
+        url,
+        name,
+        limits: crate::fetch::FetchLimits::default(),
+    };
+    // PDF だったときだけ pdftotext を引く(serve の PATH 依存。PUT documents と同じ)。
+    let mut extract_pdf = |pdf: &[u8]| {
+        let extractor = pdf_extractor().map_err(crate::fetch::FetchError::ToolMissing)?;
+        crate::fetch::pdf_text_with(extractor, pdf)
+    };
+    let started = std::time::Instant::now();
+    let document = match crate::fetch::fetch_document(&fetch_request, &mut extract_pdf) {
+        Ok(document) => document,
+        Err(e) => {
+            crate::log_line!("uniqnode: fetch: {collection} ← {url}: {e}");
+            return error_response(e.status(), &e.to_string());
+        }
+    };
+    if let Some(reason) = &document.outline_reason {
+        crate::log_line!("uniqnode: ingest: {collection}/{} の節見出し: {reason}", document.name);
+    }
+    let mut store = context.store.lock().expect("lock");
+    let outcome = match crate::ingest::ingest_document(&mut store, &document.input(collection)) {
+        Ok(outcome) => outcome,
+        Err(e) => return store_error_response(e),
+    };
+    drop(store);
+    // 取ったことは記録に残す(何を、どこから、どの道具で。should/0111)。
+    crate::log_line!(
+        "uniqnode: fetch: {collection}/{} ← {} ({}, {} バイト, chunks {}, {}, {} ミリ秒, {})",
+        document.name,
+        document.final_url,
+        document.media,
+        document.source.len(),
+        document.chunks.len(),
+        document.fetcher,
+        started.elapsed().as_millis(),
+        if outcome.ref_updated { "updated" } else { "no-op" }
+    );
+    let mut fields = vec![
+        ("doc_rev", c1::Value::Text(outcome.doc_rev_id)),
+        ("new_objects", c1::Value::Integer(outcome.new_objects as i64)),
+        ("ref_updated", c1::Value::Bool(outcome.ref_updated)),
+        ("final_url", c1::Value::Text(document.final_url.clone())),
+        ("name", c1::Value::Text(document.name.clone())),
+        ("media", c1::Value::Text(document.media.to_string())),
+    ];
+    if let Some(dropped) = &document.dropped {
+        fields.push(("dropped", crate::fetch::dropped_value(dropped)));
+    }
+    Response::json(200, json_object(fields))
+}
+
 fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Response {
     let store = &*context.store;
     let path = request.path.as_str();
@@ -1853,6 +1935,16 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
     // 文書の取り込み(INGEST の「CLI と API」節)。本文は生バイト列、種別は
     // {name} の拡張子で判定する。
     if let Some(rest) = path.strip_prefix("/v1/collections/") {
+        // URL からの取り込み(INGEST の「URL からの取り込み」節。node/src/fetch.rs)。
+        if let Some(collection) = rest.strip_suffix("/fetch") {
+            if method != "POST" {
+                return error_response(405, "POST のみ");
+            }
+            if collection.is_empty() || collection.contains('/') {
+                return error_response(400, "コレクション名が要る(/v1/collections/{c}/fetch)");
+            }
+            return handle_fetch(context, collection, request);
+        }
         if method != "PUT" {
             return error_response(405, "PUT のみ");
         }
@@ -1903,6 +1995,7 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
             media,
             chunks: &chunks,
             extractor: extractor_label,
+            extra_meta: &[],
         };
         let mut store = store.lock().expect("lock");
         return match crate::ingest::ingest_document(&mut store, &input) {

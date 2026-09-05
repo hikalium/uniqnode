@@ -982,6 +982,7 @@ mod tests {
                 media: "markdown",
                 chunks: &chunks,
                 extractor: None,
+                extra_meta: &[],
             },
         )
         .expect("ingest")
@@ -1005,6 +1006,7 @@ mod tests {
                 media: "pdf",
                 chunks,
                 extractor: Some("pdftotext 22.02"),
+                extra_meta: &[],
             },
         )
         .expect("ingest")

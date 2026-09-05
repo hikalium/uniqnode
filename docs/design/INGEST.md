@@ -1,4 +1,4 @@
-# INGEST — 取り込み層(文書モデル・チャンキング・PDF・注釈・訂正)
+# INGEST — 取り込み層(文書モデル・チャンキング・PDF・HTML・URL・注釈・訂正)
 
 <a id="47d69a3e-c39a-4e76-9814-e9c24240293b"></a>
 
@@ -43,7 +43,9 @@ blob(原文そのもの)・chunk(検索と引用の単位)・doc_rev(版)・ref(
 - チャンクの順序は doc_rev の chunks 列だけが持つ(順序は辺が持つ、という I7 と同じ形)。
   chunk 自身は番号を持たず、順序という一つの事実を二箇所に置かない。
 - doc_rev に時刻は入らない。入れると同一内容の再取り込みが別 ID になり、べき等(I1)が
-  壊れる。取り込み時刻は ref レコードの at(可変層・署名付き)が持つ(I2)。
+  壊れる。取り込み時刻は ref レコードの at(可変層・署名付き)が持つ(I2)。例外は URL
+  からの取り込みの meta.fetched_at(URL からの取り込みの節)で、同一性は下の (source,
+  chunks 列) の一致で判定するので、同じ内容の再取得は時刻が違っても no-op のままである。
 - 書き込みの順序は blob と chunk 群 → doc_rev → ref(set_ref は存在しない target を拒否する
   ため ref は最後)。
 - 再取り込みの同一性は doc_rev の ID ではなく (source, chunks 列) の一致で判定する。previous
@@ -115,6 +117,58 @@ blob(原文そのもの)・chunk(検索と引用の単位)・doc_rev(版)・ref(
   ([docs/design/RENDITION.md](#6046eeca-1d95-4d47-87da-13f86c7710dc))。HTML と名乗れる原本は
   text/html で出るので、ブラウザでそのまま開ける。網に取りに行かない紙面を入れておけば、
   ストアの中の 1 枚がそのまま読める紙面になる。
+
+## URL からの取り込み
+
+URL を渡すと、ノード自身が取りに行って上の道(HTML・PDF・素文)へ流す。家は
+node/src/fetch.rs で、取る・見分ける・名前を決める・出所を組むまでを持ち、書き込みは
+ファイルからの取り込みと同じ ingest_document を通る(should/0135)。
+
+- 取りに行く道具は curl への外部プロセス委譲である。依存クレートを持たないこの木では TLS を
+  自前で話せないので、pdftotext と同じ枠(Command で直接起動、シェルは経由しない。
+  must/0009)で頼む。渡す指定は `--location --max-redirs 10 --proto =http,https
+  --proto-redir =http,https --max-time 30 --max-filesize 67108864 --user-agent uniqnode/<版>`
+  で、本文は一時ファイルへ落とし、`--write-out` の 3 行(content_type・url_effective・
+  http_code)を標準出力から読む。入力側でも http と https 以外のスキーム(file: や ftp:)は
+  curl に渡す前に断る。HTTP の状態が 2xx でなければ理由(状態と転送後の URL)を言って
+  失敗し、404 の紙面を黙って取り込まない(must/0022)。curl が無ければ導入手順を示して
+  失敗する。
+- curl の版は最初の呼び出しで一度だけ `curl --version` の先頭行から取り(PDF 抽出の
+  pdftotext と同型)、doc_rev.meta.fetcher に「curl <版>」の形で書く。
+- 種別は相手の名乗り(Content-Type の主要部)に従う: text/html と application/xhtml+xml は
+  html、application/pdf は pdf、text/plain は text、text/markdown は markdown。ただし中身が
+  `%PDF-` で始まれば名乗りによらず pdf(名乗りは嘘をつくが魔法数字はつかない)。名乗りが
+  無い・application/octet-stream のときだけ中身の頭で決め、その見方は写しの恒等レシピと同じ
+  1 箇所(node/src/rendition.rs の identity_content_type。
+  [docs/design/RENDITION.md](#6046eeca-1d95-4d47-87da-13f86c7710dc))である。画像などそれ以外は
+  「取り込める種別ではない」と断る(黙って素文にしない)。text/plain で配られる Markdown は
+  text として入る(名乗りが正しいと信じる)。
+- HTML は blob にする前に自足した 1 枚に書き換える(node/src/web.rs の self_contain。
+  スクリプト・外部スタイル・画像・フレーム・フォントなど外部への依存を落とし、相対リンクを
+  転送後の URL を基準に絶対にし、出所の meta を入れる)。blob になるのは書き換えた後の
+  紙面で、チャンクはそこから HTML 抽出の節の道で作る。`<html>` も DOCTYPE も無い断片は
+  書き換えの出力が `<head>` で始まり、原本の Content-Type 判定(RENDITION.md。頭が
+  `<!doctype html` か `<html` のときだけ text/html)で素文に落ちるので、その判定に問うて
+  HTML と名乗れなければ `<!DOCTYPE html>` を前置してから blob にする。PDF は PDF 抽出の節の道(blob は PDF
+  そのもの、meta.extractor に pdftotext の版)。素文と Markdown はそのまま。
+- 文書名は指定が無ければ URL から導く: ホスト(小文字)とパスと問い合わせ(? 以降)を、
+  英数字と `.` `-` 以外を `_` に潰した 1 語にする(`https://arxiv.org/abs/2401.00001` は
+  `arxiv.org_abs_2401.00001`)。スキームと断片(# 以降)は落とし、取り込み対象の拡張子
+  (.pdf/.html/.md など。判定は拡張子の表と同じ media_for_extension)は残さない。100 文字を
+  超えれば先頭 80 文字に URL の SHA-256 の先頭 8 桁を付ける。同じ URL は同じ名前になるので、
+  再取得は同じ文書名への上書き(新しい doc_rev、previous が前版。旧チャンクは孤児になり
+  gc が回収する)であり、内容が同じなら no-op である。
+- doc_rev.meta には name・media(・extractor)に加えて出所が入る: source_url(要求した
+  URL)、final_url(転送後)、fetched_at(UTC の unix 秒)、fetcher(「curl 7.81.0」)、
+  content_type(相手の名乗り。名乗らなければ鍵ごと無し)、HTML なら dropped(自足化で
+  落としたものの数。scripts・stylesheets・images・frames・fonts・handlers・others の 7 つを
+  0 でも書く)。
+- 入口は `POST /v1/collections/{collection}/fetch`(ボディ `{"url": "...", "name"?: "..."}`)
+  と CLI の `uniqnode fetch`(CLI と API の節)。serve は curl と pdftotext を待つあいだ
+  ストアのロックを持たない(取ってから、ロックを取って書く。SPEC §8.2 の同型)。誤りは
+  誰が直せるかで分ける: 400 は URL や name の誤り、415 は取り込める種別でない、502 は
+  向こうから取れない(繋がらない・期限切れ・2xx でない・上限超え)、503 は道具(curl・
+  pdftotext)が無い、500 は取れたのにこちらで処理できない。
 
 ## 注釈の取り込みと照合
 
@@ -243,6 +297,10 @@ sync サブコマンドと同じ扱い)。形の正典は node/src/main.rs の u
 - `uniqnode ingest <dir> <コレクション名> <パス> [--pdftotext <exe>]`: 文書の取り込み。
   ディレクトリは再帰(名前順)。対象の拡張子は .md / .markdown / .txt / .html / .htm / .pdf のみで、
   それ以外は取り込まず、対象外の一覧を最後に印字する(黙って捨てない)。
+- `uniqnode fetch <dir> <コレクション名> <url> [--name <名>] [--pdftotext <exe>]`: URL からの
+  取り込み(URL からの取り込みの節)。ストアを開くのは取ってからで、取れない URL では
+  ストアを作らない。1 行目は ingest と同じ形に media と final_url を足したもの、HTML なら
+  2 行目に dropped の内訳。
 - `uniqnode ingest-annotations <dir> <コレクション名> <data.md> [--manual <承認リスト>]`:
   注釈索引の取り込み(注釈の取り込みと照合の節)。
 - `uniqnode correct <dir> <コレクション名> <誤った言明ID> <新しい言明ID> <理由>`: 訂正の
@@ -250,6 +308,10 @@ sync サブコマンドと同じ扱い)。形の正典は node/src/main.rs の u
 - `PUT /v1/collections/{collection}/documents/{name}`: 文書 1 件の取り込み。本文は生バイト列
   で、種別は name の拡張子で判定し、ref 名には拡張子を残さない。応答は doc_rev の ID・
   new_objects・ref_updated。
+- `POST /v1/collections/{collection}/fetch`: URL からの取り込み(URL からの取り込みの節)。
+  ボディは `{"url": "...", "name": "..."}`(name は省略可)。応答は PUT documents と同じ
+  doc_rev・new_objects・ref_updated に final_url・name・media を足し、HTML なら dropped
+  (落としたものの数)も載る。
 - `GET /v1/objects/{id}/referrers`: 逆引き(逆引きの節)。応答は referrers(ID の列)。
 - 引用を組み立てる専用 API は無い(ref → doc_rev → chunks の添字と、既存のオブジェクト取得
   で組める)。
@@ -265,3 +327,11 @@ sync サブコマンドと同じ扱い)。形の正典は node/src/main.rs の u
   そのときは索引語が本文だけから出る。
 - 注釈索引は 1 オブジェクトで、注釈数に比例して大きくなる。100 件規模を超えて常用するなら
   分割が要る(現在は分割していない)。
+- URL からの取り込みは、serve が受けた URL をノード自身が取りに行く形なので、serve に
+  届く者はノードの居る網から見える先(内側のアドレスを含む)を取らせられる(SSRF の形)。
+  serve は 127.0.0.1 に束縛される前提で、第一版の守りは「http と https のみ・転送 10 回
+  まで・30 秒と 64 MB の上限」にとどめ、内側のアドレスの拒否はしていない。robots.txt は
+  見ない(取りに行くのは利用者が 1 枚ずつ指した URL で、這うわけではない)。
+- 同じ URL の再取得が同じ内容だったとき、fetched_at は最初にその内容を取った時刻のまま
+  残る(doc_rev も ref も動かさないため)。「いつ最後に確かめたか」は記録に無く、ログの
+  fetch の行だけが持つ。

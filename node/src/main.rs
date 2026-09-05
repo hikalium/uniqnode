@@ -96,6 +96,17 @@ fn usage() -> ! {
                                       PUT /v1/collections/{{c}}/documents/{{name}} を使う。\n\
                                       PDF の抽出は pdftotext に委譲し、--pdftotext の明示\n\
                                       指定が優先、無指定なら PATH を引く)\n\
+           fetch <dir> <collection> <url> [--name <名>] [--pdftotext <exe>]\n\
+                                      URL を取って取り込む(http/https のみ。取りに行くのは\n\
+                                      curl で、版を doc_rev.meta.fetcher に残す。転送は 10 回\n\
+                                      まで、{fetch_max_seconds} 秒・{fetch_max_bytes} バイトが\n\
+                                      上限)。取れたものが HTML なら外部への依存(スクリプト・\n\
+                                      画像・フォント・外部スタイル)を落として自足した 1 枚に\n\
+                                      してから、PDF なら pdftotext で、素文はそのまま取り込む。\n\
+                                      --name を省くと文書名は URL から導き(ホストとパスを\n\
+                                      1 語に。拡張子は残さない)、同じ URL の再取得は同じ\n\
+                                      文書名への上書きになる。serve 停止中のストア用。serve\n\
+                                      中は POST /v1/collections/{{c}}/fetch を使う\n\
            ingest-annotations <dir> <collection> <data.md> [--manual <承認リスト>]\n\
                                       注釈索引を取り込む(先に PDF を ingest しておく。\n\
                                       タイトルとページ本文の照合に一致した注釈だけが\n\
@@ -143,6 +154,8 @@ fn usage() -> ! {
          ログは標準エラーとファイルの両方に同じ行が出る。行頭は UTC の時刻と pid",
         default_reranker = uniqnode::rerank::DEFAULT_RERANKER_ID,
         default_gc_threshold = uniqnode::gc::DEFAULT_THRESHOLD,
+        fetch_max_seconds = uniqnode::fetch::DEFAULT_MAX_SECONDS,
+        fetch_max_bytes = uniqnode::fetch::DEFAULT_MAX_BYTES,
         default_listen = uniqnode::install::DEFAULT_LISTEN,
         default_viewer_listen = uniqnode::install::DEFAULT_VIEWER_LISTEN,
         default_max_bytes = uniqnode::log::DEFAULT_MAX_BYTES,
@@ -247,6 +260,7 @@ fn run_ingest(
                 media,
                 chunks: &chunks,
                 extractor: extractor_label,
+                extra_meta: &[],
             },
         )?;
         let state = if outcome.ref_updated { "updated" } else { "no-op" };
@@ -259,6 +273,60 @@ fn run_ingest(
     }
     for path in &skipped {
         println!("対象外(拡張子): {path}");
+    }
+    Ok(())
+}
+
+/// URL からの取り込みの CLI 本体(INGEST の「URL からの取り込み」節)。取る・見分ける・
+/// 名前を決めるは node/src/fetch.rs にあり、API の POST /v1/collections/{c}/fetch と同じ道を
+/// 通る(should/0135)。ストアを開くのは取ってからで、取れない URL でストアを作らない。
+fn run_fetch(
+    dir: &str,
+    collection: &str,
+    url: &str,
+    name: Option<&str>,
+    pdftotext: Option<&str>,
+) -> Result<(), StoreError> {
+    let request = uniqnode::fetch::FetchRequest {
+        url,
+        name,
+        limits: uniqnode::fetch::FetchLimits::default(),
+    };
+    // PDF だったときだけ pdftotext を引く(--pdftotext の明示指定が優先、無指定なら PATH)。
+    let mut extract_pdf = |pdf: &[u8]| {
+        let extractor =
+            uniqnode::ingest::PdfExtractor::locate(pdftotext.map(std::path::Path::new))
+                .map_err(uniqnode::fetch::FetchError::ToolMissing)?;
+        uniqnode::fetch::pdf_text_with(&extractor, pdf)
+    };
+    let document = uniqnode::fetch::fetch_document(&request, &mut extract_pdf)
+        .map_err(|error| StoreError::Invalid(error.to_string()))?;
+    if let Some(reason) = &document.outline_reason {
+        uniqnode::log_line!("uniqnode: ingest: {} の節見出し: {reason}", document.name);
+    }
+    let mut store = open(dir);
+    let outcome = uniqnode::ingest::ingest_document(&mut store, &document.input(collection))?;
+    let state = if outcome.ref_updated { "updated" } else { "no-op" };
+    println!(
+        "{collection}/{}: {state} chunks={} new_objects={} doc_rev={} media={} final_url={}",
+        document.name,
+        document.chunks.len(),
+        outcome.new_objects,
+        outcome.doc_rev_id,
+        document.media,
+        document.final_url
+    );
+    if let Some(dropped) = &document.dropped {
+        println!(
+            "dropped: scripts={} stylesheets={} images={} frames={} fonts={} handlers={} others={}",
+            dropped.scripts,
+            dropped.stylesheets,
+            dropped.images,
+            dropped.frames,
+            dropped.fonts,
+            dropped.handlers,
+            dropped.others
+        );
     }
     Ok(())
 }
@@ -809,6 +877,24 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 usage();
             }
             run_ingest(dir, collection, root, pdftotext)?;
+        }
+        "fetch" => {
+            let collection = rest.first().map(String::as_str).unwrap_or_else(|| usage());
+            let url = rest.get(1).map(String::as_str).unwrap_or_else(|| usage());
+            let mut name = None;
+            let mut pdftotext = None;
+            let mut at = 2;
+            while at < rest.len() {
+                let value = rest.get(at + 1).map(String::as_str).unwrap_or_else(|| usage());
+                match rest[at].as_str() {
+                    "--name" => name = Some(value),
+                    "--pdftotext" => pdftotext = Some(value),
+                    // 知らない引数は黙って捨てず usage で落とす。
+                    _ => usage(),
+                }
+                at += 2;
+            }
+            run_fetch(dir, collection, url, name, pdftotext)?;
         }
         "ingest-annotations" => {
             let collection = rest.first().map(String::as_str).unwrap_or_else(|| usage());

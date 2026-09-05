@@ -91,8 +91,12 @@ fn status_reason(status: u16) -> &'static str {
         405 => "Method Not Allowed",
         411 => "Length Required",
         413 => "Payload Too Large",
+        // URL からの取り込みで、取れたものが取り込める種別でないとき(node/src/fetch.rs)。
+        415 => "Unsupported Media Type",
         500 => "Internal Server Error",
         501 => "Not Implemented",
+        // URL からの取り込みで、向こうの相手から取れなかったとき(node/src/fetch.rs)。
+        502 => "Bad Gateway",
         // 設備が足りない(pdftotext や poppler が無い)ときの状態符号。導入すれば同じ
         // 要求が通るので、理由句も「今は使えない」と読めるものにする。
         503 => "Service Unavailable",

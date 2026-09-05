@@ -52,7 +52,7 @@ pub struct StoreConfig {
     /// 1レコードの上限(len フィールドの暴走値からの防御)。
     pub max_record_bytes: u32,
     /// オブジェクト合計の容量上限。None = 無制限。超える put は拒否される
-    /// (機会層の evict と pack の物理回収は後続マイルストーン。docs/plan/M1.md)。
+    /// (機会層の evict と pack の物理回収は docs/plan/RAG.md の項目 8 (uuid:4ed764d8-a570-4809-bd0c-80de0d4b5545))。
     pub capacity_bytes: Option<u64>,
 }
 

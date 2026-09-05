@@ -124,6 +124,21 @@ rsync は写し先を検証しないので、取った後に必ず `uniqnode fsc
 写し戻す先は空にしておく。中身のある data_dir へ写すと、写しに無い新しいセグメントが残って
 混ざり、どの時点の状態でもないストアになる。
 
+systemd で常駐しているノード([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2))
+を写し戻すときは、先に unit を止める。serve が錠を持っている data_dir へは書けず、timer が
+その最中に走ると壊れた写し元をそのまま写し先へ運ぶ:
+
+```
+systemctl --user stop uniqnode-backup.timer uniqnode-serve uniqnode-viewer
+mv <data_dir> <data_dir>.broken-<日付>
+uniqnode backup ~/uniqnode-backup <data_dir>     # 写し先の既定は install の --backup-dir
+uniqnode fsck <data_dir>
+systemctl --user start uniqnode-serve uniqnode-viewer uniqnode-backup.timer
+```
+
+起こした後は serve の journal に埋め込みとリランカーの行が出ること、`/v1/status` の
+node_id が壊れる前と同じであることまで見る(should/0116)。
+
 ## 写しが壊れていたら
 
 写し先の封印済みセグメントが 1 バイトでも変わると、`uniqnode fsck <backup_dir>` も次回の

@@ -98,3 +98,9 @@ fsck まで通す。何を写して何を写さないかは SPEC §5.1 の「ス
 写し、それ以外のうち鍵と設定は失うと困るので写し、作り直せる `derived/`・運用ログ `logs/`・
 作業場 `tmp/` は写さない。復元は写しをそのまま serve に渡すか逆向きに backup することで、
 手順は [docs/mop/BACKUP.md](#e026a5e7-1ece-4f4e-b6b8-ee96c62883a2) にある。
+
+据え付けは `uniqnode install <dir>` の 1 命令で、unit と drop-in を置いて起こし、serve と
+viewer 経由の `/v1/status` が同じ node_id を返すことと、backup を 1 回走らせた写し先が fsck で
+緑であることを見てから戻る。設定は編集した時点ではなく効果を見た時点で完了、という
+should/0116 をそのまま命令にした形である。手順も手で同じことをするときの命令列も
+SYSTEMD.md にある。

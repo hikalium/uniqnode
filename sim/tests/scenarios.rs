@@ -1,4 +1,4 @@
-//! SPEC.md §8(レプリカと健全性)のシナリオ検証。docs/plan/M1.md 項目1に対応する。
+//! SPEC.md §8(レプリカと健全性)のシナリオ検証。結果と限界は docs/analysis/20260815-replica-model-simulation.md (uuid:31e38823-b783-4dfe-bc7c-3cd268f5e7b4) にある。
 
 use uniqnode_sim::*;
 

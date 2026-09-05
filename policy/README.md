@@ -27,9 +27,11 @@ lamalium's agent-container architecture. Consequences of that seeding:
   and their Enforcement sections may cite lamalium tooling (`lamalium host check-docs`,
   `cargo test` self-tests in `container/src/`). Read those citations as precedents from the
   originating project: they document why the rule exists and prove it is mechanizable, not that
-  the mechanism exists in this tree. Until uniqnode grows equivalent checks, enforcement here is
-  convention + review. Mechanizing the corpus check and the docs check is planned work
-  (docs/plan/M1.md).
+  the mechanism exists in this tree. Here the corpus check (file format, retired stubs, every
+  policy reference from SPEC/docs/source resolving to a live number) and the docs check (UUID
+  anchors defined, unique and resolvable; link text naming the document it points at; no bold
+  emphasis) are mechanized in `node/tests/repo_hygiene.rs` and run with every `cargo test`. The
+  remaining policies are enforced by convention + review.
 
 ## File format
 

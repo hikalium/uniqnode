@@ -29,7 +29,7 @@ pub const SERVE_ROLE: &str = "serve";
 /// 役割ごとに別のファイルへ書く。
 pub const MCP_ROLE: &str = "mcp";
 
-/// viewer のログの役割名。ビューワも serve と同時に走る(転送する形なので錠を取らない)。
+/// viewer のログの役割名。ビューワも serve と同時に走る(転送する形なのでロックを取らない)。
 pub const VIEWER_ROLE: &str = "viewer";
 
 /// 1 世代の上限(既定)。実測(2026-08-17、25443 オブジェクトの実コーパス)では、
@@ -140,7 +140,7 @@ pub fn write_line(arguments: std::fmt::Arguments) {
     let mut destination = lock();
     let Some(opened) = destination.as_mut() else { return };
     if let Err(error) = opened.append(&line) {
-        // ここで log_line! を呼ぶと自分を呼び戻す(かつ錠を握ったままになる)ので、
+        // ここで log_line! を呼ぶと自分を呼び戻す(かつロックを握ったままになる)ので、
         // 直接標準エラーへ書く。書けなくなった事実を黙って飲まず、以後は標準エラー
         // だけに出す(毎行同じ苦情を繰り返さない。must/0022)。
         eprintln!(
@@ -159,7 +159,7 @@ fn prefix() -> String {
     format!("{} [pid {}]", clock::format_unix_time(clock::unix_now()), std::process::id())
 }
 
-/// 他のスレッドが panic した後もログは出し続ける。錠が毒されたことを理由に記録を
+/// 他のスレッドが panic した後もログは出し続ける。ロックが毒されたことを理由に記録を
 /// 止めると、panic の前後という最も読みたい部分が残らない。
 fn lock() -> MutexGuard<'static, Option<Destination>> {
     DESTINATION.lock().unwrap_or_else(|poisoned| poisoned.into_inner())

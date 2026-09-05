@@ -37,7 +37,7 @@ curl -X POST --data-binary '{"v":1,"kind":"node","contents":"hello"}' http://127
 curl http://127.0.0.1:7440/v1/status
 ```
 
-ブラウザから引くには、serve を起こしたままビューワを足す(ストアの錠を取らないので同時に
+ブラウザから引くには、serve を起こしたままビューワを足す(ストアのロックを取らないので同時に
 走る)。`http://127.0.0.1:7450` を開けば、検索・出典・全文が 1 枚の頁で辿れる:
 
 ```
@@ -63,7 +63,7 @@ node_id を返し backup の写しが fsck で緑であることを見てから�
 中身と、起動・停止・更新・二重起動の手順は
 [docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2)。
 
-バックアップは `uniqnode backup <dir> <写し先>` で取る。serve を止めずに取れ(錠を取らない)、
+バックアップは `uniqnode backup <dir> <写し先>` で取る。serve を止めずに取れ(ロックを取らない)、
 増分で(写し済みの封印済みセグメントは写さない)、写した後に写し先をストアとして開いて fsck
 まで通す。写さないのは `derived/`・`logs/`・`tmp/`(作り直せる導出データ・運用ログ・作業場)。
 毎日取るなら SYSTEMD.md の timer の unit を使う。復元は、写しをそのまま
@@ -72,7 +72,7 @@ node_id を返し backup の写しが fsck で緑であることを見てから�
 写しが壊れていたときの直し方は [docs/mop/BACKUP.md](#e026a5e7-1ece-4f4e-b6b8-ee96c62883a2)。
 
 `uniqnode gc <dir> --dry-run` で、どの ref・pin・保持表明からも辿れなくなったオブジェクト
-(孤児)が pack ごとにどれだけあり、回収すれば何バイト戻るかが分かる。何も書かない。錠を
+(孤児)が pack ごとにどれだけあり、回収すれば何バイト戻るかが分かる。何も書かない。ロックを
 取るので serve を止めて(または写しに対して)打つ。定義と出力の読み方は
 [docs/design/GC.md](#9b1ceac3-f3cf-4595-87cb-6e40ce0900e5)。回収そのものは未実装
 ([docs/plan/PACK_GC.md](#f272eeda-8664-42da-9e5c-ef354bc3f3a7))。

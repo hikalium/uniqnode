@@ -1,7 +1,7 @@
 //! ストアのバックアップ(`uniqnode backup <data_dir> <backup_dir>`)。
 //!
 //! SPEC §5.1 の規律(データは「封印後不変のセグメント」と「atomic rename の MANIFEST」
-//! だけ)を、無停止・増分のバックアップに還元したもの。錠は取らない。走っている serve の
+//! だけ)を、無停止・増分のバックアップに還元したもの。ロックは取らない。走っている serve の
 //! 隣で読むだけで足りる: 封印済みセグメントは二度と変わらず、アクティブなセグメントは
 //! 追記されるだけなので、どの瞬間の写しも「有効なレコード列 + 書き込み途中の尻尾」であり、
 //! 尻尾は CRC で切り詰められる(SPEC §5.2)。
@@ -171,7 +171,7 @@ pub fn verify_copy(destination: &Path) -> store::Result<FsckReport> {
     backup_store.fsck()
 }
 
-/// バックアップを 1 回行い、写し先を開いて fsck した結果まで返す。錠は取らない(serve が
+/// バックアップを 1 回行い、写し先を開いて fsck した結果まで返す。ロックは取らない(serve が
 /// 走っていてよい)。写し先の異常は Err ではなく報告の verification に載る(fsck 命令と
 /// 同じ扱い)。開けないほど壊れていれば Err。
 pub fn run(source: &Path, destination: &Path) -> store::Result<BackupReport> {

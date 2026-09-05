@@ -26,12 +26,12 @@ Environment=UNIQNODE_LISTEN=127.0.0.1:7440
 Environment=UNIQNODE_SERVE_OPTIONS=
 ExecStart=/usr/local/bin/uniqnode serve ${UNIQNODE_DATA_DIR} ${UNIQNODE_LISTEN} $UNIQNODE_SERVE_OPTIONS
 
-# %S/uniqnode を作る。ストアの錠・ログ(logs/)・導出データ(derived/)はすべてこの下に
+# %S/uniqnode を作る。ストアのロック・ログ(logs/)・導出データ(derived/)はすべてこの下に
 # 書かれる。
 StateDirectory=uniqnode
 StateDirectoryMode=0750
 
-# 落ちたら起こし直す。ストアの錠は抽象名前空間の unix socket なので、プロセスが死ねば
+# 落ちたら起こし直す。ストアのロックは抽象名前空間の unix socket なので、プロセスが死ねば
 # カーネルが解放し、次の起動は書き込み途中で裂かれていても fsck なしで回復する
 # (node/tests/crash.rs)。起動時に分かる誤りは再起動で直らないので、1 回で止めて理由を
 # journal に残す: 1 はアドレスが塞がっている・別プロセスがストアを開いている、2 は引数の誤り。
@@ -40,8 +40,8 @@ Restart=on-failure
 RestartSec=2s
 RestartPreventExitStatus=1 2
 
-# 閉じ込め。書けるのは StateDirectory の下だけになる。ストアの錠が unix socket なので
-# AF_UNIX を残す。PrivateNetwork= は使わない(錠はネットワーク名前空間ごとに別になり、
+# 閉じ込め。書けるのは StateDirectory の下だけになる。ストアのロックが unix socket なので
+# AF_UNIX を残す。PrivateNetwork= は使わない(ロックはネットワーク名前空間ごとに別になり、
 # 外の CLI と二重起動を検出し合えなくなる。viewer と mcp も loopback で serve に届く必要がある)。
 PrivateUsers=yes
 NoNewPrivileges=yes

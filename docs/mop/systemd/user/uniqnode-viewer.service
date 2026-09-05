@@ -13,7 +13,7 @@ Wants=uniqnode-serve.service
 
 [Service]
 Type=exec
-#   UNIQNODE_DATA_DIR        serve と同じストア。開かない(錠を取らない)が、届かないときの
+#   UNIQNODE_DATA_DIR        serve と同じストア。開かない(ロックを取らない)が、届かないときの
 #                            案内とログの置き場(<dir>/logs/viewer.log)に使う。
 #   UNIQNODE_VIEWER_LISTEN   ブラウザが開く待ち受け(README と同じ 7450)。
 #   UNIQNODE_SERVE_URL       転送先。serve の UNIQNODE_LISTEN を変えたらここも変える。
@@ -28,7 +28,7 @@ ExecStart=/usr/local/bin/uniqnode viewer ${UNIQNODE_DATA_DIR} ${UNIQNODE_VIEWER_
 StateDirectory=uniqnode
 StateDirectoryMode=0750
 
-# serve と同じ方針。viewer は錠を取らないので、起こし直しに条件はない。
+# serve と同じ方針。viewer はロックを取らないので、起こし直しに条件はない。
 Restart=on-failure
 RestartSec=2s
 RestartPreventExitStatus=1 2

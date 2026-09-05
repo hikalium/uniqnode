@@ -16,8 +16,8 @@
 //! 足りるが、小数を含む要求は解析誤り(-32700)として拒む。黙って読み飛ばさない。
 //!
 //! ツールの後ろ盾は二つの形がある(Backend)。ストアを直接開く形(Local)は起動から終了
-//! までストアの排他錠を持つので、常駐している間 CLI の ingest・embed は断られる。走って
-//! いる serve の REST へ転送する形(Forward)は錠を一切取らないので、エージェントを繋いだ
+//! までストアの排他ロックを持つので、常駐している間 CLI の ingest・embed は断られる。走って
+//! いる serve の REST へ転送する形(Forward)はロックを一切取らないので、エージェントを繋いだ
 //! まま取り込みと埋め込みを回せる。整形は一つで、どちらの形も同じ render_search /
 //! render_fetch を通る(検索の判断も整形も二重に実装しない。should/0135)。
 //!
@@ -80,15 +80,15 @@ pub const HANDSHAKE_CLIENT_ENV: &str = "UNIQNODE_MCP_HANDSHAKE_CLIENT";
 
 /// ツールの後ろ盾。ストアを直接開く形と、走っている serve の REST へ転送する形の二つ。
 ///
-/// 転送する形はストアの錠を一切取らない。これが要点である: Claude Code に登録した MCP
+/// 転送する形はストアのロックを一切取らない。これが要点である: Claude Code に登録した MCP
 /// サーバが常駐していても、同じデータディレクトリに対する ingest・embed が通る。検索の
 /// 判断(方式の既定・劣化・引用の組み立て)はどちらの形でも serve と同じ 1 箇所
 /// (node/src/api.rs の run_search)にあり、転送する形はその答えを REST の応答から
 /// 組み直すだけである(should/0135)。
 pub enum Backend {
-    /// ストアを直接開く形。起動から終了まで排他錠を持つ(serve と同じ制約)。
+    /// ストアを直接開く形。起動から終了まで排他ロックを持つ(serve と同じ制約)。
     Local(Box<ApiContext>),
-    /// 走っている serve へ転送する形。錠を取らない。
+    /// 走っている serve へ転送する形。ロックを取らない。
     Forward(ServeClient),
 }
 
@@ -119,9 +119,9 @@ impl Backend {
     /// 起動の知らせに載せる、この形の説明。
     fn description(&self) -> String {
         match self {
-            Backend::Local(_) => "ストアを直接開く形(排他錠を持つ)".to_string(),
+            Backend::Local(_) => "ストアを直接開く形(排他ロックを持つ)".to_string(),
             Backend::Forward(client) => {
-                format!("{} へ転送する形(ストアの錠を取らない)", client.url)
+                format!("{} へ転送する形(ストアのロックを取らない)", client.url)
             }
         }
     }
@@ -465,7 +465,7 @@ impl StdioServer {
 
     /// 新しいイメージへの exec。引数はそのまま渡し、ハンドシェイクの事実は環境変数で
     /// 引き継ぐ(新しいイメージは initialize を受けたことを忘れており、Claude Code は
-    /// 再送しない)。ストアの排他錠は CLOEXEC 付きの FD なので exec で解放され、新しい
+    /// 再送しない)。ストアの排他ロックは CLOEXEC 付きの FD なので exec で解放され、新しい
     /// イメージが取り直す(取り直しの隙間は acquire_lock の有界再試行が吸収する)。
     fn exec_replacement(&self, path: &Path) -> std::io::Error {
         use std::os::unix::process::CommandExt;

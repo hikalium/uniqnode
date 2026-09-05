@@ -128,9 +128,9 @@ fn expect_100_continue_is_honored() {
     assert_eq!(response.status, 201);
 }
 
-/// 錠を取れない serve は `listening on` を一度も言わずに終わる。標準出力のこの 1 行は
+/// ロックを取れない serve は `listening on` を一度も言わずに終わる。標準出力のこの 1 行は
 /// 「出たら要求を受け付ける」という起動スクリプトとの取り決めで、束縛してから開く順だと、
-/// 錠を持つ別のプロセスがいるときにこの行を出した後で exit 1 し、行を待つ側が騙される
+/// ロックを持つ別のプロセスがいるときにこの行を出した後で exit 1 し、行を待つ側が騙される
 /// (2026-09-05 に systemd の据え付けで観測。docs/mop/SYSTEMD.md の二重起動の症状)。
 #[test]
 fn a_serve_that_cannot_take_the_store_lock_never_says_listening_on() {
@@ -149,23 +149,23 @@ fn a_serve_that_cannot_take_the_store_lock_never_says_listening_on() {
     let stderr = String::from_utf8_lossy(&second.stderr);
     assert!(
         !stdout.contains("listening on"),
-        "錠を取れないのに待ち受けると言った: stdout={stdout:?} stderr={stderr}"
+        "ロックを取れないのに待ち受けると言った: stdout={stdout:?} stderr={stderr}"
     );
     assert_eq!(
         second.status.code(),
         Some(1),
-        "錠を取れない serve の終了コードは 1(unit は起こし直さない): stderr={stderr}"
+        "ロックを取れない serve の終了コードは 1(unit は起こし直さない): stderr={stderr}"
     );
     assert!(
         stderr.contains("別プロセスが開いている"),
-        "錠を取れなかった理由を言っていない: {stderr}"
+        "ロックを取れなかった理由を言っていない: {stderr}"
     );
     // 終わった後に、渡したアドレスで何も受け付けていない(束縛したまま残していない)。
     assert!(
         TcpStream::connect(&address).is_err(),
         "2 本目が終わった後も {address} で何かが受け付けている"
     );
-    // 錠を持つ 1 本目は影響を受けずに答え続ける。
+    // ロックを持つ 1 本目は影響を受けずに答え続ける。
     let status = simple(&holder.address, "GET", "/v1/status", b"");
     assert_eq!(status.status, 200, "{}", body_text(&status));
 }

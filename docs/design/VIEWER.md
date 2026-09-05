@@ -20,7 +20,7 @@ uniqnode viewer <data_dir> <host:port> [--serve-url <url>] [ログの指定]
 ```
 
 - 転送先の既定は定数 DEFAULT_SERVE_URL(http://127.0.0.1:7440)。`--serve-url` で替える。
-- 自分でストアを開かないので排他錠を取らない。serve が常駐したまま起こせるし、ビューワを
+- 自分でストアを開かないので排他ロックを取らない。serve が常駐したまま起こせるし、ビューワを
   起こしたまま ingest と embed も回せる(MCP の転送する形と同じ性質)。
 - データディレクトリは開くためではなく、届かないときに「どの serve を起こせばよいか」を
   言うためと、ログの置き場を決めるために要る。ログは既定で `<data_dir>/logs/viewer.log`

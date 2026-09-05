@@ -232,8 +232,8 @@ fn unknown_aliases_and_chunks_outside_the_view_are_refused() {
     assert_eq!(posted.status, 405, "{}", body_text(&posted));
 }
 
-/// 写しを作っているあいだ、ストアの錠を持たない(node/src/embed.rs・node/src/sync.rs と
-/// 同じ規律。外部との往復のあいだ錠を握らない)。生成は poppler との往復で、この機械の
+/// 写しを作っているあいだ、ストアのロックを持たない(node/src/embed.rs・node/src/sync.rs と
+/// 同じ規律。外部との往復のあいだロックを握らない)。生成は poppler との往復で、この機械の
 /// 実測で 0.1〜0.4 秒かかる。その間 API 全体が止まるかどうかを、実際に別の要求を投げて
 /// 観測する(should/0116: 設定ではなく観測された効果で確かめる)。
 ///
@@ -278,7 +278,7 @@ fn the_api_stays_open_while_a_rendition_is_being_made() {
     );
     // すぐ返ったのが「生成がもう終わっていたから」なら、この観測は何も言っていない。
     // 黙って緑にしない(検証したのか検証を諦めたのかが結果から区別できなくなる)。
-    assert!(still_rendering, "写しの生成({cost:?})が先に終わり、錠の観測になっていない");
+    assert!(still_rendering, "写しの生成({cost:?})が先に終わり、ロックの観測になっていない");
 }
 
 /// 写しをストアへ足しても検索の索引は作り直されない(世代が見るのは collections/ 配下の

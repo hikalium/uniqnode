@@ -532,21 +532,21 @@ fn the_forwarding_form_answers_through_serve_and_names_the_cause_when_serve_is_d
         exit.stderr
     );
     assert!(
-        exit.stderr.contains("へ転送する形(ストアの錠を取らない)"),
+        exit.stderr.contains("へ転送する形(ストアのロックを取らない)"),
         "どの形で起きたのかを起動時に言うべき: {}",
         exit.stderr
     );
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 
-/// 転送する形はストアの錠を取らない。これが改善の要点である: MCP サーバを常駐させた
+/// 転送する形はストアのロックを取らない。これが改善の要点である: MCP サーバを常駐させた
 /// まま、同じデータディレクトリに対して CLI の取り込みと埋め込みが通る(ストアを直接
 /// 開く形なら、どちらも「別プロセスが開いている」で断られる)。
 #[test]
 fn the_forwarding_form_holds_no_store_lock_so_the_cli_can_ingest_and_embed() {
     let dir = store_with("mcp-forward-lock", &["search_ja.md"]);
-    // serve は起こさない。ここで見たいのは「MCP が錠を取らないこと」だけであり、
-    // 錠を取っていればこの後の ingest が断られる。
+    // serve は起こさない。ここで見たいのは「MCP がロックを取らないこと」だけであり、
+    // ロックを取っていればこの後の ingest が断られる。
     let mcp = McpProcess::start(&dir, &["--serve-url", "http://127.0.0.1:7440"]);
     let path = assets().join("search_en.md");
     let text = dir.to_str().expect("utf-8");
@@ -564,7 +564,7 @@ fn the_forwarding_form_holds_no_store_lock_so_the_cli_can_ingest_and_embed() {
     assert!(out.contains("cache:"), "ストアを開けていない: {out} {error}");
     assert!(
         !error.contains("別プロセスが開いている"),
-        "MCP が錠を持っている: {error}"
+        "MCP がロックを持っている: {error}"
     );
 
     // 取り込んだ結果は、走っている MCP からも見える(索引は世代で作り直される)。

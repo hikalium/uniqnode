@@ -25,14 +25,14 @@ Environment=UNIQNODE_BACKUP_DIR=%h/uniqnode-backup
 ExecStart=/usr/local/bin/uniqnode backup ${UNIQNODE_DATA_DIR} ${UNIQNODE_BACKUP_DIR}
 ReadWritePaths=%h/uniqnode-backup
 
-# serve と同じストアを読む。錠は取らないので serve が走っていてよい。
+# serve と同じストアを読む。ロックは取らないので serve が走っていてよい。
 StateDirectory=uniqnode
 StateDirectoryMode=0750
 
 # 一回きりなので Restart= は無い。写せない・開けない(1)と検証の異常(3)は failed として
 # journal に残り、次の timer の刻みでまた走る。写しが壊れているときの直し方は BACKUP.md。
 
-# 閉じ込め(serve の unit と同じ行)。写し先を開いて検証するときの錠が unix socket なので
+# 閉じ込め(serve の unit と同じ行)。写し先を開いて検証するときのロックが unix socket なので
 # AF_UNIX を残す。
 PrivateUsers=yes
 NoNewPrivileges=yes

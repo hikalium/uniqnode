@@ -76,7 +76,7 @@ pub struct GcPlan {
     pub roots: usize,
     pub objects: usize,
     pub live_objects: usize,
-    /// 根を集めて閉包を辿り終えるまでの時間。回収の手順 A・C が錠を持つ長さの実測
+    /// 根を集めて閉包を辿り終えるまでの時間。回収の手順 A・C がロックを持つ長さの実測
     /// (PACK_GC のセルフレビュー 6)。
     pub live_set_elapsed: Duration,
 }

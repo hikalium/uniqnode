@@ -2,7 +2,7 @@
 //! `cargo test` で言い直せる形にしたもの。手順は BACKUP (uuid:e026a5e7-1ece-4f4e-b6b8-ee96c62883a2)。
 //!
 //! 本番の入口である `uniqnode backup` を子プロセスとして走らせ、写し先をストアとして
-//! 開いて観測する(should/0137)。写し元は serve 相当にストアを開いたまま(錠を持ったまま)
+//! 開いて観測する(should/0137)。写し元は serve 相当にストアを開いたまま(ロックを持ったまま)
 //! にしておく。
 
 mod common;
@@ -84,7 +84,7 @@ fn a_backup_taken_beside_an_open_store_opens_with_every_object_and_a_green_fsck(
         "複数の pack に分かれている前提"
     );
 
-    // 写し元は開いたまま(serve 相当。錠を持っている)。
+    // 写し元は開いたまま(serve 相当。ロックを持っている)。
     let outcome = backup(&source, &destination);
     assert_eq!(
         outcome.status, 0,
@@ -319,7 +319,7 @@ fn derived_data_logs_and_scratch_are_not_copied_and_are_named_in_the_report() {
     std::fs::remove_dir_all(&destination).expect("cleanup");
 }
 
-/// (5) 実プロセスの serve が錠を持って走っている隣で backup が通り、写しから serve が
+/// (5) 実プロセスの serve がロックを持って走っている隣で backup が通り、写しから serve が
 /// 受け付けたオブジェクトが読める。
 #[test]
 fn a_backup_runs_beside_a_serving_process_without_taking_its_lock() {
@@ -343,7 +343,7 @@ fn a_backup_runs_beside_a_serving_process_without_taking_its_lock() {
         copy.get_ref(&copy.own_ref_name("notes/live")).is_some(),
         "ref も写っている"
     );
-    // serve はまだ生きている(backup が錠を奪っていない)。
+    // serve はまだ生きている(backup がロックを奪っていない)。
     let status = common::simple(&server.address, "GET", "/v1/status", b"");
     assert_eq!(status.status, 200);
     drop(copy);

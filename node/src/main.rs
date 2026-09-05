@@ -18,13 +18,13 @@ fn usage() -> ! {
                                       だけを開き、ストアでない場所は初期化せず断る)\n\
            backup <dir> <backup_dir>  封印済みセグメント・MANIFEST・node_key・設定を\n\
                                       backup_dir へ写し(増分: 写し済みの封印済みセグメントは\n\
-                                      写さない)、写し先を開いて fsck まで通す。錠を取らない\n\
+                                      写さない)、写し先を開いて fsck まで通す。ロックを取らない\n\
                                       ので serve と同時に走れる(異常があれば非0で終了)\n\
            gc <dir> --dry-run [--threshold <割合>]\n\
                                       pack ごとに、生きているバイト数と孤児(どの ref・pin・\n\
                                       保持表明からも辿れないオブジェクト)のバイト数を数え、\n\
                                       孤児率が閾値(既定 {default_gc_threshold})を超えた封印済み\n\
-                                      pack を回収の対象と言う。何も書かない。錠を取るので\n\
+                                      pack を回収の対象と言う。何も書かない。ロックを取るので\n\
                                       serve が開いているストアには走れない。--dry-run 無しの\n\
                                       回収は未実装で、2 で終わる(docs/plan/PACK_GC.md)\n\
            pin <dir> <root> <min>     root の到達閉包に min_replicas を要求する(0 で解除)\n\
@@ -57,7 +57,7 @@ fn usage() -> ! {
                                       した相手が標準エラーを吸うので、ファイルが唯一\n\
                                       読める記録になる)。--serve-url を与えると、\n\
                                       自分でストアを開かず、走っている serve の REST へ\n\
-                                      転送する(ストアの排他錠を取らないので、常駐した\n\
+                                      転送する(ストアの排他ロックを取らないので、常駐した\n\
                                       まま ingest・embed が通る。埋め込みと順位の取り直し\n\
                                       を装備するのは転送先の serve なので、--embed・\n\
                                       --rerank とは併用しない)。無指定ならストアを直接\n\
@@ -71,7 +71,7 @@ fn usage() -> ! {
                                       RAG ビューワ(1枚のHTML)をブラウザへ出す\n\
                                       (例: 127.0.0.1:7450、:0 で自動割当)。頁が呼ぶ\n\
                                       /v1/* は走っている serve へ転送するので、自分では\n\
-                                      ストアを開かない(排他錠を取らないため、serve が\n\
+                                      ストアを開かない(排他ロックを取らないため、serve が\n\
                                       常駐したまま起こせる)。--serve-url の既定は\n\
                                       http://127.0.0.1:7440。ログは既定で\n\
                                       <dir>/logs/viewer.log にも残す(下記)\n\
@@ -315,7 +315,7 @@ fn run_ingest_annotations(
     Ok(())
 }
 
-/// ストアを開く(無ければ初期化する)。開けない理由(別のプロセスが錠を持っている、
+/// ストアを開く(無ければ初期化する)。開けない理由(別のプロセスがロックを持っている、
 /// など)はログの出口を通す: mcp がこれで落ちたとき、標準エラーは登録した相手の中で
 /// 消えるためである。この道を通るのは、状態を作ることが役目の命令(init、put・set-ref・
 /// pin・ingest・correct・sync・flood の書き込み系、serve・mcp・embed の初回起動で
@@ -1044,7 +1044,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             start_logging(dir, uniqnode::log::MCP_ROLE, &options.run.log);
             let backend = match &options.serve_url {
                 // 転送する形: 走っている serve の REST へ回す。ストアを開かない
-                // (排他錠を取らない)ので、常駐したまま ingest・embed が通る。
+                // (排他ロックを取らない)ので、常駐したまま ingest・embed が通る。
                 Some(url) => {
                     // 埋め込みも順位の取り直しも、装備するのは転送先の serve である。
                     // ここで受けても効かせる先が無いので、黙って捨てずに断る
@@ -1124,7 +1124,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             start_logging(dir, uniqnode::log::SERVE_ROLE, &options.log);
             // 順序は「ストアを開く → 装備する → 束縛する → listening on」。標準出力の
             // この 1 行は起動スクリプトとの取り決めで、待つ側は「出たら要求を受け付ける」
-            // と信じてよい。ここから束縛までの間で落ちるもの(錠を持つ別プロセス、誤った
+            // と信じてよい。ここから束縛までの間で落ちるもの(ロックを持つ別プロセス、誤った
             // URL)は、何も束縛しないうちに理由を言って終わる。束縛してから開くと、待つ側
             // は騙され、その後で exit 1 する(2026-09-05 に systemd の据え付けで観測)。
             let data_dir = std::path::PathBuf::from(dir);

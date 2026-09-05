@@ -47,7 +47,7 @@ packs/ が 360 MB、derived/ が 292 MB、reflog と設定は合わせて 200 KB
 uniqnode backup <data_dir> <backup_dir>
 ```
 
-- 錠を取らない。serve が走っているノードに対してそのまま走らせてよい。ストアを開く必要が
+- ロックを取らない。serve が走っているノードに対してそのまま走らせてよい。ストアを開く必要が
   ないのは、封印済みセグメントは不変で、未封印のものは上の理由で任意の瞬間の写しが使える
   からである。
 - 増分である。写し先に同じ大きさで在る封印済みセグメントは写さない(封印後は不変で、内容は
@@ -115,7 +115,7 @@ rsync は写し先を検証しないので、取った後に必ず `uniqnode fsc
 確かめる。
 
 1. 写しをそのまま使う。`uniqnode fsck <backup_dir>` で緑を確かめ、`uniqnode serve <backup_dir> …`
-   で起こす。錠は場所ごとなので、元の data_dir が壊れたまま残っていても衝突しない。
+   で起こす。ロックは場所ごとなので、元の data_dir が壊れたまま残っていても衝突しない。
 2. 写し戻す。空のディレクトリ(または壊れた data_dir を脇へどけた跡)を新しい data_dir にして、
    `uniqnode backup <backup_dir> <new_data_dir>` を走らせる。backup は写し元がストアなら
    どちら向きにも使えるので、写し戻しの命令は別に無い。終わったら `uniqnode fsck <new_data_dir>`。
@@ -131,7 +131,7 @@ rsync は写し先を検証しないので、取った後に必ず `uniqnode fsc
 言って 1 で終わり、何も作らない(緑が出たら、そこには既にストアがある)。
 
 systemd で常駐しているノード([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2))
-を写し戻すときは、先に unit を止める。serve が錠を持っている data_dir へは書けず、timer が
+を写し戻すときは、先に unit を止める。serve がロックを持っている data_dir へは書けず、timer が
 その最中に走ると壊れた写し元をそのまま写し先へ運ぶ:
 
 ```

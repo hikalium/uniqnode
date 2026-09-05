@@ -509,7 +509,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         return Ok(());
     }
 
-    // (5) 起こす前に錠を探る。unit は exit 1 で起こし直さない設計なので、落ちてから journal
+    // (5) 起こす前にロックを探る。unit は exit 1 で起こし直さない設計なので、落ちてから journal
     // を読ませるより先に言う。
     if store::opened_by_another_process(&options.data_dir).map_err(|e| e.to_string())? {
         let serve_state = unit_state(SERVE_UNIT)?;
@@ -743,7 +743,7 @@ mod tests {
         assert!(exec_start_with_binary("[Service]\nType=exec\n", "/x").is_err());
     }
 
-    /// 錠の探り: ストアを開いている間は「別プロセスが開いている」になり、閉じれば戻る。
+    /// ロックの探り: ストアを開いている間は「別プロセスが開いている」になり、閉じれば戻る。
     /// 無いディレクトリは誰も開けないので false。
     #[test]
     fn the_lock_probe_sees_an_open_store_and_a_closed_one() {

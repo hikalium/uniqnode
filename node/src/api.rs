@@ -1376,9 +1376,9 @@ fn handle_rendition_catalog(context: &ApiContext, chunk_id: &str) -> Response {
 
 /// GET /v1/objects/{chunk_id}/rendition/{alias}。無ければ作って足して返す。
 ///
-/// 錠の規律(node/src/embed.rs・node/src/sync.rs と同じ): 生成は poppler との往復で実測
-/// 0.4 秒かかるので、そのあいだストアの錠を持たない。三段に割ってあり(rendition.rs の
-/// prepare / render / commit)、錠を握るのは第 1 段と第 3 段だけである。
+/// ロックの規律(node/src/embed.rs・node/src/sync.rs と同じ): 生成は poppler との往復で実測
+/// 0.4 秒かかるので、そのあいだストアのロックを持たない。三段に割ってあり(rendition.rs の
+/// prepare / render / commit)、ロックを握るのは第 1 段と第 3 段だけである。
 fn handle_rendition(context: &ApiContext, chunk_id: &str, alias: &str) -> Response {
     if !c1::is_object_id(chunk_id) {
         return error_response(400, "オブジェクトIDの形式が不正");
@@ -1390,7 +1390,7 @@ fn handle_rendition(context: &ApiContext, chunk_id: &str, alias: &str) -> Respon
     };
     let options = crate::rendition::RenditionOptions::in_data_dir(&context.data_dir);
 
-    // 第 1 段(錠を持つ): チャンクから鍵を組み、既に在るなら読むだけで返す。
+    // 第 1 段(ロックを持つ): チャンクから鍵を組み、既に在るなら読むだけで返す。
     let prepared = {
         let store = context.store.lock().expect("lock");
         let subject = match rendition_subject(context, &store, chunk_id) {
@@ -1449,20 +1449,20 @@ fn handle_rendition(context: &ApiContext, chunk_id: &str, alias: &str) -> Respon
             Ok(prepared) => prepared,
             Err(e) => return rendition_error_response(e),
         }
-    }; // ここで錠を放す。
+    }; // ここでロックを放す。
 
     let work = match prepared {
         crate::rendition::Prepared::Ready(rendition) => return rendition_response(rendition),
         crate::rendition::Prepared::Work(work) => work,
     };
-    // 第 2 段(錠を持たない): poppler を回す。このあいだ他の要求はストアを使える。
+    // 第 2 段(ロックを持たない): poppler を回す。このあいだ他の要求はストアを使える。
     let started = std::time::Instant::now();
     let rendered = match crate::rendition::render(&work) {
         Ok(rendered) => rendered,
         Err(e) => return rendition_error_response(e),
     };
     let elapsed_ms = started.elapsed().as_millis();
-    // 第 3 段(錠を取り直す): ストアへ足して名前を付ける。
+    // 第 3 段(ロックを取り直す): ストアへ足して名前を付ける。
     let mut store = context.store.lock().expect("lock");
     match crate::rendition::commit(&mut store, work, rendered) {
         Ok(rendition) => {

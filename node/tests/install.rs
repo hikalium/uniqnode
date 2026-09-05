@@ -297,7 +297,7 @@ fn an_unknown_option_is_refused_with_usage() {
     assert!(outcome.stderr.contains("usage:"), "{}", outcome.stderr);
 }
 
-/// 錠の探りは別プロセス(実プロセスの serve)が開いているストアを見分ける。install が
+/// ロックの探りは別プロセス(実プロセスの serve)が開いているストアを見分ける。install が
 /// 起こす前に「別プロセスが開いている」と言うための判断。
 #[test]
 fn the_lock_probe_sees_a_store_held_by_a_serving_process() {

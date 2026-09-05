@@ -343,3 +343,53 @@ fn docs_anchors_are_defined_unique_and_resolvable() {
     }
     assert!(failures.is_empty(), "docs anchors:\n{}", failures.join("\n"));
 }
+
+// ---- 用語の裁定: lock は「ロック」(CLAUDE.md) ----
+
+/// 用語検査の対象: 追跡している散文に、ソース(node/・sim/)と systemd の unit を足す。
+fn tracked_prose_and_source() -> Vec<PathBuf> {
+    let root = repo_root();
+    let mut files = tracked_markdown();
+    for dir in ["node/src", "node/tests", "sim/src", "sim/tests", "docs/mop/systemd"] {
+        let mut stack = vec![root.join(dir)];
+        while let Some(current) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&current) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("rs" | "md" | "html" | "service" | "timer")
+                ) {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// プログラム上の lock は「ロック」と書く。U+9320 の字は利用者の裁定で使わない(CLAUDE.md の
+/// 用語の裁定)。禁じる字そのものをこのファイルに書くと自分が引っかかるので、符号位置で持つ。
+#[test]
+fn locks_are_called_rokku_not_jou() {
+    let forbidden = char::from_u32(0x9320).expect("禁じる字の符号位置");
+    let mut failures = Vec::new();
+    for path in tracked_prose_and_source() {
+        let text = std::fs::read_to_string(&path).expect("read tracked file");
+        for (index, line) in text.lines().enumerate() {
+            if line.contains(forbidden) {
+                failures.push(format!(
+                    "{}:{}: lock は「ロック」と書く(CLAUDE.md の用語の裁定): {}",
+                    display(&path),
+                    index + 1,
+                    line.trim()
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "terminology:\n{}", failures.join("\n"));
+}

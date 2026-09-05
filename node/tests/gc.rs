@@ -303,8 +303,8 @@ fn gc_without_dry_run_refuses_because_reclaiming_is_not_implemented() {
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 
-/// (4) serve が錠を持って走っているストアには、開けないと言って 1 で終わる(backup と
-/// 違い、gc は錠を取る)。serve はそのまま生きている。
+/// (4) serve がロックを持って走っているストアには、開けないと言って 1 で終わる(backup と
+/// 違い、gc はロックを取る)。serve はそのまま生きている。
 #[test]
 fn a_dry_run_against_a_store_held_by_serve_exits_1() {
     let server = common::start_server("gc-beside-serve");
@@ -314,7 +314,7 @@ fn a_dry_run_against_a_store_held_by_serve_exits_1() {
     let outcome = gc(&server.dir, &["--dry-run"]);
     assert_eq!(
         outcome.status, 1,
-        "錠を持たれたストアは 1 で終わるべき\nstdout:\n{}\nstderr:\n{}",
+        "ロックを持たれたストアは 1 で終わるべき\nstdout:\n{}\nstderr:\n{}",
         outcome.stdout, outcome.stderr
     );
     assert!(

@@ -19,16 +19,16 @@
 `uniqnode mcp <dir> --serve-url http://127.0.0.1:7440` で登録する)。backup は常駐せず、
 timer が毎日 1 回起こす一回きりの命令である。
 
-| unit | 中身 | 待ち受け(既定) | ストアの錠 |
+| unit | 中身 | 待ち受け(既定) | ストアのロック |
 |---|---|---|---|
 | uniqnode-serve.service | `uniqnode serve <dir> 127.0.0.1:7440` | 7440 | 取る |
 | uniqnode-viewer.service | `uniqnode viewer <dir> 127.0.0.1:7450 --serve-url http://127.0.0.1:7440` | 7450 | 取らない |
-| uniqnode-backup.service | `uniqnode backup <dir> <backup_dir>`(Type=oneshot) | — | 取らない(写し先の錠だけを検証の間) |
+| uniqnode-backup.service | `uniqnode backup <dir> <backup_dir>`(Type=oneshot) | — | 取らない(写し先のロックだけを検証の間) |
 | uniqnode-backup.timer | uniqnode-backup.service を毎日 0 時に起こす。Persistent=true なので逃した刻みは次の起動時に走る | — | — |
 
 viewer は serve の後に起こす(After= と Wants=)。Requires= にしないのは、serve が居なくても
 頁は出て、届かないことを 502 の本文で言うためである。serve を起こし直せばそのまま繋がる。
-backup は serve に順序を持たない。錠を取らないので serve が走っていても止まっていても同じ
+backup は serve に順序を持たない。ロックを取らないので serve が走っていても止まっていても同じ
 写しが取れる。
 
 unit は system 単位と user 単位で別のファイルにしてある。
@@ -53,7 +53,7 @@ unit ファイルは差し替えても drop-in は残る。
 
 | 変数 | unit | 既定 | 意味 |
 |---|---|---|---|
-| UNIQNODE_DATA_DIR | 両方 | %S/uniqnode | ストア。錠・logs/・derived/ はこの下 |
+| UNIQNODE_DATA_DIR | 両方 | %S/uniqnode | ストア。ロック・logs/・derived/ はこの下 |
 | UNIQNODE_LISTEN | serve | 127.0.0.1:7440 | HTTP API の待ち受け |
 | UNIQNODE_SERVE_OPTIONS | serve | 空 | 追加の引数(`--embed` など。空白で分ける) |
 | UNIQNODE_VIEWER_LISTEN | viewer | 127.0.0.1:7450 | ブラウザが開く待ち受け |
@@ -100,9 +100,9 @@ unit ファイルは差し替えても drop-in は残る。
   読むだけである。
   StateDirectoryMode=0750 なのは、node_key(DBノードの秘密鍵。自身は 0600)の入った
   ディレクトリを他の利用者に見せないため。
-- Restart=on-failure と RestartSec=2s。落ちたら 2 秒後に起こし直す。ストアの錠は
+- Restart=on-failure と RestartSec=2s。落ちたら 2 秒後に起こし直す。ストアのロックは
   データディレクトリの道から名付けた抽象名前空間の unix socket で(node/src/store.rs の
-  acquire_lock)、プロセスが死ねば kill -9 でもカーネルが解放するので、錠が残って再起動を
+  acquire_lock)、プロセスが死ねば kill -9 でもカーネルが解放するので、ロックが残って再起動を
   阻むことはない。書き込み途中で裂かれたストアは次の open が fsck なしで回復する
   (node/tests/crash.rs がそれを実プロセスで確かめている)。
 - RestartPreventExitStatus=1 2。起動時に分かる誤りは再起動で直らないので、1 回で止めて
@@ -110,9 +110,9 @@ unit ファイルは差し替えても drop-in は残る。
   2 は引数の誤りである。POST /v1/admin/shutdown による終了(0)は意図した停止なので、
   on-failure は起こし直さない(unit は inactive のまま。起こすなら `systemctl start`)。
 - 閉じ込めは書ける場所を StateDirectory= の下だけにし、/ と home を読むだけにする。
-  RestrictAddressFamilies= に AF_UNIX を残しているのは錠が unix socket だからで、
+  RestrictAddressFamilies= に AF_UNIX を残しているのはロックが unix socket だからで、
   PrivateNetwork= を使わないのは、抽象名前空間の socket がネットワーク名前空間ごとに別に
-  なり、外の CLI と unit が互いの錠を見られなくなる(二重起動を検出できなくなる)からで
+  なり、外の CLI と unit が互いのロックを見られなくなる(二重起動を検出できなくなる)からで
   ある。viewer と mcp が loopback で serve に届く必要もある。
 - pdftotext など取り込みが呼ぶ外部プロセスは PATH から引く。閉じ込めは /usr の実行を
   妨げない。
@@ -151,7 +151,7 @@ useradd で作るのはユーザー(とその主グループ)だけで、/var/li
 上の drop-in)。enable するのは backup の timer であって service ではない(service は timer が
 起こす)。
 
-serve が走っているあいだ、CLI の ingest・embed・sync はストアの錠に阻まれる。取り込みは
+serve が走っているあいだ、CLI の ingest・embed・sync はストアのロックに阻まれる。取り込みは
 REST(`PUT /v1/collections/{c}/documents/{name}`)で行い、CLI が要る作業は serve を止めて
 `sudo -u uniqnode /usr/local/bin/uniqnode ingest /var/lib/uniqnode …` のように専用ユーザー
 で行う。root で走らせると root 所有のファイルがストアに残り、次の serve が書けなくなる。
@@ -253,7 +253,7 @@ install は次を 1 手順 1 命令で行う。unit は docs/mop/systemd/user/ �
 
    ストアと写し先のディレクトリを作る(ReadWritePaths= は無い道を作らない)。
 4. `systemctl --user daemon-reload`。`--no-start` はここで止まる。
-5. ストアの錠を探り、別のプロセスが開いていれば止まる。
+5. ストアのロックを探り、別のプロセスが開いていれば止まる。
 6. `systemctl --user enable` と `systemctl --user restart` を uniqnode-serve.service、
    uniqnode-viewer.service、uniqnode-backup.timer に(restart は止まっている unit も起こす
    ので、初回と更新で同じ手順)。手でなら
@@ -294,7 +294,7 @@ journalctl --user -u uniqnode-backup.service -n 5       # copied … / backup: �
 uniqnode fsck <backup_dir>                              # unit の外からも写しが開けて緑
 ```
 
-実測(user 単位、serve が同じストアの錠を持ったまま): 1 回目は未封印の pack と node_key を
+実測(user 単位、serve が同じストアのロックを持ったまま): 1 回目は未封印の pack と node_key を
 写して `verify: objects 4 refs 0 errors 0`、serve 経由で 1 件足した後の 2 回目も同じ 2 つだけを
 写し直して緑、その間 serve は走り続けた。
 
@@ -365,17 +365,17 @@ a_serve_that_cannot_take_the_store_lock_never_says_listening_on)。
 
 | 状況 | 出る行 | 終了 |
 |---|---|---|
-| 同じストアに 2 本目(アドレスは別) | 錠の判別の 250 ms の後に `uniqnode: ストアを開けない: invalid: <dir> は別プロセスが開いている` | 1 |
+| 同じストアに 2 本目(アドレスは別) | ロックの判別の 250 ms の後に `uniqnode: ストアを開けない: invalid: <dir> は別プロセスが開いている` | 1 |
 | 同じアドレスに 2 本目(ストアは別) | ストアを開いた後に `uniqnode: serve: 127.0.0.1:7440 に束縛できない: Address already in use (os error 98)` | 1 |
 | 同じストアかつ同じアドレスに 2 本目 | 先に見るのはストアなので、上の「別プロセスが開いている」 | 1 |
 
-- 錠はデータディレクトリの正規化した道から名付けるので、unit と CLI、unit と別の unit の
+- ロックはデータディレクトリの正規化した道から名付けるので、unit と CLI、unit と別の unit の
   どの組でも互いに検出する。閉じ込めの中で走る unit と外の CLI の間でも同じである
   (実測: user 単位、PrivateUsers=yes、どちらが先でも)。
 - unit の側が 2 本目だったときは、exit 1 なので RestartPreventExitStatus= により起こし直さ
   ず、`systemctl status` が failed (Result: exit-code) を示す。先に走っていた方を止めてから
   `systemctl reset-failed uniqnode-serve` と `systemctl start uniqnode-serve`。
-- viewer は錠を取らないので、同じストアに何本でも起こせる。衝突するのはアドレスだけである。
+- viewer はロックを取らないので、同じストアに何本でも起こせる。衝突するのはアドレスだけである。
 - serve が走っている間に CLI の ingest・embed・sync を叩くと、同じ「別プロセスが開いて
   いる」で断られる。REST を使うか、serve を止めてから行う(上の「system 単位で起こす」)。
 

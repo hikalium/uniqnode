@@ -125,6 +125,17 @@ pub struct Store {
     active_pack_number: u64,
     active_pack_length: u64,
     active_reflog_number: u64,
+    /// オブジェクトの集合が変わるたびに進む番号(put で 1 つ増える、gc の回収で 1 つ増える)。
+    /// 導出データ(逆引き索引)が「作ってから集合が変わっていないか」を見る札。件数で見ると、
+    /// 回収で k 件減った後に k 件増えた集合を同じと誤認する。
+    object_generation: u64,
+    /// gc が A と C の間に置く記録: put_object が「既に在る」と答えた ID。回収の対象に
+    /// なっている孤児を、呼び手が put し直して ref を張ろうとしている(SPEC §5.3 の順序:
+    /// オブジェクト → ref)途中かもしれないので、C はこれを生きているものとして写し足す
+    /// (GC (uuid:9b1ceac3-f3cf-4595-87cb-6e40ce0900e5))。None なら記録しない。
+    gc_touched: Option<std::collections::BTreeSet<String>>,
+    /// 回収が走っている(S から D の終わりまで)。同じストアに 2 つの回収を重ねない。
+    gc_running: bool,
     /// 同一データディレクトリの二重オープン防止(プロセス終了で自動解放される
     /// Linux 抽象名前空間ソケットをロックとして使う)。
     _lock: std::os::unix::net::UnixListener,
@@ -214,7 +225,21 @@ struct RecordScan {
 }
 
 fn scan_records(path: &Path, max_record_bytes: u32) -> Result<RecordScan> {
-    let bytes = std::fs::read(path)?;
+    scan_records_from(path, max_record_bytes, 0)
+}
+
+/// ファイル内オフセット `from` から末尾までのレコードを読む。オフセットは絶対値で返す
+/// (from = 0 なら scan_records と同じ)。gc が「前回見た位置より後に追記された分」だけを
+/// 解析するのに使う。from がファイルの長さを超えていれば空。
+fn scan_records_from(path: &Path, max_record_bytes: u32, from: u64) -> Result<RecordScan> {
+    let mut file = std::fs::File::open(path)?;
+    let total = file.metadata()?.len();
+    if from >= total {
+        return Ok(RecordScan { records: Vec::new(), valid_length: total, truncated: false });
+    }
+    file.seek(SeekFrom::Start(from))?;
+    let mut bytes = Vec::with_capacity((total - from) as usize);
+    file.read_to_end(&mut bytes)?;
     let mut records = Vec::new();
     let mut position = 0usize;
     loop {
@@ -239,14 +264,107 @@ fn scan_records(path: &Path, max_record_bytes: u32) -> Result<RecordScan> {
         if crc32(payload) != expected_crc {
             break;
         }
-        records.push((payload_start as u64, payload.to_vec()));
+        records.push((from + payload_start as u64, payload.to_vec()));
         position = payload_end;
     }
     Ok(RecordScan {
         records,
-        valid_length: position as u64,
+        valid_length: from + position as u64,
         truncated: (position as u64) < bytes.len() as u64,
     })
+}
+
+/// オブジェクトのバイト列が持つ参照(SPEC §4.3: c1 値の中の `s256:` + 16 進 64 桁の
+/// 文字列)。c1 として解釈できないバイト列(生 blob)は定義上参照を持たない。閉包の探索・
+/// 逆引き索引・gc の参照表がみな同じこの 1 つを呼ぶ(should/0135)。
+pub fn references_in(bytes: &[u8]) -> Vec<String> {
+    let mut references = Vec::new();
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        if let Ok(value) = c1::parse(text) {
+            c1::collect_references(&value, &mut references);
+        }
+    }
+    references
+}
+
+/// 根から参照を辿った到達閉包。`references_of(id)` は、ローカルに在るオブジェクトなら
+/// その参照の列を Some で、無ければ None を返す。None(dangling)は結果に含めず、その先も
+/// 辿らない(開世界: 世界が忘れた参照は無害)。参照の出どころ(オブジェクトを読んで解釈
+/// するか、解析済みの表を引くか)は呼び手が決め、探索の規約はここ 1 箇所にある
+/// (should/0135)。結果は ID 昇順。
+pub fn closure_over<'a, F>(
+    roots: impl IntoIterator<Item = &'a str>,
+    mut references_of: F,
+) -> Result<std::collections::BTreeSet<String>>
+where
+    F: FnMut(&str) -> Result<Option<Vec<String>>>,
+{
+    let mut seen = std::collections::BTreeSet::new();
+    let mut present = std::collections::BTreeSet::new();
+    let mut queue: Vec<String> = roots.into_iter().map(str::to_string).collect();
+    while let Some(id) = queue.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let references = match references_of(&id)? {
+            None => continue,
+            Some(references) => references,
+        };
+        for r in references {
+            if !seen.contains(&r) {
+                queue.push(r);
+            }
+        }
+        present.insert(id);
+    }
+    Ok(present)
+}
+
+/// (オブジェクト ID, そのオブジェクトが持つ参照先の列) の列。参照表の中身。
+pub type ReferenceEntries = Vec<(String, Vec<String>)>;
+
+/// 回収の新 pack に写したオブジェクト: (ID, ペイロードのオフセット, 長さ)。
+pub type CopiedObject = (String, u64, u32);
+
+/// 1 本の pack の参照表の材料: レコードごとの (オブジェクト ID, 参照先の列) と、走査した
+/// ファイルの長さ。gc がロックの外で封印済み pack(不変)を解析するのに使う
+/// (GC (uuid:9b1ceac3-f3cf-4595-87cb-6e40ce0900e5))。
+pub(crate) struct PackReferences {
+    pub(crate) entries: ReferenceEntries,
+    pub(crate) file_length: u64,
+    /// 末尾に不完全なレコードがあったか。封印済み pack なら破損、追記中の pack なら書き込み
+    /// 途中を読んだだけ(有効な分までを返している)。
+    pub(crate) truncated: bool,
+}
+
+/// pack のレコードを全部読み、ID と参照を取る。Store を借りずにデータディレクトリの道だけで
+/// 動くので、ロックの外で呼べる。
+pub(crate) fn scan_pack_references(
+    dir: &Path,
+    max_record_bytes: u32,
+    number: u64,
+) -> Result<PackReferences> {
+    let path = pack_path(dir, number);
+    let file_length = std::fs::metadata(&path)?.len();
+    let scan = scan_records_from(&path, max_record_bytes, 0)?;
+    let entries = scan
+        .records
+        .iter()
+        .map(|(_, payload)| (c1::id_for_bytes(payload), references_in(payload)))
+        .collect();
+    Ok(PackReferences { entries, file_length, truncated: scan.truncated })
+}
+
+/// gc が tmp/ に書く新しい pack の名前の頭。開くときに tmp/ を空にするので、書きかけの
+/// 新 pack はクラッシュ後に残らない。
+pub(crate) const GC_TMP_PREFIX: &str = "gc-";
+
+/// 追記の位置(pack 番号とその中のオフセット)。gc が「ここより後に追記されたレコード」を
+/// 問うためのカーソル(Store::references_since)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WriteCursor {
+    pub pack: u64,
+    pub offset: u64,
 }
 
 /// MANIFEST の本文から (封印済み pack 番号, 封印済み reflog 番号) を読む。開くときと
@@ -359,6 +477,15 @@ impl Store {
         std::fs::create_dir_all(dir.join(REFLOG.directory))?;
         std::fs::create_dir_all(dir.join("tmp"))?;
         let lock = Self::acquire_lock(&dir)?;
+        // tmp/ は作業場で、据えられなかった書きかけ(atomic_write の途中、gc の新 pack、
+        // backup の写しかけ)しか残らない。持ち主はロックを取ったこのプロセスだけなので、
+        // 開くときに空にする。
+        for entry in std::fs::read_dir(dir.join("tmp"))? {
+            let path = entry?.path();
+            if path.is_file() {
+                std::fs::remove_file(&path)?;
+            }
+        }
 
         let secret_seed = Self::load_or_create_key(&dir)?;
         let node_id_hex = sha2::hex(&ed25519::public_key(&secret_seed));
@@ -380,6 +507,9 @@ impl Store {
             active_pack_number: 1,
             active_pack_length: 0,
             active_reflog_number: 1,
+            object_generation: 0,
+            gc_touched: None,
+            gc_running: false,
             _lock: lock,
         };
         store.recover()?;
@@ -481,11 +611,40 @@ impl Store {
 
     /// 起動時回復。封印済みセグメントは完全でなければならず(破損は Corruption)、
     /// 未封印(アクティブ)セグメントは最後の1つに限り torn tail を切り詰めてよい。
+    ///
+    /// MANIFEST が在るとき、MANIFEST に無く最後でもない pack は、回収(gc)が MANIFEST を
+    /// 書き換えた後・旧 pack を消す前に落ちた残骸である(封印済みの一覧は MANIFEST に完全に
+    /// 書かれているので、それ以外の道でこの形は生じない)。走査せず、名を出して削除する。
+    /// MANIFEST が無い(初回封印前か、失った)ストアでは全部が未封印に見えるので、この規則は
+    /// 使わず、従来どおり走査する(GC (uuid:9b1ceac3-f3cf-4595-87cb-6e40ce0900e5))。
     fn recover(&mut self) -> Result<()> {
         let dir = self.config.data_dir.clone();
+        let manifest_present = dir.join(MANIFEST_NAME).exists();
 
         // pack の走査(オブジェクト索引の再構築 = 導出データ、I4)。
-        let pack_numbers = PACK.numbers(&dir)?;
+        let mut pack_numbers = PACK.numbers(&dir)?;
+        if manifest_present {
+            // 追記中の pack は封印済みのどれよりも大きい番号を持つ(番号は単調に進む)。
+            // 最後であっても封印済みの最大より小さい番号なら、追記中ではなく残骸である
+            // (回収が新 pack を作らずに旧 pack を MANIFEST から外した直後に落ちた形)。
+            let last = pack_numbers.last().copied();
+            let max_sealed = self.sealed_packs.iter().max().copied().unwrap_or(0);
+            let mut kept = Vec::with_capacity(pack_numbers.len());
+            for number in pack_numbers {
+                let is_active_candidate = Some(number) == last && number > max_sealed;
+                if !self.sealed_packs.contains(&number) && !is_active_candidate {
+                    let path = pack_path(&dir, number);
+                    crate::log_line!(
+                        "uniqnode: store: {} は MANIFEST に無く最後でもない(回収済みの残骸)ので削除する",
+                        path.display()
+                    );
+                    std::fs::remove_file(&path)?;
+                } else {
+                    kept.push(number);
+                }
+            }
+            pack_numbers = kept;
+        }
         for (position, number) in pack_numbers.iter().enumerate() {
             let sealed = self.sealed_packs.contains(number);
             let is_last = position == pack_numbers.len() - 1;
@@ -502,6 +661,7 @@ impl Store {
                 file.set_len(scan.valid_length)?;
                 file.sync_all()?;
             }
+            let mut added = 0usize;
             for (offset, payload) in &scan.records {
                 let id = c1::id_for_bytes(payload);
                 // 重複追記(クラッシュ再送)は最初の1つだけ索引と容量に数える。
@@ -515,11 +675,28 @@ impl Store {
                             payload_length: payload.len() as u32,
                         },
                     );
+                    added += 1;
                 }
             }
             if !sealed && is_last {
-                self.active_pack_number = *number;
-                self.active_pack_length = std::fs::metadata(&path)?.len();
+                // 最後の未封印 pack のレコードが 1 件以上あって全部が前の pack の重複なら、
+                // 回収が新 pack を packs/ へ据えた後・MANIFEST を書く前に落ちた形である
+                // (put_object はべき等で、通常の追記は重複を作らない)。中身は全部前の pack
+                // に在るので、消しても失うものは無い。残せば、以後の追記がその後ろに続いて
+                // 重複の分が二度と回収されない。
+                if manifest_present && !scan.records.is_empty() && added == 0 {
+                    crate::log_line!(
+                        "uniqnode: store: {} は MANIFEST に無く中身が全部前の pack の重複(回収が \
+                         MANIFEST を書く前に落ちた新 pack)なので削除する",
+                        path.display()
+                    );
+                    std::fs::remove_file(&path)?;
+                    self.active_pack_number = *number;
+                    self.active_pack_length = 0;
+                } else {
+                    self.active_pack_number = *number;
+                    self.active_pack_length = std::fs::metadata(&path)?.len();
+                }
             }
         }
         if let Some(max) = pack_numbers.last() {
@@ -528,6 +705,7 @@ impl Store {
                 self.active_pack_length = 0;
             }
         }
+        self.object_generation = self.object_index.len() as u64;
 
         // reflog の再生。
         let reflog_numbers = REFLOG.numbers(&dir)?;
@@ -717,6 +895,9 @@ impl Store {
         }
         let id = c1::id_for_bytes(bytes);
         if self.object_index.contains_key(&id) {
+            if let Some(touched) = &mut self.gc_touched {
+                touched.insert(id.clone());
+            }
             return Ok((id, false));
         }
         if let Some(capacity) = self.config.capacity_bytes {
@@ -744,6 +925,7 @@ impl Store {
             },
         );
         self.used_bytes += bytes.len() as u64;
+        self.object_generation += 1;
         Ok((id, true))
     }
 
@@ -753,6 +935,190 @@ impl Store {
         self.active_pack_number += 1;
         self.active_pack_length = 0;
         Ok(())
+    }
+
+    // ---- 回収(gc)がロックの中で呼ぶ口 ----
+    // 手順の全体は node/src/gc.rs と GC (uuid:9b1ceac3-f3cf-4595-87cb-6e40ce0900e5)。
+    // ここにあるのは、Store の内部(索引・MANIFEST・アクティブ pack)に触れる相だけである。
+
+    /// データディレクトリ。gc がロックの外で封印済み pack を読むために持ち出す。
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.config.data_dir
+    }
+
+    pub(crate) fn max_record_bytes(&self) -> u32 {
+        self.config.max_record_bytes
+    }
+
+    /// 回収の始まり(S)で呼ぶ。既に走っていれば false(2 つ目は始めない: 1 つ目が対象を消した
+    /// 後の pack を読みに行くことになる)。
+    pub fn gc_try_begin(&mut self) -> bool {
+        if self.gc_running {
+            return false;
+        }
+        self.gc_running = true;
+        true
+    }
+
+    /// 回収の終わり(成功でも失敗でも)で呼ぶ。
+    pub fn gc_end(&mut self) {
+        self.gc_running = false;
+        self.gc_touched = None;
+    }
+
+    /// 追記の現在位置。
+    pub fn write_cursor(&self) -> WriteCursor {
+        WriteCursor { pack: self.active_pack_number, offset: self.active_pack_length }
+    }
+
+    /// 手順 S: 追記中の pack を封印して MANIFEST に載せる。封印した番号を返す。空(1 件も
+    /// 追記されていない)なら封印せず None(空の pack を封印すると次回の回収の対象に
+    /// なるだけで、意味が無い)。
+    pub fn seal_active_pack_for_gc(&mut self) -> Result<Option<u64>> {
+        if self.active_pack_length == 0 {
+            return Ok(None);
+        }
+        let number = self.active_pack_number;
+        self.seal_active_pack()?;
+        Ok(Some(number))
+    }
+
+    /// カーソルより後に追記されたレコードの (ID, 参照の列) と、新しいカーソル。カーソルの
+    /// pack のオフセット以後と、それより大きい番号の pack(その間に封印が起きていれば
+    /// 複数)の全部。ロックの中で呼ぶので、追記中の pack は末尾まで完全である(不完全なら
+    /// 破損)。
+    pub fn references_since(
+        &self,
+        cursor: WriteCursor,
+    ) -> Result<(ReferenceEntries, WriteCursor)> {
+        let mut entries = Vec::new();
+        let numbers = self
+            .sealed_packs
+            .iter()
+            .copied()
+            .chain(std::iter::once(self.active_pack_number))
+            .filter(|number| *number >= cursor.pack);
+        for number in numbers {
+            let path = pack_path(&self.config.data_dir, number);
+            if !path.exists() {
+                continue; // 追記中の pack は最初の追記までファイルが無い
+            }
+            let from = if number == cursor.pack { cursor.offset } else { 0 };
+            let scan = scan_records_from(&path, self.config.max_record_bytes, from)?;
+            if scan.truncated {
+                return Err(StoreError::Corruption(format!(
+                    "pack {number} の末尾が不完全(ロックの中で見えてはならない)"
+                )));
+            }
+            for (_, payload) in &scan.records {
+                entries.push((c1::id_for_bytes(payload), references_in(payload)));
+            }
+        }
+        Ok((entries, self.write_cursor()))
+    }
+
+    /// 手順 A の終わりで呼ぶ: 以後 put_object が「既に在る」と答えた ID を記録し始める。
+    pub fn gc_begin_touch_log(&mut self) {
+        self.gc_touched = Some(std::collections::BTreeSet::new());
+    }
+
+    /// 手順 C で呼ぶ: 記録を取り出して止める。
+    pub fn gc_take_touch_log(&mut self) -> std::collections::BTreeSet<String> {
+        self.gc_touched.take().unwrap_or_default()
+    }
+
+    /// 手順 C の差し替え。`targets` は MANIFEST から外す封印済み pack、`new_pack` は tmp/ に
+    /// 書いて fsync 済みの新しい pack と、そこに写したオブジェクトの (ID, ペイロードの
+    /// オフセット, 長さ)。写したものが 1 件も無ければ None(新しい pack は作らない)。
+    ///
+    /// 順序は回復の仮定「封印済みでない最後の 1 本がアクティブ」を守るためにある:
+    /// 1. アクティブを封印し MANIFEST を書く(空なら封印せず、その番号を新 pack に譲る)。
+    ///    先に据えると、追記中の pack が最後でなくなり、torn tail が破損に見える。
+    /// 2. 新 pack を次の番号で packs/ へ rename(参照される前に fsync 済み。SPEC §5.2)。
+    /// 3. MANIFEST を書く(対象を外し、新 pack を足す)。
+    /// 4. 索引を新しい位置に差し替え、対象に残った孤児を索引と used_bytes から外す。
+    /// 5. 新しいアクティブの番号を新 pack の次にする。
+    ///
+    /// 各点で落ちたときの回復は recover と GC.md の表。
+    pub(crate) fn gc_commit(
+        &mut self,
+        targets: &[u64],
+        new_pack: Option<(&Path, &[CopiedObject])>,
+    ) -> Result<GcCommit> {
+        for target in targets {
+            if !self.sealed_packs.contains(target) {
+                return Err(StoreError::Invalid(format!(
+                    "pack {target} は封印済みでないので回収できない"
+                )));
+            }
+        }
+        // C-1
+        let sealed_active = self.seal_active_pack_for_gc()?;
+        crate::gc::crash_point(crate::gc::CRASH_AFTER_C1);
+        // C-2
+        let new_number = match new_pack {
+            Some((tmp_path, _)) => {
+                let number = self.active_pack_number;
+                let target = pack_path(&self.config.data_dir, number);
+                std::fs::rename(tmp_path, &target)?;
+                std::fs::File::open(target.parent().expect("packs/ がある"))?.sync_all()?;
+                crate::gc::crash_point(crate::gc::CRASH_AFTER_C2);
+                Some(number)
+            }
+            None => None,
+        };
+        // C-3
+        self.sealed_packs.retain(|number| !targets.contains(number));
+        if let Some(number) = new_number {
+            self.sealed_packs.push(number);
+            self.sealed_packs.sort_unstable();
+        }
+        self.write_manifest()?;
+        crate::gc::crash_point(crate::gc::CRASH_AFTER_C3);
+        // C-4
+        let copied: BTreeMap<&str, (u64, u32)> = new_pack
+            .map(|(_, entries)| {
+                entries
+                    .iter()
+                    .map(|(id, offset, length)| (id.as_str(), (*offset, *length)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let in_targets: Vec<String> = self
+            .object_index
+            .iter()
+            .filter(|(_, location)| targets.contains(&location.pack_number))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut reclaimed_bytes = 0u64;
+        let mut removed_objects = 0usize;
+        for id in in_targets {
+            match (copied.get(id.as_str()), new_number) {
+                (Some((offset, length)), Some(number)) => {
+                    self.object_index.insert(
+                        id,
+                        ObjectLocation {
+                            pack_number: number,
+                            payload_offset: *offset,
+                            payload_length: *length,
+                        },
+                    );
+                }
+                _ => {
+                    let location = self.object_index.remove(&id).expect("索引にある");
+                    self.used_bytes -= location.payload_length as u64;
+                    reclaimed_bytes += location.payload_length as u64;
+                    removed_objects += 1;
+                }
+            }
+        }
+        self.object_generation += 1;
+        // C-5
+        if let Some(number) = new_number {
+            self.active_pack_number = number + 1;
+            self.active_pack_length = 0;
+        }
+        Ok(GcCommit { sealed_active, new_pack: new_number, reclaimed_bytes, removed_objects })
     }
 
     /// 自分の名前空間の ref を更新する。target=None が tombstone。
@@ -941,6 +1307,13 @@ impl Store {
         self.object_index.len()
     }
 
+    /// オブジェクトの集合の世代。put で 1 件増えるたび、gc の回収で減るたびに進む。導出
+    /// データ(逆引き索引)が最新かを見る札で、件数の一致より強い(回収で k 件減った後に
+    /// k 件増えた集合を同じと言わない)。
+    pub fn object_generation(&self) -> u64 {
+        self.object_generation
+    }
+
     /// 全オブジェクトの ID(昇順)。逆引き索引の構築(ReferrerIndex::build)が使う。
     pub fn object_ids(&self) -> impl Iterator<Item = &String> {
         self.object_index.keys()
@@ -1044,31 +1417,9 @@ impl Store {
         &self,
         roots: impl IntoIterator<Item = &'a str>,
     ) -> Result<std::collections::BTreeSet<String>> {
-        let mut seen = std::collections::BTreeSet::new();
-        let mut present = std::collections::BTreeSet::new();
-        let mut queue: Vec<String> = roots.into_iter().map(str::to_string).collect();
-        while let Some(id) = queue.pop() {
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            let bytes = match self.get_object(&id)? {
-                None => continue, // dangling: 世界が忘れた参照。結果に含めない
-                Some(b) => b,
-            };
-            if let Ok(text) = std::str::from_utf8(&bytes) {
-                if let Ok(value) = c1::parse(text) {
-                    let mut references = Vec::new();
-                    c1::collect_references(&value, &mut references);
-                    for r in references {
-                        if !seen.contains(&r) {
-                            queue.push(r);
-                        }
-                    }
-                }
-            }
-            present.insert(id);
-        }
-        Ok(present)
+        closure_over(roots, |id| {
+            Ok(self.get_object(id)?.map(|bytes| references_in(&bytes)))
+        })
     }
 
     // ---- 検証 ----
@@ -1077,6 +1428,16 @@ impl Store {
     /// 「内容が正しいか」まで機械的に検証できる(SPEC §5.5)。
     pub fn fsck(&self) -> Result<FsckReport> {
         let mut report = FsckReport::default();
+        // MANIFEST に無く最後でもない pack。MANIFEST が在れば開くときに残骸として削除して
+        // いるので、ここに出るのは MANIFEST の無い(失った)ストアの場合だけである。エラー
+        // ではなく事実として報告する(封印されていたのか追記中だったのかは、もう分からない)。
+        let pack_numbers = PACK.numbers(&self.config.data_dir)?;
+        let last = pack_numbers.last().copied();
+        report.unlisted_packs = pack_numbers
+            .iter()
+            .copied()
+            .filter(|number| !self.sealed_packs.contains(number) && Some(*number) != last)
+            .collect();
         // 索引の全エントリについて、実データを読み直してハッシュを照合する。
         for (id, location) in &self.object_index {
             report.objects_checked += 1;
@@ -1118,7 +1479,21 @@ pub struct FsckReport {
     pub objects_checked: usize,
     pub refs_checked: usize,
     pub foreign_targets_absent: usize,
+    /// MANIFEST に無く最後でもない pack の番号。事実であってエラーではない(fsck の説明)。
+    pub unlisted_packs: Vec<u64>,
     pub errors: Vec<String>,
+}
+
+/// gc_commit の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GcCommit {
+    /// C-1 で封印したアクティブ pack の番号(空で封印しなかったなら None)。
+    pub sealed_active: Option<u64>,
+    /// packs/ に据えた新しい pack の番号(写すものが無く作らなかったなら None)。
+    pub new_pack: Option<u64>,
+    /// 索引と used_bytes から外した孤児のバイト数。
+    pub reclaimed_bytes: u64,
+    pub removed_objects: usize,
 }
 
 /// 逆引き索引: あるオブジェクト ID を参照している既知オブジェクトの一覧。逆向きの知識は
@@ -1129,9 +1504,9 @@ pub struct FsckReport {
 /// 見る唯一の共有経路であり、そこに全件パースを足すと壊れたオブジェクト 1 個でストアが
 /// 開かなくなる。INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の「逆引き」節)。
 pub struct ReferrerIndex {
-    /// 構築時点の object_count。オブジェクトは追記専用で消えないため、これが現在値と
-    /// 一致する限り索引は最新(世代番号による整合)。
-    generation: usize,
+    /// 構築時点の Store::object_generation。オブジェクトの集合が変わる(put で増える、gc の
+    /// 回収で減る)たびに進む番号なので、これが現在値と一致する限り索引は最新。
+    generation: u64,
     /// 参照先 ID → 参照している既知オブジェクトの ID 列(昇順)。
     map: BTreeMap<String, Vec<String>>,
 }
@@ -1141,14 +1516,11 @@ impl ReferrerIndex {
     /// (生 blob 等)は参照ゼロとして飛ばす(参照の規約 SPEC §4.3 は c1 値の中の
     /// s256: 文字列だけを参照と見なすため、パースできない内容は定義上参照を持たない)。
     pub fn build(store: &Store) -> Result<ReferrerIndex> {
-        let generation = store.object_count();
+        let generation = store.object_generation();
         let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for id in store.object_ids() {
             let Some(bytes) = store.get_object(id)? else { continue };
-            let Ok(text) = std::str::from_utf8(&bytes) else { continue };
-            let Ok(value) = c1::parse(text) else { continue };
-            let mut references = Vec::new();
-            c1::collect_references(&value, &mut references);
+            let mut references = references_in(&bytes);
             references.sort();
             references.dedup();
             for target in references {
@@ -1159,10 +1531,10 @@ impl ReferrerIndex {
         Ok(ReferrerIndex { generation, map })
     }
 
-    /// この索引が store の現在のオブジェクト集合について最新か。オブジェクトは追記専用
-    /// なので object_count の一致が「構築後に書き込みが無い」ことと同値。
+    /// この索引が store の現在のオブジェクト集合について最新か(構築後に put も回収も
+    /// 無い)。
     pub fn is_current(&self, store: &Store) -> bool {
-        self.generation == store.object_count()
+        self.generation == store.object_generation()
     }
 
     /// id を参照している既知オブジェクトの一覧(昇順)。知らない ID は空を返す

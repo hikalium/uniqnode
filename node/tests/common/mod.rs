@@ -162,6 +162,12 @@ pub fn start_server_capturing_stderr_with_env(
     start_server_at_with(unique_dir(name), envs, args, true)
 }
 
+/// 既存のディレクトリに対して環境変数を差し替えて起動する(gc のテスト用の口を開けて、
+/// 孤児を仕込んだストアを使い回す用)。
+pub fn start_server_at_with_env(dir: PathBuf, envs: &[(&str, &str)]) -> Server {
+    start_server_at_with(dir, envs, &[], false)
+}
+
 /// serve に追加の引数を与えて起動する(--embed など)。
 pub fn start_server_with_args(name: &str, args: &[&str]) -> Server {
     start_server_at_with(unique_dir(name), &[], args, false)

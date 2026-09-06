@@ -98,8 +98,8 @@ agentd(ハーネス)─HTTP─▶ 10.100.0.1:11440 ─server-proxy─wg1─▶ 1
   うち `GET /v1/collections` の口そのものと、search の `full` はこの計画の下の作業で足す。
 - 第 2 段の許可表(着地済み。同じ文書の「書く口」): `--agent-writable <c>`(複数可)で
   許したコレクションだけ `PUT /v1/collections/{c}/documents/{name}?meta.agent=<id>&meta.task=<id>`
-  を通す。本番の集合は lamalium-notes の 1 つ(lamalium 側の書く先は共有 1 つ。操作者の裁定
-  2026-09-05)。lamalium 側は capability `uniqnode:vega:rw` を持つ task にだけ書くツールを載せる。
+  を通す。本番の集合は lamalium-notes の 1 つ(lamalium 側の書く先は共有 1 つで、名は
+  lamalium-notes。操作者の裁定 2026-09-05 と 2026-09-06)。lamalium 側は capability `uniqnode:vega:rw` を持つ task にだけ書くツールを載せる。
 - 読めるコレクションの許可表(`--agent-collections` のようなもの)は第 1 段では持たない。
   capability の付与 = 全コレクションが読める、である。web コレクションは第三者の頁を含むので、
   要るなら第 2 段で足す(末尾の「判断が要ること」)。

@@ -167,8 +167,8 @@ sudo ~/.local/bin/uniqnode install /work2/llm_playground_host_dir/uniqnode-store
 ```
 
 (本番の実物。ストアは /work2 の下、読み口は wg1 のアドレス 10.10.128.1:7441、読み口から
-書けるのはコレクション lamalium-notes の 1 つ(lamalium 側の書く先は共有 1 つ。操作者の裁定
-2026-09-05)、wg1 の unit は wg-quick@wg1.service。既に user 単位で常駐しているなら、先に下の
+書けるのはコレクション lamalium-notes の 1 つ(lamalium 側の書く先は共有 1 つで、名は
+lamalium-notes。操作者の裁定 2026-09-05 と 2026-09-06)、wg1 の unit は wg-quick@wg1.service。既に user 単位で常駐しているなら、先に下の
 「user 単位から移る」。)
 
 user 単位と違うのは、unit の中身(docs/mop/systemd/system/。User=/Group= を持ち、閉じ込めは

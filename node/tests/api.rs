@@ -249,3 +249,54 @@ fn collections_are_listed_with_their_document_counts() {
         "{\"collections\":[{\"documents\":1,\"name\":\"notes\"},{\"documents\":1,\"name\":\"specs\"}]}"
     );
 }
+
+/// PUT の query `?meta.<key>=<value>` は主の口でも同じに通る(判断は api.rs の put_document
+/// と parse_meta_query の 1 箇所で、読み口だけの機能ではない)。写った meta は doc_rev で
+/// 読め、name・media は取り込みが決めたまま。形が違う query は 400 で理由を言い、ストアには
+/// 何も入らない。`?` だけの空の query は meta 無しと同じ。
+/// should/0137: handle の parse_meta_query を `Ok(Vec::new())` に置き換えると meta の全文一致と
+/// 400 の段が落ちる。
+#[test]
+fn the_meta_query_lands_in_the_doc_rev_through_the_main_door_too() {
+    let server = start_server("api-put-meta");
+    let put = |path: &str| simple(&server.address, "PUT", path, b"# m\n\nmeta document\n");
+
+    let written = put("/v1/collections/notes/documents/m.md?meta.agent=agent-7&meta.task=t%201");
+    assert_eq!(written.status, 200, "{}", body_text(&written));
+    let doc_rev = json_text_field(&body_text(&written), "doc_rev").expect("doc_rev");
+    let object = simple(&server.address, "GET", &format!("/v1/objects/{doc_rev}"), b"");
+    let text = body_text(&object);
+    assert!(
+        text.contains("\"meta\":{\"agent\":\"agent-7\",\"media\":\"markdown\",\"name\":\"m\",\"task\":\"t 1\"}"),
+        "{text}"
+    );
+
+    // 同じ本文の再 PUT は meta が違っても no-op(同一内容の判定は source と chunks 列で、
+    // meta は見ない。URL からの取り込みの fetched_at と同じ扱い)。doc_rev も meta も最初の
+    // まま。
+    let again = put("/v1/collections/notes/documents/m.md?meta.agent=agent-8");
+    assert_eq!(again.status, 200, "{}", body_text(&again));
+    assert_eq!(json_text_field(&body_text(&again), "doc_rev").expect("doc_rev"), doc_rev);
+    assert!(body_text(&again).contains("\"ref_updated\":false"), "{}", body_text(&again));
+    // `?` だけの空の query は meta 無しと同じ。
+    let empty = simple(
+        &server.address,
+        "PUT",
+        "/v1/collections/notes/documents/n.md?",
+        b"# n\n\nsecond document\n",
+    );
+    assert_eq!(empty.status, 200, "{}", body_text(&empty));
+    let n_rev = json_text_field(&body_text(&empty), "doc_rev").expect("doc_rev");
+    let n_text = body_text(&simple(&server.address, "GET", &format!("/v1/objects/{n_rev}"), b""));
+    assert!(n_text.contains("\"meta\":{\"media\":\"markdown\",\"name\":\"n\"}"), "{n_text}");
+
+    let refused = put("/v1/collections/notes/documents/o.md?meta.agent=a&meta.agent=b");
+    assert_eq!(refused.status, 400, "{}", body_text(&refused));
+    assert_eq!(body_text(&refused), "{\"error\":\"meta.agent が 2 度ある\"}");
+    let collections = simple(&server.address, "GET", "/v1/collections", b"");
+    assert_eq!(
+        body_text(&collections),
+        "{\"collections\":[{\"documents\":2,\"name\":\"notes\"}]}",
+        "断った PUT は入らない"
+    );
+}

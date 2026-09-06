@@ -487,6 +487,23 @@ fn after_and_user_are_system_only_and_the_agent_listen_is_checked() {
         same_as_main.stderr
     );
     assert!(!unit_dir.exists(), "断るときは unit を置かない");
+    // 書く口は読み口があるときだけ(should/0137: normalize の agent_writable の検査を消すと
+    // ここが「unit が置かれた」で赤になる)。名前の形も検める。
+    let writable_alone = base(&["--agent-writable", "notes"]);
+    assert_eq!(writable_alone.status, 1, "{}\n{}", writable_alone.stdout, writable_alone.stderr);
+    assert!(
+        writable_alone.stderr.contains("--agent-writable notes は --listen-agent があるときだけ"),
+        "{}",
+        writable_alone.stderr
+    );
+    let bad_name = base(&["--listen-agent", "127.0.0.1:7441", "--agent-writable", "a b"]);
+    assert_eq!(bad_name.status, 1, "{}\n{}", bad_name.stdout, bad_name.stderr);
+    assert!(
+        bad_name.stderr.contains("--agent-writable はコレクション名(空でなく / と空白を含まない 1 語): \"a b\""),
+        "{}",
+        bad_name.stderr
+    );
+    assert!(!unit_dir.exists(), "断るときは unit を置かない");
     // 移行と firewall の指定も system 単位だけ(should/0137: normalize の 2 つの検査を消すと
     // ここが「unit が置かれた」で赤になる)。
     let take_over = base(&["--take-over-user-units"]);
@@ -639,6 +656,72 @@ fn a_system_drop_in_names_the_user_cancels_the_state_directory_and_waits_for_the
     assert!(!user_serve.contains("User="), "{user_serve}");
     assert!(!user_serve.contains("StateDirectory="), "{user_serve}");
     assert!(!user_serve.contains("ProtectHome"), "{user_serve}");
+}
+
+/// 書く口(`--agent-writable`)の drop-in: 集合は空白で分けた 1 本の環境変数
+/// UNIQNODE_AGENT_WRITABLE に写り、ExecStart= の末尾には `--listen-agent ${UNIQNODE_AGENT_LISTEN}`
+/// の後に `--agent-writable <c>` が集合の数だけ値のまま並ぶ(環境変数の展開に頼らない)。
+/// viewer と backup には出ない。読み口が無ければ normalize が断る。
+/// should/0137: drop_ins の agent_writable の分岐を消すと ExecStart= の全文一致が、Environment=
+/// の行だけ消すと 1 つ目の assert が赤になる。
+#[test]
+fn the_writable_collections_are_written_to_the_drop_in_as_values_not_expansions() {
+    use uniqnode::install::{drop_ins, normalize, SYSTEMD_DEFAULT_PATH};
+    let mut options = system_options();
+    options.agent_writable = vec!["lamalium-notes".to_string(), "scratch".to_string()];
+    let rendered = drop_ins(&options, SYSTEMD_DEFAULT_PATH).expect("描ける");
+    let of = |unit: &str| -> String {
+        rendered
+            .iter()
+            .find(|(name, _)| *name == unit)
+            .map(|(_, text)| text.clone())
+            .expect("3 つの service の 1 つ")
+    };
+    let serve = of("uniqnode-serve.service");
+    assert!(
+        serve.contains(
+            "\nEnvironment=UNIQNODE_AGENT_LISTEN=10.10.128.1:7441\n\
+             Environment=\"UNIQNODE_AGENT_WRITABLE=lamalium-notes scratch\"\n"
+        ),
+        "{serve}"
+    );
+    assert!(
+        serve.ends_with(
+            "ExecStart=\nExecStart=/home/op/.local/bin/uniqnode serve ${UNIQNODE_DATA_DIR} \
+             ${UNIQNODE_LISTEN} $UNIQNODE_SERVE_OPTIONS --listen-agent ${UNIQNODE_AGENT_LISTEN} \
+             --agent-writable lamalium-notes --agent-writable scratch\n"
+        ),
+        "{serve}"
+    );
+    for unit in ["uniqnode-viewer.service", "uniqnode-backup.service"] {
+        let text = of(unit);
+        assert!(!text.contains("UNIQNODE_AGENT_WRITABLE"), "{unit}:\n{text}");
+        assert!(!text.contains("--agent-writable"), "{unit}:\n{text}");
+    }
+    // 1 つだけなら環境変数も引用符なしの 1 語。
+    options.agent_writable = vec!["lamalium-notes".to_string()];
+    let one = drop_ins(&options, SYSTEMD_DEFAULT_PATH).expect("描ける")[0].1.clone();
+    assert!(one.contains("\nEnvironment=UNIQNODE_AGENT_WRITABLE=lamalium-notes\n"), "{one}");
+    assert!(one.ends_with("${UNIQNODE_AGENT_LISTEN} --agent-writable lamalium-notes\n"), "{one}");
+
+    // 読み口が無ければ書く口は受け付けない(unit を描く前に断る)。
+    let mut without_door = system_options();
+    without_door.agent_listen = None;
+    without_door.after.clear();
+    without_door.agent_writable = vec!["lamalium-notes".to_string()];
+    let refused = match normalize(without_door) {
+        Ok(_) => panic!("読み口が無いのに書く口の指定が通った"),
+        Err(message) => message,
+    };
+    assert_eq!(
+        refused,
+        "--agent-writable lamalium-notes は --listen-agent があるときだけ受け付ける(書く許可は\
+         読み口に掛かるもので、読み口が無ければ効かせる先が無い)"
+    );
+    let mut with_door = system_options();
+    with_door.agent_writable = vec!["lamalium-notes".to_string()];
+    let accepted = normalize(with_door).expect("読み口があれば通る");
+    assert_eq!(accepted.agent_writable, vec!["lamalium-notes".to_string()]);
 }
 
 /// --after の unit 名の検査と、system 単位で外部の道具を探す PATH(実行ユーザの ~/.local/bin と

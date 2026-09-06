@@ -96,9 +96,10 @@ agentd(ハーネス)─HTTP─▶ 10.100.0.1:11440 ─server-proxy─wg1─▶ 1
   実装済みで、許可表・断りの本文・チャンク限定の理由・束縛の再試行・記録の行は
   [docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d) にある。第 1 段の許可表の
   うち `GET /v1/collections` の口そのものと、search の `full` はこの計画の下の作業で足す。
-- 第 2 段の許可表: `--agent-writable <c>`(複数可)で許したコレクションだけ
-  `PUT /v1/collections/{c}/documents/{name}` を通す。lamalium 側は capability
-  `uniqnode:vega:rw` を持つ task にだけ書くツールを載せる。
+- 第 2 段の許可表(着地済み。同じ文書の「書く口」): `--agent-writable <c>`(複数可)で
+  許したコレクションだけ `PUT /v1/collections/{c}/documents/{name}?meta.agent=<id>&meta.task=<id>`
+  を通す。本番の集合は lamalium-notes の 1 つ(lamalium 側の書く先は共有 1 つ。操作者の裁定
+  2026-09-05)。lamalium 側は capability `uniqnode:vega:rw` を持つ task にだけ書くツールを載せる。
 - 読めるコレクションの許可表(`--agent-collections` のようなもの)は第 1 段では持たない。
   capability の付与 = 全コレクションが読める、である。web コレクションは第三者の頁を含むので、
   要るなら第 2 段で足す(末尾の「判断が要ること」)。
@@ -169,13 +170,23 @@ uniqnode 側に残るもの:
 1. 索引の温めは SearchIndex だけで(本番で 10 秒)、埋め込みのベクトルの読み込みは初回の
    hybrid 検索が払う。実演では温まった状態で 2.8 秒だったので急がない。
 
-### 第 2 段(別の裁定。書く)
+### 第 2 段(書く。裁定 2026-09-06)
 
-- `--agent-writable <c>`(複数可)のコレクションだけ `PUT /v1/collections/{c}/documents/{name}`
-  を読み口に通す。試験は node/tests/agent_door.rs に足す。
-- 出所の記録: PUT に `meta`(誰が: agent id・task id)を受け付け、doc_rev.meta に写す
-  (取り込みの extra_meta は既にあり、put_document は今は空で呼ぶので、API に欄を足すだけ)。
-- 読めるコレクションの許可表(`--agent-collections`)が要ると分かればここで足す。
+uniqnode 側の書く口と出所の meta は着地した(`--agent-writable <c>`、PUT の
+`?meta.<key>=<value>`、install の `--agent-writable`。現在形は
+[docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d) の「書く口」と
+[docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b) の PUT の項)。本番は
+`install --system … --agent-writable lamalium-notes`
+([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の 1 行の命令)で、まだ打って
+いない。残るもの:
+
+- lamalium 側の書くツール(`uniqnode_remember {name, text}` のようなもの。capability
+  `uniqnode:vega:rw` を持つ task にだけ載る)。`PUT /v1/collections/lamalium-notes/documents/<name>.md?meta.agent=<id>&meta.task=<id>`
+  を打ち、403 の本文(「コレクション … は書けない(--agent-writable で許したのは …)」)は
+  そのまま観測へ載せる。同じ本文の再 PUT は meta が違っても no-op なので、書き直しは本文を
+  変える(追記する)形にする。
+- 読めるコレクションの許可表(`--agent-collections`)が要ると分かればここで足す。今は
+  capability の付与 = 全コレクションが読める。
 
 ### L4 で要るもの
 
@@ -212,7 +223,7 @@ uniqnode 側に残るもの:
 | L0 | lamalium の文書を uniqnode の本番に入れ、Claude Code の MCP から引いて、どんな問いに何が返るかを 10 問記録 | docs/analysis/ に記録がある |
 | L1 | uniqnode の読み口(上の「uniqnode 側の作業」1〜6)+ server-proxy の転送 + lamalium の 3 ツール(読むだけ)。最初の席は helpdesk(本物の tools API を持つ gpt-oss-120b) | 完了確認の 7 本がすべて通り、helpdesk が uniqnode_search で仕様書と設計文書の断片を出典付きで答えた(向こうのログで観測) |
 | L2 | BENCH で「引けば直る」タスクを回し、呼ばれた率と緑到達率を測る | モデル × 説明文の行列に数字がある |
-| L3 | 数字に応じた調整(説明文・位置・tip)。それでも足りないモデルにだけ push。第 2 段(書く)の裁定はここまでの数字を見てから | 調整前後の差が数字である |
+| L3 | 数字に応じた調整(説明文・位置・tip)。それでも足りないモデルにだけ push。第 2 段(書く)は uniqnode 側が先に着地した(上の「第 2 段」)ので、lamalium 側の書くツールをここで載せる | 調整前後の差が数字である |
 | L4 | vega の timer による lamalium の木の取り込み + エージェントが書いた記憶の運用(コレクションの整理、gc) | 過去タスクで書いた事実が別のタスクの uniqnode_search に出る |
 
 ## 判断が要ること(操作者に聞く)

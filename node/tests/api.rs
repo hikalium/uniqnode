@@ -198,3 +198,54 @@ fn a_serve_with_a_bad_rerank_url_stops_before_it_says_listening_on() {
     );
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
+
+/// GET /v1/collections はコレクションごとの見えの文書数を名前順に返す。数えるのは
+/// collections/<c>/<name> の形で target が null でない ref だけである(判断は api.rs の
+/// handle_collections の 1 箇所。ref 名の読み方は search::document_ref_parts)。
+///
+/// 欠陥を戻すとどこで落ちるか(should/0137): tombstone の除外(target の検査)を消すと
+/// 最後の段(notes が 1 に減る)が落ちる。collections/ 以外の ref を数えると annotations/
+/// の段が落ちる。名前順を崩すと 2 コレクションの段の全文一致が落ちる。
+#[test]
+fn collections_are_listed_with_their_document_counts() {
+    let server = start_server("api-collections");
+    let get = || {
+        let response = simple(&server.address, "GET", "/v1/collections", b"");
+        assert_eq!(response.status, 200, "{}", body_text(&response));
+        body_text(&response)
+    };
+    let put = |collection: &str, name: &str, body: &str| {
+        let path = format!("/v1/collections/{collection}/documents/{name}");
+        let response = simple(&server.address, "PUT", &path, body.as_bytes());
+        assert_eq!(response.status, 200, "{}", body_text(&response));
+    };
+
+    // 空のストアは空の配列(不在の言明ではなく、見えに文書が無いという事実)。
+    assert_eq!(get(), "{\"collections\":[]}");
+
+    put("specs", "c.md", "# c\n\nthird document\n");
+    put("notes", "a.md", "# a\n\nfirst document\n");
+    put("notes", "b.md", "# b\n\nsecond document\n");
+    let two = "{\"collections\":[{\"documents\":2,\"name\":\"notes\"},\
+               {\"documents\":1,\"name\":\"specs\"}]}";
+    assert_eq!(get(), two);
+
+    // 同じ文書を入れ直しても ref は 1 本のままで、数は増えない(べき等)。
+    put("notes", "a.md", "# a\n\nfirst document\n");
+    assert_eq!(get(), two);
+    // 改版しても文書は 1 件のまま(ref の張り替え)。
+    put("notes", "a.md", "# a\n\nfirst document, revised\n");
+    assert_eq!(get(), two);
+
+    // collections/ の外の ref は文書ではない。
+    let id = put_object(&server.address, b"{\"kind\":\"note\",\"v\":1}");
+    put_ref(&server.address, "annotations/x", Some(&id));
+    assert_eq!(get(), two);
+
+    // tombstone は見えに無いので数えない。
+    put_ref(&server.address, "collections/notes/a", None);
+    assert_eq!(
+        get(),
+        "{\"collections\":[{\"documents\":1,\"name\":\"notes\"},{\"documents\":1,\"name\":\"specs\"}]}"
+    );
+}

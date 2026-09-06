@@ -567,6 +567,9 @@ struct Seen {
     snippet: String,
     citation: Citation,
     source_url: Option<String>,
+    /// 全文(要求が full のとき)。道と同じく手元の件からしか採らない: ピアの答えは
+    /// 抜粋しか運ばない。
+    text: Option<String>,
     sources: Vec<String>,
 }
 
@@ -579,11 +582,17 @@ pub fn fuse(
     // 各チャンクの見え方(抜粋と引用)と、どこから来たか。最初に見た側のものを使う
     // (ローカルを先に入れるので、手元にあるチャンクは手元の引用で答える)。
     let mut seen: BTreeMap<String, Seen> = BTreeMap::new();
-    let mut note = |id: &str, snippet: &str, citation: &Citation, url: Option<&String>, source: &str| {
+    let mut note = |id: &str,
+                    snippet: &str,
+                    citation: &Citation,
+                    url: Option<&String>,
+                    text: Option<&String>,
+                    source: &str| {
         let entry = seen.entry(id.to_string()).or_insert_with(|| Seen {
             snippet: snippet.to_string(),
             citation: citation.clone(),
             source_url: url.cloned(),
+            text: text.cloned(),
             sources: Vec::new(),
         });
         if !entry.sources.iter().any(|known| known == source) {
@@ -594,7 +603,14 @@ pub fn fuse(
         local
             .iter()
             .map(|hit| {
-                note(&hit.id, &hit.snippet, &hit.citation, hit.source_url.as_ref(), "local");
+                note(
+                    &hit.id,
+                    &hit.snippet,
+                    &hit.citation,
+                    hit.source_url.as_ref(),
+                    hit.text.as_ref(),
+                    "local",
+                );
                 hit.id.clone()
             })
             .collect(),
@@ -603,7 +619,7 @@ pub fn fuse(
         rankings.push(
             hits.iter()
                 .map(|hit| {
-                    note(&hit.id, &hit.snippet, &hit.citation, None, source);
+                    note(&hit.id, &hit.snippet, &hit.citation, None, None, source);
                     hit.id.clone()
                 })
                 .collect(),
@@ -620,6 +636,7 @@ pub fn fuse(
                     snippet: seen.snippet.clone(),
                     citation: seen.citation.clone(),
                     source_url: seen.source_url.clone(),
+                    text: seen.text.clone(),
                 },
                 sources: seen.sources.clone(),
             })
@@ -693,6 +710,7 @@ mod tests {
             top_k: 10,
             method: None,
             include_low_information: false,
+            full: false,
         }
     }
 
@@ -714,6 +732,7 @@ mod tests {
             snippet: format!("{id} の抜粋"),
             citation: citation("memo", 0),
             source_url: Some(format!("/v1/objects/{id}/rendition/source")),
+            text: None,
         }
     }
 

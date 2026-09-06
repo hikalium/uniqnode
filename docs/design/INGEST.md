@@ -35,7 +35,11 @@ blob(原文そのもの)・chunk(検索と引用の単位)・doc_rev(版)・ref(
   種別は入力ファイル名の拡張子で判定し(.md / .markdown は markdown、.txt は text、
   .html / .htm は html、.pdf は pdf)、拡張子を ref 名には残さない。
 - ref `collections/<コレクション名>/<文書名>` が現行の doc_rev を指す。文書一覧は既存の
-  refs 一覧(GET /v1/refs)で足りるので、専用の一覧 API は無い。
+  refs 一覧(GET /v1/refs)で足りるので、専用の一覧 API は無い。コレクションの一覧と
+  各コレクションの文書数だけは GET /v1/collections が返す(応答
+  `{"collections":[{"documents":N,"name":"<c>"}]}`、名前順。数えるのはこの形の名前で
+  target が null でない ref で、署名者は見ない。ref 名の読み方は
+  search::document_ref_parts の一箇所で、索引の走査と同じ。should/0135)。
 - 引用は doc_rev 側から組み立てる: 文書名は ref パスから `collections/<コレクション名>/` を
   除いた残り、文書内位置は chunks 列の添字、見出しは meta.breadcrumbs、PDF はさらに
   meta.page。チャンク単体から出発する逆方向(このチャンクはどの文書のものか)は逆引き

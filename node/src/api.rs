@@ -25,6 +25,10 @@ pub struct ApiContext {
     /// 世代はオブジェクト数に加えて署名者ごとの最終 seq も見る(ref の張り替えだけの
     /// 変化でも旧版のチャンクを見えから外すため。node/src/search.rs)。
     pub search: Mutex<Option<crate::search::SearchIndex>>,
+    /// 検索索引を要求より先に温める裏のスレッドへの合図(serve でだけ Some。温めの本体は
+    /// start_index_warmer)。書き込みの口はどれも、書き終えたら nudge_index_warmer を呼ぶ。
+    /// None なら合図は捨てられ、索引は従来どおり次の要求が作る(ストアを直接開く mcp)。
+    pub search_warmer: Option<IndexWarmer>,
     /// 埋め込みの装備(serve の --embed が与えられたときだけ Some。node/src/embed.rs)。
     /// 無ければ検索は BM25 だけで答える。
     pub embedding: Option<crate::embed::EmbeddingService>,
@@ -241,7 +245,15 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
                 .collect();
             Response::json(200, json_object(vec![("pins", c1::Value::Array(pins))]))
         }
-        ("POST", "/v1/sync") => crate::sync::handle_sync_request(store, request),
+        ("POST", "/v1/sync") => {
+            // 受け取りで他のDBノードの ref と文書が届くので、見えが動きうる。
+            let response = crate::sync::handle_sync_request(store, request);
+            if response.status == 200 {
+                nudge_index_warmer(context);
+            }
+            response
+        }
+        ("GET", "/v1/collections") => handle_collections(context),
         ("GET", "/v1/replication/signers") => {
             let store = store.lock().expect("lock");
             let signers: Vec<c1::Value> = store
@@ -259,18 +271,60 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
         ("POST", "/v1/objects") => {
             let mut store = store.lock().expect("lock");
             match store.put_object(&request.body) {
-                Ok((id, new)) => Response::json(
-                    if new { 201 } else { 200 },
-                    json_object(vec![
-                        ("id", c1::Value::Text(id)),
-                        ("new", c1::Value::Bool(new)),
-                    ]),
-                ),
+                Ok((id, new)) => {
+                    drop(store);
+                    // オブジェクト 1 個は束縛を変えないが、構築時に「まだ無い」で飛ばした
+                    // doc_rev やチャンクを埋めることはある(Generation の missing)。
+                    if new {
+                        nudge_index_warmer(context);
+                    }
+                    Response::json(
+                        if new { 201 } else { 200 },
+                        json_object(vec![
+                            ("id", c1::Value::Text(id)),
+                            ("new", c1::Value::Bool(new)),
+                        ]),
+                    )
+                }
                 Err(e) => store_error_response(e),
             }
         }
         _ => handle_with_path_argument(context, request),
     }
+}
+
+/// GET /v1/collections。コレクションの一覧と、各コレクションが見えに持つ文書の数。
+/// 応答は {"collections":[{"documents":N,"name":"<c>"}]}(名前順)。
+///
+/// 数えるのは ref である: 名前が <署名者>/collections/<c>/<文書名> の形で target が
+/// null でない(tombstone でない)現行のもの。署名者は見ないので、他のDBノードから
+/// 伝播で届いた ref も同じ形なら数える(自分の見えの範囲の導出データであり、空は不在の
+/// 言明ではない。SPEC §10)。同じ文書を取り込み直しても ref は 1 本のままなので数は
+/// 増えない(べき等。I1)。「見えの文書を指す ref か」の読み方は
+/// crate::search::document_ref_parts(索引の走査と同じ 1 箇所。should/0135)。
+/// 見張るのは node/tests/api.rs の collections_are_listed_with_their_document_counts。
+fn handle_collections(context: &ApiContext) -> Response {
+    let store = context.store.lock().expect("lock");
+    let mut counts: BTreeMap<String, i64> = BTreeMap::new();
+    for (name, state) in store.list_refs() {
+        if state.target.is_none() {
+            continue;
+        }
+        let Some((collection, _document)) = crate::search::document_ref_parts(name) else {
+            continue;
+        };
+        *counts.entry(collection.to_string()).or_insert(0) += 1;
+    }
+    let collections: Vec<c1::Value> = counts
+        .into_iter()
+        .map(|(name, documents)| {
+            let mut map = BTreeMap::new();
+            map.insert("documents".to_string(), c1::Value::Integer(documents));
+            map.insert("name".to_string(), c1::Value::Text(name));
+            c1::Value::Object(map)
+        })
+        .collect();
+    Response::json(200, json_object(vec![("collections", c1::Value::Array(collections))]))
 }
 
 /// POST /v1/admin/gc。ボディ(省略可): {threshold?: 0 以上 1 以下, dry_run?: bool}。走っている
@@ -484,7 +538,16 @@ pub struct SearchRequest {
     /// 落とす。図版のページのように pdftotext が柱しか採れなかったチャンクを探すときは
     /// true にする(索引からは外していないので、そのときは戻ってくる)。
     pub include_low_information: bool,
+    /// 各件にチャンクの全文(text)を載せるか。省略時は false で、抜粋(snippet)だけを
+    /// 返す。true のとき top_k は FULL_TOP_K_LIMIT まで(全文 1 件は抜粋の数倍あり、
+    /// 読み手は LLM の文脈である)。判断は parse_search_request(上限)と run_search
+    /// (本文を引く)と result_json(載せる)の 1 箇所ずつにある。
+    pub full: bool,
 }
+
+/// full のときに許す top_k の上限。要求の検証(parse_search_request)と、その誤りの
+/// 文言の両方がこの 1 つから出る(must/0023)。
+pub const FULL_TOP_K_LIMIT: usize = 10;
 
 /// 引用(取り込み層の引用規則。INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の
 /// 「文書モデル」節): document は ref パスから collections/<コレクション名>/ を除いた
@@ -530,6 +593,9 @@ pub struct SearchResult {
     /// ビューワは上位の数件しか目録を引かず、MCP は引かないので、読み手によって道が
     /// あったり無かったりしていた。
     pub source_url: Option<String>,
+    /// チャンクの全文。要求に full: true があるときだけ Some で、応答の text になる。
+    /// 手元の索引から引いた件にだけ入る(分散検索でピアから来た件は抜粋しか運ばれない)。
+    pub text: Option<String>,
 }
 
 /// 検索 1 回の答え。method は実際に使った方式、degraded は要求した方式で答えられな
@@ -585,15 +651,31 @@ pub fn parse_search_request(value: &c1::Value) -> Result<SearchRequest, String> 
         Some(c1::Value::Bool(flag)) => *flag,
         _ => return Err("include_low_information は真偽値".to_string()),
     };
+    let full = match map.get("full") {
+        None | Some(c1::Value::Null) => false,
+        Some(c1::Value::Bool(flag)) => *flag,
+        _ => return Err("full は真偽値".to_string()),
+    };
+    // 全文を載せる要求は件数を絞る(node/tests/search.rs の
+    // full_results_carry_the_whole_chunk_text が top_k=11 の 400 で見張る)。
+    if full && top_k > FULL_TOP_K_LIMIT {
+        return Err(format!("top_k は full のとき 1..={FULL_TOP_K_LIMIT}"));
+    }
     if crate::search::terms_of(&query).is_empty() {
         return Err("クエリに索引語が無い(英数字の語か、仮名・漢字などの文字が要る)".to_string());
     }
-    Ok(SearchRequest { query, collection, top_k, method, include_low_information })
+    Ok(SearchRequest { query, collection, top_k, method, include_low_information, full })
 }
 
-/// 検索索引を最新にして貸す。索引は導出データの遅延キャッシュで、referrers と同じく
-/// 初回要求時に構築し、世代がずれたら次の要求で作り直す(検索と全文取得が共用する
-/// 唯一の入口。should/0135)。store のロックは呼び手が持つ。
+/// 検索索引を最新にして貸す。索引は導出データのキャッシュで、referrers と同じく世代が
+/// ずれたら作り直す(検索・全文取得・温めが共用する唯一の入口。should/0135)。作り直しは
+/// キャッシュのロックの中で行うので、作り直しの最中に来た検索は古い索引で答えず、終わる
+/// のを待つ(入れた直後に引けないことを黙って起こさない。must/0022)。同時に 2 本の
+/// 作り直しが走ることも無い。store のロックは呼び手が持つ(構築のあいだ持ち続ける。
+/// 温めの側も同じ形で、ロックを持つ時間は構築そのものの時間である)。
+///
+/// 作り直した事実は 1 行残す(いつ・何ミリ秒・何チャンク。温めが要求なしに働いた証拠
+/// でもある。node/tests/search.rs の the_index_is_warmed_without_a_request)。
 fn with_current_index<T>(
     context: &ApiContext,
     store: &Store,
@@ -601,9 +683,112 @@ fn with_current_index<T>(
 ) -> Result<T, StoreError> {
     let mut cache = context.search.lock().expect("lock");
     if !cache.as_ref().is_some_and(|index| index.is_current(store)) {
-        *cache = Some(crate::search::SearchIndex::build(store)?);
+        let started = std::time::Instant::now();
+        let index = crate::search::SearchIndex::build(store)?;
+        crate::log_line!(
+            "uniqnode: search index built in {} ms ({} chunks)",
+            started.elapsed().as_millis(),
+            index.chunk_count()
+        );
+        *cache = Some(index);
     }
     Ok(use_index(cache.as_ref().expect("直前に構築した")))
+}
+
+/// 索引の温め(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580) の「索引の構築と世代」)
+/// への合図の口。serve が ApiContext に持ち、書き込みの口が nudge を呼ぶ。受け手の
+/// スレッドは start_index_warmer が起こす。
+pub struct IndexWarmer {
+    sender: std::sync::mpsc::Sender<()>,
+    /// 受け手。start_index_warmer が取り出して裏のスレッドへ渡す(取り出した後は None)。
+    receiver: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl Default for IndexWarmer {
+    fn default() -> IndexWarmer {
+        IndexWarmer::new()
+    }
+}
+
+impl IndexWarmer {
+    pub fn new() -> IndexWarmer {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        IndexWarmer { sender, receiver: Mutex::new(Some(receiver)) }
+    }
+
+    /// 書き込みの直後に呼ぶ。合図は溜まるだけで、ここでは何も待たない。
+    fn nudge(&self) {
+        // 受け手が居ないのは serve が終わる途中だけであり、その索引はもう誰も引かない。
+        // 黙って飲まず、一言残す(must/0022)。
+        if self.sender.send(()).is_err() {
+            crate::log_line!("uniqnode: search: 索引の温めの受け手が居ない(終了中か)");
+        }
+    }
+}
+
+/// 書き込みの口が、書き終えてから呼ぶ(ストアのロックは放してから)。温めの合図の有無は
+/// ここ 1 箇所で判断する。
+fn nudge_index_warmer(context: &ApiContext) {
+    if let Some(warmer) = &context.search_warmer {
+        warmer.nudge();
+    }
+}
+
+/// 続けて届いた書き込みの合図を 1 回の作り直しにまとめる静穏の長さ。ディレクトリを
+/// まとめて取り込むとき、1 文書ごとに作り直すと(作り直しはストアのロックを持つので)
+/// 次の文書の書き込みが毎回その完了を待ち、取り込みが作り直しの回数倍に伸びる。
+/// 待つのは条件ではなく間隔だが(should/0104 の許す形)、この間に来た検索は
+/// with_current_index が自分で作り直すので、正しさはこの長さに依らない。
+pub const INDEX_WARM_QUIET: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// 索引を要求より先に温める裏のスレッドを起こす。serve が ApiContext を組んだ直後に
+/// 1 度呼ぶ(束縛より前でも後でもよい。束縛を遅らせない)。
+///
+/// スレッドはまず起動直後の温めを 1 回行い、以後は書き込みの合図を待っては作り直す。
+/// 判断は with_current_index の 1 箇所で(古くなければ何もしない)、ここは呼ぶだけで
+/// ある。作り直しの最中に届いた合図は次の 1 回にまとまる(走っているものが古ければ
+/// 終わってからもう 1 回)。実測(2026-09-06、55,452 オブジェクト)では冷えた初回の
+/// 検索が 22.46 秒、温まれば 0.3〜0.7 秒である。
+pub fn start_index_warmer(context: Arc<ApiContext>) {
+    let receiver = context
+        .search_warmer
+        .as_ref()
+        .and_then(|warmer| warmer.receiver.lock().expect("lock").take());
+    let Some(receiver) = receiver else {
+        // 合図の口が無い(組み立て側の誤り)か、既に起こしてある。黙って何もしないと
+        // 「温まらない」が観測されるまで分からないので、記録に残す(must/0022)。
+        crate::log_line!(
+            "uniqnode: search: 索引の温めを起こせない(ApiContext に合図の口が無いか、既に起きている)"
+        );
+        return;
+    };
+    std::thread::spawn(move || {
+        warm_search_index(&context);
+        loop {
+            // 合図を待つ。送り手が全部消えるのは ApiContext が落ちたとき(serve の終わり)。
+            if receiver.recv().is_err() {
+                return;
+            }
+            loop {
+                match receiver.recv_timeout(INDEX_WARM_QUIET) {
+                    Ok(()) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            }
+            warm_search_index(&context);
+        }
+    });
+}
+
+/// 温め 1 回。ストアのロックを取り、索引が古ければ作り直す(判断と記録は
+/// with_current_index)。作れなければ理由を残して次の合図を待つ(次の検索が同じ失敗を
+/// 呼び手に返す)。
+fn warm_search_index(context: &ApiContext) {
+    let store = context.store.lock().expect("lock");
+    if let Err(error) = with_current_index(context, &store, |_index| ()) {
+        crate::log_line!("uniqnode: search: 索引の温めに失敗した: {error}");
+    }
 }
 
 /// 検索の本体(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))。方式の既定・劣化の
@@ -707,35 +892,47 @@ pub fn run_search(
         // pdftotext が柱しか採れなかった図版のページが見えから消えるからである
         // (SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))。
         let mut filtered_low_information = 0usize;
-        let results = ranked
-            .hits
-            .iter()
-            .filter(|hit| {
-                if request.include_low_information || !index.chunk(hit.position).low_information {
-                    return true;
-                }
-                filtered_low_information += 1;
-                false
-            })
-            .map(|hit| {
-                let chunk = index.chunk(hit.position);
-                SearchResult {
-                    id: chunk.id.clone(),
-                    score: hit.score,
-                    snippet: chunk.snippet.clone(),
-                    citation: Citation::of(chunk),
-                    source_url: source_url_of(chunk),
-                }
-            })
-            .collect();
-        SearchResults {
+        let mut results = Vec::with_capacity(ranked.hits.len());
+        for hit in ranked.hits.iter().filter(|hit| {
+            if request.include_low_information || !index.chunk(hit.position).low_information {
+                return true;
+            }
+            filtered_low_information += 1;
+            false
+        }) {
+            let chunk = index.chunk(hit.position);
+            // 全文は索引に無い(索引が持つのは先頭の抜粋だけ)ので、求められたときだけ
+            // ストアから引く。索引にある ID がストアに無いのは索引とストアの食い違いで
+            // あり、黙って抜粋だけにせず言う(must/0022)。
+            let text = match request.full {
+                false => None,
+                true => match store.get_object(&chunk.id)?.map(classify_object) {
+                    Some(Fetched::Chunk { text, .. }) => Some(text),
+                    _ => {
+                        return Err(StoreError::Corruption(format!(
+                            "索引にあるチャンク {} がストアにチャンクとして無い",
+                            chunk.id
+                        )))
+                    }
+                },
+            };
+            results.push(SearchResult {
+                id: chunk.id.clone(),
+                score: hit.score,
+                snippet: chunk.snippet.clone(),
+                citation: Citation::of(chunk),
+                source_url: source_url_of(chunk),
+                text,
+            });
+        }
+        Ok(SearchResults {
             method: ranked.method,
             degraded: ranked.degraded,
             results,
             filtered_low_information,
             reranked: false,
-        }
-    })?;
+        })
+    })??;
     // キャッシュを読めなかったのが根の理由なら、そちらを載せる(「索引がない」だけでは
     // 何を直せばよいか読めない)。
     if load_failure.is_some() {
@@ -1059,8 +1256,15 @@ fn result_json(result: &SearchResult, sources: Option<&[String]>) -> String {
         Some(url) => format!(",\"source_url\":{}", json_text(url)),
         None => String::new(),
     };
+    // 全文は求められた(full: true)件にだけ載る。無いときは欄そのものを出さない
+    // (node/tests/search.rs の full_results_carry_the_whole_chunk_text が、full 無しの
+    // 応答に text 鍵が無いことを見張る)。
+    let text = match &result.text {
+        Some(text) => format!(",\"text\":{}", json_text(text)),
+        None => String::new(),
+    };
     format!(
-        "{{\"citation\":{citation},\"id\":{},\"score\":{},\"snippet\":{}{source_url}{sources}}}",
+        "{{\"citation\":{citation},\"id\":{},\"score\":{},\"snippet\":{}{source_url}{sources}{text}}}",
         json_text(&result.id),
         result.score,
         json_text(&result.snippet),
@@ -1226,6 +1430,9 @@ pub fn search_request_value(request: &SearchRequest) -> c1::Value {
     if request.include_low_information {
         map.insert("include_low_information".to_string(), c1::Value::Bool(true));
     }
+    if request.full {
+        map.insert("full".to_string(), c1::Value::Bool(true));
+    }
     c1::Value::Object(map)
 }
 
@@ -1280,7 +1487,8 @@ pub fn parse_search_response(body: &[u8]) -> Result<SearchResults, String> {
         // 相手が道を言わなければ載せない(こちらで組み立てると、手元に無いチャンクへの
         // 道を約束してしまう)。
         let source_url = item.field("source_url").and_then(Json::text).map(|url| url.to_string());
-        results.push(SearchResult { id, score, snippet, citation, source_url });
+        let text = item.field("text").and_then(Json::text).map(|text| text.to_string());
+        results.push(SearchResult { id, score, snippet, citation, source_url, text });
     }
     Ok(SearchResults { method, degraded, results, filtered_low_information, reranked: false })
 }
@@ -1689,6 +1897,7 @@ pub fn fetch_into(context: &ApiContext, collection: &str, body: &[u8]) -> Respon
         Err(e) => return store_error_response(e),
     };
     drop(store);
+    nudge_index_warmer(context);
     // 取ったことは記録に残す(何を、どこから、どの道具で。should/0111)。
     crate::log_line!(
         "uniqnode: fetch: {collection}/{} ← {} ({}, {} バイト, chunks {}, {}, {} ミリ秒, {})",
@@ -1937,13 +2146,19 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
                 };
                 let mut store = store.lock().expect("lock");
                 return match store.set_ref(rest, target.as_deref()) {
-                    Ok(seq) => Response::json(
-                        200,
-                        json_object(vec![
-                            ("name", c1::Value::Text(store.own_ref_name(rest))),
-                            ("seq", c1::Value::Integer(seq as i64)),
-                        ]),
-                    ),
+                    Ok(seq) => {
+                        let name = store.own_ref_name(rest);
+                        drop(store);
+                        // 束縛の変化(張り替え・tombstone)は見えを動かす。
+                        nudge_index_warmer(context);
+                        Response::json(
+                            200,
+                            json_object(vec![
+                                ("name", c1::Value::Text(name)),
+                                ("seq", c1::Value::Integer(seq as i64)),
+                            ]),
+                        )
+                    }
                     Err(e) => store_error_response(e),
                 };
             }
@@ -2031,10 +2246,16 @@ pub fn put_document(context: &ApiContext, collection: &str, name: &str, body: &[
         extra_meta: &[],
     };
     let mut store = context.store.lock().expect("lock");
-    match crate::ingest::ingest_document(&mut store, &input) {
-        Ok(outcome) => Response::json(200, json_object(ingest_outcome_fields(outcome))),
-        Err(e) => store_error_response(e),
-    }
+    let outcome = match crate::ingest::ingest_document(&mut store, &input) {
+        Ok(outcome) => outcome,
+        Err(e) => return store_error_response(e),
+    };
+    drop(store);
+    // 書き終えたら索引を温める(node/tests/search.rs の
+    // a_write_warms_the_index_before_the_next_search が、PUT の後に要求なしで作り直しの
+    // 記録が増えることで見張る)。
+    nudge_index_warmer(context);
+    Response::json(200, json_object(ingest_outcome_fields(outcome)))
 }
 
 #[cfg(test)]
@@ -2066,6 +2287,8 @@ mod tests {
                     // 道は「原本があると言い切れる件」にだけ載る。往復で消えないこと
                     // (と、無い件では欄そのものが出ないこと)を両方の件で見る。
                     source_url: Some(format!("/v1/objects/s256:{}/rendition/source", "1".repeat(64))),
+                    // 全文も同じ扱い: 求めた件にだけ載り、往復で消えない。
+                    text: Some("転置索引は\n導出データであり、遅延構築である".to_string()),
                 },
                 SearchResult {
                     id: format!("s256:{}", "2".repeat(64)),
@@ -2080,6 +2303,7 @@ mod tests {
                         at: 1_786_904_600,
                     },
                     source_url: None,
+                    text: None,
                 },
             ],
             filtered_low_information: 2,
@@ -2123,6 +2347,20 @@ mod tests {
         );
         assert_eq!(read.results[1].source_url, None);
         assert!(!text.contains("\"source_url\":\"\""), "{text}");
+        // 全文は鍵の辞書順で source_url の後ろに来て、無い件には欄が出ない。
+        assert!(
+            text.contains(
+                "\"source_url\":\"/v1/objects/s256:1111111111111111111111111111111111111111111111111111111111111111/rendition/source\",\
+                 \"text\":\"転置索引は\\u000a導出データであり、遅延構築である\"}"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            read.results[0].text.as_deref(),
+            Some("転置索引は\n導出データであり、遅延構築である")
+        );
+        assert_eq!(read.results[1].text, None);
+        assert_eq!(text.matches("\"text\":").count(), 1, "{text}");
 
         // 欠けた形は黙って通さない(must/0022)。
         let missing =
@@ -2155,12 +2393,13 @@ mod tests {
             top_k: 3,
             method: Some(crate::embed::SearchMethod::Bm25),
             include_low_information: true,
+            full: true,
         };
         let body = search_request_body(&request);
         assert_eq!(
             String::from_utf8(body.clone()).expect("utf-8"),
-            "{\"collection\":\"notes\",\"include_low_information\":true,\"method\":\"bm25\",\
-             \"query\":\"世代の整合\",\"top_k\":3}"
+            "{\"collection\":\"notes\",\"full\":true,\"include_low_information\":true,\
+             \"method\":\"bm25\",\"query\":\"世代の整合\",\"top_k\":3}"
         );
         let value = c1::parse(std::str::from_utf8(&body).expect("utf-8")).expect("c1");
         let read = parse_search_request(&value).expect("読み直せるべき");
@@ -2169,6 +2408,19 @@ mod tests {
         assert_eq!(read.top_k, 3);
         assert_eq!(read.method.map(|method| method.as_str()), Some("bm25"));
         assert!(read.include_low_information);
+        assert!(read.full);
+
+        // 全文を求める要求は件数に上限がある。境目の両側を見る(上限 FULL_TOP_K_LIMIT を
+        // 無くすと、11 が通ってこの試験が落ちる)。
+        let at_limit = c1::parse("{\"query\":\"x\",\"full\":true,\"top_k\":10}").expect("c1");
+        assert_eq!(parse_search_request(&at_limit).expect("上限ちょうどは通る").top_k, 10);
+        let over = c1::parse("{\"query\":\"x\",\"full\":true,\"top_k\":11}").expect("c1");
+        assert_eq!(
+            parse_search_request(&over).err().as_deref(),
+            Some("top_k は full のとき 1..=10")
+        );
+        let without_full = c1::parse("{\"query\":\"x\",\"top_k\":11}").expect("c1");
+        assert_eq!(parse_search_request(&without_full).expect("full 無しは従来の上限").top_k, 11);
 
         // 省略できる項は省いたまま書く(既定は読み手が持つ)。低情報を残す指定は
         // 既定(落とす)と同じなら書かない。
@@ -2178,6 +2430,7 @@ mod tests {
             top_k: 10,
             method: None,
             include_low_information: false,
+            full: false,
         };
         assert_eq!(
             String::from_utf8(search_request_body(&bare)).expect("utf-8"),

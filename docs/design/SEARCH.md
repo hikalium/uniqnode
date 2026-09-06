@@ -50,11 +50,24 @@ MCP の fetch ツールも別経路ではなく、同じ store の呼び出し�
 
 ## 索引の構築と世代
 
-- 転置索引は導出データ(I4)であり、遅延構築である。Store::open では作らず、最初の検索
-  要求で見えの全チャンクを一度走査して作り、次の要求からはキャッシュ済みの索引で応える
-  (逆引きの ReferrerIndex と同じ扱い。open はオブジェクトをパースせずハッシュだけを見る
-  唯一の共有経路であり、そこに全件パースを足すと壊れたオブジェクト 1 個でストアが開かなく
-  なる)。
+- 転置索引は導出データ(I4)であり、Store::open では作らない(open はオブジェクトを
+  パースせずハッシュだけを見る唯一の共有経路であり、そこに全件パースを足すと壊れた
+  オブジェクト 1 個でストアが開かなくなる)。見えの全チャンクを一度走査して作り、以後は
+  キャッシュ済みの索引で応える(逆引きの ReferrerIndex と同じ扱い)。作る判断は api.rs の
+  with_current_index の一箇所にあり(古ければ作り直す。should/0135)、検索・全文取得・
+  温めのどれもそこを通る。
+- serve は要求を待たずに索引を温める(api.rs の start_index_warmer)。起動直後に裏の
+  スレッドが 1 回作り、以後は書き込みの口(PUT documents・POST collections/{c}/fetch・
+  POST /v1/objects・PUT /v1/refs・POST /v1/sync の受け取り)が書き終えるたびに合図を送り、
+  スレッドが作り直す。続けて届いた合図は静穏(定数 INDEX_WARM_QUIET、1 秒)のあいだ
+  1 回にまとめる(ディレクトリをまとめて取り込むとき、1 文書ごとに作り直さない)。
+  作り直しはキャッシュのロックの中で行うので、作り直しの最中に来た検索は古い索引で答えず
+  終わるのを待ち(入れた直後に引けないことを黙って起こさない。must/0022)、2 本の作り直しが
+  同時に走ることも無い。作り直しのあいだストアのロックを持つのは要求が作るときと同じで、
+  持つ時間は構築そのものの時間である。作り直すたびにログへ
+  「search index built in <ms> ms (<chunks> chunks)」の 1 行を残す。実測(2026-09-06、
+  55,452 オブジェクト・31,232 チャンク)では冷えた初回の検索が 22.46 秒、温まれば
+  0.3〜0.7 秒である。ストアを直接開く mcp には温めが無く、初回の要求が作る。
 - 世代は構築時点の (object_count, 署名者ごとの最終 seq) の組で、両方が現在値と一致する
   限り索引は最新である。object_count だけでは足りない: 既存 doc_rev への張り替え
   (巻き戻し)や tombstone は ref レコードしか増やさず、旧版のチャンクが索引に残る。世代が
@@ -236,14 +249,15 @@ MCP の fetch ツールも別経路ではなく、同じ store の呼び出し�
 
 ```jsonc
 // 要求。collection(省略時は全コレクション)・top_k(省略時 10、1..=1000)・method・
-// include_low_information(省略時 false)は省略可。
+// include_low_information(省略時 false)・full(省略時 false)は省略可。
 // query は空でない文字列で、索引語を最低 1 語含む(含まなければ 400)。
 { "query": "世代の整合", "collection": "notes", "top_k": 10, "method": "hybrid",
-  "include_low_information": false }
+  "include_low_information": false, "full": false }
 
 // 応答。results は score 降順。citation の page は PDF のチャンクだけが持つ。
 // degraded は、要求した方式で答えられなかったときだけ載る。
 // filtered_low_information は、低情報として落とした件数(0 なら載らない)。
+// text は要求が full: true のときだけ載る(チャンクの全文)。
 { "degraded": "埋め込みサーバが設定されていない(serve の --embed)",
   "filtered_low_information": 2,
   "method": "bm25",
@@ -251,12 +265,23 @@ MCP の fetch ツールも別経路ではなく、同じ store の呼び出し�
     { "citation": { "at": 1786904557, "breadcrumbs": ["分散設計", "世代の整合"],
         "collection": "notes", "document": "search_ja", "position": 1 },
       "id": "s256:…", "score": 2.94, "snippet": "転置索引は導出データであり…",
-      "source_url": "/v1/objects/s256:…/rendition/source" } ],
+      "source_url": "/v1/objects/s256:…/rendition/source",
+      "text": "転置索引は導出データであり、遅延構築である。…" } ],
   "score_semantics": "bm25" }
 ```
 
 - snippet はチャンク本文の先頭 200 文字(定数 SNIPPET_CHAR_LIMIT。文字境界で切る)。
-  全文は id(チャンクのオブジェクト ID)から既存の GET /v1/objects/{id} で取る。
+  全文は id(チャンクのオブジェクト ID)から既存の GET /v1/objects/{id} で取るか、
+  要求に full: true を付けて各件の text として受け取る。
+- full: true のとき、各件にチャンクの全文が text として載る(鍵は辞書順なので snippet・
+  source_url・text の順)。full の無い要求の応答は従来のままで、text の鍵そのものが無い。
+  全文は索引に無い(索引が持つのは抜粋だけ)ので、run_search が求められた件だけストアから
+  引く。索引にある ID がストアにチャンクとして無ければ抜粋だけにせず 500 で言う
+  (must/0022)。full のとき top_k は定数 FULL_TOP_K_LIMIT(10)までで、超えれば 400
+  「top_k は full のとき 1..=10」(検証は parse_search_request の一箇所)。全文 1 件は
+  抜粋の数倍あり、読み手は LLM の文脈だからである。分散検索でピアから来た件には
+  載らない(ピアの答えは抜粋しか運ばない。source_url と同じ扱い)。MCP の search ツールは
+  この欄を使わず、全文は fetch で取る。
 - source_url は原本(このチャンクの出た文書そのもの)を取る道である。写しの恒等レシピ
   ([docs/design/RENDITION.md](#6046eeca-1d95-4d47-87da-13f86c7710dc))の URL で、HTML なら
   紙面 1 枚、PDF ならまるごと、markdown なら原文が返る。抜粋の周りを読むには文書へ行く道が
@@ -328,8 +353,9 @@ MCP の fetch ツールも別経路ではなく、同じ store の呼び出し�
 
 ## 既知の癖
 
-- 初回の検索は索引構築込みで応答し、25k チャンク規模で約 9 秒かかる。以後は世代がずれる
-  まで、キャッシュ済みの索引で応える。
+- 索引の構築は 25k チャンク規模で約 9 秒かかる。serve は起動直後と書き込みの後に裏で
+  作るので(「索引の構築と世代」)、要求がそれを待つのは作り直しの最中に来たときだけで
+  ある。ストアを直接開く mcp では初回の検索が構築込みで応答する。
 - コーパス全体の埋め込みは時間で買う。実データ(25,098 チャンク)の全件で 936 秒、毎秒およそ
   27 チャンクだった。キャッシュは 104,596,198 バイトになり、2 回目の uniqnode embed は 9.8 秒で
   再計算ゼロ、fsck も 0 エラーだった(実測 2026-08-17)。取り込みのたびに走らせる前提の重さ

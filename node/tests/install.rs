@@ -506,7 +506,7 @@ fn after_and_user_are_system_only_and_the_agent_listen_is_checked() {
     let bad_address = base(&["--firewall-allow", "orion"]);
     assert_eq!(bad_address.status, 1, "{}\n{}", bad_address.stdout, bad_address.stderr);
     assert!(
-        bad_address.stderr.contains("--firewall-allow orion は IP アドレスでない"),
+        bad_address.stderr.contains("--firewall-allow orion は IPv4 アドレスでない"),
         "{}",
         bad_address.stderr
     );
@@ -734,4 +734,65 @@ fn the_take_over_and_firewall_steps_use_fixed_words_and_judge_by_effect() {
     let accepted = normalize(with_door).expect("読み口があれば通る");
     assert_eq!(accepted.firewall_allow.as_deref(), Some("10.10.128.4"));
     assert!(accepted.take_over_user_units);
+}
+
+/// ufw が active でない機械では、規則は nft の自分の表 inet uniqnode に入れ、serve の drop-in の
+/// ExecStartPre=+nft -f が起動のたびに入れ直す。規則ファイルは何度読んでも同じ 1 表になる形
+/// (空で作る → 消す → 作る)。should/0137: nft_rules_text の `delete table` の行を消すと
+/// 2 つ目の assert が赤、drop_ins の ExecStartPre= の分岐を消すと最後の assert が赤になる
+/// (どちらも実験した)。
+#[test]
+fn the_nft_road_writes_one_table_and_lets_the_serve_unit_load_it_on_every_start() {
+    use uniqnode::install::{
+        drop_ins, nft_rule_listed, nft_rules_text, FirewallBackend, NFT_RULES_NAME, NFT_TABLE,
+    };
+    let text = nft_rules_text("10.10.128.4", "10.10.128.1:7441").expect("組める");
+    assert!(text.contains("table inet uniqnode {}\n"), "{text}");
+    assert!(text.contains("delete table inet uniqnode\n"), "{text}");
+    assert!(
+        text.contains("type filter hook input priority filter; policy accept;"),
+        "{text}"
+    );
+    assert!(
+        text.contains("ip daddr 10.10.128.1 tcp dport 7441 ip saddr != 10.10.128.4 counter drop"),
+        "{text}"
+    );
+    assert_eq!(NFT_TABLE, "inet uniqnode");
+
+    // nft list table の答え(counter の数は変わる)。
+    let listing = "table inet uniqnode {\n\tchain agent_door {\n\t\ttype filter hook input priority filter; policy accept;\n\t\tip daddr 10.10.128.1 tcp dport 7441 ip saddr != 10.10.128.4 counter packets 3 bytes 180 drop\n\t}\n}\n";
+    assert!(nft_rule_listed(listing, "10.10.128.4", "10.10.128.1:7441").expect("読める"));
+    assert!(!nft_rule_listed(listing, "10.10.128.5", "10.10.128.1:7441").expect("読める"));
+    assert!(!nft_rule_listed(listing, "10.10.128.4", "10.10.128.1:7442").expect("読める"));
+    let accepting = listing.replace(" drop", " accept");
+    assert!(!nft_rule_listed(&accepting, "10.10.128.4", "10.10.128.1:7441").expect("読める"));
+
+    let mut options = system_options();
+    options.firewall_allow = Some("10.10.128.4".to_string());
+    options.firewall_backend = Some(FirewallBackend::Nft(PathBuf::from("/usr/sbin/nft")));
+    assert_eq!(
+        options.nft_rules_path(),
+        PathBuf::from("/etc/systemd/system/uniqnode-serve.service.d").join(NFT_RULES_NAME)
+    );
+    let rendered = drop_ins(&options, "/usr/bin").expect("描ける");
+    let serve = &rendered.iter().find(|(unit, _)| *unit == "uniqnode-serve.service").expect("serve").1;
+    assert!(
+        serve.contains(
+            "ExecStartPre=+/usr/sbin/nft -f /etc/systemd/system/uniqnode-serve.service.d/agent-door.nft"
+        ),
+        "{serve}"
+    );
+    for (unit, content) in &rendered {
+        if *unit != "uniqnode-serve.service" {
+            assert!(!content.contains("ExecStartPre="), "{unit} には要らない: {content}");
+        }
+    }
+    let mut ufw = system_options();
+    ufw.firewall_allow = Some("10.10.128.4".to_string());
+    ufw.firewall_backend = Some(FirewallBackend::Ufw);
+    let rendered = drop_ins(&ufw, "/usr/bin").expect("描ける");
+    assert!(
+        rendered.iter().all(|(_, content)| !content.contains("ExecStartPre=")),
+        "ufw の道では unit に足すものは無い"
+    );
 }

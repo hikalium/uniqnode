@@ -166,10 +166,11 @@ fn usage() -> ! {
                                       常駐しているなら --take-over-user-units で install に\n\
                                       止めて外させる(user 単位の 3 つの unit を disable --now\n\
                                       し、止まったこととロックが外れたことを見る)。\n\
-                                      --firewall-allow <addr> は ufw が active なら <addr> から\n\
-                                      読み口への TCP だけ許す規則を入れて表に載ったことを見る\n\
-                                      (inactive なら nft の規則を写して赤で止まる。--system\n\
-                                      と --listen-agent のときだけ)。手順は SYSTEMD.md の移行\n\
+                                      --firewall-allow <addr> は <addr> からだけ読み口へ届く\n\
+                                      規則を入れて効果を見る(ufw が active なら ufw allow、\n\
+                                      そうでなければ nft の表 inet uniqnode を serve の\n\
+                                      ExecStartPre= が起動のたびに入れる。--system と\n\
+                                      --listen-agent のときだけ)。手順は SYSTEMD.md の移行\n\
          \n\
          serve・mcp・viewer のログの指定(常駐する命令だけが持つ。既定は保存する):\n\
            --log <path>               保存先を変える(既定 <dir>/logs/<serve|mcp|viewer>.log。\n\

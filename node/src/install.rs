@@ -98,6 +98,11 @@ pub const TAKE_OVER_FLAG: &str = "--take-over-user-units";
 pub const FIREWALL_ALLOW_FLAG: &str = "--firewall-allow";
 /// user 単位を止めた後、ストアのロックが外れるのを待つ上限。
 pub const TAKE_OVER_WAIT: Duration = Duration::from_secs(10);
+/// nft に置く表(家族名 inet、名 uniqnode)。iptables-nft や docker が持つ表には触らず、
+/// 自分の表を 1 つ持つ(base chain は表ごとに独立に評価され、どれかの drop が勝つ)。
+pub const NFT_TABLE: &str = "inet uniqnode";
+/// nft の規則ファイルの名(serve の drop-in の隣に置き、ExecStartPre= が読む)。
+pub const NFT_RULES_NAME: &str = "agent-door.nft";
 
 /// 起こした後の確認で待つ上限(serve と viewer の /v1/status が揃うまで、読み口が答えるまで)。
 /// 読み口は wg1 のような後から上がるインターフェースのアドレスに束縛されることがあり、
@@ -450,6 +455,17 @@ pub struct Options {
     /// 読み口へ届いてよい相手のアドレス(`--firewall-allow`)。ufw が active ならその規則を
     /// 入れ、載ったことを見る。system 単位で読み口があるときだけ。
     pub firewall_allow: Option<String>,
+    /// 規則をどこに入れるか(run が ufw status を読んで決める。drop-in を描く前に要る:
+    /// nft なら serve の ExecStartPre= が規則ファイルを読む)。
+    pub firewall_backend: Option<FirewallBackend>,
+}
+
+/// firewall の実物。ufw が active ならその規則、そうでなければ nft の自分の表。
+#[derive(Debug, Clone, PartialEq)]
+pub enum FirewallBackend {
+    Ufw,
+    /// nft の実行ファイルの絶対パス(ExecStartPre= は絶対パスを要する)。
+    Nft(PathBuf),
 }
 
 impl Options {
@@ -469,7 +485,13 @@ impl Options {
             agent_listen: None,
             take_over_user_units: false,
             firewall_allow: None,
+            firewall_backend: None,
         }
+    }
+
+    /// nft の規則ファイルの置き場(serve の drop-in の隣。systemd は *.conf しか読まない)。
+    pub fn nft_rules_path(&self) -> PathBuf {
+        self.unit_dir.join(format!("{SERVE_UNIT}.d")).join(NFT_RULES_NAME)
     }
 
     /// 置く unit(名前, 中身)。据え先で user/system を切り替える。
@@ -646,6 +668,17 @@ pub fn drop_ins(
                     lines.push(environment_line(AGENT_LISTEN_ENV, agent_listen)?);
                     exec_tail = format!(" {AGENT_LISTEN_FLAG} ${{{AGENT_LISTEN_ENV}}}");
                 }
+                if let Some(FirewallBackend::Nft(nft)) = &options.firewall_backend {
+                    // 読み口の firewall は serve を起こすたびに入れ直す(nftables.service が
+                    // 無効な機械でも再起動で消えない)。先頭の + は User= に関わらず root で
+                    // 走らせる印。
+                    lines.push(format!(
+                        "# 読み口へ届いてよい相手を nft の表 {NFT_TABLE} で限る(隣の {NFT_RULES_NAME})\n\
+                         ExecStartPre=+{} -f {}",
+                        unit_word(&nft.to_string_lossy())?,
+                        unit_word(&options.nft_rules_path().to_string_lossy())?
+                    ));
+                }
                 writable.push(&data_dir);
             }
             VIEWER_UNIT => {
@@ -789,16 +822,17 @@ pub fn normalize(options: Options) -> Result<Options, String> {
         agent_listen: options.agent_listen,
         take_over_user_units: options.take_over_user_units,
         firewall_allow: options.firewall_allow,
+        firewall_backend: options.firewall_backend,
     })
 }
 
-/// `--firewall-allow` の値は IP アドレス 1 つ(範囲や名前は受けない。ufw に渡す字句を
-/// ここで固定する)。
+/// `--firewall-allow` の値は IPv4 アドレス 1 つ(範囲や名前は受けない。ufw と nft に渡す
+/// 字句をここで固定する。読み口の側も `ip daddr` で書くので IPv4 に限る)。
 pub fn check_firewall_allow(allow: &str) -> Result<(), String> {
-    match allow.parse::<std::net::IpAddr>() {
+    match allow.parse::<std::net::Ipv4Addr>() {
         Ok(_) => Ok(()),
         Err(_) => Err(format!(
-            "{FIREWALL_ALLOW_FLAG} {allow} は IP アドレスでない(例 10.10.128.4)"
+            "{FIREWALL_ALLOW_FLAG} {allow} は IPv4 アドレスでない(例 10.10.128.4)"
         )),
     }
 }
@@ -1291,47 +1325,119 @@ fn command_output(program: &str, arguments: &[String]) -> Result<String, String>
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// firewall の規則(`--firewall-allow`)。ufw が active ならその規則を入れて表に載ったことを
-/// 見る。inactive なら nft の規則を報告に写して赤で止まる(install は nft に触らない。黙って
-/// 飛ばさない。must/0022)。
-fn apply_firewall(from: &str, agent_listen: &str, out: &mut dyn Write) -> Result<String, String> {
-    let say = |out: &mut dyn Write, line: &str| -> Result<(), String> {
-        writeln!(out, "install: {line}").map_err(|e| format!("標準出力に書けない: {e}"))
-    };
-    let status = command_output("ufw", &["status".to_string()])?;
-    match ufw_status_of(&status)? {
-        UfwStatus::Active => {}
-        UfwStatus::Inactive => {
-            let ruleset = command_output("nft", &["list".to_string(), "ruleset".to_string()])
-                .unwrap_or_else(|e| format!("(nft の規則を読めない: {e})"));
-            for line in ruleset.lines() {
-                say(out, &format!("nft: {line}"))?;
-            }
-            return Err(format!(
-                "ufw は inactive で、規則は nft が持っている(上に写した)。install は nft には\
-                 触らないので、{from} から読み口 {agent_listen} への TCP だけを許す規則は操作者が\
-                 入れる"
-            ));
-        }
-    }
-    let arguments = ufw_allow_arguments(from, agent_listen)?;
-    let added = command_output("ufw", &arguments)?;
-    say(out, &format!("ufw {}: {}", arguments.join(" "), added.trim()))?;
-    let after = command_output("ufw", &["status".to_string()])?;
-    if !ufw_rule_listed(&after, from, agent_listen)? {
-        return Err(format!(
-            "ufw allow を打ったが ufw status の表に載っていない: {}",
-            after.trim()
-        ));
-    }
+/// nft の規則ファイル。表を空で作ってから消して作り直す形なので、何度読んでも同じ 1 表に
+/// なる(nft は無い表の delete を断るので、先に空で作る)。
+pub fn nft_rules_text(from: &str, agent_listen: &str) -> Result<String, String> {
+    let (ip, port) = agent_ip_and_port(agent_listen)?;
     Ok(format!(
-        "ufw が {from} から読み口 {agent_listen} への TCP を許す規則を持つ(ufw status に載った)"
+        "# uniqnode install が書いた。読み口 {agent_listen} へ届いてよいのは {from} だけ。\n\
+         # serve の unit の ExecStartPre= が起動のたびに読む(nft -f)。手で入れるなら同じ命令。\n\
+         table {NFT_TABLE} {{}}\n\
+         delete table {NFT_TABLE}\n\
+         table {NFT_TABLE} {{\n\
+         \tchain agent_door {{\n\
+         \t\ttype filter hook input priority filter; policy accept;\n\
+         \t\tip daddr {ip} tcp dport {port} ip saddr != {from} counter drop\n\
+         \t}}\n\
+         }}\n"
     ))
 }
 
+/// `nft list table inet uniqnode` の答えに、その規則が載っているか(字句が同じ行にあること
+/// で見る。counter の数は行ごとに変わるので照合しない)。
+pub fn nft_rule_listed(listing: &str, from: &str, agent_listen: &str) -> Result<bool, String> {
+    let (ip, port) = agent_ip_and_port(agent_listen)?;
+    let words = ["daddr", ip.as_str(), "dport", port.as_str(), "saddr", "!=", from, "drop"];
+    Ok(listing.lines().any(|line| {
+        let cells: Vec<&str> = line.split_whitespace().collect();
+        words.iter().all(|word| cells.contains(word))
+    }))
+}
+
+/// PATH から実行ファイルの絶対パスを引く(ExecStartPre= に書くため)。
+pub fn find_in_path(program: &str, path_env: &str) -> Option<PathBuf> {
+    path_env
+        .split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| Path::new(dir).join(program))
+        .find(|candidate| candidate.is_file())
+}
+
+/// firewall の実物を決める: ufw が active ならそれ、inactive(または ufw が無い)なら nft。
+/// どちらも無ければ Err。
+fn firewall_backend(path_env: &str) -> Result<FirewallBackend, String> {
+    let ufw_active = match command_output("ufw", &["status".to_string()]) {
+        Ok(status) => ufw_status_of(&status)? == UfwStatus::Active,
+        Err(reason) if reason.contains("PATH に無い") => false,
+        Err(reason) => return Err(reason),
+    };
+    if ufw_active {
+        return Ok(FirewallBackend::Ufw);
+    }
+    match find_in_path("nft", path_env) {
+        Some(nft) => Ok(FirewallBackend::Nft(nft)),
+        None => Err(format!(
+            "{FIREWALL_ALLOW_FLAG}: ufw は active でなく、nft も PATH({path_env})に無い。規則を\
+             入れる先が無い"
+        )),
+    }
+}
+
+/// firewall の規則(`--firewall-allow`)の効果を見る。ufw なら規則を入れて表に載ったことを、
+/// nft なら serve の ExecStartPre= が入れた表に規則が載っていることを見る(nft の道では
+/// ここで入れ直さない: 入れるのは unit の起動そのもので、それが再起動のたびに同じ道で入る
+/// ことの証拠になる)。
+fn apply_firewall(options: &Options, out: &mut dyn Write) -> Result<String, String> {
+    let say = |out: &mut dyn Write, line: &str| -> Result<(), String> {
+        writeln!(out, "install: {line}").map_err(|e| format!("標準出力に書けない: {e}"))
+    };
+    let (from, agent_listen) = match (&options.firewall_allow, &options.agent_listen) {
+        (Some(from), Some(agent_listen)) => (from.as_str(), agent_listen.as_str()),
+        _ => return Err("firewall の確認には --firewall-allow と読み口が要る".to_string()),
+    };
+    match &options.firewall_backend {
+        Some(FirewallBackend::Ufw) => {
+            let arguments = ufw_allow_arguments(from, agent_listen)?;
+            let added = command_output("ufw", &arguments)?;
+            say(out, &format!("ufw {}: {}", arguments.join(" "), added.trim()))?;
+            let after = command_output("ufw", &["status".to_string()])?;
+            if !ufw_rule_listed(&after, from, agent_listen)? {
+                return Err(format!(
+                    "ufw allow を打ったが ufw status の表に載っていない: {}",
+                    after.trim()
+                ));
+            }
+            Ok(format!(
+                "ufw が {from} から読み口 {agent_listen} への TCP を許す規則を持つ(ufw status に載った)"
+            ))
+        }
+        Some(FirewallBackend::Nft(nft)) => {
+            let (family, table) = NFT_TABLE.split_once(' ').expect("NFT_TABLE は 2 語");
+            let listing = command_output(
+                &nft.to_string_lossy(),
+                &["list".to_string(), "table".to_string(), family.to_string(), table.to_string()],
+            )?;
+            if !nft_rule_listed(&listing, from, agent_listen)? {
+                return Err(format!(
+                    "serve の ExecStartPre= が nft の表 {NFT_TABLE} を入れたはずだが、規則が載って\
+                     いない: {}",
+                    listing.trim()
+                ));
+            }
+            Ok(format!(
+                "nft の表 {NFT_TABLE} が {from} 以外から読み口 {agent_listen} への TCP を落とす\
+                 (規則は {} にあり、serve の起動のたびに入る)",
+                options.nft_rules_path().display()
+            ))
+        }
+        None => Err("firewall の実物が決まっていない(run の順序の誤り)".to_string()),
+    }
+}
+
 pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
-    let options = normalize(options)?;
-    let scope = &options.scope;
+    let mut options = normalize(options)?;
+    let scope = options.scope.clone();
+    let scope = &scope;
     let say = |out: &mut dyn Write, line: &str| -> Result<(), String> {
         writeln!(out, "install: {line}").map_err(|e| format!("標準出力に書けない: {e}"))
     };
@@ -1366,6 +1472,28 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     // 503 で答える(should/0114 と同じ扱い)。環境から PATH を読むのはここだけ。
     let path_env = std::env::var_os("PATH").unwrap_or_default();
     let search_path = tool_search_path(&path_env.to_string_lossy(), scope);
+    // firewall の実物は drop-in を描く前に決める(nft なら serve の ExecStartPre= に載る)。
+    if let (Some(from), Some(agent_listen)) = (&options.firewall_allow, &options.agent_listen) {
+        let backend = firewall_backend(&search_path)?;
+        match &backend {
+            FirewallBackend::Ufw => say(out, "firewall: ufw が active。規則は ufw に入れる")?,
+            FirewallBackend::Nft(nft) => {
+                let path = options.nft_rules_path();
+                write_file(&path, &nft_rules_text(from, agent_listen)?)?;
+                say(
+                    out,
+                    &format!(
+                        "firewall: ufw は active でない。nft の表 {NFT_TABLE} を {} に書き、serve の \
+                         ExecStartPre=+{} -f が起動のたびに入れる",
+                        path.display(),
+                        nft.display()
+                    ),
+                )?;
+            }
+        }
+        options.firewall_backend = Some(backend);
+    }
+    let options = &options;
     let tools = tool_path(&search_path);
     say(
         out,
@@ -1579,8 +1707,8 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     }
 
     // (8b) firewall。読み口が答えるのを見た後に、届いてよい相手の規則を入れる。
-    if let (Some(from), Some(agent_listen)) = (&options.firewall_allow, &options.agent_listen) {
-        let line = apply_firewall(from, agent_listen, out)?;
+    if options.firewall_backend.is_some() {
+        let line = apply_firewall(options, out)?;
         say(out, &format!("確認: {line}"))?;
     }
 
@@ -1615,6 +1743,9 @@ mod tests {
             scope: Scope::User,
             after: Vec::new(),
             agent_listen: None,
+            take_over_user_units: false,
+            firewall_allow: None,
+            firewall_backend: None,
         }
     }
 

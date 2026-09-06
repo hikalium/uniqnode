@@ -1,6 +1,7 @@
 //! uniqnode: 分散マルチノードのグラフ知識データベース(SPEC.md)。
 //! L0(単一DBノードのストア)から実装している。
 
+pub mod agent_door;
 pub mod api;
 pub mod backup;
 pub mod c1;

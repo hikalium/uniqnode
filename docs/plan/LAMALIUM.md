@@ -92,19 +92,10 @@ agentd(ハーネス)─HTTP─▶ 10.100.0.1:11440 ─server-proxy─wg1─▶ 1
   (tool::Tool。capability uniqnode:vega を持つ task にだけ載る)
 ```
 
-- uniqnode の serve に 2 本目の TcpListener を足す:
-  `uniqnode serve <dir> <listen> --listen-agent 10.10.128.1:7441`。これを読み口と呼ぶ。
-  読み口は (method, path) の許可表を 1 つ持ち、表に無い要求は 403
-  `{"error":"agent door: <method> <path> は許可されていない"}` で断り、表にある要求だけを
-  既存の api::handle に委ねる。何を返すかの判断は主の口と同じ 1 箇所にあり、読み口は門で
-  しかない(should/0135)。
-- 第 1 段の許可表: `GET /healthz`、`GET /v1/status`、`POST /v1/search`(本文に peers が
-  あれば 400。`full` に対応)、`GET /v1/objects/{id}`(kind:"chunk" のオブジェクトのみ。
-  blob や他の kind は 403)、`GET /v1/objects/{id}/citation`、`GET /v1/collections`(新設)。
-  rendition・referrers・closure・refs・pins・peers・sync・admin・fetch・PUT は 403。
-  `fetch` を通さないのは、コンテナが網に出る道になるからで(lamalium のオフライン不変条件)、
-  URL の取り込みは操作者の仕事のまま。objects をチャンクに限るのは、LLM が幻覚の id や
-  切れた id も渡すからで、数 MB の PDF バイナリが観測へ流れる経路を境界で落とす。
+- uniqnode の serve の 2 本目の TcpListener(読み口。`--listen-agent 10.10.128.1:7441`)は
+  実装済みで、許可表・断りの本文・チャンク限定の理由・束縛の再試行・記録の行は
+  [docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d) にある。第 1 段の許可表の
+  うち `GET /v1/collections` の口そのものと、search の `full` はこの計画の下の作業で足す。
 - 第 2 段の許可表: `--agent-writable <c>`(複数可)で許したコレクションだけ
   `PUT /v1/collections/{c}/documents/{name}` を通す。lamalium 側は capability
   `uniqnode:vega:rw` を持つ task にだけ書くツールを載せる。
@@ -155,14 +146,9 @@ agentd(ハーネス)─HTTP─▶ 10.100.0.1:11440 ─server-proxy─wg1─▶ 1
 
 ## uniqnode 側の作業(第 1 段 = L1。実行順)
 
-1. 読み口: `uniqnode serve <dir> <listen> --listen-agent <addr>`。第 2 の TcpListener を
-   束縛し、(method, path) の許可表に無いものは 403
-   `{"error":"agent door: <method> <path> は許可されていない"}`、許可されたものだけ既存の
-   api::handle に委ねる(上の「接続の形」の許可表。判断は 1 箇所、should/0135)。
-   `--listen-agent` を与えなければ第 2 の口は存在しない。
-2. `GET /v1/collections` を新設する。応答は `{"collections":[{"documents":N,"name":"<c>"}]}`
+1. `GET /v1/collections` を新設する。応答は `{"collections":[{"documents":N,"name":"<c>"}]}`
    (名前順)。refs の `<node_id>/collections/<c>/<name>` を数える。主の口にも出す。
-3. `POST /v1/search` の要求に `"full":true` を足すと各件に `"text"`(チャンク全文)を載せる。
+2. `POST /v1/search` の要求に `"full":true` を足すと各件に `"text"`(チャンク全文)を載せる。
    full のとき top_k の上限は 10。応答の形は次のとおり(鍵は辞書順、無い鍵は載せない。
    受け手は増える鍵を無視する):
    `{"degraded"?,"filtered_low_information"?,"method","results":[{"citation":{"at","breadcrumbs","collection","document","page"?,"position"},"id","score","snippet","source_url"?,"text"?}],"score_semantics"}`。
@@ -171,44 +157,37 @@ agentd(ハーネス)─HTTP─▶ 10.100.0.1:11440 ─server-proxy─wg1─▶ 1
    `{"capacity_bytes","free_bytes","health","last_seq","node_id","objects","used_bytes","v"}`。
    search の判断は run_search のまま(REST・MCP・読み口が同じ関数を通る。
    [docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))。
-4. bind の堅牢化: 10.10.128.1 は wg1 が上がって初めて存在する。(a) unit に After= と Wants=
-   で wg1 の unit を待つ、(b) 読み口の bind 失敗は主の口を殺さず、記録して再試行する。
-   両方採り、install に載せる。
-5. install: `uniqnode install <dir> --listen-agent 10.10.128.1:7441` で drop-in に
+3. bind の堅牢化の unit 側: 10.10.128.1 は wg1 が上がって初めて存在する。unit に After= と
+   Wants= で wg1 の unit を待ち、install に載せる(serve 側の再試行は済んでいる。
+   [docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d) の「束縛と再試行」)。
+4. install: `uniqnode install <dir> --listen-agent 10.10.128.1:7441` で drop-in に
    `UNIQNODE_AGENT_LISTEN` を書く(既存の drop-in の表は
    [docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2))。install の確認に「読み口の
    /v1/status が主の口と同じ node_id を返す」「読み口の POST /v1/admin/gc が 403」を足す。
    firewall(10.10.128.4 から 7441 への接続だけ許す。ufw か nftables かの実物は操作者に
    確かめる)は操作者の作業で、命令は `… 2>&1 | tee /tmp/uniqnode-firewall.log` の形で渡し、
    記録を自分で読む。
-6. 索引の温め: 今の SearchIndex は初回要求時に作る遅延キャッシュで(api.rs の
+5. 索引の温め: 今の SearchIndex は初回要求時に作る遅延キャッシュで(api.rs の
    with_current_index)、書き込みで世代がずれると次の要求で作り直す。これを、serve の起動
    直後(要求を待たずに)と書き込み(PUT・fetch・ingest)の後に裏のスレッドで作り直す形に
    する。作り直し中の検索は待つ。古い索引で答えると「入れた直後に引けない」が黙って起きる
    (must/0022)。実測(2026-09-06、55,452 オブジェクト・31,232 チャンク): 温まった
    hybrid + リランクの top_k=5 で 0.34〜0.68 秒、bm25 で 0.31 秒、冷えた初回は 22.46 秒。
    60 秒の時限には収まるが、初回の 22 秒を要求のたびに払わせない。
-7. 記録: 読み口への要求は `logs/serve.log` に `agent <peer addr> <method> <path> <status> <ms>`
-   の 1 行(ログの規律は [docs/design/LOGGING.md](#14a4e260-70af-4c52-9f19-1c116bddd004))。
-   peer addr は server-proxy 経由なので常に 10.10.128.4 である。タスク識別ヘッダ
-   (X-Lamalium-Task)は第 1 段では付けない。
-8. 検証: node/tests/agent_door.rs に「許可表の各行が通る」「admin・sync・pins・fetch・PUT が
-   403」「peers 付きの search が 400」「blob の GET が 403」「読み口は指定アドレスにしか
-   束縛しない」「`--listen-agent` 無しでは第 2 の口が存在しない」「`--agent-writable` の
-   コレクションだけ PUT が通る」。should/0137 に従い、許可表の 1 行を消すとどの試験が落ちるか
-   で試験を証明する。
-9. 文書: 実装後に docs/design/AGENT_DOOR.md を起こし、この節の第 1 段の記述をそちらへ移す
-   (must/0013)。
-10. 完了確認(7 本): orion から `curl http://10.10.128.1:7441/v1/status` が node_id を返す。
-    orion から `curl -X POST http://10.10.128.1:7441/v1/admin/gc` が 403。orion からの search が
-    結果を返す。orion からの PUT が 403(第 1 段)。vega 上で `curl 127.0.0.1:7441` が接続
-    拒否。orion から `curl 10.10.128.1:7440` が不到達。orion からの citation が返る。orion 側で
-    打つ命令は tee で記録を残す形で渡す。
+6. 検証: 1 と 2 で足す口(`GET /v1/collections`・`full`)の試験を、読み口経由のものは
+   node/tests/agent_door.rs に、主の口のものは search.rs に足す(読み口そのものの試験は
+   agent_door.rs に済んでいる。should/0137 に従い、許可表の 1 行を消すとどの試験が落ちるかを
+   試験の冒頭に記す形を保つ)。
+7. 完了確認(7 本): orion から `curl http://10.10.128.1:7441/v1/status` が node_id を返す。
+   orion から `curl -X POST http://10.10.128.1:7441/v1/admin/gc` が 403。orion からの search が
+   結果を返す。orion からの PUT が 403(第 1 段)。vega 上で `curl 127.0.0.1:7441` が接続
+   拒否。orion から `curl 10.10.128.1:7440` が不到達。orion からの citation が返る。orion 側で
+   打つ命令は tee で記録を残す形で渡す。
 
 ### 第 2 段(別の裁定。書く)
 
 - `--agent-writable <c>`(複数可)のコレクションだけ `PUT /v1/collections/{c}/documents/{name}`
-  を読み口に通す。試験は上の 8 の最後の 1 本。
+  を読み口に通す。試験は node/tests/agent_door.rs に足す。
 - 出所の記録: PUT に `meta`(誰が: agent id・task id)を受け付け、doc_rev.meta に写す
   (取り込みの extra_meta は既にあり、put_document は今は空で呼ぶので、API に欄を足すだけ)。
 - 読めるコレクションの許可表(`--agent-collections`)が要ると分かればここで足す。
@@ -246,7 +225,7 @@ agentd(ハーネス)─HTTP─▶ 10.100.0.1:11440 ─server-proxy─wg1─▶ 1
 | 段階 | 内容 | 完了条件 |
 |---|---|---|
 | L0 | lamalium の文書を uniqnode の本番に入れ、Claude Code の MCP から引いて、どんな問いに何が返るかを 10 問記録 | docs/analysis/ に記録がある |
-| L1 | uniqnode の読み口(上の「uniqnode 側の作業」1〜9)+ server-proxy の転送 + lamalium の 3 ツール(読むだけ)。最初の席は helpdesk(本物の tools API を持つ gpt-oss-120b) | 完了確認の 7 本がすべて通り、helpdesk が uniqnode_search で仕様書と設計文書の断片を出典付きで答えた(向こうのログで観測) |
+| L1 | uniqnode の読み口(上の「uniqnode 側の作業」1〜6)+ server-proxy の転送 + lamalium の 3 ツール(読むだけ)。最初の席は helpdesk(本物の tools API を持つ gpt-oss-120b) | 完了確認の 7 本がすべて通り、helpdesk が uniqnode_search で仕様書と設計文書の断片を出典付きで答えた(向こうのログで観測) |
 | L2 | BENCH で「引けば直る」タスクを回し、呼ばれた率と緑到達率を測る | モデル × 説明文の行列に数字がある |
 | L3 | 数字に応じた調整(説明文・位置・tip)。それでも足りないモデルにだけ push。第 2 段(書く)の裁定はここまでの数字を見てから | 調整前後の差が数字である |
 | L4 | vega の timer による lamalium の木の取り込み + エージェントが書いた記憶の運用(コレクションの整理、gc) | 過去タスクで書いた事実が別のタスクの uniqnode_search に出る |

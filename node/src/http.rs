@@ -106,15 +106,25 @@ fn status_reason(status: u16) -> &'static str {
 
 pub type Handler = dyn Fn(&Request) -> Response + Send + Sync;
 
+/// 相手のアドレスも受け取るハンドラ。要求を誰が送ったかを記録に残す口(serve の読み口。
+/// node/src/agent_door.rs)が使う。
+pub type PeerHandler = dyn Fn(&Request, std::net::SocketAddr) -> Response + Send + Sync;
+
 /// listener を受け取り、接続ごとにスレッドを立てて捌き続ける(返らない)。
 pub fn serve(listener: TcpListener, handler: Arc<Handler>) -> ! {
+    serve_with_peer(listener, Arc::new(move |request, _peer| handler(request)))
+}
+
+/// serve と同じだが、ハンドラに相手のアドレスも渡す。接続の受け方は 1 つ(should/0135)で、
+/// serve はこれの被せ物である。
+pub fn serve_with_peer(listener: TcpListener, handler: Arc<PeerHandler>) -> ! {
     loop {
         match listener.accept() {
-            Ok((stream, _peer)) => {
+            Ok((stream, peer)) => {
                 let handler = handler.clone();
                 std::thread::spawn(move || {
                     // 接続単位のエラーはその接続を閉じるだけでよい。
-                    if let Err(e) = handle_connection(stream, handler) {
+                    if let Err(e) = handle_connection(stream, peer, handler) {
                         // タイムアウト・切断は平常運転なのでログにしない。
                         let benign = matches!(
                             e.kind(),
@@ -137,7 +147,11 @@ pub fn serve(listener: TcpListener, handler: Arc<Handler>) -> ! {
     }
 }
 
-fn handle_connection(stream: TcpStream, handler: Arc<Handler>) -> std::io::Result<()> {
+fn handle_connection(
+    stream: TcpStream,
+    peer: std::net::SocketAddr,
+    handler: Arc<PeerHandler>,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
@@ -151,7 +165,7 @@ fn handle_connection(stream: TcpStream, handler: Arc<Handler>) -> std::io::Resul
             Some(ReadOutcome::Ok(r)) => r,
         };
         let close = matches!(request.header("connection"), Some(v) if v.eq_ignore_ascii_case("close"));
-        let response = handler(&request);
+        let response = handler(&request, peer);
         let write_result = write_response(&mut writer, &response, close);
         if response.shutdown_after {
             // 応答の書き込みに失敗しても(クライアントが先に切っても)終了は実行する。

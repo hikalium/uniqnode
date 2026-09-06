@@ -39,8 +39,13 @@ fn usage() -> ! {
            revoke-make <node_id> <group_id>\n\
                                       失効文の本体を標準出力へ(署名なし)\n\
            serve <dir> <addr> [--embed <url>] [--embedder <id>] [--rerank <url>]\n\
-                              [--reranker <id>] [ログの指定]\n\
+                              [--reranker <id>] [--listen-agent <addr>] [ログの指定]\n\
                                       HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)。\n\
+                                      --listen-agent を与えると、そのアドレスに第 2 の口\n\
+                                      (読み口)を束縛する。読み口は許可表(healthz・status・\n\
+                                      search・objects のチャンク・citation・collections)の\n\
+                                      要求だけを通し、他は 403 で断る。束縛できなければ主の\n\
+                                      口はそのまま上げ、裏で再試行する(docs/design/AGENT_DOOR.md)。\n\
                                       --embed を与えると POST /v1/search の既定が BM25 と\n\
                                       埋め込みの RRF 融合になる。ベクトルは embed で作った\n\
                                       キャッシュから読むので、検索が模型の計算を待つことは\n\
@@ -651,16 +656,21 @@ struct LogOptions {
 struct RunOptions {
     embed: EmbedOptions,
     log: LogOptions,
+    /// 読み口の束縛先(--listen-agent)。serve だけが持つ口で、無指定なら第 2 の口は
+    /// 存在しない(docs/design/AGENT_DOOR.md)。mcp・viewer は読み手を共有しているので
+    /// 字面は通るが、効かせる先が無いので断る。
+    listen_agent: Option<String>,
 }
 
-/// ログの指定だけを抜き取り、残りは埋め込みの読み手に渡す(読み取りを二重に実装
-/// しない。should/0135)。
+/// ログの指定と読み口の指定だけを抜き取り、残りは埋め込みの読み手に渡す(読み取りを
+/// 二重に実装しない。should/0135)。
 fn parse_run_options(rest: &[String]) -> RunOptions {
     let mut log = LogOptions {
         path: None,
         enabled: true,
         max_bytes: uniqnode::log::DEFAULT_MAX_BYTES,
     };
+    let mut listen_agent = None;
     let mut others = Vec::new();
     let mut at = 0;
     while at < rest.len() {
@@ -668,6 +678,10 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
         match rest[at].as_str() {
             "--log" => {
                 log.path = Some(value());
+                at += 2;
+            }
+            "--listen-agent" => {
+                listen_agent = Some(value());
                 at += 2;
             }
             "--no-log" => {
@@ -692,7 +706,19 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
             }
         }
     }
-    RunOptions { embed: parse_embed_options(&others), log }
+    RunOptions { embed: parse_embed_options(&others), log, listen_agent }
+}
+
+/// 読み口を持たない命令(mcp・viewer)が --listen-agent を受け取ったとき、黙って捨てずに
+/// 断る(must/0022 の同型。viewer の --writable と同じ扱い)。
+fn refuse_misplaced_listen_agent(role: &str, options: &RunOptions) {
+    if options.listen_agent.is_some() {
+        uniqnode::log_line!(
+            "uniqnode: {role}: --listen-agent は {role} の引数ではない(読み口を束縛するのは \
+             serve である)"
+        );
+        std::process::exit(2);
+    }
 }
 
 /// ログの保存を始める(既定で有効)。既定の道が開けなければ利用者の書ける場所へ倒し、
@@ -1223,6 +1249,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // 何よりも先に開く。ストアを開けない・転送先が誤っている、といった起動時の
             // 失敗こそ残したい記録である。
             start_logging(dir, uniqnode::log::MCP_ROLE, &options.run.log);
+            refuse_misplaced_listen_agent(uniqnode::log::MCP_ROLE, &options.run);
             let backend = match &options.serve_url {
                 // 転送する形: 走っている serve の REST へ回す。ストアを開かない
                 // (排他ロックを取らない)ので、常駐したまま ingest・embed が通る。
@@ -1363,7 +1390,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // 標準出力の 1 行は起動スクリプトとの取り決めなので形を変えない。ログにも
             // 残すのは、後から「いつ、どのアドレスで起きたか」を読めるようにするため。
             uniqnode::log_line!("uniqnode: serve: {bound} で待ち受ける");
-            let context = uniqnode::api::ApiContext {
+            let context = std::sync::Arc::new(uniqnode::api::ApiContext {
                 store,
                 engine,
                 health: Some(health),
@@ -1374,7 +1401,19 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 // ページの写しの作業ファイル置き場を組むために持つ(健全性エンジンへ
                 // 渡した data_dir は移動済みなので、同じ dir から作り直す)。
                 data_dir: std::path::PathBuf::from(dir),
-            };
+            });
+            // 読み口(AGENT_DOOR (uuid:02f79aec-2f12-41e6-bede-1557d4719e4d))。主の口と
+            // 同じ ApiContext を共有し、許可表を通った要求だけを同じ api::handle に委ねる。
+            // 主の口の listening on の後に開く(束縛できなくても主の口は殺さない。
+            // 裏のスレッドで再試行する)。無指定なら第 2 の口は存在しない。
+            if let Some(agent_address) = options.listen_agent.clone() {
+                let context = context.clone();
+                let door: std::sync::Arc<uniqnode::http::PeerHandler> =
+                    std::sync::Arc::new(move |request, peer| {
+                        uniqnode::agent_door::handle(&context, request, peer)
+                    });
+                uniqnode::agent_door::open(agent_address, door);
+            }
             let handler: std::sync::Arc<uniqnode::http::Handler> =
                 std::sync::Arc::new(move |request| uniqnode::api::handle(&context, request));
             uniqnode::http::serve(listener, handler);
@@ -1386,6 +1425,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             let address = rest.first().map(String::as_str).unwrap_or_else(|| usage());
             let options = parse_mcp_options(&rest[1..]);
             start_logging(dir, uniqnode::log::VIEWER_ROLE, &options.run.log);
+            refuse_misplaced_listen_agent(uniqnode::log::VIEWER_ROLE, &options.run);
             // ビューワは書き込みの口を持たない。mcp と読み手を共有しているので字面は
             // 通るが、効かせる先の無い指定は黙って捨てずに断る(must/0022 の同型)。
             if !options.writable.is_empty() {

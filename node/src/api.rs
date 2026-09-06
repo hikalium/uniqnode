@@ -45,7 +45,7 @@ fn json_object(entries: Vec<(&str, c1::Value)>) -> Vec<u8> {
     c1::to_canonical_bytes(&c1::Value::Object(map))
 }
 
-fn error_response(status: u16, message: &str) -> Response {
+pub(crate) fn error_response(status: u16, message: &str) -> Response {
     Response::json(
         status,
         json_object(vec![("error", c1::Value::Text(message.to_string()))]),

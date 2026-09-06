@@ -146,43 +146,27 @@ agentd(ハーネス)─HTTP─▶ 10.100.0.1:11440 ─server-proxy─wg1─▶ 1
 
 ## uniqnode 側の作業(第 1 段 = L1。実行順)
 
-1. `GET /v1/collections` を新設する。応答は `{"collections":[{"documents":N,"name":"<c>"}]}`
-   (名前順)。refs の `<node_id>/collections/<c>/<name>` を数える。主の口にも出す。
-2. `POST /v1/search` の要求に `"full":true` を足すと各件に `"text"`(チャンク全文)を載せる。
-   full のとき top_k の上限は 10。応答の形は次のとおり(鍵は辞書順、無い鍵は載せない。
-   受け手は増える鍵を無視する):
-   `{"degraded"?,"filtered_low_information"?,"method","results":[{"citation":{"at","breadcrumbs","collection","document","page"?,"position"},"id","score","snippet","source_url"?,"text"?}],"score_semantics"}`。
-   エラーは `{"error":"…"}`。`/healthz` はテキスト `ok`。`GET /v1/objects/{id}` はチャンクの
-   c1 JSON `{"kind":"chunk","meta":{...},"text":"...","v":1}`。`GET /v1/status` は
-   `{"capacity_bytes","free_bytes","health","last_seq","node_id","objects","used_bytes","v"}`。
-   search の判断は run_search のまま(REST・MCP・読み口が同じ関数を通る。
-   [docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))。
-3. bind の堅牢化の unit 側: 10.10.128.1 は wg1 が上がって初めて存在する。unit に After= と
-   Wants= で wg1 の unit を待ち、install に載せる(serve 側の再試行は済んでいる。
-   [docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d) の「束縛と再試行」)。
-4. install: `uniqnode install <dir> --listen-agent 10.10.128.1:7441` で drop-in に
-   `UNIQNODE_AGENT_LISTEN` を書く(既存の drop-in の表は
-   [docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2))。install の確認に「読み口の
-   /v1/status が主の口と同じ node_id を返す」「読み口の POST /v1/admin/gc が 403」を足す。
-   firewall(10.10.128.4 から 7441 への接続だけ許す。ufw か nftables かの実物は操作者に
-   確かめる)は操作者の作業で、命令は `… 2>&1 | tee /tmp/uniqnode-firewall.log` の形で渡し、
-   記録を自分で読む。
-5. 索引の温め: 今の SearchIndex は初回要求時に作る遅延キャッシュで(api.rs の
-   with_current_index)、書き込みで世代がずれると次の要求で作り直す。これを、serve の起動
-   直後(要求を待たずに)と書き込み(PUT・fetch・ingest)の後に裏のスレッドで作り直す形に
-   する。作り直し中の検索は待つ。古い索引で答えると「入れた直後に引けない」が黙って起きる
-   (must/0022)。実測(2026-09-06、55,452 オブジェクト・31,232 チャンク): 温まった
-   hybrid + リランクの top_k=5 で 0.34〜0.68 秒、bm25 で 0.31 秒、冷えた初回は 22.46 秒。
-   60 秒の時限には収まるが、初回の 22 秒を要求のたびに払わせない。
-6. 検証: 1 と 2 で足す口(`GET /v1/collections`・`full`)の試験を、読み口経由のものは
-   node/tests/agent_door.rs に、主の口のものは search.rs に足す(読み口そのものの試験は
-   agent_door.rs に済んでいる。should/0137 に従い、許可表の 1 行を消すとどの試験が落ちるかを
-   試験の冒頭に記す形を保つ)。
-7. 完了確認(7 本): orion から `curl http://10.10.128.1:7441/v1/status` が node_id を返す。
+読み口・`GET /v1/collections`・`full`・索引の温め・`install --system`(`--after` で wg1 の unit を
+待ち、`--listen-agent` を drop-in に書き、読み口の確認 2 本を含む)は着地した(2026-09-06。
+[docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d)・
+[docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580)・
+[docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2))。残るのは本番に据える段と、
+その効果の観測である。
+
+1. 本番の移行: user unit を止めて外し、`sudo … install --system … --listen-agent 10.10.128.1:7441
+   --after wg-quick@wg1.service` で据え直す(命令の実物は SYSTEMD.md の移行の節。出力は
+   `… 2>&1 | tee /tmp/uniqnode-install-system.log` で残し、記録を自分で読む)。
+2. firewall(10.10.128.4 から 7441 への接続だけ許す。ufw か nftables かの実物は操作者に
+   確かめる)は操作者の作業で、命令は `… 2>&1 | tee /tmp/uniqnode-firewall.log` の形で渡す。
+3. 完了確認(7 本): orion から `curl http://10.10.128.1:7441/v1/status` が node_id を返す。
    orion から `curl -X POST http://10.10.128.1:7441/v1/admin/gc` が 403。orion からの search が
    結果を返す。orion からの PUT が 403(第 1 段)。vega 上で `curl 127.0.0.1:7441` が接続
    拒否。orion から `curl 10.10.128.1:7440` が不到達。orion からの citation が返る。orion 側で
    打つ命令は tee で記録を残す形で渡す。
+4. 着地時の実演記録: 時限 60 秒・top_k 既定 5・上限 10 は仮置きで、orion からの実測
+   (温まった検索と、起動直後の初回)を docs/analysis に残して見直す。索引の温めは SearchIndex
+   だけで、埋め込みのベクトルの読み込みは初回の hybrid 検索が払う(SEARCH.md の既知の癖)。
+   実測で効くなら温めの対象に足す。
 
 ### 第 2 段(別の裁定。書く)
 
@@ -232,19 +216,17 @@ agentd(ハーネス)─HTTP─▶ 10.100.0.1:11440 ─server-proxy─wg1─▶ 1
 
 ## 判断が要ること(操作者に聞く)
 
-1. lamalium の KNOWLEDGE.md §8 の却下(埋め込み・ベクトル検索はやらない)を、上の答え方で
-   書き換えてよいか。lamalium 側の設計判断の変更なので、操作者の裁定が要る。
-2. (裁定済み 2026-09-06: 移す)uniqnode を system unit に移す。lamalium の policy 0108
-   (user unit ではなく system unit)に合わせるためにも、wg1 の unit を After= で待つためにも、
-   system unit のほうが自然である。user unit のままでもつながるが、wg1 の待ち合わせは
-   user unit からは組めない。`uniqnode install --system`(`--after`・`--listen-agent` を含む)
-   と user 単位からの移行手順は [docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2)。
-3. 「capability の付与 = 全コレクションが読める(web を含む)」でよいか。web コレクションは
-   第三者の頁を含む。否なら第 2 段で `--agent-collections` を足す。
-4. firewall で 10.10.128.4 から 7441 への接続だけを許す規則を操作者が入れる(ufw か nftables
-   かの実物の確認を含む)。
-5. BENCH に載せるモデルの集合(gemma4:31b は必須。gpt-oss-120b と Qwen3 を足すか)。
-6. 段階の順(L0〜L4)は現行どおりでよいか。
+裁定済み(2026-09-06): lamalium の KNOWLEDGE.md §8 の却下は上の答え方で書き換える(向こうの
+docs/plan/UNIQNODE.md の着地条件に載り、着地の日に向こうの design へ移る)。uniqnode は
+system unit に移す(`uniqnode install --system`。移行手順は
+[docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2))。capability の付与 = 全コレクション
+(web を含む)が読める。firewall の規則は操作者が入れる。時限 60 秒・top_k 既定 5・上限 10 は
+仮置きで、着地時の実演記録で見直す。
+
+残る判断:
+
+1. BENCH に載せるモデルの集合(gemma4:31b は必須。gpt-oss-120b と Qwen3 を足すか)。
+2. 段階の順(L0〜L4)は現行どおりでよいか。
 
 ## やらないこと
 

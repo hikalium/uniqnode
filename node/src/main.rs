@@ -691,7 +691,7 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
                 log.path = Some(value());
                 at += 2;
             }
-            "--listen-agent" => {
+            uniqnode::install::AGENT_LISTEN_FLAG => {
                 listen_agent = Some(value());
                 at += 2;
             }
@@ -840,7 +840,7 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
             "--unit-dir" => unit_dir = Some(std::path::PathBuf::from(value())),
             "--user" => user = Some(value()),
             "--after" => after.push(value()),
-            "--listen-agent" => agent_listen = Some(value()),
+            uniqnode::install::AGENT_LISTEN_FLAG => agent_listen = Some(value()),
             "--no-start" => {
                 start = false;
                 at += 1;

@@ -260,8 +260,8 @@ fn a_paraphrased_query_reaches_its_section_through_the_search_api() {
 /// (実測 2026-08-17。20260817-real-corpus-search-quality
 /// (uuid:faeda9ac-5e9e-4091-8122-2fba9f80c8db))。ここでは
 /// 同じ形を固定資材で作る: 日本語だけの文書に英語で問えば、語の集合は文字種の段階で
-/// 交わらない。ベクトルは劣化の試験と同じくこちらで 1 件だけ書き込むので、この試験が
-/// 測るのは順位の質ではなく「片肺だったと言うこと」だけである。
+/// 交わらない。ベクトルは serve が書き込みの後に裏で埋めるものを待って使う(順位の質
+/// ではなく「片肺だったと言うこと」だけを測る)。
 #[test]
 fn hybrid_says_when_bm25_matched_nothing_and_the_fusion_was_one_sided() {
     require_embedding_server();
@@ -271,17 +271,7 @@ fn hybrid_says_when_bm25_matched_nothing_and_the_fusion_was_one_sided() {
         &["--embed", uniqnode::embed::DEFAULT_EMBEDDING_URL],
     );
     put_document(&server.address, "notes", "search_ja.md", SEARCH_JA.as_bytes());
-    let seed = body_text(&search(&server.address, "{\"query\":\"世代の整合\",\"method\":\"bm25\"}"));
-    let chunk_id = json_text_field(&seed, "id").expect("チャンク ID");
-    let mut cache = uniqnode::embed::VectorCache::open(
-        uniqnode::embed::VectorCache::path_for(&dir, "bge-m3"),
-        "bge-m3",
-        uniqnode::embed::DEFAULT_EMBEDDING_DIMENSION,
-    )
-    .expect("open cache");
-    let mut vector = vec![0.0f32; uniqnode::embed::DEFAULT_EMBEDDING_DIMENSION];
-    vector[0] = 1.0;
-    cache.extend(vec![(chunk_id, vector)]).expect("write cache");
+    wait_for_log_lines(&server, VECTORS_FILLED, 1);
 
     // 日本語だけの文書に英語で問う。BM25 単独では 1 件も返らない。
     let query = "how long are request logs kept";
@@ -317,14 +307,14 @@ fn hybrid_says_when_bm25_matched_nothing_and_the_fusion_was_one_sided() {
     assert!(!ids(&alone).is_empty(), "埋め込み単独では返るはず: {alone}");
     assert_eq!(ids(&fused), ids(&alone), "片肺の融合は埋め込み単独と同じ列のはず");
 
-    // 語が一致する問いでは、この表明は出ない(いつでも出る文言ではない)。被覆の欠落は
-    // 別の理由なので、そちらは残る。
+    // 語が一致する問いでは、この表明は出ない(いつでも出る文言ではない)。ベクトルは
+    // 全チャンクぶん埋まっているので、被覆の欠落も無く、劣化は何も言わない。
     let matched = body_text(&search(
         &server.address,
         "{\"query\":\"世代の整合\",\"top_k\":10,\"method\":\"hybrid\"}",
     ));
     assert!(!matched.contains("BM25 が 1 語も一致せず"), "語が一致すれば片肺ではない: {matched}");
-    assert!(matched.contains("ベクトルは 1/"), "被覆の欠落は残るべき: {matched}");
+    assert!(!matched.contains("degraded"), "全チャンクぶん埋まっていれば劣化は無い: {matched}");
     drop(server);
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
@@ -424,6 +414,94 @@ fn search_degrades_to_bm25_when_the_embedding_server_cannot_be_reached() {
     ));
     assert!(body.contains("\"method\":\"bm25\""), "{body}");
     assert!(!body.contains("degraded"), "劣化していないのに理由を出さない: {body}");
+
+    // (3) 裏の補完も届かない相手に当たって失敗し、理由をログに残す(黙らない。must/0022)。
+    // どのサーバに届かなかったかを言う。
+    wait_for_log_lines(&server, FILL_REFUSED, 1);
+    let refusal = serve_log(&server);
+    let line = refusal.lines().find(|line| line.contains(FILL_REFUSED)).expect("補完の失敗の行");
+    assert!(line.contains("127.0.0.1:1"), "どのサーバに届かなかったかを言うべき: {line}");
+    assert!(line.contains("BM25 に劣化"), "検索がどうなるかを言うべき: {line}");
+    // 同じ理由が続くあいだは繰り返さない: もう 1 文書書いて補完がもう 1 回失敗しても、
+    // 行は 1 本のまま。補完が走ったことは温めの記録がもう 1 本増えたことで知り(起動直後の
+    // 温めと最初の PUT のどちらが先かで本数が変わるので、増分で数える)、失敗は接続拒否
+    // なので温めの直後に即座に決まる。短い猶予の後に数える(負の確認なので、記録を待つ
+    // 形にはできない)。
+    //
+    // 欠陥を戻すとどこで落ちるか(should/0137): api.rs の fill_missing_vectors の
+    // last_refusal の比較を消すと、2 本目の PUT の後に同じ行がもう 1 本積まれて最後の
+    // 段で落ちる(戻して確かめた)。補完を呼ばなくすると、行が 0 本のままで
+    // wait_for_log_lines が落ちる。
+    let builds_before = index_builds_in_log(&server);
+    put_document(&server.address, "notes", "search_en.md", SEARCH_EN.as_bytes());
+    wait_for_index_builds(&server, builds_before + 1);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(
+        log_lines_with(&server, FILL_REFUSED),
+        1,
+        "同じ理由の失敗を繰り返し書いている: {}",
+        serve_log(&server)
+    );
+    drop(server);
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// 無いベクトルは serve が裏で埋める(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580) の
+/// 「コーパスの埋め込みと serve の分担」): --embed 付きの serve にベクトル無しで文書を
+/// 書くと、要求が 1 つも来なくても補完の記録が残り、次の融合検索は被覆の欠落を言わない
+/// (キャッシュファイルが伸びたことを見かけで知って索引を読み直す)。
+///
+/// 欠陥を戻すとどこで落ちるか(should/0137): api.rs の start_index_warmer から
+/// start_vector_filler の呼び出しを消す(補完が一切起きない)と、記録が 0 本のままで
+/// wait_for_log_lines が落ちる。書き込みの後の nudge_vector_filler だけを消した場合は、
+/// 起動直後の温めを待ってから書くので、その温めに続く補完は空のストアを見ており、
+/// 書いたぶんを埋めるものが無くなって同じ所で落ちる(起動直後の補完の走査がまだ終わって
+/// いない隙に PUT が滑り込むと通ってしまうが、走査は温めの記録の直後の数ミリ秒であり、
+/// 消した欠陥を毎回は隠せない)。埋めてもファイルに追記しない(cache.extend を飛ばす)と、
+/// 記録はあっても次の検索が「ベクトルは 0/n」と言って最後の段で落ちる。index_is_current
+/// がキャッシュの見かけを見なくなると、同じく古い索引のままで落ちる。
+#[test]
+fn the_server_fills_missing_vectors_after_a_write_without_a_request() {
+    require_embedding_server();
+    let dir = unique_dir("search-fill-write");
+    let server = start_server_at_with_args(
+        dir.clone(),
+        &["--embed", uniqnode::embed::DEFAULT_EMBEDDING_URL],
+    );
+    // 起動直後の温めを見届けてから書く(書き込みの合図の側が埋めることを測るため)。
+    wait_for_index_builds(&server, 1);
+    put_document(&server.address, "notes", "search_ja.md", SEARCH_JA.as_bytes());
+    // 検索を打たずに待つ。書き込みの合図 → 温め → 補完の順に裏で進む。
+    wait_for_log_lines(&server, VECTORS_FILLED, 1);
+    let logged = serve_log(&server);
+    let line = logged.lines().find(|line| line.contains(VECTORS_FILLED)).expect("補完の記録");
+    // 形は「embedded <n> missing vectors in <ms> ms (<cached>/<distinct> cached)」。
+    let rest = line.split(VECTORS_FILLED).nth(1).expect("行の残り");
+    let (count, rest) = rest.split_once(" missing vectors in ").expect("<n> missing vectors in");
+    let (millis, rest) = rest.split_once(" ms (").expect("<ms> ms (");
+    let (fraction, tail) = rest.split_once(" cached)").expect("<cached>/<distinct> cached)");
+    let count: usize = count.parse().expect("件数が数");
+    assert!(count > 0, "埋めた件数が 0: {line}");
+    assert!(millis.parse::<u64>().is_ok(), "ミリ秒が数でない: {line}");
+    // 新しいストアなので、相異なるチャンクは全部が無かった: 埋めた後は全部が有る。
+    assert_eq!(fraction, format!("{count}/{count}"), "{line}");
+    assert_eq!(tail, "", "{line}");
+
+    // 次の融合検索は温めた索引と伸びたキャッシュで答え、劣化を何も言わない。
+    let body = body_text(&search(
+        &server.address,
+        "{\"query\":\"世代の整合\",\"top_k\":10,\"method\":\"hybrid\"}",
+    ));
+    assert!(body.contains("\"method\":\"hybrid\""), "{body}");
+    assert!(!body.contains("degraded"), "埋めた後に劣化を言っている: {body}");
+    assert!(body.contains("\"document\":\"search_ja\""), "{body}");
+    // 意味検索だけでも同じ文書に届く(ベクトルが実際に索引に載っている)。
+    let alone = body_text(&search(
+        &server.address,
+        "{\"query\":\"世代の整合\",\"top_k\":3,\"method\":\"embedding\"}",
+    ));
+    assert!(alone.contains("\"document\":\"search_ja\""), "{alone}");
+    assert!(!alone.contains("degraded"), "{alone}");
     drop(server);
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
@@ -522,34 +600,50 @@ fn full_results_carry_the_whole_chunk_text() {
 
 /// 索引を作り直した記録(api.rs の with_current_index が残す 1 行)。
 const INDEX_BUILT: &str = "uniqnode: search index built in ";
+/// 無いベクトルを裏で埋めた記録(api.rs の fill_missing_vectors が残す 1 行)。
+const VECTORS_FILLED: &str = "uniqnode: embed: embedded ";
+/// 埋められなかった記録(同じ関数。同じ理由が続くあいだは 1 本だけ)。
+const FILL_REFUSED: &str = "uniqnode: embed: 無いベクトルを埋められない: ";
+
+/// serve のログの全文(起動直後はまだ無いことがある: ログを開くのは束縛より前だが、
+/// ファイルは最初の 1 行で生まれる)。
+fn serve_log(server: &Server) -> String {
+    let path = uniqnode::log::default_path(&server.dir, uniqnode::log::SERVE_ROLE);
+    std::fs::read_to_string(&path).unwrap_or_default()
+}
+
+/// serve のログにある needle の数。
+fn log_lines_with(server: &Server, needle: &str) -> usize {
+    serve_log(server).matches(needle).count()
+}
 
 /// serve のログにある作り直しの記録の数。
 fn index_builds_in_log(server: &Server) -> usize {
-    let path = uniqnode::log::default_path(&server.dir, uniqnode::log::SERVE_ROLE);
-    match std::fs::read_to_string(&path) {
-        Ok(logged) => logged.matches(INDEX_BUILT).count(),
-        // 起動直後はまだ無いことがある(ログを開くのは束縛より前だが、ファイルは
-        // 最初の 1 行で生まれる)。
-        Err(_) => 0,
-    }
+    log_lines_with(server, INDEX_BUILT)
 }
 
-/// 作り直しの記録が少なくとも want 本になるまで待つ。待つ条件は記録そのものであり、
-/// 上限は温めの静穏(INDEX_WARM_QUIET)と小さなストアの構築を十分に越える安全網である
-/// (期限が来たら黙って進まず落ちる。should/0104)。
-fn wait_for_index_builds(server: &Server, want: usize) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+/// needle の記録が少なくとも want 本になるまで待つ。待つ条件は記録そのものであり、
+/// 上限は温めの静穏(INDEX_WARM_QUIET)と小さなストアの構築・埋め込みを十分に越える
+/// 安全網である(期限が来たら黙って進まず落ちる。should/0104)。
+fn wait_for_log_lines(server: &Server, needle: &str, want: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        let seen = index_builds_in_log(server);
+        let seen = log_lines_with(server, needle);
         if seen >= want {
             return;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "作り直しの記録が {want} 本にならない({seen} 本のまま)"
+            "{needle:?} の記録が {want} 本にならない({seen} 本のまま): {}",
+            serve_log(server)
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+}
+
+/// 作り直しの記録が少なくとも want 本になるまで待つ。
+fn wait_for_index_builds(server: &Server, want: usize) {
+    wait_for_log_lines(server, INDEX_BUILT, want);
 }
 
 /// 起動直後、要求が 1 つも来なくても索引は温まる(作り直しの記録が残る)。

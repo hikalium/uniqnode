@@ -47,10 +47,11 @@ fn usage() -> ! {
                                       要求だけを通し、他は 403 で断る。束縛できなければ主の\n\
                                       口はそのまま上げ、裏で再試行する(docs/design/AGENT_DOOR.md)。\n\
                                       --embed を与えると POST /v1/search の既定が BM25 と\n\
-                                      埋め込みの RRF 融合になる。ベクトルは embed で作った\n\
-                                      キャッシュから読むので、検索が模型の計算を待つことは\n\
-                                      ない。届かなければ BM25 だけに劣化して答え、応答の\n\
-                                      method と degraded がそれを言う。\n\
+                                      埋め込みの RRF 融合になる。ベクトルはキャッシュから\n\
+                                      読むので検索が模型の計算を待つことはなく、無いぶんは\n\
+                                      起動直後と書き込みの後に裏で埋める(検索はそれを\n\
+                                      待たない)。届かなければ BM25 だけに劣化して答え、\n\
+                                      応答の method と degraded がそれを言う。\n\
                                       --rerank を与えると上位候補の順位をリランカー\n\
                                       (--reranker で模型名、既定 {default_reranker})で\n\
                                       取り直す。届かなければ融合の順位のまま答え、\n\
@@ -98,7 +99,7 @@ fn usage() -> ! {
                                       <dir>/derived/embeddings/<id>.vec に足す(導出データ。\n\
                                       消しても作り直せる)。まとまりごとに fsync するので\n\
                                       途中で止めても続きから再開できる。serve 停止中の\n\
-                                      ストア用\n\
+                                      ストア用(serve 中は serve 自身が裏で埋める)\n\
            sync <dir> <peer_addr>     相手から pull で同期する(serve 停止中のストア用。\n\
                                       serve 中は POST /v1/sync を使う)\n\
            ingest <dir> <collection> <path> [--pdftotext <exe>]\n\

@@ -30,7 +30,8 @@ pub struct ApiContext {
     /// None なら合図は捨てられ、索引は従来どおり次の要求が作る(ストアを直接開く mcp)。
     pub search_warmer: Option<IndexWarmer>,
     /// 埋め込みの装備(serve の --embed が与えられたときだけ Some。node/src/embed.rs)。
-    /// 無ければ検索は BM25 だけで答える。
+    /// 無ければ検索は BM25 だけで答える。search_warmer もあれば、温めの後に無いベクトルを
+    /// 裏で埋める(start_vector_filler)。
     pub embedding: Option<crate::embed::EmbeddingService>,
     /// 順位を取り直すリランカー(serve の --rerank が与えられたときだけ Some。
     /// node/src/rerank.rs)。無ければ融合の順位のまま答える。
@@ -762,8 +763,10 @@ pub fn start_index_warmer(context: Arc<ApiContext>) {
         );
         return;
     };
+    let filler = start_vector_filler(context.clone());
     std::thread::spawn(move || {
         warm_search_index(&context);
+        nudge_vector_filler(&filler);
         loop {
             // 合図を待つ。送り手が全部消えるのは ApiContext が落ちたとき(serve の終わり)。
             if receiver.recv().is_err() {
@@ -777,6 +780,7 @@ pub fn start_index_warmer(context: Arc<ApiContext>) {
                 }
             }
             warm_search_index(&context);
+            nudge_vector_filler(&filler);
         }
     });
 }
@@ -788,6 +792,79 @@ fn warm_search_index(context: &ApiContext) {
     let store = context.store.lock().expect("lock");
     if let Err(error) = with_current_index(context, &store, |_index| ()) {
         crate::log_line!("uniqnode: search: 索引の温めに失敗した: {error}");
+    }
+}
+
+/// 無いベクトルを裏で埋めるスレッドを起こし、その合図の口を返す(埋め込みを装備して
+/// いなければ None で、合図は捨てられる)。契機は索引の温めと同じ 1 本の合図で、温めの
+/// スレッドが温め終えるたびに送る(いつ埋めるかの判断は温めの側の 1 箇所。should/0135)。
+/// 別のスレッドにするのは、補完が分単位かかりうるからである: 温めのスレッドで続けて
+/// 行うと、その間の書き込みの温めが補完の終わりまで待たされる。
+///
+/// 同時に 2 本走ることは無い(受け手は 1 本)。走っている間に届いた合図は残り、終わって
+/// からもう 1 回走る。始める前に溜まった合図は 1 回にまとめる。
+///
+/// 検索はこれを待たない(索引の温めと違う点。SEARCH の「索引の構築と世代」): 穴が
+/// あっても BM25 で答えられ、応答の degraded が穴を言う。埋め終わってキャッシュファイルが
+/// 伸びれば、次の検索が見かけのずれで索引を読み直す(EmbeddingService::index_is_current)。
+fn start_vector_filler(context: Arc<ApiContext>) -> Option<std::sync::mpsc::Sender<()>> {
+    context.embedding.as_ref()?;
+    let (sender, receiver) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let mut last_refusal: Option<String> = None;
+        while receiver.recv().is_ok() {
+            while receiver.try_recv().is_ok() {}
+            fill_missing_vectors(&context, &mut last_refusal);
+        }
+    });
+    Some(sender)
+}
+
+/// 温めの後に呼ぶ。合図は溜まるだけで、ここでは何も待たない。
+fn nudge_vector_filler(filler: &Option<std::sync::mpsc::Sender<()>>) {
+    let Some(filler) = filler else { return };
+    // 受け手が居ないのは補完のスレッドが死んだときだけ(panic)。黙って飲まない(must/0022)。
+    if filler.send(()).is_err() {
+        crate::log_line!("uniqnode: embed: ベクトルの補完の受け手が居ない(スレッドが止まった)");
+    }
+}
+
+/// 補完 1 回(本体は EmbeddingService::fill_missing。ロックの持ち方もそちら)。埋めた
+/// ものがあれば 1 行残す。埋められなければ理由を残して次の合図を待つが、直前と同じ
+/// 理由なら繰り返さない(埋め込みサーバが落ちているあいだ、書き込みのたびに同じ行を
+/// 積まない。読み口の束縛の再試行と同じ規律。agent_door.rs)。理由が変わればまた記す。
+/// その間の検索は BM25 に劣化して答え、応答の degraded が理由を言う(should/0128)。
+fn fill_missing_vectors(context: &ApiContext, last_refusal: &mut Option<String>) {
+    let Some(service) = &context.embedding else { return };
+    let started = std::time::Instant::now();
+    let mut embedded_so_far = 0usize;
+    let outcome = service.fill_missing(&context.store, &mut |progress| {
+        embedded_so_far = progress.embedded;
+    });
+    match outcome {
+        Ok(report) => {
+            *last_refusal = None;
+            if report.embedded > 0 {
+                crate::log_line!(
+                    "uniqnode: embed: embedded {} missing vectors in {} ms ({}/{} cached)",
+                    report.embedded,
+                    started.elapsed().as_millis(),
+                    report.already_cached + report.embedded,
+                    report.distinct_chunks
+                );
+            }
+        }
+        Err(error) => {
+            let refusal = error.to_string();
+            if last_refusal.as_deref() != Some(refusal.as_str()) {
+                crate::log_line!(
+                    "uniqnode: embed: 無いベクトルを埋められない: {refusal}(埋めたのは \
+                     {embedded_so_far} 件。検索は BM25 に劣化して答える。次の書き込みの後に\
+                     また試し、同じ理由が続くあいだはこの行を繰り返さない)"
+                );
+                *last_refusal = Some(refusal);
+            }
+        }
     }
 }
 
@@ -831,7 +908,8 @@ pub fn run_search(
     let store = context.store.lock().expect("lock");
     // ベクトルの索引も BM25 の索引と同じ遅延キャッシュで持つ。読むのはキャッシュ
     // ファイルだけなので、検索要求が模型の計算を待つことはない(コーパスの埋め込みは
-    // CLI の uniqnode embed の仕事)。
+    // 裏の補完(start_vector_filler)と CLI の uniqnode embed の仕事で、検索はそれを
+    // 待たない。穴があれば degraded が言う)。
     let mut vector_cache = None;
     let mut load_failure = None;
     if requested != crate::embed::SearchMethod::Bm25 {

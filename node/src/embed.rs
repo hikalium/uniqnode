@@ -234,7 +234,9 @@ impl SearchMethod {
 
 // ---- 埋め込みサーバのクライアント ----
 
-/// 埋め込みサーバ 1 台ぶんの設定と往復。
+/// 埋め込みサーバ 1 台ぶんの設定と往復。Clone なのは、serve が同じ相手に問いの文(短い
+/// 期限)とコーパスの補完(長い期限)の 2 通りの期限で当たるためである。
+#[derive(Clone)]
 pub struct Embedder {
     /// 接続先(host:port)。
     address: String,
@@ -452,6 +454,11 @@ pub struct VectorCache {
     /// 読み込み時に捨てた末尾のバイト数。追記の途中で止まると生じうる(導出データなので
     /// 捨ててよいが、捨てたことは黙らない。must/0022)。
     discarded_tail_bytes: u64,
+    /// 読めた記録の終わり(ファイル先頭からのバイト数)。捨てた末尾があるとき、次の追記は
+    /// ここまで切り詰めてから書く。壊れた末尾の後ろに足すと、読み手は壊れた所で読むのを
+    /// やめるので、足した記録が永久に見えなくなる(serve の裏の補完が同じチャンクを毎回
+    /// 埋め直して、ファイルだけが伸びる)。
+    valid_length: u64,
     /// 読み込んだ時点のファイルの見かけ。
     stamp: CacheStamp,
 }
@@ -491,6 +498,7 @@ impl VectorCache {
             dimension,
             vectors: BTreeMap::new(),
             discarded_tail_bytes: 0,
+            valid_length: 0,
             stamp: CacheStamp::default(),
         }
     }
@@ -508,6 +516,7 @@ impl VectorCache {
             dimension,
             vectors: BTreeMap::new(),
             discarded_tail_bytes: 0,
+            valid_length: 0,
             stamp: CacheStamp::of(&path),
         };
         let file = match std::fs::File::open(&path) {
@@ -569,6 +578,7 @@ impl VectorCache {
             }
         }
         cache.discarded_tail_bytes = total.saturating_sub(consumed);
+        cache.valid_length = consumed;
         Ok(cache)
     }
 
@@ -606,7 +616,10 @@ impl VectorCache {
             }
         }
         if let Some(path) = self.path.clone() {
-            self.append_to_file(&path, &entries)?;
+            let written = self.append_to_file(&path, &entries)?;
+            // 切り詰めた上に足したので、捨てた末尾はもう無い。
+            self.discarded_tail_bytes = 0;
+            self.valid_length += written;
         }
         for (chunk_id, vector) in entries {
             self.vectors.insert(chunk_id, vector);
@@ -614,11 +627,12 @@ impl VectorCache {
         Ok(())
     }
 
+    /// 足したバイト数を返す(見出し行を含む)。
     fn append_to_file(
         &self,
         path: &Path,
         entries: &[(String, Vec<f32>)],
-    ) -> Result<(), EmbedError> {
+    ) -> Result<u64, EmbedError> {
         let io = |e: std::io::Error| EmbedError::Service(format!("{}: {e}", path.display()));
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(io)?;
@@ -626,6 +640,11 @@ impl VectorCache {
         let fresh = !path.exists();
         let mut file =
             std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(io)?;
+        // 捨てた末尾があれば、その手前まで切り詰めてから足す(壊れた記録の後ろに足した
+        // 記録は読み手に届かない。valid_length のコメント)。
+        if self.discarded_tail_bytes > 0 {
+            file.set_len(self.valid_length).map_err(io)?;
+        }
         let mut bytes = Vec::new();
         if fresh {
             bytes.extend_from_slice(
@@ -648,7 +667,7 @@ impl VectorCache {
         }
         file.write_all(&bytes).map_err(io)?;
         file.sync_all().map_err(io)?;
-        Ok(())
+        Ok(bytes.len() as u64)
     }
 }
 
@@ -709,26 +728,23 @@ pub struct FillReport {
     pub embedded: usize,
 }
 
-/// 見えのチャンクのうちキャッシュに無いものを埋め込み、キャッシュに足す。
-/// まとまりごとに追記して fsync するので、途中で止めてもそこまでは残る。progress は
-/// まとまりを 1 つ終えるたびに呼ばれる(25k チャンクは分単位かかるので、進みを黙って
-/// いられる長さではない)。
-pub fn fill_cache(
-    store: &Store,
-    embedder: &Embedder,
-    cache: &mut VectorCache,
-    progress: &mut dyn FnMut(&FillReport),
-) -> Result<FillReport, EmbedError> {
-    if embedder.embedder_id() != cache.embedder_id() {
-        return Err(EmbedError::Service(format!(
-            "模型 {} のベクトルを {} のキャッシュには足せない",
-            embedder.embedder_id(),
-            cache.embedder_id()
-        )));
-    }
+/// キャッシュに無い見えのチャンク(fill_cache の「集める」半分の結果)。report には
+/// chunks・distinct_chunks・already_cached が入り、embedded は 0 である。
+pub struct MissingChunks {
+    pub report: FillReport,
+    /// (チャンクのオブジェクト ID, 本文)。埋め込みに掛けるのは本文である。
+    pub chunks: Vec<(String, String)>,
+}
+
+/// 見えのチャンクを走査し、キャッシュに無いものの ID と本文を集める(ストアを読むだけで、
+/// 埋め込みサーバは呼ばない)。ストアのロックを持つのはこの走査のあいだだけでよい:
+/// serve はここをロックの中で呼び、ロックを離してから embed_missing で往復する(往復の
+/// あいだストアを塞ぐと、1 本の補完で API 全体が止まる。run_search の問いの埋め込みと
+/// 同じ規律)。
+pub fn collect_missing(store: &Store, cache: &VectorCache) -> Result<MissingChunks, EmbedError> {
     let mut report = FillReport::default();
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut missing: Vec<(String, String)> = Vec::new();
+    let mut chunks: Vec<(String, String)> = Vec::new();
     visit_indexable_chunks(store, &mut |chunk| {
         report.chunks += 1;
         if !seen.insert(chunk.id.clone()) {
@@ -738,10 +754,32 @@ pub fn fill_cache(
         if cache.get(&chunk.id).is_some() {
             report.already_cached += 1;
         } else {
-            missing.push((chunk.id, chunk.text));
+            chunks.push((chunk.id, chunk.text));
         }
     })?;
-    for group in missing.chunks(embedder.batch_size()) {
+    Ok(MissingChunks { report, chunks })
+}
+
+/// 集めたチャンクを埋め込み、キャッシュに足す(fill_cache の「埋める」半分)。
+/// まとまりごとに追記して fsync するので、途中で止めてもそこまでは残る。progress は
+/// まとまりを 1 つ終えるたびに呼ばれる(25k チャンクは分単位かかるので、進みを黙って
+/// いられる長さではない)。模型の照合はここ 1 箇所で行う(cache と embedder が出会うのは
+/// ここである)。
+pub fn embed_missing(
+    embedder: &Embedder,
+    cache: &mut VectorCache,
+    missing: MissingChunks,
+    progress: &mut dyn FnMut(&FillReport),
+) -> Result<FillReport, EmbedError> {
+    if embedder.embedder_id() != cache.embedder_id() {
+        return Err(EmbedError::Service(format!(
+            "模型 {} のベクトルを {} のキャッシュには足せない",
+            embedder.embedder_id(),
+            cache.embedder_id()
+        )));
+    }
+    let MissingChunks { mut report, chunks } = missing;
+    for group in chunks.chunks(embedder.batch_size()) {
         let texts: Vec<String> = group.iter().map(|(_, text)| text.clone()).collect();
         let vectors = embedder.embed(&texts).map_err(EmbedError::Service)?;
         // 件数がずれたまま zip すると、チャンクと違うベクトルを鍵に結びつけてしまう。
@@ -762,6 +800,19 @@ pub fn fill_cache(
         progress(&report);
     }
     Ok(report)
+}
+
+/// 見えのチャンクのうちキャッシュに無いものを埋め込み、キャッシュに足す(collect_missing
+/// と embed_missing を続けて呼ぶだけ)。CLI の uniqnode embed と評価ハーネスはストアを
+/// 独占しているのでこの形でよい。serve は二つを別々に呼ぶ(EmbeddingService::fill_missing)。
+pub fn fill_cache(
+    store: &Store,
+    embedder: &Embedder,
+    cache: &mut VectorCache,
+    progress: &mut dyn FnMut(&FillReport),
+) -> Result<FillReport, EmbedError> {
+    let missing = collect_missing(store, cache)?;
+    embed_missing(embedder, cache, missing, progress)
 }
 
 /// 見えのチャンクに並びを合わせたベクトルの索引。BM25 の索引(SearchIndex)と同じ走査
@@ -1015,7 +1066,8 @@ impl HybridSearch<'_> {
             (embedded < total).then(|| {
                 format!(
                     "ベクトルは {embedded}/{total} チャンクぶんしかない(残りは意味検索の\
-                     対象外。uniqnode embed で埋める)"
+                     対象外。serve は書き込みの後に裏で埋める。ストアを直接開く形では \
+                     uniqnode embed で埋める)"
                 )
             })
         });
@@ -1085,7 +1137,8 @@ impl HybridSearch<'_> {
         };
         if vectors.embedded_count() == 0 {
             return Err(format!(
-                "模型 {} のベクトルが 1 件も無い(uniqnode embed <dir> で作る)",
+                "模型 {} のベクトルが 1 件も無い(serve は書き込みの後に裏で作る。ストアを\
+                 直接開く形では uniqnode embed <dir> で作る)",
                 vectors.embedder_id()
             ));
         }
@@ -1109,7 +1162,10 @@ fn fusion_depth(top_k: usize) -> usize {
 /// 索引は BM25 の索引と同じく導出データの遅延キャッシュで、世代がずれたら次の要求で
 /// 作り直す。
 pub struct EmbeddingService {
+    /// 問いの文を埋め込む相手(短い期限。QUERY_EMBED_TIMEOUT)。
     pub embedder: Embedder,
+    /// コーパスの補完に使う同じ相手(まとまりごとの長い期限。DEFAULT_EMBED_TIMEOUT)。
+    corpus_embedder: Embedder,
     pub cache_path: PathBuf,
     pub index: std::sync::Mutex<Option<VectorIndex>>,
 }
@@ -1117,19 +1173,25 @@ pub struct EmbeddingService {
 impl EmbeddingService {
     pub fn new(data_dir: &Path, embedder: Embedder) -> EmbeddingService {
         let cache_path = VectorCache::path_for(data_dir, embedder.embedder_id());
-        EmbeddingService { embedder, cache_path, index: std::sync::Mutex::new(None) }
+        let corpus_embedder = embedder.clone().with_timeout(DEFAULT_EMBED_TIMEOUT);
+        EmbeddingService {
+            embedder,
+            corpus_embedder,
+            cache_path,
+            index: std::sync::Mutex::new(None),
+        }
     }
 
-    /// キャッシュファイルを読んでベクトルの索引を作る(要求のたびにではなく、世代が
-    /// ずれたときだけ呼ばれる)。
     /// 手元の索引が今も最新か。ストアの世代(見えの変化)と、キャッシュファイルの
-    /// 見かけ(ベクトルの増加)の両方を見る。uniqnode embed はストアに何も書かないので、
-    /// 世代だけを見ていると足したベクトルに気づけない。
+    /// 見かけ(ベクトルの増加)の両方を見る。ベクトルを足してもストアには何も書かない
+    /// (裏の補完も uniqnode embed も)ので、世代だけを見ていると足したベクトルに気づけない。
     pub fn index_is_current(&self, index: &VectorIndex, store: &Store) -> bool {
         index.is_current(store) && index.stamp == CacheStamp::of(&self.cache_path)
     }
 
-    pub fn load_index(&self, store: &Store) -> Result<VectorIndex, EmbedError> {
+    /// キャッシュファイルを読む(索引を作るときも補完するときもここを通る)。捨てた末尾が
+    /// あれば黙らない(must/0022)。捨てたぶんは次の補完が埋め直す。
+    fn open_cache(&self) -> Result<VectorCache, EmbedError> {
         let cache = VectorCache::open(
             self.cache_path.clone(),
             self.embedder.embedder_id(),
@@ -1137,13 +1199,41 @@ impl EmbeddingService {
         )?;
         if cache.discarded_tail_bytes() > 0 {
             crate::log_line!(
-                "uniqnode: {} の末尾 {} バイトを捨てた(追記の途中で止まった記録。\
-                 uniqnode embed で埋め直せる)",
+                "uniqnode: {} の末尾 {} バイトを捨てた(追記の途中で止まった記録。次の補完が\
+                 そこから埋め直す)",
                 self.cache_path.display(),
                 cache.discarded_tail_bytes()
             );
         }
+        Ok(cache)
+    }
+
+    /// キャッシュファイルを読んでベクトルの索引を作る(要求のたびにではなく、世代か
+    /// キャッシュの見かけがずれたときだけ呼ばれる)。埋め込みサーバは呼ばない。
+    pub fn load_index(&self, store: &Store) -> Result<VectorIndex, EmbedError> {
+        let cache = self.open_cache()?;
         VectorIndex::from_cache(store, &cache)
+    }
+
+    /// 見えのチャンクのうちベクトルの無いものを埋めてキャッシュに足す(serve の裏の
+    /// 補完。api.rs の start_index_warmer が温めの後に呼ぶ)。ストアのロックを持つのは
+    /// 「無いチャンクを集める」走査のあいだだけで、埋め込みサーバとの往復はロックを
+    /// 離してから行う(往復は分単位かかりうる。その間も検索と書き込みは通る)。
+    ///
+    /// 走査と往復のあいだに書き込みが入っても正しさは崩れない: 鍵はチャンクの内容
+    /// ハッシュなので、消えたチャンクのベクトルは無駄になるだけで、混ざらない。増えた
+    /// チャンクは次の合図が拾う。
+    pub fn fill_missing(
+        &self,
+        store: &std::sync::Mutex<Store>,
+        progress: &mut dyn FnMut(&FillReport),
+    ) -> Result<FillReport, EmbedError> {
+        let mut cache = self.open_cache()?;
+        let missing = {
+            let store = store.lock().expect("lock");
+            collect_missing(&store, &cache)?
+        };
+        embed_missing(&self.corpus_embedder, &mut cache, missing, progress)
     }
 }
 
@@ -1274,6 +1364,18 @@ mod tests {
         let torn = VectorCache::open(path.clone(), "test-model", 2).expect("open");
         assert_eq!(torn.vector_count(), 3, "前半の記録は残るべき");
         assert_eq!(torn.discarded_tail_bytes(), 8, "捨てた末尾のバイト数を数えるべき");
+
+        // 捨てた末尾の後ろに足すのではなく、切り詰めてから足す。壊れた記録の後ろに足すと、
+        // 読み手は壊れた所で読むのをやめるので足した記録が見えない(serve の裏の補完が
+        // 同じチャンクを毎回埋め直すことになる)。欠陥を戻す(set_len を消す)と、読み直しが
+        // 3 件のまま末尾を 8 + 20 バイト捨てて、ここで落ちる(should/0137)。
+        let mut torn = torn;
+        torn.extend(vec![("s256:dd".to_string(), vec![0.0, 1.0])]).expect("extend after tear");
+        assert_eq!(torn.discarded_tail_bytes(), 0, "切り詰めた後は捨てた末尾が無い");
+        let healed = VectorCache::open(path.clone(), "test-model", 2).expect("open");
+        assert_eq!(healed.vector_count(), 4, "切り詰めた上に足した記録は読めるべき");
+        assert_eq!(healed.discarded_tail_bytes(), 0, "壊れた末尾は消えているべき");
+        assert_eq!(healed.get("s256:dd"), Some(&[0.0f32, 1.0][..]));
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

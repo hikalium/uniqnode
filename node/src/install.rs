@@ -95,8 +95,10 @@ pub const AGENT_LISTEN_FLAG: &str = "--listen-agent";
 /// 起こした後の確認で待つ上限(serve と viewer の /v1/status が揃うまで、読み口が答えるまで)。
 /// 読み口は wg1 のような後から上がるインターフェースのアドレスに束縛されることがあり、
 /// serve は bind に失敗しても主の口を殺さず再試行するので、その分をここで待つ。上限は安全の
-/// 網で、条件が立った瞬間に進む(should/0104)。
-pub const WAIT_BOUND: Duration = Duration::from_secs(30);
+/// 網で、条件が立った瞬間に進む(should/0104)。起動直後の serve は索引を裏で温め、その間
+/// ストアのロックを持つので /v1/status も待たされる(本番 55,452 オブジェクトで冷えた初回が
+/// 22 秒。docs/design/SEARCH.md の索引の構築の節)。30 秒ではその余裕が無いので 90 秒。
+pub const WAIT_BOUND: Duration = Duration::from_secs(90);
 
 /// PrivateTmp=yes の unit からは見えない置き場。ここにストアや写し先を指されたら断る
 /// (unit は自分だけの空の /tmp を見るので、起こしても「ストアが無い」で落ちる)。

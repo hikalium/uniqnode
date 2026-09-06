@@ -770,6 +770,120 @@ fn every_request_through_the_door_leaves_one_line_in_the_log() {
     );
 }
 
+/// 記録の行から、読み口の要求 1 本ぶんの欄を切り出す(`<time> [pid N] agent <peer> …` の
+/// peer より後ろ)。
+fn agent_line_fields(log: &str, wanted: &str) -> Vec<String> {
+    let mark = format!(" {} 127.0.0.1:", uniqnode::agent_door::LOG_MARK);
+    let line = log
+        .lines()
+        .filter(|line| line.contains(&mark))
+        .find(|line| line.contains(wanted))
+        .unwrap_or_else(|| panic!("{wanted} の行が無い: {log}"));
+    let rest = line.split(&mark).nth(1).expect("mark");
+    rest.split(' ').map(|field| field.to_string()).collect()
+}
+
+/// 要求ヘッダ X-Uniqnode-Task と X-Uniqnode-Agent は記録の行の末尾に写る(通した要求にも
+/// 断った要求にも)。判断には入らない: 同じ要求は、ヘッダの有無によらず同じ status で答える。
+/// should/0137: handle の log_line! を元の書式({recorded} 抜き)に戻すと、欄が 5 つに
+/// なってこの試験が落ちる(実験した)。
+#[test]
+fn the_task_and_agent_headers_ride_at_the_end_of_the_recorded_line() {
+    let server = DoorServer::start("door-task-header", &["--listen-agent", "127.0.0.1:0"]);
+    let door = server.door();
+    let asking = [("X-Uniqnode-Task", "tasks/chat"), ("X-Uniqnode-Agent", "worker-3")];
+
+    let health = with_headers(&door, "GET", "/healthz", &asking, b"");
+    assert_eq!((health.status, body_text(&health).as_str()), (200, "ok\n"), "判断には入らない");
+    // 断った要求にも同じ末尾が付く(誰が何を試したかを記録から追える)。
+    let refused = with_headers(&door, "POST", "/v1/admin/gc", &asking, b"");
+    assert_eq!(refused.status, 403, "{}", body_text(&refused));
+
+    let log = std::fs::read_to_string(server.server.dir.join("logs").join("serve.log")).expect("serve.log");
+    for wanted in [" GET /healthz 200 ", " POST /v1/admin/gc 403 "] {
+        let fields = agent_line_fields(&log, wanted);
+        assert_eq!(fields.len(), 7, "{wanted}: {fields:?}");
+        assert_eq!(
+            (fields[5].as_str(), fields[6].as_str()),
+            ("task=tasks/chat", "agent=worker-3"),
+            "{wanted}: {fields:?}"
+        );
+    }
+    // 片方だけでも同じ(在るものだけを足す)。
+    assert_eq!(
+        with_headers(&door, "GET", "/v1/status", &[("X-Uniqnode-Agent", "worker-3")], b"").status,
+        200
+    );
+    let log = std::fs::read_to_string(server.server.dir.join("logs").join("serve.log")).expect("serve.log");
+    let fields = agent_line_fields(&log, " GET /v1/status 200 ");
+    assert_eq!(fields.len(), 6, "{fields:?}");
+    assert_eq!(fields[5], "agent=worker-3", "{fields:?}");
+}
+
+/// ヘッダが無いのは正常で、記録の行は今までどおりの 5 欄のままである(足すものが無い)。
+/// should/0137: recorded_tail が無いヘッダを飛ばさず既定値(`-` など)で埋めるようにすると、
+/// 欄が 7 つになってこの assert が落ちる(実験した)。
+#[test]
+fn a_request_without_the_headers_leaves_the_line_it_always_left() {
+    let server = DoorServer::start("door-task-absent", &["--listen-agent", "127.0.0.1:0"]);
+    let door = server.door();
+    assert_eq!(simple(&door, "GET", "/healthz", b"").status, 200);
+
+    let log = std::fs::read_to_string(server.server.dir.join("logs").join("serve.log")).expect("serve.log");
+    let fields = agent_line_fields(&log, " GET /healthz 200 ");
+    assert_eq!(fields.len(), 5, "{fields:?}");
+    assert!(fields[4].parse::<u64>().is_ok(), "ms が整数でない: {fields:?}");
+    assert!(!log.contains(" task=") && !log.contains(" agent="), "{log}");
+}
+
+/// 字種の外の値は 400 で理由を言い、要求は api::handle に届かない(何も起きない)。
+/// should/0137: handle が recorded_tail の Err を捨てて admit へ進むようにすると、PUT が
+/// 200 で通ってしまい「一覧が空」の assert が落ちる(実験した)。
+#[test]
+fn a_task_name_outside_the_alphabet_is_refused_before_the_table() {
+    let server = DoorServer::start(
+        "door-task-bad",
+        &["--listen-agent", "127.0.0.1:0", "--agent-writable", "notes"],
+    );
+    let main = server.main().to_string();
+    let door = server.door();
+
+    let path = "/v1/collections/notes/documents/memo.md";
+    let refused = with_headers(
+        &door,
+        "PUT",
+        path,
+        &[("X-Uniqnode-Task", "tasks chat")],
+        "# memo\n\n読み口から書いた覚え書き\n".as_bytes(),
+    );
+    assert_eq!(refused.status, 400, "{}", body_text(&refused));
+    assert_eq!(
+        body_text(&refused),
+        "{\"error\":\"agent door: X-Uniqnode-Task の値は [A-Za-z0-9_.:/-] の 1..=64 字\"}"
+    );
+    // api::handle に届いていない: ストアには何も入っていない。
+    let collections = simple(&main, "GET", "/v1/collections", b"");
+    assert_eq!(body_text(&collections), "{\"collections\":[]}");
+
+    // 通るはずの要求も、同じ理由で断られる(許可表より前に見る)。長すぎる値も空の値も同じ。
+    for (name, value) in [
+        ("X-Uniqnode-Agent", "a".repeat(65)),
+        ("X-Uniqnode-Agent", String::new()),
+    ] {
+        let health = with_headers(&door, "GET", "/healthz", &[(name, &value)], b"");
+        assert_eq!(health.status, 400, "{name}={value:?}: {}", body_text(&health));
+        assert_eq!(
+            body_text(&health),
+            "{\"error\":\"agent door: X-Uniqnode-Agent の値は [A-Za-z0-9_.:/-] の 1..=64 字\"}",
+            "{name}={value:?}"
+        );
+    }
+    // 断った 1 本も記録には残る(末尾は付かない: 書けない値だから断った)。
+    let log = std::fs::read_to_string(server.server.dir.join("logs").join("serve.log")).expect("serve.log");
+    let fields = agent_line_fields(&log, &format!(" PUT {path} 400 "));
+    assert_eq!(fields.len(), 5, "{fields:?}");
+}
+
 /// mcp と viewer は読み口を持たないので、--listen-agent を黙って捨てずに断る。
 #[test]
 fn mcp_and_viewer_refuse_the_flag_they_cannot_honour() {

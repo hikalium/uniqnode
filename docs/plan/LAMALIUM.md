@@ -250,7 +250,11 @@ system unit に移す(`uniqnode install --system`。移行手順は
 - admin・sync・pins・peers・refs・closure・referrers・rendition をコンテナへ見せること。
 - 主の口(7440)を wg1 に出すこと。orion から届くのは読み口の 7441 だけ。
 - 読み口に認証や TLS を足すこと(境界は束縛先・firewall・許可表。向こうの ureq は平文のみ)。
-- 第 1 段でタスク識別ヘッダ(X-Lamalium-Task)を持つこと。
+- 読み口の記録に写る申告を、判断に使うこと。uniqnode 側は要求ヘッダ `X-Uniqnode-Task` と
+  `X-Uniqnode-Agent` を読んで記録の行の末尾に足すだけで(2026-09-06 着地。
+  [docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d) の「誰が要求したかの
+  申告」)、許可も検索も変えない。lamalium 側がこの 2 つを付けるかは向こうの裁量である
+  (付けなくても要求は通る)。
 - lamalium に MCP クライアントを作ること(今回は 3 ツールを直に登録する。MCP サーバが
   複数になったら向こうで改めて考える)。
 - uniqnode を lamalium のバイナリに埋め込むこと(別プロセス、別機械のまま。HTTP でつなぐ)。

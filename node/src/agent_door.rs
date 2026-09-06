@@ -31,9 +31,24 @@ pub const BIND_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 pub const LISTENING_LINE_SUFFIX: &str = " (agent door)";
 
 /// 読み口への要求 1 本につきログに残す行の頭。行は
-/// `agent <peer addr> <METHOD> <path> <status> <ms>` の形で、試験はこの頭で行を選ぶ
-/// (must/0023)。
+/// `agent <peer addr> <METHOD> <path> <status> <ms>` の形で、末尾に、要求ヘッダから写した
+/// ` task=<値> agent=<値>` が在るぶんだけ付く。試験はこの頭で行を選ぶ(must/0023)。
 pub const LOG_MARK: &str = "agent";
+
+/// 記録の行に写す要求ヘッダ。3 つ組は(応答の 400 に出す字面, 引くときの名, 記録の行の欄の
+/// 名)で、引くのが小文字なのは http::Request の headers が小文字化済みだからである。並びは
+/// 記録の行に出る順(must/0023: 字面・引く名・欄の名はここだけにある)。
+///
+/// 誰が要求したかの申告であって、判断には一切入らない: 許可表も検索も、この値を見ない。
+pub const RECORDED_HEADERS: [(&str, &str, &str); 2] = [
+    ("X-Uniqnode-Task", "x-uniqnode-task", "task"),
+    ("X-Uniqnode-Agent", "x-uniqnode-agent", "agent"),
+];
+
+/// 記録に写すヘッダの値の字種(応答の 400 の本文にこの字面で出す)と長さの上限。`/` を許す
+/// のは、lamalium のタスク id が `tasks/chat` の形だからである。
+pub const RECORDED_VALUE_CHARS: &str = "[A-Za-z0-9_.:/-]";
+pub const RECORDED_VALUE_MAX: usize = 64;
 
 /// 断りの本文の頭。表に無い要求の 403 と、peers 付きの search の 400 が共に持つ。
 pub const ERROR_PREFIX: &str = "agent door: ";
@@ -223,6 +238,37 @@ pub fn screen(
     }
 }
 
+/// 記録に写すヘッダの値か。字種は RECORDED_VALUE_CHARS、長さは 1..=RECORDED_VALUE_MAX 字。
+fn is_recorded_value(value: &str) -> bool {
+    let length = value.chars().count();
+    (1..=RECORDED_VALUE_MAX).contains(&length)
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '-'))
+}
+
+/// 記録の行の末尾に足す ` task=<値> agent=<値>`(在るヘッダのぶんだけ、RECORDED_HEADERS の
+/// 順)。ヘッダが無いのは正常で、何も足さない。字種の外・長すぎ・空は 400 で断る: 記録に
+/// 書けない値を受け取ったまま通すと、その 1 行が誰の要求だったのかを言えなくなる
+/// (黙って捨てない。must/0022)。読む口にも書く口にも同じに掛かる(読み口を通る要求すべて)。
+pub fn recorded_tail(request: &Request) -> Result<String, Response> {
+    let mut tail = String::new();
+    for (name, key, field) in RECORDED_HEADERS {
+        let Some(value) = request.header(key) else { continue };
+        if !is_recorded_value(value) {
+            return Err(api::error_response(
+                400,
+                &format!(
+                    "{ERROR_PREFIX}{name} の値は {RECORDED_VALUE_CHARS} の \
+                     1..={RECORDED_VALUE_MAX} 字"
+                ),
+            ));
+        }
+        tail.push_str(&format!(" {field}={value}"));
+    }
+    Ok(tail)
+}
+
 /// 表を通った 1 本を主の口へ委ね、応答を検める。search と collections だけは、読める集合を
 /// 共有ポリシーとして受け取る入口から呼ぶ: 何を返すかの判断は api.rs の 1 箇所のままで、
 /// 読み口はそこへ集合を渡すだけである(should/0135)。
@@ -268,13 +314,20 @@ pub fn handle(
     readable: &[String],
 ) -> Response {
     let started = Instant::now();
-    let response =
-        match admit(&request.method, &request.path, &request.body, writable, readable) {
-            Ok(row) => answer(context, request, row, readable),
-            Err(refused) => refused,
-        };
+    // 誰が要求したかの申告(X-Uniqnode-Task・X-Uniqnode-Agent)を先に読む。判断には入れない
+    // が、記録に書けない値なら要求ごと断るので、許可表より前に見る。
+    let (recorded, response) = match recorded_tail(request) {
+        Ok(recorded) => (
+            recorded,
+            match admit(&request.method, &request.path, &request.body, writable, readable) {
+                Ok(row) => answer(context, request, row, readable),
+                Err(refused) => refused,
+            },
+        ),
+        Err(refused) => (String::new(), refused),
+    };
     crate::log_line!(
-        "{LOG_MARK} {peer} {} {} {} {}",
+        "{LOG_MARK} {peer} {} {} {} {}{recorded}",
         request.method,
         request.path,
         response.status,
@@ -504,6 +557,62 @@ mod tests {
             assert_eq!(body(&refused), "{\"error\":\"agent door: peers は使えない\"}");
         }
         assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\",", READ_ONLY, EVERY_COLLECTION).ok(), Some(Row::Search));
+    }
+
+    /// 記録に写すヘッダ: 在るものだけを RECORDED_HEADERS の順で末尾に足し、無いヘッダは
+    /// 何も足さない。字種の外・長すぎ・空は 400 で、本文が字種と長さを言う。
+    /// should/0137: is_recorded_value の字種の検査を消すと空白入りの 400 が Ok になって
+    /// 落ち、長さの検査を消すと 65 字の段が落ちる。
+    #[test]
+    fn the_requester_headers_are_copied_to_the_line_and_refused_when_they_are_not_labels() {
+        let asking = |headers: &[(&str, &str)]| -> Request {
+            Request {
+                method: "GET".to_string(),
+                path: "/healthz".to_string(),
+                headers: headers
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect(),
+                body: Vec::new(),
+            }
+        };
+        // Response は Debug を持たないので、通った側は match で取り出す。
+        let tail = |headers: &[(&str, &str)]| -> String {
+            match recorded_tail(&asking(headers)) {
+                Ok(tail) => tail,
+                Err(refused) => panic!("字種の中のはず: {}", body(&refused)),
+            }
+        };
+        assert_eq!(tail(&[]), "", "ヘッダが無いのは正常(何も足さない)");
+        assert_eq!(
+            tail(&[("x-uniqnode-agent", "worker-3"), ("x-uniqnode-task", "tasks/chat")]),
+            " task=tasks/chat agent=worker-3",
+            "行に出る順は RECORDED_HEADERS の順(ヘッダの並び順ではない)"
+        );
+        assert_eq!(tail(&[("x-uniqnode-task", "a.b:c_d-e/1")]), " task=a.b:c_d-e/1");
+        assert_eq!(
+            tail(&[("x-uniqnode-task", &"a".repeat(64))]),
+            format!(" task={}", "a".repeat(64)),
+            "上限ちょうどは通る"
+        );
+        for bad in ["", "a b", "タスク", &"a".repeat(65), "a\"b", "a;b"] {
+            let refused = recorded_tail(&asking(&[("x-uniqnode-task", bad)]))
+                .err()
+                .unwrap_or_else(|| panic!("{bad:?} は断るはず"));
+            assert_eq!(refused.status, 400, "{bad:?}");
+            assert_eq!(
+                body(&refused),
+                "{\"error\":\"agent door: X-Uniqnode-Task の値は [A-Za-z0-9_.:/-] の 1..=64 字\"}",
+                "{bad:?}"
+            );
+        }
+        let refused = recorded_tail(&asking(&[("x-uniqnode-agent", "a b")]))
+            .err()
+            .expect("字種の外は断る");
+        assert_eq!(
+            body(&refused),
+            "{\"error\":\"agent door: X-Uniqnode-Agent の値は [A-Za-z0-9_.:/-] の 1..=64 字\"}"
+        );
     }
 
     /// 応答の検め: オブジェクトの行だけ、チャンク以外を 403 に差し替える。他の行と、

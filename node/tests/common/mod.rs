@@ -287,6 +287,30 @@ pub fn simple(address: &str, method: &str, path: &str, body: &[u8]) -> HttpRespo
     read_response(&mut reader)
 }
 
+/// simple と同じ組み立てで、追加の要求ヘッダを添える(読み口の X-Uniqnode-Task など。
+/// curl の -H に当たる)。ヘッダ名はそのまま送る(受け側が小文字化する)。
+pub fn with_headers(
+    address: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> HttpResponse {
+    let mut stream = TcpStream::connect(address).expect("connect");
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).expect("write head");
+    stream.write_all(body).expect("write body");
+    let mut reader = BufReader::new(stream);
+    read_response(&mut reader)
+}
+
 pub fn body_text(response: &HttpResponse) -> String {
     String::from_utf8(response.body.clone()).expect("utf-8 body")
 }

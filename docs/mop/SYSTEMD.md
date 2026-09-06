@@ -35,7 +35,7 @@ unit は system 単位と user 単位で別のファイルにしてある。
 
 | 置き場 | ファイル | 動かす者 | データディレクトリ(既定) | 写し先(既定) |
 |---|---|---|---|---|
-| /etc/systemd/system/ | docs/mop/systemd/system/*.service と *.timer | 専用ユーザー uniqnode | /var/lib/uniqnode | /var/backups/uniqnode |
+| /etc/systemd/system/ | docs/mop/systemd/system/*.service と *.timer | 専用ユーザー uniqnode(`install --system` は drop-in の User=/Group= で sudo を打った利用者に替える) | /var/lib/uniqnode | /var/backups/uniqnode |
 | ~/.config/systemd/user/ | docs/mop/systemd/user/*.service と *.timer | 自分 | この機械の systemd 249 では ~/.config/uniqnode(新しい systemd では ~/.local/state/uniqnode)| ~/uniqnode-backup |
 
 同じファイルを両方で使えないのは実測による。user 単位に User= を書くと exit 217 で
@@ -60,6 +60,7 @@ unit ファイルは差し替えても drop-in は残る。
 | UNIQNODE_SERVE_URL | viewer | http://127.0.0.1:7440 | 転送先。UNIQNODE_LISTEN を変えたらここも |
 | UNIQNODE_VIEWER_OPTIONS | viewer | 空 | 追加の引数(ログの指定など) |
 | UNIQNODE_BACKUP_DIR | backup | system: /var/backups/uniqnode、user: %h/uniqnode-backup | 写し先。変えるときは ReadWritePaths= も(下) |
+| UNIQNODE_AGENT_LISTEN | serve(install の `--listen-agent` だけが書く) | 無し | 読み口の待ち受け。unit の ExecStart= には無く、install が drop-in の ExecStart= の末尾に `--listen-agent ${UNIQNODE_AGENT_LISTEN}` を足す |
 | PATH | serve(install は 3 つに同じ値) | systemd の既定 /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin | pdftotext・pdftohtml・pdftoppm・curl を探す道。unit には書かず、install が自分の PATH で見つけた場所を前に足して drop-in に書く(下) |
 
 - 埋め込みは既定で装備しない。serve は `--embed` を明示したときだけ埋め込みサーバに繋ぎ、
@@ -154,6 +155,94 @@ ExecStart=/opt/uniqnode/bin/uniqnode serve ${UNIQNODE_DATA_DIR} ${UNIQNODE_LISTE
 
 ## system 単位で起こす
 
+第一の道は `uniqnode install --system` である。root で走らせ(sudo)、unit は
+/etc/systemd/system/ に置かれ、常駐は sudo を打った利用者(SUDO_USER。`--user <name>` で
+別の利用者を指せる。root は断る)で走る。既定の置き場(バイナリ ~/.local/bin/uniqnode、
+写し先 ~/uniqnode-backup)はその利用者の home の下で、root の home ではない。出力は
+ファイルに残す形で渡す(CLAUDE.md):
+
+```
+sudo ~/.local/bin/uniqnode install /work2/llm_playground_host_dir/uniqnode-store --system --serve-options "--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank" --viewer-listen 0.0.0.0:7450 --listen-agent 10.10.128.1:7441 --after wg-quick@wg1.service 2>&1 | tee /tmp/uniqnode-install-system.log
+```
+
+(本番の実物。ストアは /work2 の下、読み口は wg1 のアドレス 10.10.128.1:7441、wg1 の unit は
+wg-quick@wg1.service。既に user 単位で常駐しているなら、先に下の「user 単位から移る」。)
+
+user 単位と違うのは、unit の中身(docs/mop/systemd/system/。User=/Group= を持ち、閉じ込めは
+PrivateUsers= なしで効く)と、drop-in に足す行、確認の走らせ方である:
+
+- drop-in の `[Service]` の先頭に `User=<name>` と `Group=<主グループ>`(unit の専用ユーザー
+  uniqnode を実行ユーザに替える)、`StateDirectory=`(空で打ち消す。ストアは明示なので
+  %S は要らず、残すと /var/lib/uniqnode を無駄に作る)。バイナリ・ストア・写し先のどれかが
+  /home・/root・/run/user の下なら `ProtectHome=read-only`(unit の yes は home を空に隠す
+  ので、その下の ReadWritePaths= も ExecStart= も届かない。read-only なら user 単位の unit と
+  同じで、ReadWritePaths= が効く)。
+- `--after <unit>`(複数可)は drop-in の `[Unit]` に `After=` と `Wants=` で書く(3 つの
+  service とも)。読み口を wg1 のアドレスに束縛するときは wg-quick@wg1.service を待つ
+  (10.10.128.1 は wg1 が上がって初めて存在する)。user 単位では断る: user 単位のマネージャは
+  機械の unit を知らないので、user unit は system unit を待てない。
+- 外部の道具(pdftotext・curl)は install 自身の PATH に加えて、実行ユーザの ~/.local/bin と
+  ~/bin でも探す(sudo は PATH を secure_path に替えるので、利用者が ~/.local/bin に置いた
+  pdftotext は root の PATH に無い)。報告の PATH の行が「探したのは …」で探した並びを言う。
+- linger は取らない(機械と共に起きる)。
+- 確認の backup は `systemctl start uniqnode-backup.service`(unit は User= で走る)、fsck は
+  `runuser -u <name> -- <bin> fsck <写し先>` で実行ユーザとして走らせる(root のプロセスで
+  写し先を開くと、未封印の尻尾の切り詰めで root 所有のファイルができる)。install が root で
+  作ったもの(バイナリの写し、無ければ作るストアと写し先のディレクトリ)は実行ユーザの所有に
+  する。最後にストアと写し先の木を歩き、実行ユーザ以外の所有のものが 1 つでもあれば赤で
+  止まる: 据え付けの後にストアと写し先に root 所有のものは残らない。
+
+root で走らせないと、sudo で走らせる形と tee の例を言って断る。ストアを別のプロセスが開いて
+いれば(user 単位の serve が典型)、止めて外す命令を添えて断り、黙って止めはしない。
+
+### user 単位から移る
+
+user 単位で動いているものを system 単位に載せ替える手順。ストアも写し先もバイナリも同じ
+場所のまま、unit の置き場と走らせ方だけが変わる。
+
+1. user unit を止めて外す(移行の間、serve と viewer は止まる):
+
+   ```
+   systemctl --user disable --now uniqnode-serve.service uniqnode-viewer.service uniqnode-backup.timer 2>&1 | tee /tmp/uniqnode-user-disable.log
+   ```
+
+   止めずに install --system を打つと、ストアのロックを user 単位の serve が持ったままなので
+   「別プロセスが開いている」で止まる(その文言がこの命令を言う)。
+2. `sudo … install … --system … 2>&1 | tee /tmp/uniqnode-install-system.log`(上の 1 行。
+   引数は user 単位のときと同じものに `--system`、要るなら `--listen-agent` と `--after` を
+   足す)。
+3. /tmp/uniqnode-install-system.log を読む。「確認:」の行が 4 本(読み口があれば 5 本)並び、
+   最後に「次の刻み:」があれば据え付けは完了である。unit の状態は
+   `systemctl status uniqnode-serve uniqnode-viewer uniqnode-backup.timer`。
+4. user 単位の unit ファイル(~/.config/systemd/user/uniqnode-*)は disable しても残る。
+   消すなら `rm ~/.config/systemd/user/uniqnode-*.service ~/.config/systemd/user/uniqnode-*.timer`
+   と `rm -r ~/.config/systemd/user/uniqnode-*.d`、`systemctl --user daemon-reload`。
+   残しておいても enable されていなければ起きない。linger は他に使うものが無ければ
+   `loginctl disable-linger` で外せる。
+
+### 読み口(--listen-agent)の確認
+
+install が自分で見るのは 2 本で、報告の「確認: 読み口 …」の行がその結果である:
+
+```
+curl http://10.10.128.1:7441/v1/status                      # 主の口と同じ node_id
+curl -X POST http://10.10.128.1:7441/v1/admin/gc -d '{"dry_run":true}'   # 403
+```
+
+読み口は wg1 が遅れて上がることがあるので、install は 30 秒を上限に答えるまで待ってから
+断る(serve の unit が failed に落ちたら待たない)。gc に dry_run を添えるのは、許可表が
+壊れていて通ってしまっても本番の pack を回収しないため。
+
+firewall は install が触らない操作者の作業である: この機械には ufw と nft の両方が入って
+いるので、どちらが実際に規則を持っているか(`sudo ufw status verbose`、
+`sudo nft list ruleset`)を確かめてから、10.10.128.4 から 7441 への接続だけを許す規則を
+入れる(例: ufw なら `sudo ufw allow from 10.10.128.4 to 10.10.128.1 port 7441 proto tcp 2>&1 | tee /tmp/uniqnode-firewall.log`)。
+読み口は wg1 のアドレスにしか束縛しないので、127.0.0.1:7441 は接続拒否のままである。
+
+### 手で同じことをするなら(専用ユーザーで置く形)
+
+install を使わず、専用ユーザー uniqnode と /var/lib/uniqnode で unit の既定のまま置く形:
+
 ```
 sudo useradd --system --home-dir /var/lib/uniqnode --shell /usr/sbin/nologin uniqnode
 sudo install -d -o uniqnode -g uniqnode -m 0750 /var/backups/uniqnode
@@ -171,8 +260,9 @@ useradd で作るのはユーザー(とその主グループ)だけで、/var/li
 
 serve が走っているあいだ、CLI の ingest・embed・sync はストアのロックに阻まれる。取り込みは
 REST(`PUT /v1/collections/{c}/documents/{name}`)で行い、CLI が要る作業は serve を止めて
-`sudo -u uniqnode /usr/local/bin/uniqnode ingest /var/lib/uniqnode …` のように専用ユーザー
-で行う。root で走らせると root 所有のファイルがストアに残り、次の serve が書けなくなる。
+`sudo -u uniqnode /usr/local/bin/uniqnode ingest /var/lib/uniqnode …` のように実行ユーザーで
+行う(install --system で据えたなら、その利用者で普通に打つ)。root で走らせると root 所有の
+ファイルがストアに残り、次の serve が書けなくなる。
 
 LLM クライアントから使うときの mcp は、それを起こす人間の権限で走る。転送する形は
 ストアを開かないので 0750 のディレクトリを指したまま起こせるが、ログの既定の道
@@ -201,6 +291,7 @@ target/release/uniqnode install ~/uniqnode-store
 ```
 uniqnode install <dir> [--listen <addr>] [--viewer-listen <addr>] [--serve-options "<引数列>"]
                        [--backup-dir <dir>] [--bin <path>] [--unit-dir <dir>] [--no-start]
+                       [--listen-agent <addr>] [--system [--user <name>] [--after <unit>]...]
 ```
 
 | 引数 | 既定 | 意味 |
@@ -211,8 +302,12 @@ uniqnode install <dir> [--listen <addr>] [--viewer-listen <addr>] [--serve-optio
 | `--serve-options` | 空 | serve の追加の引数を 1 つの文字列で(例 `"--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank"`) |
 | `--backup-dir` | ~/uniqnode-backup | 写し先 |
 | `--bin` | ~/.local/bin/uniqnode | 実行ファイルの置き場。走っている自分自身をここへ写す |
-| `--unit-dir` | ~/.config/systemd/user | unit と drop-in の置き場(テスト用) |
+| `--unit-dir` | ~/.config/systemd/user(`--system` なら /etc/systemd/system) | unit と drop-in の置き場(テスト用) |
 | `--no-start` | — | daemon-reload までで止める(unit を置くだけ) |
+| `--listen-agent` | 無し | serve の読み口(第 2 の待ち受け。許可表の外は 403)。drop-in に UNIQNODE_AGENT_LISTEN を書き、ExecStart= の末尾に `--listen-agent ${UNIQNODE_AGENT_LISTEN}` を足す。--listen と別のアドレスで、ポートは固定 |
+| `--system` | — | system 単位に据える(上の「system 単位で起こす」)。root で走らせる |
+| `--user` | SUDO_USER | `--system` の実行ユーザ(unit の User=/Group=)。root は断る。`--system` のときだけ |
+| `--after` | 無し | drop-in の `[Unit]` に After= と Wants= で書く unit(複数可。`--system` のときだけ) |
 
 出力は手順ごとに 1 行で、最後に確認した観測(serve と viewer 経由の /v1/status が返した
 node_id、backup の写し先の fsck の件数)と backup の次の刻みが出る。実測(2026-09-05、
@@ -236,7 +331,7 @@ install: 次の刻み: Sun 2026-09-06 00:00:00 JST 6h left … uniqnode-backup.t
 daemon-reload して restart する)。ストアを別のプロセス(手で起こした serve や CLI)が
 開いていると、unit を起こす前に「別プロセスが開いている」と言って止まる(unit は exit 1 で
 起こし直さないので、起こしてから journal を読ませるより先に言う)。system 単位
-(/etc/systemd/system、専用ユーザー)は install が扱わないので、上の節の手順で行う。
+(/etc/systemd/system)は同じ命令に `--system` を足す(上の「system 単位で起こす」)。
 
 ### 中で何をしているか(手で同じことをするなら)
 
@@ -284,8 +379,11 @@ install は次を 1 手順 1 命令で行う。unit は docs/mop/systemd/user/ �
    ときに user 単位のマネージャごと止まり、backup の timer の刻みも来ない。
 8. 確認(下の「効いていることの確かめ方」と同じ観測): serve の /v1/status と viewer 経由の
    /v1/status が同じ node_id を返すまで短い間隔で待ち(上限 30 秒。serve の unit が failed
-   に落ちたら待たずに言う)、`systemctl --user start uniqnode-backup.service` を 1 回走らせ、
-   写し先をストアとして開いて fsck する(backup 命令の最後の検証と同じ関数)。
+   に落ちたら待たずに言う)、`--listen-agent` があれば読み口の /v1/status が同じ node_id を
+   返し POST /v1/admin/gc(dry_run)が 403 であることを同じ上限で待ち、
+   `systemctl --user start uniqnode-backup.service` を 1 回走らせ、写し先をストアとして開いて
+   fsck する(backup 命令の最後の検証と同じ関数。system 単位では実行ユーザで
+   `<bin> fsck <写し先>` を起こし、最後にストアと写し先の所有者を見る)。
 9. `systemctl --user list-timers uniqnode-backup.timer` の表を載せる。
 
 unit だけを手で置いたときのデータディレクトリの既定は %S/uniqnode で、実際にどこへ
@@ -341,8 +439,10 @@ backup を止めるのは timer である(`systemctl --user stop uniqnode-backup
 
 ## 更新
 
-user 単位なら、ビルドしてから同じ引数で `uniqnode install` を打ち直す(バイナリを写し直し、
-unit と drop-in を書き直し、restart し、確認まで通す)。system 単位は手で:
+ビルドしてから同じ引数で `uniqnode install` を打ち直す(バイナリを写し直し、unit と
+drop-in を書き直し、restart し、確認まで通す)。system 単位なら同じく sudo で
+`… install … --system … 2>&1 | tee /tmp/uniqnode-install-system.log`。install を使わず
+専用ユーザーで置いた形なら手で:
 
 ```
 cargo build --release -p uniqnode

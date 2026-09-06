@@ -234,10 +234,11 @@ agentd(ハーネス)─HTTP─▶ 10.100.0.1:11440 ─server-proxy─wg1─▶ 1
 
 1. lamalium の KNOWLEDGE.md §8 の却下(埋め込み・ベクトル検索はやらない)を、上の答え方で
    書き換えてよいか。lamalium 側の設計判断の変更なので、操作者の裁定が要る。
-2. uniqnode を system unit に移すか。`uniqnode install --system` は未実装で、
-   docs/mop/systemd/system/ の unit は手順書のみ。lamalium の policy 0108(user unit ではなく
-   system unit)に合わせるためにも、wg1 の unit を After= で待つためにも、system unit のほうが
-   自然である。user unit のままでもつながるが、wg1 の待ち合わせは user unit からは組めない。
+2. (裁定済み 2026-09-06: 移す)uniqnode を system unit に移す。lamalium の policy 0108
+   (user unit ではなく system unit)に合わせるためにも、wg1 の unit を After= で待つためにも、
+   system unit のほうが自然である。user unit のままでもつながるが、wg1 の待ち合わせは
+   user unit からは組めない。`uniqnode install --system`(`--after`・`--listen-agent` を含む)
+   と user 単位からの移行手順は [docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2)。
 3. 「capability の付与 = 全コレクションが読める(web を含む)」でよいか。web コレクションは
    第三者の頁を含む。否なら第 2 段で `--agent-collections` を足す。
 4. firewall で 10.10.128.4 から 7441 への接続だけを許す規則を操作者が入れる(ufw か nftables

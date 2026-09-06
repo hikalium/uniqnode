@@ -753,19 +753,27 @@ fn the_nft_road_writes_one_table_and_lets_the_serve_unit_load_it_on_every_start(
         text.contains("type filter hook input priority filter; policy accept;"),
         "{text}"
     );
+    // 許す相手は from と読み口自身の IP(install の確認が同じ機械から 10.10.128.1 を源に
+    // 届くので、自分を締め出さない。実測 2026-09-06: from だけにしたら install の確認が
+    // connection timed out で赤になった)。
     assert!(
-        text.contains("ip daddr 10.10.128.1 tcp dport 7441 ip saddr != 10.10.128.4 counter drop"),
+        text.contains(
+            "ip daddr 10.10.128.1 tcp dport 7441 ip saddr != { 10.10.128.4, 10.10.128.1 } counter drop"
+        ),
         "{text}"
     );
     assert_eq!(NFT_TABLE, "inet uniqnode");
 
-    // nft list table の答え(counter の数は変わる)。
-    let listing = "table inet uniqnode {\n\tchain agent_door {\n\t\ttype filter hook input priority filter; policy accept;\n\t\tip daddr 10.10.128.1 tcp dport 7441 ip saddr != 10.10.128.4 counter packets 3 bytes 180 drop\n\t}\n}\n";
+    // nft list table の答え(counter の数は変わり、集合の並びも変わりうる)。
+    let listing = "table inet uniqnode {\n\tchain agent_door {\n\t\ttype filter hook input priority filter; policy accept;\n\t\tip daddr 10.10.128.1 tcp dport 7441 ip saddr != { 10.10.128.1, 10.10.128.4 } counter packets 3 bytes 180 drop\n\t}\n}\n";
     assert!(nft_rule_listed(listing, "10.10.128.4", "10.10.128.1:7441").expect("読める"));
     assert!(!nft_rule_listed(listing, "10.10.128.5", "10.10.128.1:7441").expect("読める"));
     assert!(!nft_rule_listed(listing, "10.10.128.4", "10.10.128.1:7442").expect("読める"));
+    assert!(!nft_rule_listed(listing, "10.10.128.40", "10.10.128.1:7441").expect("読める"));
     let accepting = listing.replace(" drop", " accept");
     assert!(!nft_rule_listed(&accepting, "10.10.128.4", "10.10.128.1:7441").expect("読める"));
+    let without_self = listing.replace("{ 10.10.128.1, 10.10.128.4 }", "{ 10.10.128.4 }");
+    assert!(!nft_rule_listed(&without_self, "10.10.128.4", "10.10.128.1:7441").expect("読める"));
 
     let mut options = system_options();
     options.firewall_allow = Some("10.10.128.4".to_string());

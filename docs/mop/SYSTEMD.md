@@ -201,7 +201,7 @@ user 単位で動いているものを system 単位に載せ替える。スト�
 まま、unit の置き場と走らせ方だけが変わる。1 命令で通す(移行の間、serve と viewer は止まる):
 
 ```
-cargo build --release -p uniqnode && sudo target/release/uniqnode install /work2/llm_playground_host_dir/uniqnode-store --system --take-over-user-units --serve-options "--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank" --viewer-listen 0.0.0.0:7450 --listen-agent 10.10.128.1:7441 --after wg-quick@wg1.service --firewall-allow 10.10.128.4 2>&1 | tee /tmp/uniqnode-install-system.log
+cargo build --release -p uniqnode && sudo target/release/uniqnode install /work2/llm_playground_host_dir/uniqnode-store --system --take-over-user-units --serve-options "--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank" --viewer-listen 0.0.0.0:7450 --listen-agent 10.10.128.1:7441 --after wg-quick@wg1.service --firewall-allow 10.10.128.4 2>&1 | ts '%Y-%m-%dT%H:%M:%S%z' | tee /tmp/uniqnode-install-system.log
 ```
 
 中で何をしているか(手で同じことをするなら、この順):
@@ -216,7 +216,8 @@ cargo build --release -p uniqnode && sudo target/release/uniqnode install /work2
    読み、`Status: active` なら ufw、そうでなければ(inactive、または ufw が無い)nft。nft なら
    規則ファイル /etc/systemd/system/uniqnode-serve.service.d/agent-door.nft を書く。中身は
    自分の表 `inet uniqnode` を空で作り、消し、作り直す形(何度読んでも同じ 1 表):
-   `ip daddr 10.10.128.1 tcp dport 7441 ip saddr != 10.10.128.4 counter drop`。iptables-nft や
+   `ip daddr 10.10.128.1 tcp dport 7441 ip saddr != { 10.10.128.4, 10.10.128.1 } counter drop`
+   (自分の IP も許すのは、install の確認が同じ機械から 10.10.128.1 を源に届くため)。iptables-nft や
    docker の表には触らない(base chain は表ごとに評価され、どれかの drop が勝つ)。serve の
    drop-in に `ExecStartPre=+/usr/sbin/nft -f <その道>` を足す(先頭の + は User= に関わらず
    root で走らせる印)ので、nftables.service が無効な機械でも、serve を起こすたびに規則が入る。

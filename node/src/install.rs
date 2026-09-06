@@ -1350,20 +1350,31 @@ pub fn nft_rules_text(from: &str, agent_listen: &str) -> Result<String, String> 
          table {NFT_TABLE} {{\n\
          \tchain agent_door {{\n\
          \t\ttype filter hook input priority filter; policy accept;\n\
-         \t\tip daddr {ip} tcp dport {port} ip saddr != {from} counter drop\n\
+         \t\tip daddr {ip} tcp dport {port} ip saddr != {{ {from}, {ip} }} counter drop\n\
          \t}}\n\
          }}\n"
     ))
 }
 
 /// `nft list table inet uniqnode` の答えに、その規則が載っているか(字句が同じ行にあること
-/// で見る。counter の数は行ごとに変わるので照合しない)。
+/// で見る。counter の数は行ごとに変わるので照合しない)。許す相手は from と読み口自身の IP
+/// の 2 つ(install の確認は同じ機械から 10.10.128.1 を源に届くので、自分を締め出さない)。
 pub fn nft_rule_listed(listing: &str, from: &str, agent_listen: &str) -> Result<bool, String> {
     let (ip, port) = agent_ip_and_port(agent_listen)?;
-    let words = ["daddr", ip.as_str(), "dport", port.as_str(), "saddr", "!=", from, "drop"];
+    let pieces = [
+        format!("ip daddr {ip} "),
+        format!("tcp dport {port} "),
+        "ip saddr != {".to_string(),
+        " drop".to_string(),
+    ];
+    // 集合の要素は nft が並べ替えることがあるので、各要素は「, か } が続く」形で個別に見る。
+    let element = |line: &str, address: &str| {
+        line.contains(&format!(" {address},")) || line.contains(&format!(" {address} }}"))
+    };
     Ok(listing.lines().any(|line| {
-        let cells: Vec<&str> = line.split_whitespace().collect();
-        words.iter().all(|word| cells.contains(word))
+        pieces.iter().all(|piece| line.contains(piece.as_str()))
+            && element(line, from)
+            && element(line, &ip)
     }))
 }
 

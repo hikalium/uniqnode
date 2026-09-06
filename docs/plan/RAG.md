@@ -17,6 +17,16 @@
 品質向上だけで、これは評価ハーネスで測って劣化が見えたときに動く。したがって先頭は 8 の
 evict だが、着手は 2 台目の計画が立ってからでよい。
 
+## 14. lamalium につなぐ
+
+<a id="1c8c5b0e-2c0a-4a1e-9d3a-7f2c6e5b4a11"></a>
+
+uniqnode の一番の利用者は lamalium(同じ機械のマルチエージェント系)になる予定である。
+計画は [docs/plan/LAMALIUM.md](#68571059-94ed-4aa2-8ae0-b2862d1de44e)。uniqnode 側の作業は、
+読むだけの口(`--listen-readonly`)、serve を止めない ingest(`--serve-url`)、小さな脳向けの応答の
+整形、lamalium の問いによる評価の 4 つで、lamalium 側の `recall` ツールと束縛時の注入と組に
+なる。着手順は同文書の段階 L0〜L4。1 台で効き、2 台目を待たないので、8 より前に置く。
+
 ## 8. pack GC(機会層 evict の物理回収)
 
 <a id="4ed764d8-a570-4809-bd0c-80de0d4b5545"></a>

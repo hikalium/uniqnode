@@ -62,6 +62,7 @@ unit ファイルは差し替えても drop-in は残る。
 | UNIQNODE_BACKUP_DIR | backup | system: /var/backups/uniqnode、user: %h/uniqnode-backup | 写し先。変えるときは ReadWritePaths= も(下) |
 | UNIQNODE_AGENT_LISTEN | serve(install の `--listen-agent` だけが書く) | 無し | 読み口の待ち受け。unit の ExecStart= には無く、install が drop-in の ExecStart= の末尾に `--listen-agent ${UNIQNODE_AGENT_LISTEN}` を足す |
 | UNIQNODE_AGENT_WRITABLE | serve(install の `--agent-writable` だけが書く) | 無し | 読み口から書けるコレクションの集合(空白区切り。読み手のための写し)。ExecStart= には展開せず、install が drop-in の ExecStart= の末尾に `--agent-writable <c>` を集合の数だけ値のまま並べる |
+| UNIQNODE_AGENT_COLLECTIONS | serve(install の `--agent-collections` だけが書く) | 無し(全コレクションが読める) | 読み口から読めるコレクションの集合(空白区切り。読み手のための写し)。ExecStart= には展開せず、install が drop-in の ExecStart= の末尾に `--agent-collections <c>` を集合の数だけ値のまま並べる |
 | PATH | serve(install は 3 つに同じ値) | systemd の既定 /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin | pdftotext・pdftohtml・pdftoppm・curl を探す道。unit には書かず、install が自分の PATH で見つけた場所を前に足して drop-in に書く(下) |
 
 - 埋め込みは既定で装備しない。serve は `--embed` を明示したときだけ埋め込みサーバに繋ぎ、
@@ -163,12 +164,15 @@ ExecStart=/opt/uniqnode/bin/uniqnode serve ${UNIQNODE_DATA_DIR} ${UNIQNODE_LISTE
 ファイルに残す形で渡す(CLAUDE.md):
 
 ```
-sudo ~/.local/bin/uniqnode install /work2/llm_playground_host_dir/uniqnode-store --system --serve-options "--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank" --viewer-listen 0.0.0.0:7450 --listen-agent 10.10.128.1:7441 --agent-writable lamalium-notes --after wg-quick@wg1.service 2>&1 | ts '%Y-%m-%dT%H:%M:%S%z' | tee /tmp/uniqnode-install-system.log
+sudo ~/.local/bin/uniqnode install /work2/llm_playground_host_dir/uniqnode-store --system --serve-options "--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank" --viewer-listen 0.0.0.0:7450 --listen-agent 10.10.128.1:7441 --agent-writable lamalium-notes --agent-collections articles --agent-collections papers --agent-collections seccamp --agent-collections specs --agent-collections trial --agent-collections web --agent-collections lamalium-notes --after wg-quick@wg1.service 2>&1 | ts '%Y-%m-%dT%H:%M:%S%z' | tee /tmp/uniqnode-install-system.log
 ```
 
 (本番の実物。ストアは /work2 の下、読み口は wg1 のアドレス 10.10.128.1:7441、読み口から
 書けるのはコレクション lamalium-notes の 1 つ(lamalium 側の書く先は共有 1 つで、名は
-lamalium-notes。操作者の裁定 2026-09-05 と 2026-09-06)、wg1 の unit は wg-quick@wg1.service。既に user 単位で常駐しているなら、先に下の
+lamalium-notes。操作者の裁定 2026-09-05 と 2026-09-06)、読めるのは現在の 7 コレクション
+全部(articles・papers・seccamp・specs・trial・web・lamalium-notes。機構として絞れる形に
+しておき、値は全部という操作者の裁定 2026-09-06。コレクションが増えたらこの行に足す)、
+wg1 の unit は wg-quick@wg1.service。既に user 単位で常駐しているなら、先に下の
 「user 単位から移る」。)
 
 user 単位と違うのは、unit の中身(docs/mop/systemd/system/。User=/Group= を持ち、閉じ込めは
@@ -204,7 +208,7 @@ user 単位で動いているものを system 単位に載せ替える。スト�
 まま、unit の置き場と走らせ方だけが変わる。1 命令で通す(移行の間、serve と viewer は止まる):
 
 ```
-cargo build --release -p uniqnode && sudo target/release/uniqnode install /work2/llm_playground_host_dir/uniqnode-store --system --take-over-user-units --serve-options "--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank" --viewer-listen 0.0.0.0:7450 --listen-agent 10.10.128.1:7441 --agent-writable lamalium-notes --after wg-quick@wg1.service --firewall-allow 10.10.128.4 2>&1 | ts '%Y-%m-%dT%H:%M:%S%z' | tee /tmp/uniqnode-install-system.log
+cargo build --release -p uniqnode && sudo target/release/uniqnode install /work2/llm_playground_host_dir/uniqnode-store --system --take-over-user-units --serve-options "--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank" --viewer-listen 0.0.0.0:7450 --listen-agent 10.10.128.1:7441 --agent-writable lamalium-notes --agent-collections articles --agent-collections papers --agent-collections seccamp --agent-collections specs --agent-collections trial --agent-collections web --agent-collections lamalium-notes --after wg-quick@wg1.service --firewall-allow 10.10.128.4 2>&1 | ts '%Y-%m-%dT%H:%M:%S%z' | tee /tmp/uniqnode-install-system.log
 ```
 
 中で何をしているか(手で同じことをするなら、この順):
@@ -225,15 +229,15 @@ cargo build --release -p uniqnode && sudo target/release/uniqnode install /work2
    drop-in に `ExecStartPre=+/usr/sbin/nft -f <その道>` を足す(先頭の + は User= に関わらず
    root で走らせる印)ので、nftables.service が無効な機械でも、serve を起こすたびに規則が入る。
    ufw も nft も無ければその旨で赤。
-3. 据え付けと確認(上の「system 単位で起こす」と同じ。「確認:」が 5 本。`--agent-writable` が
-   あればさらに 1 本、下の「読み口(--listen-agent)の確認」)。
+3. 据え付けと確認(上の「system 単位で起こす」と同じ。「確認:」が 5 本。`--agent-writable` と
+   `--agent-collections` があればそれぞれさらに 1 本、下の「読み口(--listen-agent)の確認」)。
 4. firewall の効果を見て「確認:」を 1 本足す。ufw なら `ufw allow from 10.10.128.4 to 10.10.128.1
    port 7441 proto tcp` を入れて、`ufw status` の表にその行(10.10.128.1 7441/tcp、ALLOW、
    10.10.128.4)が載ったこと。nft なら `nft list table inet uniqnode` にその規則が載っている
    こと(入れたのは serve の起動そのもので、install はここで入れ直さない: 再起動のたびに同じ
    道で入ることの証拠になる)。
-5. /tmp/uniqnode-install-system.log を読む。「確認:」の行が 6 本(`--agent-writable` があれば
-   7 本)並び、最後に「次の刻み:」があれば据え付けは完了である。unit の状態は
+5. /tmp/uniqnode-install-system.log を読む。「確認:」の行が 6 本(`--agent-writable` と
+   `--agent-collections` があれば 8 本)並び、最後に「次の刻み:」があれば据え付けは完了である。unit の状態は
    `systemctl status uniqnode-serve uniqnode-viewer uniqnode-backup.timer`。
 6. user 単位の unit ファイル(~/.config/systemd/user/uniqnode-*)は disable しても残る。
    消すなら `rm ~/.config/systemd/user/uniqnode-*.service ~/.config/systemd/user/uniqnode-*.timer`
@@ -263,6 +267,16 @@ PUT が「は書けない(--agent-writable で許したのは …)」の 403 で
 ```
 curl -X PUT http://10.10.128.1:7441/v1/collections/lamalium-notes/documents/uniqnode-install-probe --data-binary ''   # 400(門は越えた。書かない)
 curl -X PUT http://10.10.128.1:7441/v1/collections/uniqnode-install-probe/documents/uniqnode-install-probe --data-binary ''   # 403 「は書けない」
+```
+
+`--agent-collections <c>` があれば、読める集合の確認をもう 1 本(「確認: 読み口の読める集合:
+…」)足す。読むだけの確認で、本番のデータには触らない: 集合に無い名前(uniqnode-install-probe。
+集合にあれば -x を足す)を collection に指した検索が「は読めない(--agent-collections で許した
+のは …)」の 403 で断られることを見る:
+
+```
+curl -X POST http://10.10.128.1:7441/v1/search -d '{"query":"probe","collection":"uniqnode-install-probe","top_k":1}'   # 403 「は読めない」
+curl -X POST http://10.10.128.1:7441/v1/search -d '{"query":"xhci","collection":"specs","top_k":1}'                     # 200(集合の中)
 ```
 
 firewall は `--firewall-allow <addr>` で install が入れる。ufw が active ならその規則、そうで
@@ -325,6 +339,7 @@ target/release/uniqnode install ~/uniqnode-store
 uniqnode install <dir> [--listen <addr>] [--viewer-listen <addr>] [--serve-options "<引数列>"]
                        [--backup-dir <dir>] [--bin <path>] [--unit-dir <dir>] [--no-start]
                        [--listen-agent <addr>] [--agent-writable <c>]...
+                       [--agent-collections <c>]...
                        [--system [--user <name>] [--after <unit>]...]
 ```
 
@@ -340,6 +355,7 @@ uniqnode install <dir> [--listen <addr>] [--viewer-listen <addr>] [--serve-optio
 | `--no-start` | — | daemon-reload までで止める(unit を置くだけ) |
 | `--listen-agent` | 無し | serve の読み口(第 2 の待ち受け。許可表の外は 403)。drop-in に UNIQNODE_AGENT_LISTEN を書き、ExecStart= の末尾に `--listen-agent ${UNIQNODE_AGENT_LISTEN}` を足す。--listen と別のアドレスで、ポートは固定 |
 | `--agent-writable` | 無し | 読み口から書けるコレクション(複数可。`--listen-agent` があるときだけ)。drop-in に `Environment="UNIQNODE_AGENT_WRITABLE=<c1> <c2>"` を書き、ExecStart= の末尾に `--agent-writable <c>` を集合の数だけ並べる。確認に「許したコレクションへの PUT が門を越え、許していないものは 403」を足す(試し書きはしない) |
+| `--agent-collections` | 無し(全コレクションが読める) | 読み口から読めるコレクション(複数可。`--listen-agent` があるときだけ)。drop-in に `Environment="UNIQNODE_AGENT_COLLECTIONS=<c1> <c2>"` を書き、ExecStart= の末尾に `--agent-collections <c>` を集合の数だけ並べる。確認に「許していない名を指した検索が 403」を足す(読むだけ。本番のデータに触らない) |
 | `--system` | — | system 単位に据える(上の「system 単位で起こす」)。root で走らせる |
 | `--user` | SUDO_USER | `--system` の実行ユーザ(unit の User=/Group=)。root は断る。`--system` のときだけ |
 | `--after` | 無し | drop-in の `[Unit]` に After= と Wants= で書く unit(複数可。`--system` のときだけ) |
@@ -418,7 +434,8 @@ install は次を 1 手順 1 命令で行う。unit は docs/mop/systemd/user/ �
    /v1/status が同じ node_id を返すまで短い間隔で待ち(上限 90 秒。serve の unit が failed
    に落ちたら待たずに言う)、`--listen-agent` があれば読み口の /v1/status が同じ node_id を
    返し POST /v1/admin/gc(dry_run)が 403 であることを同じ上限で待ち、`--agent-writable` が
-   あれば書く口を書かずに確かめ(上の「読み口(--listen-agent)の確認」)、
+   あれば書く口を書かずに確かめ、`--agent-collections` があれば集合の外を指した検索が 403 で
+   断られることを確かめ(どちらも上の「読み口(--listen-agent)の確認」)、
    `systemctl --user start uniqnode-backup.service` を 1 回走らせ、写し先をストアとして開いて
    fsck する(backup 命令の最後の検証と同じ関数。system 単位では実行ユーザで
    `<bin> fsck <写し先>` を起こし、最後にストアと写し先の所有者を見る)。

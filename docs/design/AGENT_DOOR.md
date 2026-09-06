@@ -1,4 +1,4 @@
-# AGENT_DOOR — serve の読み口(第 2 の TcpListener・許可表・チャンク限定・許したコレクションへの PUT・束縛の再試行)
+# AGENT_DOOR — serve の読み口(第 2 の TcpListener・許可表・チャンク限定・読める集合・許したコレクションへの PUT・束縛の再試行)
 
 <a id="02f79aec-2f12-41e6-bede-1557d4719e4d"></a>
 
@@ -16,9 +16,11 @@ node/src/agent_door.rs を読む者。この文書は読み口の現在の実装
 管理の口で、機械の外に出さない。だが別の機械のエージェントに知識を引かせたいとき、必要なのは
 「検索して、当たったチャンクの全文と出典を読む」であり、覚えさせたいときに足すのは「許した
 コレクションに文書を 1 件入れる」だけである。読み口はそのためだけの第 2 の TcpListener で、
-`uniqnode serve <dir> <listen> --listen-agent <addr> [--agent-writable <c>]...` で束縛する。
+`uniqnode serve <dir> <listen> --listen-agent <addr> [--agent-writable <c>]...
+[--agent-collections <c>]...` で束縛する。
 `--listen-agent` を与えなければ第 2 の口は存在しない。`--agent-writable` を 1 つも与えなければ
-読み口は読むだけである(第 1 段)。
+読み口は読むだけである(第 1 段)。`--agent-collections` を 1 つも与えなければ、読み口からは
+全コレクションが読める(既定は絞らない)。
 
 読み口は門でしかない。(method, path) の許可表を 1 つ持ち、表に無い要求は断り、表にある要求だけを
 主の口と同じ `api::handle` に委ねる。何を返すか(検索の方式・劣化・引用の組み立て・取り込み)の
@@ -31,16 +33,17 @@ node/src/agent_door.rs を読む者。この文書は読み口の現在の実装
 ## 許可表
 
 node/src/agent_door.rs の `admit` の match がこの表そのものである。行の順も同じ。`admit` は
-`--agent-writable` の集合を引数に取り、PUT の行はその集合で決まる(判断はこの 1 箇所)。
+`--agent-writable` と `--agent-collections` の集合を引数に取り、PUT の行は前者で、search が
+名指しした `collection` は後者で決まる(どちらも判断はこの 1 箇所)。
 
 | method | path | 委ねる先での意味 | 読み口だけの扱い |
 |---|---|---|---|
 | GET | /healthz | 生存 | |
 | GET | /v1/status | node_id・件数・容量 | |
-| POST | /v1/search | 検索 | 本文に `peers` 鍵があれば 400 |
-| GET | /v1/objects/{id} | オブジェクトの生バイト列 | id は `c1::is_object_id` の形に限る。応答が kind:"chunk" でなければ 403 |
-| GET | /v1/objects/{id}/citation | 出典 | id は `c1::is_object_id` の形に限る |
-| GET | /v1/collections | コレクションの一覧 | |
+| POST | /v1/search | 検索 | 本文に `peers` 鍵があれば 400。`collection` が読める集合の外なら 403、省略なら集合が share になる |
+| GET | /v1/objects/{id} | オブジェクトの生バイト列 | id は `c1::is_object_id` の形に限る。応答が kind:"chunk" でなければ 403。出典のコレクションが読める集合の外なら 403 |
+| GET | /v1/objects/{id}/citation | 出典 | id は `c1::is_object_id` の形に限る。出典のコレクションが読める集合の外なら 403 |
+| GET | /v1/collections | コレクションの一覧 | 読める集合にあるものだけ |
 | PUT | /v1/collections/{c}/documents/{name} | 文書 1 件の取り込み(第 2 段) | c が `--agent-writable` の集合にあるときだけ。集合に無い c は許した一覧を言って 403。集合が空なら表に無い |
 
 表に無いものはすべて 403 である: admin(gc・shutdown)・sync・pins・peers・refs・closure・
@@ -56,6 +59,11 @@ path の別の method(`POST /v1/status` など)。`fetch` は `--agent-writable`
   `--agent-writable` が 1 つも無いときの PUT もこれである。
 - 許していないコレクションへの PUT: 403 `{"error":"agent door: コレクション <c> は書けない
   (--agent-writable で許したのは <c1>, <c2>)"}`。一覧は与えられた順、`, ` 区切り。
+- 読める集合の外を読もうとしたとき: 403 `{"error":"agent door: コレクション <c> は読めない
+  (--agent-collections で許したのは <c1>, <c2>)"}`。search の `collection` でも、objects と
+  citation の出典でも同じ文言である(門から見ればどちらも同じ「集合の外を読もうとした」で
+  ある)。文言を組むのは `agent_door::unreadable_refusal` の 1 箇所で、install の確認も
+  そこから期待値を作る(must/0023)。
 - peers 付きの search: 400 `{"error":"agent door: peers は使えない"}`。散布は他のDBノードへ問いの
   文を配る行為で、読み口の向こうのエージェントに選ばせない。鍵があれば値によらず断る
   (`false` や `null` を主の口と同じく「散布しない」と読み替えると、その解釈が変わったとき
@@ -63,6 +71,39 @@ path の別の method(`POST /v1/status` など)。`fetch` は `--agent-writable`
   400 が返る。
 - チャンクでないオブジェクト: 403 `{"error":"agent door: チャンクでないオブジェクトは許可されて
   いない"}`。
+
+## 読める集合(`--agent-collections`)
+
+`--agent-collections <c>`(複数可。名前の形は `--agent-writable` と同じ 1 語で、検査も同じ
+1 箇所。`--listen-agent` が無いのに与えれば serve は 2 で終わる)を与えると、読み口から
+読めるコレクションがその集合に限られる。1 つも与えなければ、読み口は今までどおり全
+コレクションを読める(既定は変えない。絞るのは、絞ると決めた運用だけである)。
+
+判断は 1 つしかない: 集合を `search::CollectionScope` に直す `agent_door::readable_scope`
+(空なら `All`、そうでなければ `Only(集合)`)である。効く場所は 4 つで、どれもその 1 つを
+呼ぶ(should/0135):
+
+1. `POST /v1/search`: 要求が `collection` を名指ししていて集合の外なら、索引を引く前に 403。
+   省略なら、集合を応答側の共有ポリシー(share)として `api::handle_search_within` に渡し、
+   要求の絞り込みとの交差は `run_search` の既存の 1 箇所が取る(ピアの QUERY に答える道と
+   同じ仕組みである)。名指しを 403 にするのは、交差に任せると集合の外を指した検索が
+   「0 件 + peers.json の share を語る degraded」になり、読み手には一致が無いのか見て
+   いないのかが読めないからである。
+2. `GET /v1/collections`: 集合にあるコレクションだけを数えて返す。指しても 403 になる名前を
+   一覧に並べない(一覧は「次に何を collection に指せるか」の表である)。
+3. `GET /v1/objects/{id}`: そのチャンクの出典のコレクションが集合の外なら 403。id さえ
+   知っていれば読めてしまう道を、検索と同じ集合で塞ぐ(チャンク限定と同じ理由・同じ場所)。
+4. `GET /v1/objects/{id}/citation`: 同じ判定。
+
+出典が引けない id(見えに無い旧版、持っていない ID、チャンクでないもの)は今までどおりで
+ある: 404 か、チャンクでないことによる 403 が返る。出典を引くのは集合を絞っているときだけ
+で、絞っていない読み口に索引の引き当てを足さない。
+
+install は `--agent-collections <c>` を drop-in に
+`Environment="UNIQNODE_AGENT_COLLECTIONS=<c1> <c2>"` と ExecStart= 末尾の
+`--agent-collections <c>` の並びとして書き(`--agent-writable` と全く同じ流儀)、確認に
+「許していない名を collection に指した検索が 403 の文言で断られる」を足す(読むだけの確認で、
+本番のデータには触らない)。
 
 ## 書く口(第 2 段)と出所の meta
 
@@ -124,6 +165,7 @@ blob。LLM は幻覚の id や、検索結果からコピーする途中で切�
   通るが、効かせる先が無いので黙って捨てずに 2 で終わる(viewer の `--writable` と同じ扱い)。
   `--agent-writable` も同じで、加えて `--listen-agent` の無い serve に与えても 2 で終わる
   (書く許可は読み口に掛かるもので、読み口が無ければ効かせる先が無い)。
+  `--agent-collections` も全く同じ扱いである(読む許可も読み口に掛かる)。
 
 ## 記録
 
@@ -139,6 +181,8 @@ blob。LLM は幻覚の id や、検索結果からコピーする途中で切�
 要求はこの行にならない。PUT も同じ 1 行で(path には `?meta.…` の query がそのまま載る)、
 誰が何を書いたかは doc_rev.meta と、この行の対で追える。起動時には
 `読み口から書けるコレクション: <c1>, <c2>` の 1 行を残す(`--agent-writable` があるときだけ)。
+`--agent-collections` があれば `読み口から読めるコレクション: <c1>, <c2>` の 1 行も同じように
+残す(絞ったことが、後から記録だけで読める)。
 
 ## 試験の場所
 
@@ -154,7 +198,12 @@ mcp と viewer が引数を断ること。書く口は、`--agent-writable notes
 なり主の口の `GET /v1/objects/{doc_rev}` に meta が写っていること、検索の citation と /citation に
 meta が出ないこと、other への PUT が許した一覧を言う 403、fetch は許しても 403、meta の鍵や値の
 形が違えば 400 で何も入らないこと、`--agent-writable` だけで `--listen-agent` 無しは 2 で終わる
-こと。主の口でも同じ query が通ることは node/tests/api.rs にある。各試験の冒頭に、許可表の
+こと。読める集合は、2 つのコレクションに文書を入れて、許した名を指した検索が返ること、
+許していない名を指した検索が文言つきの 403 で断られること(同じ検索は主の口では通る)、
+collection を省いた検索の結果と `GET /v1/collections` に集合の外が 1 つも出ないこと、集合の外の
+チャンクは ID を知っていても objects と citation が 403(同じ ID が主の口では 200)であること、
+`--agent-collections` 無しなら全部読めること、`--listen-agent` 無しの指定と名前の形の誤りが
+2 で終わること。主の口でも同じ query が通ることは node/tests/api.rs にある。各試験の冒頭に、許可表の
 どの行を消すとどの assert が落ちるかを記してある(should/0137)。許可表そのものの単体試験は
 node/src/agent_door.rs に、query の読み方の単体試験は node/src/api.rs にある。install の
 drop-in の文面と「読み口が無ければ断る」は node/tests/install.rs にある。

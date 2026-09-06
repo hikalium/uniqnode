@@ -503,6 +503,21 @@ fn after_and_user_are_system_only_and_the_agent_listen_is_checked() {
         "{}",
         bad_name.stderr
     );
+    // 読める集合も同じ扱い(読み口があるときだけ、名前は 1 語)。
+    let readable_alone = base(&["--agent-collections", "notes"]);
+    assert_eq!(readable_alone.status, 1, "{}\n{}", readable_alone.stdout, readable_alone.stderr);
+    assert!(
+        readable_alone.stderr.contains("--agent-collections notes は --listen-agent があるときだけ"),
+        "{}",
+        readable_alone.stderr
+    );
+    let bad_readable = base(&["--listen-agent", "127.0.0.1:7441", "--agent-collections", "a b"]);
+    assert_eq!(bad_readable.status, 1, "{}\n{}", bad_readable.stdout, bad_readable.stderr);
+    assert!(
+        bad_readable.stderr.contains("--agent-collections はコレクション名(空でなく / と空白を含まない 1 語): \"a b\""),
+        "{}",
+        bad_readable.stderr
+    );
     assert!(!unit_dir.exists(), "断るときは unit を置かない");
     // 移行と firewall の指定も system 単位だけ(should/0137: normalize の 2 つの検査を消すと
     // ここが「unit が置かれた」で赤になる)。
@@ -722,6 +737,75 @@ fn the_writable_collections_are_written_to_the_drop_in_as_values_not_expansions(
     with_door.agent_writable = vec!["lamalium-notes".to_string()];
     let accepted = normalize(with_door).expect("読み口があれば通る");
     assert_eq!(accepted.agent_writable, vec!["lamalium-notes".to_string()]);
+}
+
+/// 読める集合(`--agent-collections`)の drop-in: 書く集合と全く同じ流儀で、集合は空白で
+/// 分けた 1 本の環境変数 UNIQNODE_AGENT_COLLECTIONS に写り、ExecStart= の末尾には
+/// `--agent-collections <c>` が集合の数だけ値のまま並ぶ(書く集合の後ろ)。viewer と backup
+/// には出ない。読み口が無ければ normalize が断る。
+/// should/0137: drop_ins の agent_collections の分岐を消すと ExecStart= の全文一致が、
+/// Environment= の行だけ消すと 1 つ目の assert が赤になる。
+#[test]
+fn the_readable_collections_are_written_to_the_drop_in_as_values_not_expansions() {
+    use uniqnode::install::{drop_ins, normalize, SYSTEMD_DEFAULT_PATH};
+    let mut options = system_options();
+    options.agent_writable = vec!["lamalium-notes".to_string()];
+    options.agent_collections = vec!["articles".to_string(), "lamalium-notes".to_string()];
+    let rendered = drop_ins(&options, SYSTEMD_DEFAULT_PATH).expect("描ける");
+    let of = |unit: &str| -> String {
+        rendered
+            .iter()
+            .find(|(name, _)| *name == unit)
+            .map(|(_, text)| text.clone())
+            .expect("3 つの service の 1 つ")
+    };
+    let serve = of("uniqnode-serve.service");
+    assert!(
+        serve.contains(
+            "\nEnvironment=UNIQNODE_AGENT_WRITABLE=lamalium-notes\n\
+             Environment=\"UNIQNODE_AGENT_COLLECTIONS=articles lamalium-notes\"\n"
+        ),
+        "{serve}"
+    );
+    assert!(
+        serve.ends_with(
+            "ExecStart=\nExecStart=/home/op/.local/bin/uniqnode serve ${UNIQNODE_DATA_DIR} \
+             ${UNIQNODE_LISTEN} $UNIQNODE_SERVE_OPTIONS --listen-agent ${UNIQNODE_AGENT_LISTEN} \
+             --agent-writable lamalium-notes --agent-collections articles \
+             --agent-collections lamalium-notes\n"
+        ),
+        "{serve}"
+    );
+    for unit in ["uniqnode-viewer.service", "uniqnode-backup.service"] {
+        let text = of(unit);
+        assert!(!text.contains("UNIQNODE_AGENT_COLLECTIONS"), "{unit}:\n{text}");
+        assert!(!text.contains("--agent-collections"), "{unit}:\n{text}");
+    }
+    // 1 つだけなら環境変数も引用符なしの 1 語。書く集合が無くても読める集合だけ書ける。
+    let mut alone = system_options();
+    alone.agent_collections = vec!["articles".to_string()];
+    let one = drop_ins(&alone, SYSTEMD_DEFAULT_PATH).expect("描ける")[0].1.clone();
+    assert!(one.contains("\nEnvironment=UNIQNODE_AGENT_COLLECTIONS=articles\n"), "{one}");
+    assert!(one.ends_with("${UNIQNODE_AGENT_LISTEN} --agent-collections articles\n"), "{one}");
+
+    // 読み口が無ければ読める集合の指定も受け付けない(unit を描く前に断る)。
+    let mut without_door = system_options();
+    without_door.agent_listen = None;
+    without_door.after.clear();
+    without_door.agent_collections = vec!["articles".to_string()];
+    let refused = match normalize(without_door) {
+        Ok(_) => panic!("読み口が無いのに読める集合の指定が通った"),
+        Err(message) => message,
+    };
+    assert_eq!(
+        refused,
+        "--agent-collections articles は --listen-agent があるときだけ受け付ける(読む許可は\
+         読み口に掛かるもので、読み口が無ければ効かせる先が無い)"
+    );
+    let mut with_door = system_options();
+    with_door.agent_collections = vec!["articles".to_string()];
+    let accepted = normalize(with_door).expect("読み口があれば通る");
+    assert_eq!(accepted.agent_collections, vec!["articles".to_string()]);
 }
 
 /// --after の unit 名の検査と、system 単位で外部の道具を探す PATH(実行ユーザの ~/.local/bin と

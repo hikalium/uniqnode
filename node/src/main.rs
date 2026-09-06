@@ -40,7 +40,8 @@ fn usage() -> ! {
                                       失効文の本体を標準出力へ(署名なし)\n\
            serve <dir> <addr> [--embed <url>] [--embedder <id>] [--rerank <url>]\n\
                               [--reranker <id>] [--listen-agent <addr>]\n\
-                              [--agent-writable <コレクション名>]... [ログの指定]\n\
+                              [--agent-writable <コレクション名>]...\n\
+                              [--agent-collections <コレクション名>]... [ログの指定]\n\
                                       HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)。\n\
                                       --listen-agent を与えると、そのアドレスに第 2 の口\n\
                                       (読み口)を束縛する。読み口は許可表(healthz・status・\n\
@@ -53,6 +54,11 @@ fn usage() -> ! {
                                       だけを読み口に通し、他のコレクションは許した一覧を\n\
                                       言って 403 で断る。PUT の query ?meta.<key>=<value> は\n\
                                       doc_rev.meta に写る(主の口でも同じ)。\n\
+                                      --agent-collections は読み口から読めるコレクション\n\
+                                      (繰り返せる。--listen-agent があるときだけ)。与えな\n\
+                                      ければ全コレクションが読める。与えると search・\n\
+                                      collections・objects・citation の 4 か所に効き、集合の\n\
+                                      外は 403 で断る。\n\
                                       --embed を与えると POST /v1/search の既定が BM25 と\n\
                                       埋め込みの RRF 融合になる。ベクトルはキャッシュから\n\
                                       読むので検索が模型の計算を待つことはなく、無いぶんは\n\
@@ -145,6 +151,7 @@ fn usage() -> ! {
                          [--serve-options \"<引数列>\"] [--backup-dir <dir>] [--bin <path>]\n\
                          [--unit-dir <dir>] [--no-start] [--listen-agent <addr>]\n\
                          [--agent-writable <コレクション名>]...\n\
+                         [--agent-collections <コレクション名>]...\n\
                          [--system [--user <name>] [--after <unit>]...\n\
                           [--take-over-user-units] [--firewall-allow <addr>]]\n\
                                       serve・viewer・毎日の backup を systemd に据える\n\
@@ -171,6 +178,11 @@ fn usage() -> ! {
                                       --agent-writable <c> を並べ、確認に「許したコレクション\n\
                                       への PUT が門を越え、許していないものは 403」を足す\n\
                                       (試し書きはしない)。\n\
+                                      --agent-collections は読み口から読めるコレクション\n\
+                                      (繰り返せる。--listen-agent のときだけ)で、drop-in に\n\
+                                      UNIQNODE_AGENT_COLLECTIONS を書き ExecStart= の末尾に\n\
+                                      --agent-collections <c> を並べ、確認に「許していない\n\
+                                      名を指した検索が 403」を足す。\n\
                                       --system は system 単位(/etc/systemd/system)に据える:\n\
                                       root で走らせ(sudo)、unit は --user の利用者(無ければ\n\
                                       SUDO_USER。root は不可)で走る。既定の置き場もその\n\
@@ -698,6 +710,10 @@ struct RunOptions {
     /// --listen-agent があるときだけ意味を持ち、無いのに与えられたら断る(黙って捨てると
     /// 「許したつもり」が残る。must/0022)。
     agent_writable: Vec<String>,
+    /// 読み口から読めるコレクション(--agent-collections。繰り返せる。与えられた順)。
+    /// 空なら読み口は全コレクションを読める(既定)。--agent-writable と同じく、
+    /// --listen-agent が無いのに与えられたら断る。
+    agent_collections: Vec<String>,
 }
 
 /// ログの指定と読み口の指定だけを抜き取り、残りは埋め込みの読み手に渡す(読み取りを
@@ -710,6 +726,7 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
     };
     let mut listen_agent = None;
     let mut agent_writable: Vec<String> = Vec::new();
+    let mut agent_collections: Vec<String> = Vec::new();
     let mut others = Vec::new();
     let mut at = 0;
     while at < rest.len() {
@@ -733,6 +750,19 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
                 }
                 if !agent_writable.contains(&collection) {
                     agent_writable.push(collection);
+                }
+                at += 2;
+            }
+            uniqnode::install::AGENT_COLLECTIONS_FLAG => {
+                // 書く集合と全く同じ読み方(名前の検査は install と同じ 1 箇所。
+                // should/0135)。同じ名前の繰り返しは 1 つに畳む。
+                let collection = value();
+                if let Err(message) = uniqnode::install::check_agent_collection(&collection) {
+                    eprintln!("uniqnode: {message}");
+                    std::process::exit(2);
+                }
+                if !agent_collections.contains(&collection) {
+                    agent_collections.push(collection);
                 }
                 at += 2;
             }
@@ -770,7 +800,24 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
         );
         std::process::exit(2);
     }
-    RunOptions { embed: parse_embed_options(&others), log, listen_agent, agent_writable }
+    if !agent_collections.is_empty() && listen_agent.is_none() {
+        // 読む許可も読み口に掛かるもの(書く許可と同じ理由で、黙って捨てない)。
+        eprintln!(
+            "uniqnode: {} {} は {} があるときだけ受け付ける(読む許可は読み口に掛かるもので、\
+             読み口が無ければ効かせる先が無い)",
+            uniqnode::install::AGENT_COLLECTIONS_FLAG,
+            agent_collections.join(" "),
+            uniqnode::install::AGENT_LISTEN_FLAG
+        );
+        std::process::exit(2);
+    }
+    RunOptions {
+        embed: parse_embed_options(&others),
+        log,
+        listen_agent,
+        agent_writable,
+        agent_collections,
+    }
 }
 
 /// 読み口を持たない命令(mcp・viewer)が --listen-agent を受け取ったとき、黙って捨てずに
@@ -877,6 +924,7 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
     let mut after: Vec<String> = Vec::new();
     let mut agent_listen: Option<String> = None;
     let mut agent_writable: Vec<String> = Vec::new();
+    let mut agent_collections: Vec<String> = Vec::new();
     let mut take_over_user_units = false;
     let mut firewall_allow: Option<String> = None;
     let mut listen: Option<String> = None;
@@ -905,6 +953,13 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
                 let collection = value();
                 if !agent_writable.contains(&collection) {
                     agent_writable.push(collection);
+                }
+            }
+            uniqnode::install::AGENT_COLLECTIONS_FLAG => {
+                // 書く集合と同じ扱い(検査は install::normalize)。
+                let collection = value();
+                if !agent_collections.contains(&collection) {
+                    agent_collections.push(collection);
                 }
             }
             uniqnode::install::FIREWALL_ALLOW_FLAG => firewall_allow = Some(value()),
@@ -975,6 +1030,7 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
     options.after = after;
     options.agent_listen = agent_listen;
     options.agent_writable = agent_writable;
+    options.agent_collections = agent_collections;
     options.take_over_user_units = take_over_user_units;
     options.firewall_allow = firewall_allow;
     options
@@ -1564,9 +1620,17 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                         writable.join(", ")
                     );
                 }
+                // 読める集合(--agent-collections)。空なら全コレクションが読める(既定)。
+                let readable = options.agent_collections.clone();
+                if !readable.is_empty() {
+                    uniqnode::log_line!(
+                        "uniqnode: serve: 読み口から読めるコレクション: {}",
+                        readable.join(", ")
+                    );
+                }
                 let door: std::sync::Arc<uniqnode::http::PeerHandler> =
                     std::sync::Arc::new(move |request, peer| {
-                        uniqnode::agent_door::handle(&context, request, peer, &writable)
+                        uniqnode::agent_door::handle(&context, request, peer, &writable, &readable)
                     });
                 uniqnode::agent_door::open(agent_address, door);
             }

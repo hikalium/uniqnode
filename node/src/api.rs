@@ -254,7 +254,9 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
             }
             response
         }
-        ("GET", "/v1/collections") => handle_collections(context),
+        ("GET", "/v1/collections") => {
+            handle_collections(context, &crate::search::CollectionScope::All)
+        }
         ("GET", "/v1/replication/signers") => {
             let store = store.lock().expect("lock");
             let signers: Vec<c1::Value> = store
@@ -304,7 +306,15 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
 /// 増えない(べき等。I1)。「見えの文書を指す ref か」の読み方は
 /// crate::search::document_ref_parts(索引の走査と同じ 1 箇所。should/0135)。
 /// 見張るのは node/tests/api.rs の collections_are_listed_with_their_document_counts。
-fn handle_collections(context: &ApiContext) -> Response {
+///
+/// share はこの呼び手へ出してよいコレクション(読み口の `--agent-collections`。主の口は
+/// CollectionScope::All)。許していないコレクションは名前も件数も出さない: 一覧は
+/// 「次に何を collection に指せるか」を読ませるための表であり、指しても 403 になる名前を
+/// 並べる意味が無い。
+pub fn handle_collections(
+    context: &ApiContext,
+    share: &crate::search::CollectionScope,
+) -> Response {
     let store = context.store.lock().expect("lock");
     let mut counts: BTreeMap<String, i64> = BTreeMap::new();
     for (name, state) in store.list_refs() {
@@ -314,6 +324,9 @@ fn handle_collections(context: &ApiContext) -> Response {
         let Some((collection, _document)) = crate::search::document_ref_parts(name) else {
             continue;
         };
+        if !share.allows(collection) {
+            continue;
+        }
         *counts.entry(collection.to_string()).or_insert(0) += 1;
     }
     let collections: Vec<c1::Value> = counts
@@ -1131,11 +1144,33 @@ fn citation_in_view(
     with_current_index(context, store, |index| index.chunk_by_id(id).map(Citation::of))
 }
 
+/// このオブジェクトが見えのどのコレクションに属するか。読み口が、読めるコレクションの
+/// 集合(`--agent-collections`)と突き合わせるために引く(docs/design/AGENT_DOOR.md)。
+/// 出典が引けない id(見えに無い旧版・チャンクでない・持っていない)は None で、呼び手は
+/// 従来どおりの答え(404 や、チャンクでないことによる 403)に任せる。出典の引き方は
+/// citation_in_view の 1 箇所である(should/0135)。
+pub fn citation_collection(context: &ApiContext, id: &str) -> Result<Option<String>, StoreError> {
+    let store = context.store.lock().expect("lock");
+    Ok(citation_in_view(context, &store, id)?.map(|citation| citation.collection))
+}
+
 /// POST /v1/search(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580))。ボディ:
 /// {"query": "...", "collection": "...", "top_k": N, "method": "..."}(collection 省略時は
 /// 全コレクション、top_k 省略時は 10)。判断は run_search が持ち、ここは HTTP の被せ物で
 /// ある。
 fn handle_search(context: &ApiContext, request: &Request) -> Response {
+    handle_search_within(context, request, &crate::search::CollectionScope::All)
+}
+
+/// POST /v1/search を、この呼び手へ出してよいコレクションを絞って捌く入口。読み口
+/// (`--agent-collections`。docs/design/AGENT_DOOR.md)がここから呼び、主の口は
+/// CollectionScope::All で呼ぶ。share と要求の collection をどう重ねるか(交差)の判断は
+/// run_search の 1 箇所にあり、ここは share を渡すだけである(should/0135)。
+pub fn handle_search_within(
+    context: &ApiContext,
+    request: &Request,
+    share: &crate::search::CollectionScope,
+) -> Response {
     let body_text = match std::str::from_utf8(&request.body) {
         Ok(t) => t,
         Err(_) => return error_response(400, "ボディが UTF-8 でない"),
@@ -1154,7 +1189,7 @@ fn handle_search(context: &ApiContext, request: &Request) -> Response {
     };
     // ローカルの順位は、散布するかどうかによらず自分で引く(自分もクエリの参加者で
     // ある。SPEC §7.2)。
-    let local = match run_search(context, &search_request, &crate::search::CollectionScope::All) {
+    let local = match run_search(context, &search_request, share) {
         Ok(results) => results,
         Err(e) => return store_error_response(e),
     };

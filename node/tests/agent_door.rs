@@ -360,6 +360,226 @@ fn an_allowed_collection_takes_a_put_through_the_door_and_records_where_it_came_
     assert!(log.contains("読み口から書けるコレクション: notes, scratch"), "{log}");
 }
 
+/// 読める集合(`--agent-collections`)の試験の資材。許していない側のコレクションに置く
+/// 文書で、許した側と同じ語(世代の整合)を持つ: collection を省いた検索が、集合の外の
+/// 件を落としていることを見るために要る。
+const BORROWED_JA: &str =
+    "# 第三者の頁\n\n## 世代の整合\n\n第三者の頁の写しにも世代の整合の話がある。\n";
+
+/// 2 つのコレクション(notes と web)に別々の文書を入れ、それぞれの最初のチャンクの ID を
+/// 返す。入れるのは主の口なので、読み口の許可表とは無関係に両方がストアにある。
+fn seed_two_collections(main: &str) -> (String, String) {
+    put_document(main, "notes", "search_ja.md", SEARCH_JA.as_bytes());
+    put_document(main, "web", "borrowed_ja.md", BORROWED_JA.as_bytes());
+    (chunk_in(main, "notes"), chunk_in(main, "web"))
+}
+
+/// そのコレクションの中で「世代の整合」に当たった最初のチャンクの ID(主の口で引く)。
+fn chunk_in(address: &str, collection: &str) -> String {
+    let body = format!("{{\"query\":\"世代の整合\",\"collection\":\"{collection}\"}}");
+    let found = simple(address, "POST", "/v1/search", body.as_bytes());
+    assert_eq!(found.status, 200, "{}", body_text(&found));
+    json_text_field(&body_text(&found), "id")
+        .unwrap_or_else(|| panic!("{collection} に当たりが無い: {}", body_text(&found)))
+}
+
+/// (a) 許したコレクションを指した検索は読み口を通って結果を返し、その件のチャンクと出典も
+/// 読める。should/0137: admit の readable_scope の検査が集合の中まで断つように壊れると、
+/// 最初の 200 が 403 になって落ちる。
+#[test]
+fn a_search_that_names_an_allowed_collection_answers_through_the_door() {
+    let server = DoorServer::start(
+        "door-read-allowed",
+        &["--listen-agent", "127.0.0.1:0", "--agent-collections", "notes"],
+    );
+    let main = server.main().to_string();
+    let door = server.door();
+    let (notes_id, _web_id) = seed_two_collections(&main);
+
+    let found = simple(
+        &door,
+        "POST",
+        "/v1/search",
+        "{\"query\":\"世代の整合\",\"collection\":\"notes\"}".as_bytes(),
+    );
+    assert_eq!(found.status, 200, "{}", body_text(&found));
+    let text = body_text(&found);
+    assert!(text.contains(&format!("\"id\":\"{notes_id}\"")), "{text}");
+    assert!(text.contains("\"collection\":\"notes\""), "{text}");
+    // 許したコレクションのチャンクは objects も citation も通る。
+    assert_eq!(simple(&door, "GET", &format!("/v1/objects/{notes_id}"), b"").status, 200);
+    let citation = simple(&door, "GET", &format!("/v1/objects/{notes_id}/citation"), b"");
+    assert_eq!(citation.status, 200, "{}", body_text(&citation));
+    assert!(body_text(&citation).contains("\"collection\":\"notes\""), "{}", body_text(&citation));
+    // 起動時に、読み口から読めるコレクションを 1 行で言う。
+    let log = std::fs::read_to_string(server.server.dir.join("logs").join("serve.log")).expect("serve.log");
+    assert!(log.contains("読み口から読めるコレクション: notes"), "{log}");
+}
+
+/// (b) 許していないコレクションを指した検索は、索引を引く前に 403 で断られ、許した一覧を
+/// 言う。should/0137: admit の readable_scope の検査を消すと 403 が 200 になって落ちる
+/// (集合の外の件が返る)。
+#[test]
+fn a_search_that_names_a_collection_outside_the_set_is_refused_with_403() {
+    let server = DoorServer::start(
+        "door-read-refused",
+        &["--listen-agent", "127.0.0.1:0", "--agent-collections", "notes", "--agent-collections", "papers"],
+    );
+    let main = server.main().to_string();
+    let door = server.door();
+    seed_two_collections(&main);
+
+    let refused = simple(
+        &door,
+        "POST",
+        "/v1/search",
+        "{\"query\":\"世代の整合\",\"collection\":\"web\"}".as_bytes(),
+    );
+    assert_eq!(refused.status, 403, "{}", body_text(&refused));
+    assert_eq!(
+        body_text(&refused),
+        "{\"error\":\"agent door: コレクション web は読めない(--agent-collections で許したのは notes, papers)\"}"
+    );
+    // 主の口には掛からない(同じ検索が通り、web の件が返る)。
+    let through_main = simple(
+        &main,
+        "POST",
+        "/v1/search",
+        "{\"query\":\"世代の整合\",\"collection\":\"web\"}".as_bytes(),
+    );
+    assert_eq!(through_main.status, 200, "{}", body_text(&through_main));
+    assert!(body_text(&through_main).contains("\"collection\":\"web\""), "{}", body_text(&through_main));
+}
+
+/// (c) collection を省いた検索の結果に、集合の外のコレクションの件は 1 つも無い(集合は
+/// share として run_search の交差に載る)。一覧の口も許した分だけを返す。
+/// should/0137: answer が Row::Search に readable_scope を渡すのをやめて api::handle に
+/// 戻すと web の件が混ざって落ち、Row::Collections の腕を戻すと一覧に web が出て落ちる。
+#[test]
+fn a_search_without_a_collection_sees_only_the_allowed_ones() {
+    let server = DoorServer::start(
+        "door-read-scope",
+        &["--listen-agent", "127.0.0.1:0", "--agent-collections", "notes"],
+    );
+    let main = server.main().to_string();
+    let door = server.door();
+    let (notes_id, web_id) = seed_two_collections(&main);
+
+    // 主の口では両方の件が返る(資材が両方に入っていることの証拠)。
+    let everything = simple(&main, "POST", "/v1/search", "{\"query\":\"世代の整合\"}".as_bytes());
+    let everything = body_text(&everything);
+    assert!(everything.contains(&format!("\"id\":\"{notes_id}\"")), "{everything}");
+    assert!(everything.contains(&format!("\"id\":\"{web_id}\"")), "{everything}");
+
+    let found = simple(&door, "POST", "/v1/search", "{\"query\":\"世代の整合\"}".as_bytes());
+    assert_eq!(found.status, 200, "{}", body_text(&found));
+    let text = body_text(&found);
+    assert!(text.contains(&format!("\"id\":\"{notes_id}\"")), "{text}");
+    assert!(!text.contains(&format!("\"id\":\"{web_id}\"")), "集合の外の件が返った: {text}");
+    assert!(!text.contains("\"collection\":\"web\""), "集合の外の件が返った: {text}");
+
+    // 一覧も許した分だけ(主の口は両方を数える)。
+    let listed = simple(&door, "GET", "/v1/collections", b"");
+    assert_eq!(listed.status, 200, "{}", body_text(&listed));
+    assert_eq!(body_text(&listed), "{\"collections\":[{\"documents\":1,\"name\":\"notes\"}]}");
+    let through_main = simple(&main, "GET", "/v1/collections", b"");
+    assert_eq!(
+        body_text(&through_main),
+        "{\"collections\":[{\"documents\":1,\"name\":\"notes\"},{\"documents\":1,\"name\":\"web\"}]}"
+    );
+}
+
+/// (d) 集合の外のコレクションのチャンクは、ID を知っていても読み口からは取れない
+/// (objects も citation も 403)。同じ ID が主の口では 200 である。
+/// should/0137: answer の source を引く腕(または screen の Object | Citation の腕)を
+/// 消すと、この 403 が 200 になって落ちる。
+#[test]
+fn a_chunk_from_a_collection_outside_the_set_is_refused_even_by_id() {
+    let server = DoorServer::start(
+        "door-read-by-id",
+        &["--listen-agent", "127.0.0.1:0", "--agent-collections", "notes"],
+    );
+    let main = server.main().to_string();
+    let door = server.door();
+    let (notes_id, web_id) = seed_two_collections(&main);
+
+    for path in [format!("/v1/objects/{web_id}"), format!("/v1/objects/{web_id}/citation")] {
+        let refused = simple(&door, "GET", &path, b"");
+        assert_eq!(refused.status, 403, "{path}: {}", body_text(&refused));
+        assert_eq!(
+            body_text(&refused),
+            "{\"error\":\"agent door: コレクション web は読めない(--agent-collections で許したのは notes)\"}",
+            "{path}"
+        );
+        // 主の口は同じ ID を返す(門だけの制限であって、ストアの不在ではない)。
+        assert_eq!(simple(&main, "GET", &path, b"").status, 200, "{path}");
+    }
+    // 許した側の同じ形の要求は通る(集合の判定であって、objects の口を閉じたのではない)。
+    assert_eq!(simple(&door, "GET", &format!("/v1/objects/{notes_id}"), b"").status, 200);
+    assert_eq!(simple(&door, "GET", &format!("/v1/objects/{notes_id}/citation"), b"").status, 200);
+}
+
+/// (e) `--agent-collections` を与えなければ、今までどおり全コレクションが読める(既定は
+/// 変えない)。should/0137: readable_scope が空を All でなく Only(空) に直すと、この試験の
+/// 検索が 0 件になって落ちる。
+#[test]
+fn without_the_flag_every_collection_is_readable() {
+    let server = DoorServer::start("door-read-default", &["--listen-agent", "127.0.0.1:0"]);
+    let main = server.main().to_string();
+    let door = server.door();
+    let (notes_id, web_id) = seed_two_collections(&main);
+
+    let found = simple(&door, "POST", "/v1/search", "{\"query\":\"世代の整合\"}".as_bytes());
+    assert_eq!(found.status, 200, "{}", body_text(&found));
+    let text = body_text(&found);
+    assert!(text.contains(&format!("\"id\":\"{notes_id}\"")), "{text}");
+    assert!(text.contains(&format!("\"id\":\"{web_id}\"")), "{text}");
+    let named = simple(
+        &door,
+        "POST",
+        "/v1/search",
+        "{\"query\":\"世代の整合\",\"collection\":\"web\"}".as_bytes(),
+    );
+    assert_eq!(named.status, 200, "{}", body_text(&named));
+    assert_eq!(simple(&door, "GET", &format!("/v1/objects/{web_id}"), b"").status, 200);
+    assert_eq!(simple(&door, "GET", &format!("/v1/objects/{web_id}/citation"), b"").status, 200);
+    let listed = simple(&door, "GET", "/v1/collections", b"");
+    assert_eq!(
+        body_text(&listed),
+        "{\"collections\":[{\"documents\":1,\"name\":\"notes\"},{\"documents\":1,\"name\":\"web\"}]}"
+    );
+}
+
+/// `--agent-collections` も `--listen-agent` があるときだけ。無いのに与えれば serve は何も
+/// 開かずに 2 で終わる。名前の形が違うときも同じ。
+/// should/0137: parse_run_options の「--listen-agent が無い」の検査を消すと最初の段が
+/// (serve が上がってしまい)落ちる。
+#[test]
+fn agent_collections_without_a_door_is_refused_with_exit_2() {
+    let dir = unique_dir("door-collections-alone");
+    let run = |args: &[&str]| -> (Option<i32>, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
+            .args(["serve", dir.to_str().expect("utf-8"), "127.0.0.1:0"])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run");
+        (output.status.code(), String::from_utf8_lossy(&output.stderr).to_string())
+    };
+    let (code, stderr) = run(&["--agent-collections", "notes"]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        stderr.contains("--agent-collections notes は --listen-agent があるときだけ"),
+        "{stderr}"
+    );
+    assert!(!dir.exists(), "断るときはストアを作らない");
+    let (code, stderr) = run(&["--listen-agent", "127.0.0.1:0", "--agent-collections", "a b"]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("--agent-collections はコレクション名"), "{stderr}");
+    assert!(!dir.exists(), "断るときはストアを作らない");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `--agent-writable` は `--listen-agent` があるときだけ。無いのに与えれば serve は何も
 /// 開かずに 2 で終わる(黙って捨てると「許したつもり」が残る)。名前の形が違うときも同じ。
 /// should/0137: parse_run_options の「--listen-agent が無い」の検査を消すと最初の段が

@@ -100,9 +100,10 @@ agentd(ハーネス)─HTTP─▶ 10.100.0.1:11440 ─server-proxy─wg1─▶ 1
   許したコレクションだけ `PUT /v1/collections/{c}/documents/{name}?meta.agent=<id>&meta.task=<id>`
   を通す。本番の集合は lamalium-notes の 1 つ(lamalium 側の書く先は共有 1 つで、名は
   lamalium-notes。操作者の裁定 2026-09-05 と 2026-09-06)。lamalium 側は capability `uniqnode:vega:rw` を持つ task にだけ書くツールを載せる。
-- 読めるコレクションの許可表(`--agent-collections` のようなもの)は第 1 段では持たない。
-  capability の付与 = 全コレクションが読める、である。web コレクションは第三者の頁を含むので、
-  要るなら第 2 段で足す(末尾の「判断が要ること」)。
+- 読めるコレクションの許可表(`--agent-collections <c>`。複数可)は着地済みで、同じ文書の
+  「読める集合」にある。指定が無ければ全コレクションが読めるまま(既定は変わっていない)で、
+  本番は現在の 7 コレクション全部を値として並べる(機構として入れ、絞る余地を残す。操作者の
+  裁定 2026-09-06)。
 - lamalium 側は 3 つのツールを `tool::Tool` として足し、ハーネス内の実装が ureq で
   `http://10.100.0.1:11440` を叩く。モデルは付与されたツール経由でしか uniqnode に触れない。
   node 名から URL への表は向こうの uniqnode.toml が持つ。MCP のクライアントは作らない(向こうの
@@ -185,8 +186,10 @@ uniqnode 側の書く口と出所の meta は着地した(`--agent-writable <c>`
   を打ち、403 の本文(「コレクション … は書けない(--agent-writable で許したのは …)」)は
   そのまま観測へ載せる。同じ本文の再 PUT は meta が違っても no-op なので、書き直しは本文を
   変える(追記する)形にする。
-- 読めるコレクションの許可表(`--agent-collections`)が要ると分かればここで足す。今は
-  capability の付与 = 全コレクションが読める。
+- 読めるコレクションの許可表(`--agent-collections`)は着地した(2026-09-06。
+  [docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d) の「読める集合」)。
+  本番の 1 行の命令には 7 コレクション全部が並ぶので、capability の付与 = 全コレクションが
+  読める、という運用は変わらない。絞りたくなったらこの引数を減らす。
 
 ### L4 で要るもの
 
@@ -247,7 +250,7 @@ system unit に移す(`uniqnode install --system`。移行手順は
 - admin・sync・pins・peers・refs・closure・referrers・rendition をコンテナへ見せること。
 - 主の口(7440)を wg1 に出すこと。orion から届くのは読み口の 7441 だけ。
 - 読み口に認証や TLS を足すこと(境界は束縛先・firewall・許可表。向こうの ureq は平文のみ)。
-- 第 1 段でタスク識別ヘッダ(X-Lamalium-Task)や読めるコレクションの許可表を持つこと。
+- 第 1 段でタスク識別ヘッダ(X-Lamalium-Task)を持つこと。
 - lamalium に MCP クライアントを作ること(今回は 3 ツールを直に登録する。MCP サーバが
   複数になったら向こうで改めて考える)。
 - uniqnode を lamalium のバイナリに埋め込むこと(別プロセス、別機械のまま。HTTP でつなぐ)。

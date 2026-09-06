@@ -6,6 +6,8 @@
 //! 表にある要求だけを主の口と同じ api::handle に委ねる。書く口は
 //! `--agent-writable <collection>`(複数可)で許したコレクションへの
 //! `PUT /v1/collections/{c}/documents/{name}` だけで、1 つも許していなければ表に載らない。
+//! 読める範囲は `--agent-collections <collection>`(複数可)で絞れ、1 つも与えなければ
+//! 今までどおり全コレクションが読める。
 //! 何を返すかの判断は api.rs の 1 箇所にあり(should/0135)、ここは門でしかない。
 //!
 //! 境界は 3 つで、この module が持つのはそのうちの 1 つ(許可表)である。残りの 2 つ
@@ -56,12 +58,42 @@ pub enum Row {
     PutDocument,
 }
 
+/// 読み口が読めるコレクション(`--agent-collections`)を、検索の共有ポリシー
+/// (CollectionScope)に直す。集合が空(指定が無い)なら All で、今までどおり全コレクション
+/// が読める。集合を範囲に直す判断はこの 1 箇所にあり、効かせる 4 か所(search・collections・
+/// objects・citation)はどれもこれを呼ぶ(should/0135)。
+pub fn readable_scope(readable: &[String]) -> crate::search::CollectionScope {
+    match readable.is_empty() {
+        true => crate::search::CollectionScope::All,
+        false => crate::search::CollectionScope::Only(readable.to_vec()),
+    }
+}
+
+/// 読めないコレクションを断る本文。要求が名指しした collection も、オブジェクトの出典の
+/// コレクションも、同じ文言で断る(門から見ればどちらも「集合の外を読もうとした」で
+/// ある)。install の確認は期待する本文をこの関数で組む(文言の家は 1 つ。must/0023)。
+pub fn unreadable_refusal(collection: &str, readable: &[String]) -> String {
+    format!(
+        "{ERROR_PREFIX}コレクション {collection} は読めない({} で許したのは {})",
+        crate::install::AGENT_COLLECTIONS_FLAG,
+        readable.join(", ")
+    )
+}
+
 /// 要求を許可表に当てる。表に無ければ 403、表にある search の本文に peers があれば 400。
 /// writable は `--agent-writable` で許したコレクション(与えられた順)。PUT は c がその
 /// 集合にあるときだけ表にあり、集合が空なら PUT は表に無い要求として断る。
+/// readable は `--agent-collections` で許したコレクション(空なら全部)。search が集合の
+/// 外の collection を名指ししていれば、索引を引く前に 403 で断る。
 /// 本文の JSON が壊れているときは断らず通す(壊れた本文を断るのは api::handle の仕事で、
 /// ここで断ると同じ判断が 2 箇所に生える)。
-pub fn admit(method: &str, path: &str, body: &[u8], writable: &[String]) -> Result<Row, Response> {
+pub fn admit(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    writable: &[String],
+    readable: &[String],
+) -> Result<Row, Response> {
     // 書く口の的(PUT で、1 つでも許したコレクションがあるときだけ形を見る)。path の分け方は
     // 主の口と同じ api::document_path(should/0135)。
     let put_target = match method {
@@ -100,6 +132,18 @@ pub fn admit(method: &str, path: &str, body: &[u8], writable: &[String]) -> Resu
     if row == Row::Search && names_peers(body) {
         return Err(api::error_response(400, PEERS_REFUSED));
     }
+    // 集合の外を名指しした検索は、索引を引く前に断る。collection を省いた検索はここを
+    // 素通りし、handle が渡す share(readable_scope)として run_search の交差に載る。
+    if row == Row::Search {
+        if let Some(collection) = requested_collection(body) {
+            if !readable_scope(readable).allows(&collection) {
+                return Err(api::error_response(
+                    403,
+                    &unreadable_refusal(&collection, readable),
+                ));
+            }
+        }
+    }
     Ok(row)
 }
 
@@ -111,6 +155,27 @@ fn object_row(path: &str) -> Option<Row> {
         return c1::is_object_id(id).then_some(Row::Citation);
     }
     c1::is_object_id(rest).then_some(Row::Object)
+}
+
+/// objects の行の id(`/v1/objects/{id}` と `/v1/objects/{id}/citation` のどちらからも)。
+/// 行が決まった後に呼ぶので、形の検査は object_row が済ませてある。
+fn object_id_of(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/v1/objects/")?;
+    Some(rest.strip_suffix("/citation").unwrap_or(rest))
+}
+
+/// search の本文が名指しした collection。値が文字列でないときと本文が壊れているときは
+/// None である: そこを断るのは api::handle の仕事で、ここで断ると同じ判断が 2 箇所に
+/// 生える(names_peers と同じ規律)。
+fn requested_collection(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    match c1::parse(text) {
+        Ok(c1::Value::Object(map)) => match map.get("collection") {
+            Some(c1::Value::Text(collection)) => Some(collection.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// search の本文が peers を名指ししているか。値が何であれ(true・false・null・配列)
@@ -127,7 +192,22 @@ fn names_peers(body: &[u8]) -> bool {
 /// 委ねた先の応答を、行に応じて検める。`GET /v1/objects/{id}` は kind:"chunk" の
 /// オブジェクトだけ通し、blob(PDF の原文など)や他の kind は 403 に差し替える。見分けは
 /// api::classify_object の 1 箇所(should/0135)。他の行はそのまま返す。
-pub fn screen(row: Row, response: Response) -> Response {
+///
+/// source は、その要求が指すオブジェクトの出典のコレクション(objects と citation の行に
+/// ついて、集合を絞っているときだけ呼び手が引いてある)。集合の外なら 403 に差し替える:
+/// id を知っていれば読めてしまう道を、検索と同じ集合で塞ぐ。出典が引けない id は None で、
+/// 今までどおりの答え(404 か、チャンクでないことによる 403)に任せる。
+pub fn screen(
+    row: Row,
+    response: Response,
+    source: Option<&str>,
+    readable: &[String],
+) -> Response {
+    if let (Row::Object | Row::Citation, Some(collection)) = (row, source) {
+        if !readable_scope(readable).allows(collection) {
+            return api::error_response(403, &unreadable_refusal(collection, readable));
+        }
+    }
     if row != Row::Object || response.status != 200 {
         return response;
     }
@@ -143,20 +223,56 @@ pub fn screen(row: Row, response: Response) -> Response {
     }
 }
 
+/// 表を通った 1 本を主の口へ委ね、応答を検める。search と collections だけは、読める集合を
+/// 共有ポリシーとして受け取る入口から呼ぶ: 何を返すかの判断は api.rs の 1 箇所のままで、
+/// 読み口はそこへ集合を渡すだけである(should/0135)。
+fn answer(context: &ApiContext, request: &Request, row: Row, readable: &[String]) -> Response {
+    let response = match row {
+        Row::Search => api::handle_search_within(context, request, &readable_scope(readable)),
+        Row::Collections => api::handle_collections(context, &readable_scope(readable)),
+        _ => api::handle(context, request),
+    };
+    // objects と citation は、id さえ知っていれば読めてしまう道である。集合を絞っていれば、
+    // その id の出典のコレクションを引いて突き合わせる(引くのは絞っているときだけ: 絞って
+    // いない読み口に索引の引き当てを足さない)。
+    let source = match (row, readable.is_empty()) {
+        (Row::Object | Row::Citation, false) => match object_id_of(&request.path) {
+            None => None,
+            Some(id) => match api::citation_collection(context, id) {
+                Ok(found) => found,
+                // 出典を引けないのは門の断りではなくストア側の失敗である。黙って通さず、
+                // 500 で理由を言う(must/0022)。
+                Err(error) => {
+                    crate::log_line!("uniqnode: 読み口: {id} の出典を引けない: {error}");
+                    return api::error_response(
+                        500,
+                        &format!("{ERROR_PREFIX}出典を引けない: {error}"),
+                    );
+                }
+            },
+        },
+        _ => None,
+    };
+    screen(row, response, source.as_deref(), readable)
+}
+
 /// 読み口の要求 1 本を捌く: 許可表に当て、通れば主の口と同じ api::handle に委ね、応答を
 /// 検め、1 行を記録する。記録は断った要求にも残る(誰が何を試したかは、通した要求と
-/// 同じだけ読みたい記録である)。writable は `--agent-writable` の集合(admit に渡す)。
+/// 同じだけ読みたい記録である)。writable は `--agent-writable` の集合(admit に渡す)、
+/// readable は `--agent-collections` の集合(空なら全コレクションが読める)。
 pub fn handle(
     context: &ApiContext,
     request: &Request,
     peer: std::net::SocketAddr,
     writable: &[String],
+    readable: &[String],
 ) -> Response {
     let started = Instant::now();
-    let response = match admit(&request.method, &request.path, &request.body, writable) {
-        Ok(row) => screen(row, api::handle(context, request)),
-        Err(refused) => refused,
-    };
+    let response =
+        match admit(&request.method, &request.path, &request.body, writable, readable) {
+            Ok(row) => answer(context, request, row, readable),
+            Err(refused) => refused,
+        };
     crate::log_line!(
         "{LOG_MARK} {peer} {} {} {} {}",
         request.method,
@@ -230,6 +346,9 @@ mod tests {
     /// 読むだけの読み口(--agent-writable 無し)。
     const READ_ONLY: &[String] = &[];
 
+    /// 読める範囲を絞らない読み口(--agent-collections 無し。全コレクションが読める)。
+    const EVERY_COLLECTION: &[String] = &[];
+
     fn writable(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| name.to_string()).collect()
     }
@@ -239,36 +358,36 @@ mod tests {
     #[test]
     fn the_table_admits_its_rows_and_names_what_it_refuses() {
         let id = format!("s256:{}", "a".repeat(64));
-        assert_eq!(admit("GET", "/healthz", b"", READ_ONLY).ok(), Some(Row::Healthz));
-        assert_eq!(admit("GET", "/v1/status", b"", READ_ONLY).ok(), Some(Row::Status));
-        assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\"}", READ_ONLY).ok(), Some(Row::Search));
-        assert_eq!(admit("GET", &format!("/v1/objects/{id}"), b"", READ_ONLY).ok(), Some(Row::Object));
+        assert_eq!(admit("GET", "/healthz", b"", READ_ONLY, EVERY_COLLECTION).ok(), Some(Row::Healthz));
+        assert_eq!(admit("GET", "/v1/status", b"", READ_ONLY, EVERY_COLLECTION).ok(), Some(Row::Status));
+        assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\"}", READ_ONLY, EVERY_COLLECTION).ok(), Some(Row::Search));
+        assert_eq!(admit("GET", &format!("/v1/objects/{id}"), b"", READ_ONLY, EVERY_COLLECTION).ok(), Some(Row::Object));
         assert_eq!(
-            admit("GET", &format!("/v1/objects/{id}/citation"), b"", READ_ONLY).ok(),
+            admit("GET", &format!("/v1/objects/{id}/citation"), b"", READ_ONLY, EVERY_COLLECTION).ok(),
             Some(Row::Citation)
         );
-        assert_eq!(admit("GET", "/v1/collections", b"", READ_ONLY).ok(), Some(Row::Collections));
+        assert_eq!(admit("GET", "/v1/collections", b"", READ_ONLY, EVERY_COLLECTION).ok(), Some(Row::Collections));
 
-        let refused = admit("POST", "/v1/admin/gc", b"", READ_ONLY).expect_err("表に無い");
+        let refused = admit("POST", "/v1/admin/gc", b"", READ_ONLY, EVERY_COLLECTION).expect_err("表に無い");
         assert_eq!(refused.status, 403);
         assert_eq!(
             body(&refused),
             "{\"error\":\"agent door: POST /v1/admin/gc は許可されていない\"}"
         );
         // 同じ path でも method が違えば表に無い。
-        assert_eq!(admit("POST", "/v1/status", b"", READ_ONLY).expect_err("表に無い").status, 403);
-        assert_eq!(admit("GET", "/v1/search", b"", READ_ONLY).expect_err("表に無い").status, 403);
+        assert_eq!(admit("POST", "/v1/status", b"", READ_ONLY, EVERY_COLLECTION).expect_err("表に無い").status, 403);
+        assert_eq!(admit("GET", "/v1/search", b"", READ_ONLY, EVERY_COLLECTION).expect_err("表に無い").status, 403);
         // オブジェクトの下の他の口(rendition・referrers)と、ID の形でない id。
         assert_eq!(
-            admit("GET", &format!("/v1/objects/{id}/rendition"), b"", READ_ONLY).expect_err("表に無い").status,
+            admit("GET", &format!("/v1/objects/{id}/rendition"), b"", READ_ONLY, EVERY_COLLECTION).expect_err("表に無い").status,
             403
         );
         assert_eq!(
-            admit("GET", &format!("/v1/objects/{id}/referrers"), b"", READ_ONLY).expect_err("表に無い").status,
+            admit("GET", &format!("/v1/objects/{id}/referrers"), b"", READ_ONLY, EVERY_COLLECTION).expect_err("表に無い").status,
             403
         );
-        assert_eq!(admit("GET", "/v1/objects/abc", b"", READ_ONLY).expect_err("ID でない").status, 403);
-        assert_eq!(admit("GET", "/v1/objects/abc/citation", b"", READ_ONLY).expect_err("ID でない").status, 403);
+        assert_eq!(admit("GET", "/v1/objects/abc", b"", READ_ONLY, EVERY_COLLECTION).expect_err("ID でない").status, 403);
+        assert_eq!(admit("GET", "/v1/objects/abc/citation", b"", READ_ONLY, EVERY_COLLECTION).expect_err("ID でない").status, 403);
     }
 
     /// 書く口(第 2 段): PUT は --agent-writable の集合にあるコレクションだけ通り、集合に
@@ -279,36 +398,95 @@ mod tests {
     fn a_put_passes_only_for_a_collection_that_was_allowed() {
         let allowed = writable(&["notes", "web"]);
         let path = "/v1/collections/notes/documents/memo.md";
-        assert_eq!(admit("PUT", path, b"# memo", &allowed).ok(), Some(Row::PutDocument));
+        assert_eq!(admit("PUT", path, b"# memo", &allowed, EVERY_COLLECTION).ok(), Some(Row::PutDocument));
         // query(出所の meta)が付いていても的はコレクションで決まる(query の検査は api.rs)。
         assert_eq!(
-            admit("PUT", &format!("{path}?meta.agent=a1"), b"", &allowed).ok(),
+            admit("PUT", &format!("{path}?meta.agent=a1"), b"", &allowed, EVERY_COLLECTION).ok(),
             Some(Row::PutDocument)
         );
-        assert_eq!(admit("PUT", "/v1/collections/web/documents/p.html", b"", &allowed).ok(), Some(Row::PutDocument));
+        assert_eq!(admit("PUT", "/v1/collections/web/documents/p.html", b"", &allowed, EVERY_COLLECTION).ok(), Some(Row::PutDocument));
 
-        let other = admit("PUT", "/v1/collections/other/documents/memo.md", b"", &allowed).expect_err("集合に無い");
+        let other = admit("PUT", "/v1/collections/other/documents/memo.md", b"", &allowed, EVERY_COLLECTION).expect_err("集合に無い");
         assert_eq!(other.status, 403);
         assert_eq!(
             body(&other),
             "{\"error\":\"agent door: コレクション other は書けない(--agent-writable で許したのは notes, web)\"}"
         );
         // 集合が空なら PUT は表に無い(第 1 段と同じ本文)。
-        let read_only = admit("PUT", path, b"", READ_ONLY).expect_err("表に無い");
+        let read_only = admit("PUT", path, b"", READ_ONLY, EVERY_COLLECTION).expect_err("表に無い");
         assert_eq!(read_only.status, 403);
         assert_eq!(
             body(&read_only),
             "{\"error\":\"agent door: PUT /v1/collections/notes/documents/memo.md は許可されていない\"}"
         );
         // 許したコレクションでも fetch(網に出る道)と、documents/ の形でない PUT は表に無い。
-        let fetch = admit("POST", "/v1/collections/notes/fetch", b"{}", &allowed).expect_err("表に無い");
+        let fetch = admit("POST", "/v1/collections/notes/fetch", b"{}", &allowed, EVERY_COLLECTION).expect_err("表に無い");
         assert_eq!(fetch.status, 403);
         assert_eq!(
             body(&fetch),
             "{\"error\":\"agent door: POST /v1/collections/notes/fetch は許可されていない\"}"
         );
-        assert_eq!(admit("PUT", "/v1/collections/notes", b"", &allowed).expect_err("表に無い").status, 403);
-        assert_eq!(admit("PUT", "/v1/refs/x", b"", &allowed).expect_err("表に無い").status, 403);
+        assert_eq!(admit("PUT", "/v1/collections/notes", b"", &allowed, EVERY_COLLECTION).expect_err("表に無い").status, 403);
+        assert_eq!(admit("PUT", "/v1/refs/x", b"", &allowed, EVERY_COLLECTION).expect_err("表に無い").status, 403);
+    }
+
+    /// 読める集合(--agent-collections): 集合の外を名指しした search は索引を引く前に 403、
+    /// 集合の中と collection 省略は通る。出典が集合の外のオブジェクトは応答の側で 403 に
+    /// なり、出典が引けない(None)ものは今までどおりの答えが通る。集合が空なら全部読める。
+    /// should/0137: admit の readable_scope の検査を消すと最初の 403 が Ok になって落ち、
+    /// screen の source の腕を消すと出典の 403 が 200 のまま通って落ちる。
+    #[test]
+    fn a_collection_outside_the_readable_set_is_refused_on_the_way_in_and_on_the_way_out() {
+        let readable = writable(&["notes", "papers"]);
+        let refused = admit(
+            "POST",
+            "/v1/search",
+            b"{\"query\":\"x\",\"collection\":\"web\"}",
+            READ_ONLY,
+            &readable,
+        )
+        .expect_err("集合の外");
+        assert_eq!(refused.status, 403);
+        assert_eq!(
+            body(&refused),
+            "{\"error\":\"agent door: コレクション web は読めない(--agent-collections で許したのは notes, papers)\"}"
+        );
+        // 集合の中と、collection を省いた検索は通る(省略は share として run_search の交差へ)。
+        assert_eq!(
+            admit("POST", "/v1/search", b"{\"query\":\"x\",\"collection\":\"notes\"}", READ_ONLY, &readable).ok(),
+            Some(Row::Search)
+        );
+        assert_eq!(
+            admit("POST", "/v1/search", b"{\"query\":\"x\"}", READ_ONLY, &readable).ok(),
+            Some(Row::Search)
+        );
+        // 集合が空(指定が無い)なら、どのコレクションを名指ししても通る(既定は全部)。
+        assert_eq!(readable_scope(EVERY_COLLECTION), crate::search::CollectionScope::All);
+        assert_eq!(
+            admit("POST", "/v1/search", b"{\"query\":\"x\",\"collection\":\"web\"}", READ_ONLY, EVERY_COLLECTION).ok(),
+            Some(Row::Search)
+        );
+
+        // 応答の側(objects と citation): 出典のコレクションが集合の外なら 403。
+        let chunk = "{\"kind\":\"chunk\",\"meta\":{},\"text\":\"本文\",\"v\":1}".as_bytes().to_vec();
+        let outside = screen(Row::Object, Response::bytes(200, chunk.clone()), Some("web"), &readable);
+        assert_eq!(outside.status, 403);
+        assert_eq!(
+            body(&outside),
+            "{\"error\":\"agent door: コレクション web は読めない(--agent-collections で許したのは notes, papers)\"}"
+        );
+        let citation = screen(
+            Row::Citation,
+            Response::text(200, "{\"citation\":{}}"),
+            Some("web"),
+            &readable,
+        );
+        assert_eq!(citation.status, 403);
+        // 集合の中の出典と、出典が引けない id はそのまま。
+        let inside = screen(Row::Object, Response::bytes(200, chunk.clone()), Some("notes"), &readable);
+        assert_eq!((inside.status, inside.body), (200, chunk.clone()));
+        let unknown = screen(Row::Object, Response::text(404, "not held locally"), None, &readable);
+        assert_eq!(unknown.status, 404);
     }
 
     /// peers を名指しした search は値によらず 400。壊れた JSON はここでは断らない
@@ -321,11 +499,11 @@ mod tests {
             "{\"query\":\"x\",\"peers\":null}",
             "{\"query\":\"x\",\"peers\":[\"127.0.0.1:1\"]}",
         ] {
-            let refused = admit("POST", "/v1/search", body_text.as_bytes(), READ_ONLY).expect_err(body_text);
+            let refused = admit("POST", "/v1/search", body_text.as_bytes(), READ_ONLY, EVERY_COLLECTION).expect_err(body_text);
             assert_eq!(refused.status, 400, "{body_text}");
             assert_eq!(body(&refused), "{\"error\":\"agent door: peers は使えない\"}");
         }
-        assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\",", READ_ONLY).ok(), Some(Row::Search));
+        assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\",", READ_ONLY, EVERY_COLLECTION).ok(), Some(Row::Search));
     }
 
     /// 応答の検め: オブジェクトの行だけ、チャンク以外を 403 に差し替える。他の行と、
@@ -333,21 +511,26 @@ mod tests {
     #[test]
     fn only_chunks_leave_through_the_object_row() {
         let chunk = "{\"kind\":\"chunk\",\"meta\":{},\"text\":\"本文\",\"v\":1}".as_bytes().to_vec();
-        let passed = screen(Row::Object, Response::bytes(200, chunk.clone()));
+        let passed = screen(Row::Object, Response::bytes(200, chunk.clone()), None, EVERY_COLLECTION);
         assert_eq!((passed.status, passed.body), (200, chunk));
 
-        let blob = screen(Row::Object, Response::bytes(200, vec![0xff, 0xfe, 0x00]));
+        let blob = screen(Row::Object, Response::bytes(200, vec![0xff, 0xfe, 0x00]), None, EVERY_COLLECTION);
         assert_eq!(blob.status, 403);
         assert_eq!(
             body(&blob),
             "{\"error\":\"agent door: チャンクでないオブジェクトは許可されていない\"}"
         );
-        let doc_rev = screen(Row::Object, Response::bytes(200, b"{\"kind\":\"doc_rev\",\"v\":1}".to_vec()));
+        let doc_rev = screen(
+            Row::Object,
+            Response::bytes(200, b"{\"kind\":\"doc_rev\",\"v\":1}".to_vec()),
+            None,
+            EVERY_COLLECTION,
+        );
         assert_eq!(doc_rev.status, 403);
 
-        let missing = screen(Row::Object, Response::text(404, "not held locally"));
+        let missing = screen(Row::Object, Response::text(404, "not held locally"), None, EVERY_COLLECTION);
         assert_eq!(missing.status, 404);
-        let status = screen(Row::Status, Response::bytes(200, vec![0xff]));
+        let status = screen(Row::Status, Response::bytes(200, vec![0xff]), None, EVERY_COLLECTION);
         assert_eq!(status.status, 200);
     }
 }

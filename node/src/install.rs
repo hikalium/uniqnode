@@ -100,6 +100,12 @@ pub const AGENT_LISTEN_FLAG: &str = "--listen-agent";
 /// そのまま書くのが一番単純で、読み手が unit だけで集合を読める)。
 pub const AGENT_WRITABLE_ENV: &str = "UNIQNODE_AGENT_WRITABLE";
 pub const AGENT_WRITABLE_FLAG: &str = "--agent-writable";
+/// 読み口から読めるコレクション(docs/design/AGENT_DOOR.md の「読める集合」)。書く口と
+/// 全く同じ流儀で、drop-in は `Environment="UNIQNODE_AGENT_COLLECTIONS=<c1> <c2>"` と
+/// ExecStart= 末尾の `--agent-collections <c>` の並びに写す。指定が無ければ読み口は全
+/// コレクションを読める(既定は変えない)。
+pub const AGENT_COLLECTIONS_ENV: &str = "UNIQNODE_AGENT_COLLECTIONS";
+pub const AGENT_COLLECTIONS_FLAG: &str = "--agent-collections";
 /// user 単位の常駐を install 自身が止めて外す指定(`--system` のときだけ)。
 pub const TAKE_OVER_FLAG: &str = "--take-over-user-units";
 /// 読み口へ届いてよい相手を firewall(ufw)に入れる指定(`--system` と `--listen-agent` の
@@ -461,6 +467,9 @@ pub struct Options {
     /// 読み口から書けるコレクション(`--agent-writable`。与えられた順)。読み口があるとき
     /// だけ。空なら読み口は読むだけ。
     pub agent_writable: Vec<String>,
+    /// 読み口から読めるコレクション(`--agent-collections`。与えられた順)。読み口がある
+    /// ときだけ。空なら読み口は全コレクションを読める(既定)。
+    pub agent_collections: Vec<String>,
     /// true なら、据える前に実行ユーザの user 単位の常駐(STARTED_UNITS)を止めて外す
     /// (`--take-over-user-units`。system 単位だけ)。
     pub take_over_user_units: bool,
@@ -496,6 +505,7 @@ impl Options {
             after: Vec::new(),
             agent_listen: None,
             agent_writable: Vec::new(),
+            agent_collections: Vec::new(),
             take_over_user_units: false,
             firewall_allow: None,
             firewall_backend: None,
@@ -694,6 +704,20 @@ pub fn drop_ins(
                             ));
                         }
                     }
+                    if !options.agent_collections.is_empty() {
+                        // 読める集合も書く集合と全く同じ流儀(環境変数は読み手のための
+                        // 写し、ExecStart= には値をそのまま並べる)。
+                        lines.push(environment_line(
+                            AGENT_COLLECTIONS_ENV,
+                            &options.agent_collections.join(" "),
+                        )?);
+                        for collection in &options.agent_collections {
+                            exec_tail.push_str(&format!(
+                                " {AGENT_COLLECTIONS_FLAG} {}",
+                                unit_word(collection)?
+                            ));
+                        }
+                    }
                 }
                 if let Some(FirewallBackend::Nft(nft)) = &options.firewall_backend {
                     // 読み口の firewall は serve を起こすたびに入れ直す(nftables.service が
@@ -798,6 +822,16 @@ pub fn normalize(options: Options) -> Result<Options, String> {
             options.agent_writable.join(" ")
         ));
     }
+    for collection in &options.agent_collections {
+        check_agent_collection(collection)?;
+    }
+    if !options.agent_collections.is_empty() && options.agent_listen.is_none() {
+        return Err(format!(
+            "{AGENT_COLLECTIONS_FLAG} {} は {AGENT_LISTEN_FLAG} があるときだけ受け付ける(読む\
+             許可は読み口に掛かるもので、読み口が無ければ効かせる先が無い)",
+            options.agent_collections.join(" ")
+        ));
+    }
     if !options.after.is_empty() && !options.scope.is_system() {
         return Err(format!(
             "--after {} は --system のときだけ受け付ける(user unit は system unit を待てない: \
@@ -858,6 +892,7 @@ pub fn normalize(options: Options) -> Result<Options, String> {
         after: options.after,
         agent_listen: options.agent_listen,
         agent_writable: options.agent_writable,
+        agent_collections: options.agent_collections,
         take_over_user_units: options.take_over_user_units,
         firewall_allow: options.firewall_allow,
         firewall_backend: options.firewall_backend,
@@ -868,10 +903,20 @@ pub fn normalize(options: Options) -> Result<Options, String> {
 /// 断るのは、drop-in が集合を空白で分けて 1 つの環境変数に写すため)。serve の引数の読み手
 /// (node/src/main.rs)と install の normalize が同じ検査を使う(should/0135)。
 pub fn check_agent_writable(collection: &str) -> Result<(), String> {
+    check_collection_flag(AGENT_WRITABLE_FLAG, collection)
+}
+
+/// `--agent-collections` の値も同じ形のコレクション名 1 つ。断りの文言は指定の名前だけが
+/// 違う(検査そのものは 1 箇所。should/0135)。
+pub fn check_agent_collection(collection: &str) -> Result<(), String> {
+    check_collection_flag(AGENT_COLLECTIONS_FLAG, collection)
+}
+
+fn check_collection_flag(flag: &str, collection: &str) -> Result<(), String> {
     if collection.is_empty() || collection.contains('/') || collection.chars().any(char::is_whitespace)
     {
         return Err(format!(
-            "{AGENT_WRITABLE_FLAG} はコレクション名(空でなく / と空白を含まない 1 語): {collection:?}"
+            "{flag} はコレクション名(空でなく / と空白を含まない 1 語): {collection:?}"
         ));
     }
     Ok(())
@@ -1155,10 +1200,22 @@ fn wait_for_agent_door(scope: &Scope, node_id: &str, agent_listen: &str) -> Resu
     }
 }
 
-/// 書く口の確認に使う文書名。拡張子が無いので api.rs の put_document が 400 で断り、ストア
-/// には何も書かれない(試し書きはしない)。読み口の門を越えた証拠は「403 でなく、本文が門の
-/// 断りでない」ことで、api.rs まで届かなければこの 400 は出ない。
+/// 確認の探りに使う名。書く口では文書名として使い、拡張子が無いので api.rs の put_document が
+/// 400 で断り、ストアには何も書かれない(試し書きはしない)。読み口の門を越えた証拠は
+/// 「403 でなく、本文が門の断りでない」ことで、api.rs まで届かなければこの 400 は出ない。
+/// 読める集合の確認では、集合に無いコレクション名としても使う(本番のコレクションの名前を
+/// 確認のために書かないため。集合にあれば -x を足してずらす)。
 pub const WRITABLE_PROBE_NAME: &str = "uniqnode-install-probe";
+
+/// 集合に無い名を作る(確認が「許していない名」を要るときに使う。本番のコレクション名を
+/// 探りに使わないための 1 箇所)。
+fn name_outside(allowed: &[String]) -> String {
+    let mut name = WRITABLE_PROBE_NAME.to_string();
+    while allowed.iter().any(|entry| *entry == name) {
+        name.push_str("-x");
+    }
+    name
+}
 
 /// 読み口の書く口(`--agent-writable`)を、書かずに確かめる。許した各コレクションへの PUT
 /// (拡張子の無い文書名、空の本文)が門を越えて api.rs の 400 で止まること、許していない
@@ -1195,10 +1252,7 @@ fn verify_agent_writable(agent_listen: &str, writable: &[String]) -> Result<Stri
         }
     }
     // 許していない名前: 集合に無いことを確かめてから使う。
-    let mut unallowed = WRITABLE_PROBE_NAME.to_string();
-    while writable.iter().any(|allowed| *allowed == unallowed) {
-        unallowed.push_str("-x");
-    }
+    let unallowed = name_outside(writable);
     let response = put(&unallowed)?;
     let body = String::from_utf8_lossy(&response.body).to_string();
     let refusal_mark = format!("は書けない({AGENT_WRITABLE_FLAG} で許したのは");
@@ -1214,6 +1268,34 @@ fn verify_agent_writable(agent_listen: &str, writable: &[String]) -> Result<Stri
         "{} への PUT が門を越えて 400 で止まり(何も書かない)、{unallowed} への PUT は 403 で\
          断られた",
         writable.join(", ")
+    ))
+}
+
+/// 読み口の読める集合(`--agent-collections`)を、本番のデータに触らずに確かめる。集合に
+/// 無い名前を collection に指した検索が、門の 403 の文言で断られること。読むだけの確認で、
+/// 何も書かない(許した側のコレクションを引かないのは、本番の索引の温めを確認のために
+/// 走らせないため。集合が効いていることは「外を指すと断られる」だけで見える)。
+/// 返り値は報告の右側。
+fn verify_agent_collections(agent_listen: &str, readable: &[String]) -> Result<String, String> {
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+    let unallowed = name_outside(readable);
+    let body = format!("{{\"query\":\"probe\",\"collection\":\"{unallowed}\",\"top_k\":1}}");
+    let response =
+        http::post_json(agent_listen, "/v1/search", body.as_bytes(), REQUEST_TIMEOUT)?;
+    // 期待する本文は読み口が組むものと同じ字句(must/0023)。
+    let refusal = crate::agent_door::unreadable_refusal(&unallowed, readable);
+    let seen = String::from_utf8_lossy(&response.body).to_string();
+    if response.status != 403 || !seen.contains(&refusal) {
+        return Err(format!(
+            "読み口 {agent_listen} が許していないコレクション {unallowed} を指した検索を 403 の\
+             文言で断らず {} を返した: {}",
+            response.status,
+            http::body_head(&response.body)
+        ));
+    }
+    Ok(format!(
+        "{} だけが読め、{unallowed} を指した検索は 403 で断られた",
+        readable.join(", ")
     ))
 }
 
@@ -1799,6 +1881,10 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
             let seen = verify_agent_writable(agent_listen, &options.agent_writable)?;
             say(out, &format!("確認: 読み口の書く口: {seen}"))?;
         }
+        if !options.agent_collections.is_empty() {
+            let seen = verify_agent_collections(agent_listen, &options.agent_collections)?;
+            say(out, &format!("確認: 読み口の読める集合: {seen}"))?;
+        }
     }
     systemctl_ok(scope, &["start", BACKUP_UNIT]).map_err(|e| {
         format!(
@@ -1885,6 +1971,7 @@ mod tests {
             after: Vec::new(),
             agent_listen: None,
             agent_writable: Vec::new(),
+            agent_collections: Vec::new(),
             take_over_user_units: false,
             firewall_allow: None,
             firewall_backend: None,

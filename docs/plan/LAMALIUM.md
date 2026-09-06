@@ -150,24 +150,22 @@ agentd(ハーネス)─HTTP─▶ 10.100.0.1:11440 ─server-proxy─wg1─▶ 1
 待ち、`--listen-agent` を drop-in に書き、読み口の確認 2 本を含む)は着地した(2026-09-06。
 [docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d)・
 [docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580)・
-[docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2))。残るのは本番に据える段と、
-その効果の観測である。
+[docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2))。本番の移行も済んだ
+(2026-09-06 21:27 JST。`install --system --take-over-user-units … --firewall-allow 10.10.128.4` の
+1 命令で確認 6 本が緑。vega は ufw が inactive なので firewall は nft の表 inet uniqnode で、
+serve の unit の ExecStartPre= が起動のたびに入れる)。orion からの完了確認も同日 21:28 JST に
+全て緑(7441 の status が同じ node_id、admin/gc と PUT が 403、7440 は不到達、full の search が
+text 入りで返り、collections が 6 件、server-proxy 経由の 10.100.0.1:11440 も同じ node_id。
+記録は orion の /tmp/lamalium-uniqnode-door-check.log)。lamalium の tasks/chat に
+capability uniqnode:vega が付与され、実演に入った。残るのは効果の観測である。
 
-1. 本番の移行: `sudo … install --system --take-over-user-units … --listen-agent 10.10.128.1:7441
-   --after wg-quick@wg1.service --firewall-allow 10.10.128.4` の 1 命令で、user unit の停止・
-   据え直し・確認・firewall まで通す(命令の実物は SYSTEMD.md の移行の節。出力は
-   `… 2>&1 | tee /tmp/uniqnode-install-system.log` で残し、記録を自分で読む)。firewall は
-   ufw が active なら ufw、そうでなければ nft の自分の表で、serve の unit の ExecStartPre= が
-   起動のたびに入れる(vega は後者。2026-09-06 の実測: ufw は inactive、規則は iptables-nft)。
-2. 完了確認(7 本): orion から `curl http://10.10.128.1:7441/v1/status` が node_id を返す。
-   orion から `curl -X POST http://10.10.128.1:7441/v1/admin/gc` が 403。orion からの search が
-   結果を返す。orion からの PUT が 403(第 1 段)。vega 上で `curl 127.0.0.1:7441` が接続
-   拒否。orion から `curl 10.10.128.1:7440` が不到達。orion からの citation が返る。orion 側で
-   打つ命令は tee で記録を残す形で渡す。
-3. 着地時の実演記録: 時限 60 秒・top_k 既定 5・上限 10 は仮置きで、orion からの実測
+1. 着地時の実演記録: 時限 60 秒・top_k 既定 5・上限 10 は仮置きで、orion からの実測
    (温まった検索と、起動直後の初回)を docs/analysis に残して見直す。索引の温めは SearchIndex
-   だけで、埋め込みのベクトルの読み込みは初回の hybrid 検索が払う(SEARCH.md の既知の癖)。
-   実測で効くなら温めの対象に足す。
+   だけで(本番で 10 秒)、埋め込みのベクトルの読み込みは初回の hybrid 検索が払う(SEARCH.md の
+   既知の癖)。実測で効くなら温めの対象に足す。
+2. 応答の degraded が「ベクトルは 31216/31232 チャンクぶんしかない」と言い続けている。
+   `uniqnode embed` で残りを埋め、degraded の無い応答に戻す(小さい作業。serve を止めずに
+   できるかは embed の実装を見て決める)。
 
 ### 第 2 段(別の裁定。書く)
 

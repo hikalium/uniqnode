@@ -1200,8 +1200,15 @@ pub fn unit_is_running(state: &str) -> bool {
 
 /// user 単位の常駐を止めて外す(`--take-over-user-units`)。disable --now の終了コードは
 /// 見ない(unit が無かったときも 0 でない終わり方をする)。効果で判定する: 3 つの unit の
-/// is-active が走っていない答えであること、そしてストアのロックが外れること。
-fn take_over_user_units(account: &Account, data_dir: &Path, out: &mut dyn Write) -> Result<String, String> {
+/// is-active が走っていない答えであること、そしてストアのロックが外れること。ただし
+/// system 単位の serve が既に走っていてロックを持つ(再実行 = 更新)なら、それは restart が
+/// 引き継ぐので待たない。
+fn take_over_user_units(
+    scope: &Scope,
+    account: &Account,
+    data_dir: &Path,
+    out: &mut dyn Write,
+) -> Result<String, String> {
     let flags = user_manager_flags(&account.name);
     let mut arguments: Vec<&str> = flags.iter().map(String::as_str).collect();
     arguments.extend(["disable", "--now"]);
@@ -1243,6 +1250,12 @@ fn take_over_user_units(account: &Account, data_dir: &Path, out: &mut dyn Write)
                 "{}: 済み(ストアのロックは {} ms で外れた)",
                 take_over_command(&account.name),
                 started.elapsed().as_millis()
+            ));
+        }
+        if unit_state(scope, SERVE_UNIT)? == "active" {
+            return Ok(format!(
+                "{}: 済み(ストアのロックは system 単位の {SERVE_UNIT} が持っている。restart が引き継ぐ)",
+                take_over_command(&account.name)
             ));
         }
         if started.elapsed() >= TAKE_OVER_WAIT {
@@ -1573,7 +1586,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     // 下の探針が止めて外す命令を添えて断る)。
     if options.take_over_user_units {
         let account = scope.account().expect("normalize が system 単位に限る");
-        let line = take_over_user_units(account, &options.data_dir, out)?;
+        let line = take_over_user_units(scope, account, &options.data_dir, out)?;
         say(out, &line)?;
     }
 

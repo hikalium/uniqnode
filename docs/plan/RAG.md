@@ -21,11 +21,15 @@ evict だが、着手は 2 台目の計画が立ってからでよい。
 
 <a id="1c8c5b0e-2c0a-4a1e-9d3a-7f2c6e5b4a11"></a>
 
-uniqnode の一番の利用者は lamalium(同じ機械のマルチエージェント系)になる予定である。
+uniqnode の一番の利用者は lamalium(別の機械 orion で動くマルチエージェント系。uniqnode は
+vega にあり、2 台は WireGuard の wg1 で疎通する)になる予定である。
 計画は [docs/plan/LAMALIUM.md](#68571059-94ed-4aa2-8ae0-b2862d1de44e)。uniqnode 側の作業は、
-エージェントの口(`--listen-agent` と `--agent-writable`)、短い応答の形、serve を止めない
-ingest(`--serve-url`)、出所の meta、BENCH の問いによる評価で、lamalium 側の `recall`・`remember`
-ツールと組になる。方針はエージェントが自発的に見つけて呼ぶこと(push は測ってから)。着手順は同文書の段階 L0〜L4。1 台で効き、2 台目を待たないので、8 より前に置く。
+wg1 のアドレスに束縛する読み口(`--listen-agent`。許可表の外は 403)と第 2 段の
+`--agent-writable`、search の `full` と `GET /v1/collections`、索引の温め、serve を止めない
+ingest(`--serve-url`)、出所の meta、BENCH の問いによる評価で、lamalium 側の
+`uniqnode_search`・`uniqnode_get`・`uniqnode_status` ツールと組になる。方針はエージェントが
+自発的に見つけて呼ぶこと(push は測ってから)。着手順は同文書の段階 L0〜L4。1 台の uniqnode で
+効き、2 台目の uniqnode を待たないので、8 より前に置く。
 
 ## 8. pack GC(機会層 evict の物理回収)
 

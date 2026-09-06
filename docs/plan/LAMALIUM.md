@@ -157,15 +157,22 @@ serve の unit の ExecStartPre= が起動のたびに入れる)。orion から�
 全て緑(7441 の status が同じ node_id、admin/gc と PUT が 403、7440 は不到達、full の search が
 text 入りで返り、collections が 6 件、server-proxy 経由の 10.100.0.1:11440 も同じ node_id。
 記録は orion の /tmp/lamalium-uniqnode-door-check.log)。lamalium の tasks/chat に
-capability uniqnode:vega が付与され、実演に入った。残るのは効果の観測である。
+capability uniqnode:vega が付与され、実演も成功して lamalium 側の第 1 段は着地した(同日、
+lamalium commit 2c92063。chat に「uniqnode_search で Battering RAM を検索して出典つきで」と
+頼むと、hybrid で 5 件、観測 4,393 文字、要求から観測まで 2.8 秒、ターン全体 9 秒で、答えは
+collection seccamp・document 2026-12-battering-ram・page 24〜33 の出典と要点を正しく写した。
+時限 60 秒・top_k 既定 5・上限 10 は実測で据え置き。向こうの記録は
+docs/analysis/20260906-uniqnode-demo.md、現在形は docs/design/UNIQNODE.md)。
 
-1. 着地時の実演記録: 時限 60 秒・top_k 既定 5・上限 10 は仮置きで、orion からの実測
-   (温まった検索と、起動直後の初回)を docs/analysis に残して見直す。索引の温めは SearchIndex
-   だけで(本番で 10 秒)、埋め込みのベクトルの読み込みは初回の hybrid 検索が払う(SEARCH.md の
-   既知の癖)。実測で効くなら温めの対象に足す。
-2. 応答の degraded が「ベクトルは 31216/31232 チャンクぶんしかない」と言い続けている。
-   `uniqnode embed` で残りを埋め、degraded の無い応答に戻す(小さい作業。serve を止めずに
-   できるかは embed の実装を見て決める)。
+uniqnode 側に残るもの:
+
+1. 応答の degraded が「ベクトルは 31216/31232 チャンクぶんしかない」と言い続けており、向こうは
+   それを観測の先頭にそのまま載せている。`uniqnode embed` は serve 停止中のストア用なので、
+   埋めるには serve を止める窓が要る(操作者の裁定)か、serve 側に「無いベクトルを裏で埋める」
+   を足す(索引の温めと同型。docs/design/SEARCH.md の既知の癖)。後者のほうが、取り込みの
+   たびに同じ穴が開く問題を根から塞ぐ。
+2. 索引の温めは SearchIndex だけで(本番で 10 秒)、埋め込みのベクトルの読み込みは初回の
+   hybrid 検索が払う。実演では温まった状態で 2.8 秒だったので急がない。
 
 ### 第 2 段(別の裁定。書く)
 

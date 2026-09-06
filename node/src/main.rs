@@ -136,7 +136,8 @@ fn usage() -> ! {
            install <dir> [--listen <addr>] [--viewer-listen <addr>]\n\
                          [--serve-options \"<引数列>\"] [--backup-dir <dir>] [--bin <path>]\n\
                          [--unit-dir <dir>] [--no-start] [--listen-agent <addr>]\n\
-                         [--system [--user <name>] [--after <unit>]...]\n\
+                         [--system [--user <name>] [--after <unit>]...\n\
+                          [--take-over-user-units] [--firewall-allow <addr>]]\n\
                                       serve・viewer・毎日の backup を systemd に据える\n\
                                       (docs/mop/SYSTEMD.md)。走っている自分自身を\n\
                                       --bin(既定 ~/.local/bin/uniqnode)へ写し、unit 4 本と\n\
@@ -162,7 +163,13 @@ fn usage() -> ! {
                                       ストアと写し先に root 所有のものを残さない。--after は\n\
                                       drop-in の After=/Wants= に書く unit(wg-quick@wg1.service\n\
                                       など。複数可。--system のときだけ)。既に user 単位で\n\
-                                      常駐しているなら先に止めて外す(SYSTEMD.md の移行)\n\
+                                      常駐しているなら --take-over-user-units で install に\n\
+                                      止めて外させる(user 単位の 3 つの unit を disable --now\n\
+                                      し、止まったこととロックが外れたことを見る)。\n\
+                                      --firewall-allow <addr> は ufw が active なら <addr> から\n\
+                                      読み口への TCP だけ許す規則を入れて表に載ったことを見る\n\
+                                      (inactive なら nft の規則を写して赤で止まる。--system\n\
+                                      と --listen-agent のときだけ)。手順は SYSTEMD.md の移行\n\
          \n\
          serve・mcp・viewer のログの指定(常駐する命令だけが持つ。既定は保存する):\n\
            --log <path>               保存先を変える(既定 <dir>/logs/<serve|mcp|viewer>.log。\n\
@@ -821,6 +828,8 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
     let mut user: Option<String> = None;
     let mut after: Vec<String> = Vec::new();
     let mut agent_listen: Option<String> = None;
+    let mut take_over_user_units = false;
+    let mut firewall_allow: Option<String> = None;
     let mut listen: Option<String> = None;
     let mut viewer_listen: Option<String> = None;
     let mut serve_options: Option<String> = None;
@@ -841,6 +850,12 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
             "--user" => user = Some(value()),
             "--after" => after.push(value()),
             uniqnode::install::AGENT_LISTEN_FLAG => agent_listen = Some(value()),
+            uniqnode::install::FIREWALL_ALLOW_FLAG => firewall_allow = Some(value()),
+            uniqnode::install::TAKE_OVER_FLAG => {
+                take_over_user_units = true;
+                at += 1;
+                continue;
+            }
             "--no-start" => {
                 start = false;
                 at += 1;
@@ -902,6 +917,8 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
     options.start = start;
     options.after = after;
     options.agent_listen = agent_listen;
+    options.take_over_user_units = take_over_user_units;
+    options.firewall_allow = firewall_allow;
     options
 }
 

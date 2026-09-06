@@ -153,11 +153,12 @@ agentd(ハーネス)─HTTP─▶ 10.100.0.1:11440 ─server-proxy─wg1─▶ 1
 [docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2))。残るのは本番に据える段と、
 その効果の観測である。
 
-1. 本番の移行: user unit を止めて外し、`sudo … install --system … --listen-agent 10.10.128.1:7441
-   --after wg-quick@wg1.service` で据え直す(命令の実物は SYSTEMD.md の移行の節。出力は
-   `… 2>&1 | tee /tmp/uniqnode-install-system.log` で残し、記録を自分で読む)。
-2. firewall(10.10.128.4 から 7441 への接続だけ許す。ufw か nftables かの実物は操作者に
-   確かめる)は操作者の作業で、命令は `… 2>&1 | tee /tmp/uniqnode-firewall.log` の形で渡す。
+1. 本番の移行: `sudo … install --system --take-over-user-units … --listen-agent 10.10.128.1:7441
+   --after wg-quick@wg1.service --firewall-allow 10.10.128.4` の 1 命令で、user unit の停止・
+   据え直し・確認・firewall(ufw が active のとき)まで通す(命令の実物は SYSTEMD.md の移行の
+   節。出力は `… 2>&1 | tee /tmp/uniqnode-install-system.log` で残し、記録を自分で読む)。
+2. ufw が inactive なら install は nft の規則を写して赤で止まるので、10.10.128.4 から 7441 への
+   接続だけ許す規則は操作者が入れる(命令は `… 2>&1 | tee /tmp/uniqnode-firewall.log` の形)。
 3. 完了確認(7 本): orion から `curl http://10.10.128.1:7441/v1/status` が node_id を返す。
    orion から `curl -X POST http://10.10.128.1:7441/v1/admin/gc` が 403。orion からの search が
    結果を返す。orion からの PUT が 403(第 1 段)。vega 上で `curl 127.0.0.1:7441` が接続

@@ -91,6 +91,13 @@ pub const DEFAULT_VIEWER_LISTEN: &str = "127.0.0.1:7450";
 /// `--listen-agent ${UNIQNODE_AGENT_LISTEN}` を書く(serve 側の引数の名と同じ字句)。
 pub const AGENT_LISTEN_ENV: &str = "UNIQNODE_AGENT_LISTEN";
 pub const AGENT_LISTEN_FLAG: &str = "--listen-agent";
+/// user 単位の常駐を install 自身が止めて外す指定(`--system` のときだけ)。
+pub const TAKE_OVER_FLAG: &str = "--take-over-user-units";
+/// 読み口へ届いてよい相手を firewall(ufw)に入れる指定(`--system` と `--listen-agent` の
+/// ときだけ)。値は相手のアドレス。
+pub const FIREWALL_ALLOW_FLAG: &str = "--firewall-allow";
+/// user 単位を止めた後、ストアのロックが外れるのを待つ上限。
+pub const TAKE_OVER_WAIT: Duration = Duration::from_secs(10);
 
 /// 起こした後の確認で待つ上限(serve と viewer の /v1/status が揃うまで、読み口が答えるまで)。
 /// 読み口は wg1 のような後から上がるインターフェースのアドレスに束縛されることがあり、
@@ -437,6 +444,12 @@ pub struct Options {
     pub after: Vec<String>,
     /// 読み口の待ち受け(`--listen-agent`)。serve の第 2 の TcpListener。
     pub agent_listen: Option<String>,
+    /// true なら、据える前に実行ユーザの user 単位の常駐(STARTED_UNITS)を止めて外す
+    /// (`--take-over-user-units`。system 単位だけ)。
+    pub take_over_user_units: bool,
+    /// 読み口へ届いてよい相手のアドレス(`--firewall-allow`)。ufw が active ならその規則を
+    /// 入れ、載ったことを見る。system 単位で読み口があるときだけ。
+    pub firewall_allow: Option<String>,
 }
 
 impl Options {
@@ -454,6 +467,8 @@ impl Options {
             scope,
             after: Vec::new(),
             agent_listen: None,
+            take_over_user_units: false,
+            firewall_allow: None,
         }
     }
 
@@ -723,6 +738,21 @@ pub fn normalize(options: Options) -> Result<Options, String> {
     for unit in &options.after {
         check_after_unit(unit)?;
     }
+    if options.take_over_user_units && !options.scope.is_system() {
+        return Err(format!(
+            "{TAKE_OVER_FLAG} は --system のときだけ受け付ける(user 単位から system 単位へ移る\
+             ときに、止めて外す段を install に含める指定)"
+        ));
+    }
+    if let Some(allow) = &options.firewall_allow {
+        check_firewall_allow(allow)?;
+        if !options.scope.is_system() || options.agent_listen.is_none() {
+            return Err(format!(
+                "{FIREWALL_ALLOW_FLAG} {allow} は --system で {AGENT_LISTEN_FLAG} があるときだけ\
+                 受け付ける(規則は読み口のポートに向けて入れ、root で ufw を打つ)"
+            ));
+        }
+    }
     let data_dir = absolute(&options.data_dir)?;
     let backup_dir = absolute(&options.backup_dir)?;
     refuse_private_tmp(&data_dir, "ストア")?;
@@ -757,7 +787,20 @@ pub fn normalize(options: Options) -> Result<Options, String> {
         scope: options.scope,
         after: options.after,
         agent_listen: options.agent_listen,
+        take_over_user_units: options.take_over_user_units,
+        firewall_allow: options.firewall_allow,
     })
+}
+
+/// `--firewall-allow` の値は IP アドレス 1 つ(範囲や名前は受けない。ufw に渡す字句を
+/// ここで固定する)。
+pub fn check_firewall_allow(allow: &str) -> Result<(), String> {
+    match allow.parse::<std::net::IpAddr>() {
+        Ok(_) => Ok(()),
+        Err(_) => Err(format!(
+            "{FIREWALL_ALLOW_FLAG} {allow} は IP アドレスでない(例 10.10.128.4)"
+        )),
+    }
 }
 
 /// path を account の所有にする(root で走る system 単位の据え付けが作ったものを、実行ユーザが
@@ -1101,6 +1144,191 @@ pub fn tool_search_path(path_env: &str, scope: &Scope) -> String {
 
 /// install の本体。手順ごとに 1 行を out へ書き、失敗はその場で Err(呼び手が理由を出して
 /// exit 1)。
+/// root から実行ユーザの user マネージャに触る systemctl の引数(`--user -M <name>@`。
+/// systemd 249 で使える)。文言と実行が同じ字句を使う(must/0023)。
+pub fn user_manager_flags(account_name: &str) -> Vec<String> {
+    vec!["--user".to_string(), "-M".to_string(), format!("{account_name}@")]
+}
+
+/// 実行ユーザの user 単位の常駐を止めて外す命令(報告に写すもの)。
+pub fn take_over_command(account_name: &str) -> String {
+    format!(
+        "systemctl {} disable --now {}",
+        user_manager_flags(account_name).join(" "),
+        STARTED_UNITS.join(" ")
+    )
+}
+
+/// `systemctl is-active` の答えのうち「まだ走っている」と読むもの。
+pub fn unit_is_running(state: &str) -> bool {
+    matches!(state.trim(), "active" | "activating" | "reloading" | "deactivating")
+}
+
+/// user 単位の常駐を止めて外す(`--take-over-user-units`)。disable --now の終了コードは
+/// 見ない(unit が無かったときも 0 でない終わり方をする)。効果で判定する: 3 つの unit の
+/// is-active が走っていない答えであること、そしてストアのロックが外れること。
+fn take_over_user_units(account: &Account, data_dir: &Path, out: &mut dyn Write) -> Result<String, String> {
+    let flags = user_manager_flags(&account.name);
+    let mut arguments: Vec<&str> = flags.iter().map(String::as_str).collect();
+    arguments.extend(["disable", "--now"]);
+    arguments.extend(STARTED_UNITS);
+    let disable = Command::new("systemctl")
+        .args(&arguments)
+        .output()
+        .map_err(|e| format!("{} を起こせない: {e}", take_over_command(&account.name)))?;
+    let transcript = format!(
+        "{}{}",
+        String::from_utf8_lossy(&disable.stdout).trim(),
+        String::from_utf8_lossy(&disable.stderr).trim()
+    );
+    let mut still_running = Vec::new();
+    for unit in STARTED_UNITS {
+        let output = Command::new("systemctl")
+            .args(&flags)
+            .args(["is-active", unit])
+            .output()
+            .map_err(|e| format!("systemctl {} is-active {unit} を起こせない: {e}", flags.join(" ")))?;
+        let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        writeln!(out, "install: user 単位の {unit}: {state}")
+            .map_err(|e| format!("標準出力に書けない: {e}"))?;
+        if unit_is_running(&state) {
+            still_running.push(format!("{unit}={state}"));
+        }
+    }
+    if !still_running.is_empty() {
+        return Err(format!(
+            "{} を打ったが user 単位がまだ走っている({})。出力: {transcript}",
+            take_over_command(&account.name),
+            still_running.join(", ")
+        ));
+    }
+    let started = Instant::now();
+    loop {
+        if !store::opened_by_another_process(data_dir).map_err(|e| e.to_string())? {
+            return Ok(format!(
+                "{}: 済み(ストアのロックは {} ms で外れた)",
+                take_over_command(&account.name),
+                started.elapsed().as_millis()
+            ));
+        }
+        if started.elapsed() >= TAKE_OVER_WAIT {
+            return Err(format!(
+                "user 単位は止まったが {} のロックが {} 秒経っても外れない(unit 以外のプロセスが\
+                 開いている)",
+                data_dir.display(),
+                TAKE_OVER_WAIT.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// `ufw status` の 1 行目の読み。
+#[derive(Debug, PartialEq)]
+pub enum UfwStatus {
+    Active,
+    Inactive,
+}
+
+pub fn ufw_status_of(stdout: &str) -> Result<UfwStatus, String> {
+    for line in stdout.lines() {
+        match line.trim() {
+            "Status: active" => return Ok(UfwStatus::Active),
+            "Status: inactive" => return Ok(UfwStatus::Inactive),
+            _ => {}
+        }
+    }
+    Err(format!("ufw status の答えに Status: の行が無い: {}", stdout.trim()))
+}
+
+/// 読み口の待ち受けから、規則に書く IP とポートを取り出す。
+pub fn agent_ip_and_port(agent_listen: &str) -> Result<(String, String), String> {
+    match agent_listen.rsplit_once(':') {
+        Some((ip, port)) if !ip.is_empty() && !port.is_empty() => {
+            Ok((ip.trim_matches(|c| c == '[' || c == ']').to_string(), port.to_string()))
+        }
+        _ => Err(format!("{AGENT_LISTEN_FLAG} {agent_listen} から IP とポートを分けられない")),
+    }
+}
+
+/// `ufw allow …` の引数(from の相手から読み口の IP:port への TCP だけ)。
+pub fn ufw_allow_arguments(from: &str, agent_listen: &str) -> Result<Vec<String>, String> {
+    let (ip, port) = agent_ip_and_port(agent_listen)?;
+    Ok(["allow", "from", from, "to", &ip, "port", &port, "proto", "tcp"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect())
+}
+
+/// `ufw status` の表に、その規則が載っているか(`10.10.128.1 7441/tcp  ALLOW IN  10.10.128.4`
+/// の形。列の幅は環境で変わるので、字句が同じ行にあることで見る)。
+pub fn ufw_rule_listed(status: &str, from: &str, agent_listen: &str) -> Result<bool, String> {
+    let (ip, port) = agent_ip_and_port(agent_listen)?;
+    let target = format!("{port}/tcp");
+    Ok(status.lines().any(|line| {
+        let cells: Vec<&str> = line.split_whitespace().collect();
+        cells.contains(&ip.as_str())
+            && cells.contains(&target.as_str())
+            && cells.contains(&"ALLOW")
+            && cells.contains(&from)
+    }))
+}
+
+fn command_output(program: &str, arguments: &[String]) -> Result<String, String> {
+    let output = Command::new(program).args(arguments).output().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!("{program} が PATH に無い"),
+        _ => format!("{program} {} を起こせない: {e}", arguments.join(" ")),
+    })?;
+    if !output.status.success() {
+        return Err(format!(
+            "{program} {} が {} で終わった: {}{}",
+            arguments.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// firewall の規則(`--firewall-allow`)。ufw が active ならその規則を入れて表に載ったことを
+/// 見る。inactive なら nft の規則を報告に写して赤で止まる(install は nft に触らない。黙って
+/// 飛ばさない。must/0022)。
+fn apply_firewall(from: &str, agent_listen: &str, out: &mut dyn Write) -> Result<String, String> {
+    let say = |out: &mut dyn Write, line: &str| -> Result<(), String> {
+        writeln!(out, "install: {line}").map_err(|e| format!("標準出力に書けない: {e}"))
+    };
+    let status = command_output("ufw", &["status".to_string()])?;
+    match ufw_status_of(&status)? {
+        UfwStatus::Active => {}
+        UfwStatus::Inactive => {
+            let ruleset = command_output("nft", &["list".to_string(), "ruleset".to_string()])
+                .unwrap_or_else(|e| format!("(nft の規則を読めない: {e})"));
+            for line in ruleset.lines() {
+                say(out, &format!("nft: {line}"))?;
+            }
+            return Err(format!(
+                "ufw は inactive で、規則は nft が持っている(上に写した)。install は nft には\
+                 触らないので、{from} から読み口 {agent_listen} への TCP だけを許す規則は操作者が\
+                 入れる"
+            ));
+        }
+    }
+    let arguments = ufw_allow_arguments(from, agent_listen)?;
+    let added = command_output("ufw", &arguments)?;
+    say(out, &format!("ufw {}: {}", arguments.join(" "), added.trim()))?;
+    let after = command_output("ufw", &["status".to_string()])?;
+    if !ufw_rule_listed(&after, from, agent_listen)? {
+        return Err(format!(
+            "ufw allow を打ったが ufw status の表に載っていない: {}",
+            after.trim()
+        ));
+    }
+    Ok(format!(
+        "ufw が {from} から読み口 {agent_listen} への TCP を許す規則を持つ(ufw status に載った)"
+    ))
+}
+
 pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     let options = normalize(options)?;
     let scope = &options.scope;
@@ -1213,7 +1441,15 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         return Ok(());
     }
 
-    // (5) 起こす前にロックを探る。unit は exit 1 で起こし直さない設計なので、落ちてから journal
+    // (5) user 単位からの移行なら、先に止めて外す(--take-over-user-units。指定が無ければ
+    // 下の探針が止めて外す命令を添えて断る)。
+    if options.take_over_user_units {
+        let account = scope.account().expect("normalize が system 単位に限る");
+        let line = take_over_user_units(account, &options.data_dir, out)?;
+        say(out, &line)?;
+    }
+
+    // 起こす前にロックを探る。unit は exit 1 で起こし直さない設計なので、落ちてから journal
     // を読ませるより先に言う。system 単位への移行では、持ち主は user 単位の serve であることが
     // 多い: 止めて外す命令を添えるが、黙って止めはしない。
     if store::opened_by_another_process(&options.data_dir).map_err(|e| e.to_string())? {
@@ -1222,7 +1458,8 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
             let migration_hint = match scope {
                 Scope::User => String::new(),
                 Scope::System(account) => format!(
-                    "。user 単位で常駐させていたなら、{} で {} を打って止めて外してから再実行する",
+                    "。user 単位で常駐させていたなら、{} で {} を打って止めて外してから再実行するか、\
+                     {TAKE_OVER_FLAG} を足して install に止めさせる",
                     account.name,
                     user_units_disable_command()
                 ),
@@ -1339,6 +1576,12 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
                 ),
             )?;
         }
+    }
+
+    // (8b) firewall。読み口が答えるのを見た後に、届いてよい相手の規則を入れる。
+    if let (Some(from), Some(agent_listen)) = (&options.firewall_allow, &options.agent_listen) {
+        let line = apply_firewall(from, agent_listen, out)?;
+        say(out, &format!("確認: {line}"))?;
     }
 
     // (9) 次の刻み。systemctl の表は見出しと行の後に空行と件数の脚注が付くので、表だけを載せる。

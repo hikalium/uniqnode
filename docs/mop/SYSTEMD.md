@@ -197,24 +197,31 @@ root で走らせないと、sudo で走らせる形と tee の例を言って�
 
 ### user 単位から移る
 
-user 単位で動いているものを system 単位に載せ替える手順。ストアも写し先もバイナリも同じ
-場所のまま、unit の置き場と走らせ方だけが変わる。
+user 単位で動いているものを system 単位に載せ替える。ストアも写し先もバイナリも同じ場所の
+まま、unit の置き場と走らせ方だけが変わる。1 命令で通す(移行の間、serve と viewer は止まる):
 
-1. user unit を止めて外す(移行の間、serve と viewer は止まる):
+```
+cargo build --release -p uniqnode && sudo target/release/uniqnode install /work2/llm_playground_host_dir/uniqnode-store --system --take-over-user-units --serve-options "--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank" --viewer-listen 0.0.0.0:7450 --listen-agent 10.10.128.1:7441 --after wg-quick@wg1.service --firewall-allow 10.10.128.4 2>&1 | tee /tmp/uniqnode-install-system.log
+```
 
-   ```
-   systemctl --user disable --now uniqnode-serve.service uniqnode-viewer.service uniqnode-backup.timer 2>&1 | tee /tmp/uniqnode-user-disable.log
-   ```
+中で何をしているか(手で同じことをするなら、この順):
 
-   止めずに install --system を打つと、ストアのロックを user 単位の serve が持ったままなので
-   「別プロセスが開いている」で止まる(その文言がこの命令を言う)。
-2. `sudo … install … --system … 2>&1 | tee /tmp/uniqnode-install-system.log`(上の 1 行。
-   引数は user 単位のときと同じものに `--system`、要るなら `--listen-agent` と `--after` を
-   足す)。
-3. /tmp/uniqnode-install-system.log を読む。「確認:」の行が 4 本(読み口があれば 5 本)並び、
-   最後に「次の刻み:」があれば据え付けは完了である。unit の状態は
+1. `--take-over-user-units`: 実行ユーザの user 単位の 3 つの unit を
+   `systemctl --user -M <name>@ disable --now uniqnode-serve.service uniqnode-viewer.service uniqnode-backup.timer`
+   で止めて外す。終了コードは見ず、効果で判定する: 3 つの `is-active` が走っていない答え
+   (inactive・failed・unit が無い)であること、そしてストアのロックが 10 秒以内に外れること。
+   まだ走っていれば出力を添えて赤で止まる。指定が無いのに user 単位が動いていれば、install
+   は「別プロセスが開いている」で止まり、その文言がこの指定と手で打つ命令を言う。
+2. 据え付けと確認(上の「system 単位で起こす」と同じ。「確認:」が 5 本)。
+3. `--firewall-allow 10.10.128.4`: root で `ufw status` を読み、`Status: active` なら
+   `ufw allow from 10.10.128.4 to 10.10.128.1 port 7441 proto tcp` を入れて、`ufw status` の表に
+   その行(10.10.128.1 7441/tcp、ALLOW、10.10.128.4)が載ったことを見て「確認:」を 1 本足す。
+   `Status: inactive` なら規則は nft が持っているので、`nft list ruleset` の全文を報告に写して
+   赤で止まる(install は nft に触らない。操作者が規則を入れる)。ufw も nft も無ければその旨で赤。
+4. /tmp/uniqnode-install-system.log を読む。「確認:」の行が 6 本並び、最後に「次の刻み:」が
+   あれば据え付けは完了である。unit の状態は
    `systemctl status uniqnode-serve uniqnode-viewer uniqnode-backup.timer`。
-4. user 単位の unit ファイル(~/.config/systemd/user/uniqnode-*)は disable しても残る。
+5. user 単位の unit ファイル(~/.config/systemd/user/uniqnode-*)は disable しても残る。
    消すなら `rm ~/.config/systemd/user/uniqnode-*.service ~/.config/systemd/user/uniqnode-*.timer`
    と `rm -r ~/.config/systemd/user/uniqnode-*.d`、`systemctl --user daemon-reload`。
    残しておいても enable されていなければ起きない。linger は他に使うものが無ければ
@@ -233,11 +240,11 @@ curl -X POST http://10.10.128.1:7441/v1/admin/gc -d '{"dry_run":true}'   # 403
 断る(serve の unit が failed に落ちたら待たない)。gc に dry_run を添えるのは、許可表が
 壊れていて通ってしまっても本番の pack を回収しないため。
 
-firewall は install が触らない操作者の作業である: この機械には ufw と nft の両方が入って
-いるので、どちらが実際に規則を持っているか(`sudo ufw status verbose`、
-`sudo nft list ruleset`)を確かめてから、10.10.128.4 から 7441 への接続だけを許す規則を
-入れる(例: ufw なら `sudo ufw allow from 10.10.128.4 to 10.10.128.1 port 7441 proto tcp 2>&1 | tee /tmp/uniqnode-firewall.log`)。
-読み口は wg1 のアドレスにしか束縛しないので、127.0.0.1:7441 は接続拒否のままである。
+firewall は `--firewall-allow <addr>` で install が ufw に入れる(ufw が active のときだけ。
+inactive なら nft の規則を写して赤で止まり、操作者が入れる。上の「user 単位から移る」の 3)。
+この機械には ufw と nft の両方が入っているので、どちらが規則を持っているかは
+`ufw status` の 1 行目で決まる。読み口は wg1 のアドレスにしか束縛しないので、127.0.0.1:7441
+は接続拒否のままである。
 
 ### 手で同じことをするなら(専用ユーザーで置く形)
 
@@ -308,6 +315,8 @@ uniqnode install <dir> [--listen <addr>] [--viewer-listen <addr>] [--serve-optio
 | `--system` | — | system 単位に据える(上の「system 単位で起こす」)。root で走らせる |
 | `--user` | SUDO_USER | `--system` の実行ユーザ(unit の User=/Group=)。root は断る。`--system` のときだけ |
 | `--after` | 無し | drop-in の `[Unit]` に After= と Wants= で書く unit(複数可。`--system` のときだけ) |
+| `--take-over-user-units` | — | 据える前に実行ユーザの user 単位の常駐を止めて外す(`--system` のときだけ。上の「user 単位から移る」) |
+| `--firewall-allow` | 無し | ufw が active なら、このアドレスから読み口への TCP だけ許す規則を入れて表に載ったことを見る。inactive なら nft の規則を写して赤(`--system` で `--listen-agent` があるときだけ) |
 
 出力は手順ごとに 1 行で、最後に確認した観測(serve と viewer 経由の /v1/status が返した
 node_id、backup の写し先の fsck の件数)と backup の次の刻みが出る。実測(2026-09-05、

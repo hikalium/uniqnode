@@ -487,6 +487,30 @@ fn after_and_user_are_system_only_and_the_agent_listen_is_checked() {
         same_as_main.stderr
     );
     assert!(!unit_dir.exists(), "断るときは unit を置かない");
+    // 移行と firewall の指定も system 単位だけ(should/0137: normalize の 2 つの検査を消すと
+    // ここが「unit が置かれた」で赤になる)。
+    let take_over = base(&["--take-over-user-units"]);
+    assert_eq!(take_over.status, 1, "{}\n{}", take_over.stdout, take_over.stderr);
+    assert!(
+        take_over.stderr.contains("--take-over-user-units は --system のときだけ"),
+        "{}",
+        take_over.stderr
+    );
+    let firewall = base(&["--firewall-allow", "10.10.128.4"]);
+    assert_eq!(firewall.status, 1, "{}\n{}", firewall.stdout, firewall.stderr);
+    assert!(
+        firewall.stderr.contains("--firewall-allow 10.10.128.4 は --system で --listen-agent が"),
+        "{}",
+        firewall.stderr
+    );
+    let bad_address = base(&["--firewall-allow", "orion"]);
+    assert_eq!(bad_address.status, 1, "{}\n{}", bad_address.stdout, bad_address.stderr);
+    assert!(
+        bad_address.stderr.contains("--firewall-allow orion は IP アドレスでない"),
+        "{}",
+        bad_address.stderr
+    );
+    assert!(!unit_dir.exists(), "断るときは unit を置かない");
     std::fs::remove_dir_all(&work).expect("cleanup");
 }
 
@@ -653,4 +677,61 @@ fn the_lock_probe_sees_a_store_held_by_a_serving_process() {
         !uniqnode::store::opened_by_another_process(&dir).expect("probe"),
         "serve が終われば false"
     );
+}
+
+/// 1 命令の移行が中で打つ字句と、その効果の読み方。root が要る部分(systemctl --user -M、ufw)
+/// は起こさず、組み立てる引数と答えの判定だけを見る。should/0137: ufw_rule_listed の
+/// `ALLOW` の照合を消すと DENY の行で true になり 3 つ目の assert が赤、ufw_status_of の
+/// inactive の腕を消すと 2 つ目が Err で赤になる(どちらも実験した)。
+#[test]
+fn the_take_over_and_firewall_steps_use_fixed_words_and_judge_by_effect() {
+    use uniqnode::install::{
+        agent_ip_and_port, check_firewall_allow, normalize, take_over_command,
+        ufw_allow_arguments, ufw_rule_listed, ufw_status_of, unit_is_running, user_manager_flags,
+        UfwStatus,
+    };
+    assert_eq!(user_manager_flags("op"), vec!["--user", "-M", "op@"]);
+    assert_eq!(
+        take_over_command("op"),
+        "systemctl --user -M op@ disable --now uniqnode-serve.service uniqnode-viewer.service \
+         uniqnode-backup.timer"
+    );
+    assert!(unit_is_running("active") && unit_is_running("deactivating"));
+    assert!(!unit_is_running("inactive") && !unit_is_running("failed") && !unit_is_running(""));
+
+    assert_eq!(ufw_status_of("Status: active\n\nTo  Action  From\n").expect("読める"), UfwStatus::Active);
+    assert_eq!(ufw_status_of("Status: inactive\n").expect("読める"), UfwStatus::Inactive);
+    assert!(ufw_status_of("ERROR: You need to be root\n").is_err());
+
+    assert_eq!(agent_ip_and_port("10.10.128.1:7441").expect("分けられる"), ("10.10.128.1".to_string(), "7441".to_string()));
+    assert_eq!(
+        ufw_allow_arguments("10.10.128.4", "10.10.128.1:7441").expect("組める"),
+        vec!["allow", "from", "10.10.128.4", "to", "10.10.128.1", "port", "7441", "proto", "tcp"]
+    );
+    let listed = "Status: active\n\nTo                         Action      From\n--                         ------      ----\n10.10.128.1 7441/tcp       ALLOW       10.10.128.4\n";
+    assert!(ufw_rule_listed(listed, "10.10.128.4", "10.10.128.1:7441").expect("読める"));
+    let denied = listed.replace("ALLOW", "DENY");
+    assert!(!ufw_rule_listed(&denied, "10.10.128.4", "10.10.128.1:7441").expect("読める"));
+    assert!(!ufw_rule_listed(listed, "10.10.128.5", "10.10.128.1:7441").expect("読める"));
+    assert!(!ufw_rule_listed(listed, "10.10.128.4", "10.10.128.1:7442").expect("読める"));
+
+    assert!(check_firewall_allow("10.10.128.4").is_ok());
+    assert!(check_firewall_allow("10.10.128.0/24").is_err(), "範囲は受けない");
+
+    // system 単位でも、読み口が無ければ firewall の指定は断る。
+    let mut without_door = system_options();
+    without_door.agent_listen = None;
+    without_door.after.clear();
+    without_door.firewall_allow = Some("10.10.128.4".to_string());
+    let refused = match normalize(without_door) {
+        Ok(_) => panic!("読み口が無いのに firewall の指定が通った"),
+        Err(message) => message,
+    };
+    assert!(refused.contains("--listen-agent があるときだけ"), "{refused}");
+    let mut with_door = system_options();
+    with_door.firewall_allow = Some("10.10.128.4".to_string());
+    with_door.take_over_user_units = true;
+    let accepted = normalize(with_door).expect("読み口があれば通る");
+    assert_eq!(accepted.firewall_allow.as_deref(), Some("10.10.128.4"));
+    assert!(accepted.take_over_user_units);
 }

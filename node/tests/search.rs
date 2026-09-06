@@ -454,3 +454,142 @@ fn search_rejects_malformed_requests_explicitly() {
     assert_eq!(response.status, 200, "{}", body_text(&response));
     assert_eq!(body_text(&response), EMPTY_RESULTS);
 }
+
+// ---- 全文つきの応答(full)と索引の温め ----
+
+/// 抜粋(200 文字)より長い 1 チャンクの文書。改行も引用符も含めない(応答から
+/// json_text_field で text を素朴に切り出すため)。
+fn long_document() -> String {
+    let sentence = "索引の温めは要求を待たずに裏のスレッドで行い、書き込みの後にも作り直す。";
+    let mut body = String::from("# 温め\n\n");
+    while body.chars().count() < 340 {
+        body.push_str(sentence);
+    }
+    body.push('\n');
+    body
+}
+
+/// full: true の応答は各件にチャンクの全文(text)を載せ、full の無い応答には text の鍵が
+/// 無い。full のとき top_k は 10 まで。
+///
+/// 欠陥を戻すとどこで落ちるか(should/0137): result_json が text を載せなくなれば
+/// 「text の鍵がある」で落ち、run_search が本文を引かなくなっても同じ。full を見ずに常に
+/// 載せると「full 無しに text が無い」で落ちる。parse_search_request の上限を外すと
+/// top_k=11 の 400 で落ちる。
+#[test]
+fn full_results_carry_the_whole_chunk_text() {
+    let server = start_server("search-full");
+    let document = long_document();
+    put_document(&server.address, "notes", "warm.md", document.as_bytes());
+
+    let response = search(&server.address, "{\"query\":\"索引の温め\",\"full\":true,\"top_k\":3}");
+    assert_eq!(response.status, 200, "{}", body_text(&response));
+    let body = body_text(&response);
+    assert_eq!(body.matches("\"id\":").count(), 1, "{body}");
+    let snippet = json_text_field(&body, "snippet").expect("snippet");
+    let text = json_text_field(&body, "text").expect("full の応答に text の鍵が無い");
+    assert_eq!(snippet.chars().count(), 200, "抜粋は先頭 200 文字: {snippet}");
+    assert!(text.chars().count() > 300, "全文が抜粋と同じ長さしか無い: {text}");
+    assert!(text.starts_with(&snippet), "全文の先頭が抜粋と一致しない: {text}");
+    assert!(text.ends_with("作り直す。"), "全文が途中で切れている: {text}");
+    // 鍵は辞書順: snippet → source_url → text。
+    let snippet_at = body.find("\"snippet\":").expect("snippet");
+    let source_at = body.find("\"source_url\":").expect("source_url");
+    let text_at = body.find("\"text\":").expect("text");
+    assert!(snippet_at < source_at && source_at < text_at, "鍵の並びが辞書順でない: {body}");
+
+    // full の無い要求は従来の形のまま(text の鍵が無い)。
+    let response = search(&server.address, "{\"query\":\"索引の温め\",\"top_k\":3}");
+    assert_eq!(response.status, 200, "{}", body_text(&response));
+    let body = body_text(&response);
+    assert!(body.contains("\"snippet\":"), "{body}");
+    assert!(!body.contains("\"text\":"), "full 無しの応答に text が載っている: {body}");
+
+    // full のとき top_k は 10 まで。境目の両側を見る。
+    let response = search(&server.address, "{\"query\":\"索引の温め\",\"full\":true,\"top_k\":10}");
+    assert_eq!(response.status, 200, "{}", body_text(&response));
+    let response = search(&server.address, "{\"query\":\"索引の温め\",\"full\":true,\"top_k\":11}");
+    assert_eq!(response.status, 400, "{}", body_text(&response));
+    assert!(
+        body_text(&response).contains("top_k は full のとき 1..=10"),
+        "{}",
+        body_text(&response)
+    );
+    let response = search(&server.address, "{\"query\":\"索引の温め\",\"full\":\"yes\"}");
+    assert_eq!(response.status, 400, "{}", body_text(&response));
+    assert!(body_text(&response).contains("full"), "{}", body_text(&response));
+}
+
+/// 索引を作り直した記録(api.rs の with_current_index が残す 1 行)。
+const INDEX_BUILT: &str = "uniqnode: search index built in ";
+
+/// serve のログにある作り直しの記録の数。
+fn index_builds_in_log(server: &Server) -> usize {
+    let path = uniqnode::log::default_path(&server.dir, uniqnode::log::SERVE_ROLE);
+    match std::fs::read_to_string(&path) {
+        Ok(logged) => logged.matches(INDEX_BUILT).count(),
+        // 起動直後はまだ無いことがある(ログを開くのは束縛より前だが、ファイルは
+        // 最初の 1 行で生まれる)。
+        Err(_) => 0,
+    }
+}
+
+/// 作り直しの記録が少なくとも want 本になるまで待つ。待つ条件は記録そのものであり、
+/// 上限は温めの静穏(INDEX_WARM_QUIET)と小さなストアの構築を十分に越える安全網である
+/// (期限が来たら黙って進まず落ちる。should/0104)。
+fn wait_for_index_builds(server: &Server, want: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let seen = index_builds_in_log(server);
+        if seen >= want {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "作り直しの記録が {want} 本にならない({seen} 本のまま)"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// 起動直後、要求が 1 つも来なくても索引は温まる(作り直しの記録が残る)。
+///
+/// 欠陥を戻すとどこで落ちるか(should/0137): main.rs の start_index_warmer の呼び出しを
+/// 消すと、要求が無いので記録は 0 本のままで期限に落ちる。記録の行の形を崩すと形の検査で
+/// 落ちる。
+#[test]
+fn the_index_is_warmed_without_a_request() {
+    let server = start_server("search-warm-startup");
+    wait_for_index_builds(&server, 1);
+    let path = uniqnode::log::default_path(&server.dir, uniqnode::log::SERVE_ROLE);
+    let logged = std::fs::read_to_string(&path).expect("read log");
+    let line = logged.lines().find(|line| line.contains(INDEX_BUILT)).expect("記録の行");
+    let rest = line.split(INDEX_BUILT).nth(1).expect("行の残り");
+    let (millis, chunks) = rest.split_once(" ms (").expect("<ms> ms (<chunks> chunks) の形");
+    assert!(millis.parse::<u64>().is_ok(), "ミリ秒が数でない: {line}");
+    assert_eq!(chunks, "0 chunks)", "空のストアの索引は 0 チャンク: {line}");
+}
+
+/// 書き込みの後、次の検索を待たずに索引は作り直され、その検索は温めた索引で答える
+/// (作り直しの記録がもう 1 本増えず、新しい文書が返る)。
+///
+/// 欠陥を戻すとどこで落ちるか(should/0137): put_document の nudge_index_warmer を消すと、
+/// 検索を打たないので記録は 1 本のままで期限に落ちる。温めが索引を差し替えずに捨てる
+/// (キャッシュに入れない)と、検索が自分で作り直して記録が 3 本になり、最後の段で落ちる。
+#[test]
+fn a_write_warms_the_index_before_the_next_search() {
+    let server = start_server("search-warm-write");
+    wait_for_index_builds(&server, 1);
+    put_document(&server.address, "notes", "search_ja.md", SEARCH_JA.as_bytes());
+    wait_for_index_builds(&server, 2);
+    let path = uniqnode::log::default_path(&server.dir, uniqnode::log::SERVE_ROLE);
+    let logged = std::fs::read_to_string(&path).expect("read log");
+    let second = logged.lines().filter(|line| line.contains(INDEX_BUILT)).nth(1).expect("2 本目");
+    assert!(!second.contains("(0 chunks)"), "書き込み後の索引が空: {second}");
+
+    let response = search(&server.address, "{\"query\":\"世代の整合\"}");
+    assert_eq!(response.status, 200, "{}", body_text(&response));
+    let body = body_text(&response);
+    assert!(body.contains("\"document\":\"search_ja\""), "{body}");
+    assert_eq!(index_builds_in_log(&server), 2, "検索が温めた索引を使わず作り直した: {logged}");
+}

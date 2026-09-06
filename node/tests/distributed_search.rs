@@ -183,6 +183,7 @@ fn an_unsigned_or_tampered_query_is_rejected() {
         top_k: 10,
         method: None,
         include_low_information: false,
+        full: false,
     };
     let signed = uniqnode::distributed_search::query_message(&store, "q2", &request, 2_000);
     let tampered =

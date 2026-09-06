@@ -1276,6 +1276,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                         health: None,
                         referrers: std::sync::Mutex::new(None),
                         search: std::sync::Mutex::new(None),
+                        search_warmer: None,
                         embedding,
                         reranker,
                         data_dir,
@@ -1363,18 +1364,23 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // 標準出力の 1 行は起動スクリプトとの取り決めなので形を変えない。ログにも
             // 残すのは、後から「いつ、どのアドレスで起きたか」を読めるようにするため。
             uniqnode::log_line!("uniqnode: serve: {bound} で待ち受ける");
-            let context = uniqnode::api::ApiContext {
+            let context = std::sync::Arc::new(uniqnode::api::ApiContext {
                 store,
                 engine,
                 health: Some(health),
                 referrers: std::sync::Mutex::new(None),
                 search: std::sync::Mutex::new(None),
+                search_warmer: Some(uniqnode::api::IndexWarmer::new()),
                 embedding,
                 reranker,
                 // ページの写しの作業ファイル置き場を組むために持つ(健全性エンジンへ
                 // 渡した data_dir は移動済みなので、同じ dir から作り直す)。
                 data_dir: std::path::PathBuf::from(dir),
-            };
+            });
+            // 索引は要求を待たずに裏で温める(起動直後と、書き込みの後。api.rs の
+            // start_index_warmer)。束縛はもう済んでいるので、これが listening on を遅らせる
+            // ことは無い。
+            uniqnode::api::start_index_warmer(context.clone());
             let handler: std::sync::Arc<uniqnode::http::Handler> =
                 std::sync::Arc::new(move |request| uniqnode::api::handle(&context, request));
             uniqnode::http::serve(listener, handler);

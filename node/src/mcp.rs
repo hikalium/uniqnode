@@ -1790,6 +1790,7 @@ mod tests {
             health: None,
             referrers: std::sync::Mutex::new(None),
             search: std::sync::Mutex::new(None),
+            search_warmer: None,
             embedding: None,
             reranker: None,
             data_dir: dir.clone(),

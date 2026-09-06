@@ -339,20 +339,17 @@ impl Generation {
     }
 
     /// collections/ 配下の非 tombstone ref の束縛。RAM 上の ref 表(Store::list_refs)を
-    /// 一巡するだけで、ストアの読み込みは無い(O(#refs))。走査(visit_indexable_chunks)の
-    /// 絞り込みと同じ条件をここで繰り返しているが、あちらは 1 件ずつ doc_rev を開く走査で
-    /// あり、こちらは要求ごとに回る鮮度札である。同じ条件を二度書かずに済ませるには走査側を
-    /// 二段に割る必要があり、そのほうが「索引が読む範囲」を見失いやすい。
+    /// 一巡するだけで、ストアの読み込みは無い(O(#refs))。走査(visit_indexable_chunks)と
+    /// 同じ条件で絞るが、あちらは 1 件ずつ doc_rev を開く走査であり、こちらは要求ごとに
+    /// 回る鮮度札である。「見えの文書を指す ref か」の読み方は document_ref_parts の
+    /// 一箇所を共用する(should/0135)。
     fn bindings_of(store: &Store) -> Vec<(String, String)> {
         store
             .list_refs()
             .filter_map(|(name, state)| {
                 // tombstone は見えに無い = 索引が読まない。
                 let target = state.target.as_ref()?;
-                let (_signer, path) = name.split_once('/')?;
-                if !path.starts_with("collections/") {
-                    return None;
-                }
+                document_ref_parts(name)?;
                 Some((name.clone(), target.clone()))
             })
             .collect()
@@ -481,6 +478,18 @@ pub struct IndexableChunk {
     pub terms: Vec<String>,
 }
 
+/// ref の完全名 <署名者>/<パス> が文書の見えを置く形 collections/<コレクション名>/<文書名>
+/// なら、その (コレクション名, 文書名) を返す。署名者は見ない(他のDBノードの ref も
+/// 同じ形なら同じ文書である)。tombstone かどうかも見ない(target は呼び手が見る)。
+/// ref 名の読み方の唯一の家(should/0135): 索引の走査(visit_indexable_chunks)・
+/// 鮮度札(Generation)・コレクションの一覧(node/src/api.rs の GET /v1/collections)が
+/// 共用する。
+pub fn document_ref_parts(name: &str) -> Option<(&str, &str)> {
+    let (_signer, path) = name.split_once('/')?;
+    let rest = path.strip_prefix("collections/")?;
+    rest.split_once('/')
+}
+
 /// 「何が索引の対象か」の唯一の家(should/0135)。見えのチャンクのうち索引語を 1 語以上
 /// 持つものを、決定的な順序(ref 名の昇順 → chunks 列の順)で渡す。
 ///
@@ -505,9 +514,7 @@ pub fn visit_indexable_chunks(
     for (name, state) in store.list_refs() {
         // tombstone は現在の見えに無い(原理 5)。
         let Some(target) = &state.target else { continue };
-        let Some((_signer, path)) = name.split_once('/') else { continue };
-        let Some(rest) = path.strip_prefix("collections/") else { continue };
-        let Some((collection, document)) = rest.split_once('/') else { continue };
+        let Some((collection, document)) = document_ref_parts(name) else { continue };
         let Some(Value::Object(doc_rev)) = read_c1(store, target, &mut missing)? else { continue };
         // 原本(source = 原文 blob)と種別(meta.media)は、いま手にしている doc_rev から
         // そのまま採る(走査の回数もストアの読み込み回数も増えない)。チャンクからは

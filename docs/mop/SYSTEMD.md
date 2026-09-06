@@ -378,7 +378,7 @@ install は次を 1 手順 1 命令で行う。unit は docs/mop/systemd/user/ �
 7. `loginctl enable-linger`。取れなければ警告して続ける。無ければ、最後のセッションが閉じた
    ときに user 単位のマネージャごと止まり、backup の timer の刻みも来ない。
 8. 確認(下の「効いていることの確かめ方」と同じ観測): serve の /v1/status と viewer 経由の
-   /v1/status が同じ node_id を返すまで短い間隔で待ち(上限 30 秒。serve の unit が failed
+   /v1/status が同じ node_id を返すまで短い間隔で待ち(上限 90 秒。serve の unit が failed
    に落ちたら待たずに言う)、`--listen-agent` があれば読み口の /v1/status が同じ node_id を
    返し POST /v1/admin/gc(dry_run)が 403 であることを同じ上限で待ち、
    `systemctl --user start uniqnode-backup.service` を 1 回走らせ、写し先をストアとして開いて

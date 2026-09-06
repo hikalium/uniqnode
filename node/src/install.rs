@@ -1,19 +1,24 @@
-//! `uniqnode install <data_dir> [options]`: serve・viewer・毎日の backup を user 単位の systemd
-//! に据える 1 命令。手順は [docs/mop/SYSTEMD.md](uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の
-//! 「user 単位で起こす」で、この命令は同じ節の「手で同じことをするなら」を機械にしたもの
-//! (should/0117: 手作業で直したものは再現できる形にして置く)。
+//! `uniqnode install <data_dir> [options]`: serve・viewer・毎日の backup を systemd に据える
+//! 1 命令。user 単位(既定。~/.config/systemd/user)と、`--system` で system 単位
+//! (/etc/systemd/system。root で走らせ、常駐は `--user`/SUDO_USER の利用者で)の両方を扱う。
+//! 手順は [docs/mop/SYSTEMD.md](uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2) で、この命令は
+//! 同じ文書の「手で同じことをするなら」を機械にしたもの(should/0117: 手作業で直したものは
+//! 再現できる形にして置く)。
 //!
-//! 置く unit は docs/mop/systemd/user/ の現物をコンパイル時に埋め込んだもの
-//! (include_str!。should/0112)。文書と実体を別々に持たないので、unit を直せばこの命令が
-//! 置くものも同時に変わる。運用者ごとの値(ストアの道・待ち受け・写し先・バイナリの道)は
-//! unit を編集せず drop-in `<unit>.d/override.conf` に書く。unit の ExecStart= も drop-in で
-//! 差し替えるが、引数の並びは埋め込んだ unit の ExecStart= 行を読んでバイナリの道だけ替える
-//! (同じ並びを 2 箇所に持たない。must/0023)。
+//! 置く unit は docs/mop/systemd/user/(user 単位)と docs/mop/systemd/system/(system 単位)
+//! の現物をコンパイル時に埋め込んだもの(include_str!。should/0112)。文書と実体を別々に
+//! 持たないので、unit を直せばこの命令が置くものも同時に変わる。運用者ごとの値(ストアの
+//! 道・待ち受け・写し先・バイナリの道・実行ユーザ・待つ unit・読み口)は unit を編集せず
+//! drop-in `<unit>.d/override.conf` に書く。unit の ExecStart= も drop-in で差し替えるが、
+//! 引数の並びは埋め込んだ unit の ExecStart= 行を読んでバイナリの道だけ替える(同じ並びを
+//! 2 箇所に持たない。must/0023)。
 //!
 //! 1 手順 1 exec で、失敗は理由を言って止まる(黙って飛ばさない。must/0022)。設定は
 //! 書いた時点ではなく効果を見た時点で完了なので(should/0116)、起こした後に serve と
-//! viewer 経由の /v1/status が同じ node_id を返すことと、backup の unit を 1 回走らせた
-//! 写し先が開けて fsck が緑であることまで見る。
+//! viewer 経由の /v1/status が同じ node_id を返すこと、読み口(`--listen-agent`)があれば
+//! その /v1/status が同じ node_id を返し POST /v1/admin/gc が 403 であること、backup の unit
+//! を 1 回走らせた写し先が開けて fsck が緑であること、system 単位ならストアと写し先に
+//! 実行ユーザ以外の所有のファイルが無いことまで見る。
 
 use crate::http;
 use crate::json::Json;
@@ -29,8 +34,8 @@ pub const VIEWER_UNIT: &str = "uniqnode-viewer.service";
 pub const BACKUP_UNIT: &str = "uniqnode-backup.service";
 pub const BACKUP_TIMER: &str = "uniqnode-backup.timer";
 
-/// 置く unit(名前, 中身)。中身は docs/mop/systemd/user/ の現物である。
-pub const UNITS: [(&str, &str); 4] = [
+/// user 単位で置く unit(名前, 中身)。中身は docs/mop/systemd/user/ の現物である。
+pub const USER_UNITS: [(&str, &str); 4] = [
     (
         SERVE_UNIT,
         include_str!("../../docs/mop/systemd/user/uniqnode-serve.service"),
@@ -49,18 +54,65 @@ pub const UNITS: [(&str, &str); 4] = [
     ),
 ];
 
+/// system 単位で置く unit(名前, 中身)。中身は docs/mop/systemd/system/ の現物である。
+pub const SYSTEM_UNITS: [(&str, &str); 4] = [
+    (
+        SERVE_UNIT,
+        include_str!("../../docs/mop/systemd/system/uniqnode-serve.service"),
+    ),
+    (
+        VIEWER_UNIT,
+        include_str!("../../docs/mop/systemd/system/uniqnode-viewer.service"),
+    ),
+    (
+        BACKUP_UNIT,
+        include_str!("../../docs/mop/systemd/system/uniqnode-backup.service"),
+    ),
+    (
+        BACKUP_TIMER,
+        include_str!("../../docs/mop/systemd/system/uniqnode-backup.timer"),
+    ),
+];
+
 /// enable --now する unit(service は timer が起こすので backup は timer の方)。
 pub const STARTED_UNITS: [&str; 3] = [SERVE_UNIT, VIEWER_UNIT, BACKUP_TIMER];
 
 /// drop-in のファイル名(`<unit>.d/` の下)。
 pub const DROP_IN_NAME: &str = "override.conf";
 
+/// system 単位の unit と drop-in の置き場(`--system` の `--unit-dir` の既定)。
+pub const SYSTEM_UNIT_DIR: &str = "/etc/systemd/system";
+
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7440";
 pub const DEFAULT_VIEWER_LISTEN: &str = "127.0.0.1:7450";
+
+/// 読み口の待ち受けを serve に渡す環境変数と、serve の引数。drop-in は
+/// `Environment=UNIQNODE_AGENT_LISTEN=<addr>` と ExecStart= 末尾の
+/// `--listen-agent ${UNIQNODE_AGENT_LISTEN}` を書く(serve 側の引数の名と同じ字句)。
+pub const AGENT_LISTEN_ENV: &str = "UNIQNODE_AGENT_LISTEN";
+pub const AGENT_LISTEN_FLAG: &str = "--listen-agent";
+
+/// 起こした後の確認で待つ上限(serve と viewer の /v1/status が揃うまで、読み口が答えるまで)。
+/// 読み口は wg1 のような後から上がるインターフェースのアドレスに束縛されることがあり、
+/// serve は bind に失敗しても主の口を殺さず再試行するので、その分をここで待つ。上限は安全の
+/// 網で、条件が立った瞬間に進む(should/0104)。
+pub const WAIT_BOUND: Duration = Duration::from_secs(30);
 
 /// PrivateTmp=yes の unit からは見えない置き場。ここにストアや写し先を指されたら断る
 /// (unit は自分だけの空の /tmp を見るので、起こしても「ストアが無い」で落ちる)。
 pub const PRIVATE_TMP_ROOTS: [&str; 2] = ["/tmp", "/var/tmp"];
+
+/// ProtectHome= が隠す置き場。system 単位の unit は ProtectHome=yes(空で見えない)なので、
+/// バイナリ・ストア・写し先のどれかがこの下にあるときは drop-in で read-only に緩める
+/// (user 単位の unit と同じ値。ReadWritePaths= は read-only の下では効くが、yes の下では
+/// 隠された道ごと捨てられる)。
+pub const PROTECTED_HOME_ROOTS: [&str; 3] = ["/home", "/root", "/run/user"];
+
+/// system 単位のとき、install 自身の PATH に加えて実行ユーザの home の下で外部の道具を
+/// 探すディレクトリ。sudo は PATH を secure_path に置き換えるので、利用者が ~/.local/bin に
+/// 置いた pdftotext は root の PATH からは見えない。ログインシェルの既定(Ubuntu の
+/// ~/.profile)が PATH に足すのはこの 2 つで、install は同じ場所を後ろに足して探す。
+pub const SERVICE_USER_TOOL_DIRS: [&str; 2] = [".local/bin", "bin"];
 
 /// user 単位の service が Environment=PATH= を書かれないときに受け取る PATH。ログイン
 /// シェルの PATH(~/.local/bin や ~/.cargo/bin を足したもの)ではなく、systemd が組み込みで
@@ -179,6 +231,191 @@ pub fn tool_path(path_env: &str) -> ToolPath {
     }
 }
 
+/// system 単位で unit を走らせる利用者。`getent passwd` と `getent group` で引いた実物。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Account {
+    pub name: String,
+    pub uid: u32,
+    pub gid: u32,
+    /// 主グループの名(drop-in の Group=)。
+    pub group: String,
+    /// バイナリ・写し先の既定と、外部の道具を探す場所(SERVICE_USER_TOOL_DIRS)の根。
+    pub home: PathBuf,
+}
+
+/// どの systemd に据えるか。user 単位は自分のマネージャ(`systemctl --user`)に、system 単位は
+/// 機械のマネージャに unit を置き、Account の利用者で走らせる。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Scope {
+    User,
+    System(Account),
+}
+
+impl Scope {
+    pub fn is_system(&self) -> bool {
+        matches!(self, Scope::System(_))
+    }
+
+    /// system 単位の実行ユーザ。
+    pub fn account(&self) -> Option<&Account> {
+        match self {
+            Scope::User => None,
+            Scope::System(account) => Some(account),
+        }
+    }
+
+    /// systemctl・journalctl に付ける引数(user 単位なら `--user`)。
+    pub fn manager_flags(&self) -> &'static [&'static str] {
+        match self {
+            Scope::User => &["--user"],
+            Scope::System(_) => &[],
+        }
+    }
+
+    /// 報告と文言に書く命令の頭(`systemctl --user ` か `systemctl `)。
+    pub fn systemctl_prefix(&self) -> String {
+        self.command_prefix("systemctl")
+    }
+
+    pub fn journalctl_prefix(&self) -> String {
+        self.command_prefix("journalctl")
+    }
+
+    fn command_prefix(&self, command: &str) -> String {
+        let mut prefix = command.to_string();
+        for flag in self.manager_flags() {
+            prefix.push(' ');
+            prefix.push_str(flag);
+        }
+        prefix.push(' ');
+        prefix
+    }
+
+    /// unit と drop-in の置き場の既定。user 単位は home の下、system 単位は /etc/systemd/system。
+    pub fn default_unit_dir(&self, home: &Path) -> PathBuf {
+        match self {
+            Scope::User => home.join(".config").join("systemd").join("user"),
+            Scope::System(_) => PathBuf::from(SYSTEM_UNIT_DIR),
+        }
+    }
+}
+
+/// 自分の実効 uid(/proc/self/status の Uid: 行の 2 つ目。Linux の systemd に据える命令なので
+/// procfs に頼ってよい)。読めなければ Err(root かどうかを推し量らない。must/0022)。
+pub fn effective_uid() -> Result<u32, String> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|e| format!("/proc/self/status を読めない: {e}"))?;
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("Uid:"))
+        .ok_or_else(|| "/proc/self/status に Uid: 行が無い".to_string())?;
+    line.split_whitespace()
+        .nth(2)
+        .and_then(|euid| euid.parse().ok())
+        .ok_or_else(|| format!("/proc/self/status の Uid: 行を読めない: {line}"))
+}
+
+/// `getent <database> <key>` の 1 行を `:` で割って返す。無い鍵は Err。
+fn getent(database: &str, key: &str) -> Result<Vec<String>, String> {
+    let output = Command::new("getent")
+        .args([database, key])
+        .output()
+        .map_err(|e| format!("getent {database} {key} を起こせない: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "getent {database} {key}: 見つからない({})",
+            output.status
+        ));
+    }
+    let line = String::from_utf8_lossy(&output.stdout);
+    Ok(line.trim_end().split(':').map(str::to_string).collect())
+}
+
+/// 利用者の名から uid・gid・主グループの名・home を引く。NSS を通す(/etc/passwd を直に読むと
+/// LDAP などの利用者を取りこぼす)。
+pub fn lookup_account(name: &str) -> Result<Account, String> {
+    // passwd: name:x:uid:gid:gecos:home:shell
+    let passwd = getent("passwd", name)?;
+    let field = |at: usize, what: &str| -> Result<&str, String> {
+        passwd
+            .get(at)
+            .map(String::as_str)
+            .ok_or_else(|| format!("getent passwd {name} の {what} の欄が無い: {passwd:?}"))
+    };
+    let uid: u32 = field(2, "uid")?
+        .parse()
+        .map_err(|e| format!("getent passwd {name} の uid を読めない: {e}"))?;
+    let gid: u32 = field(3, "gid")?
+        .parse()
+        .map_err(|e| format!("getent passwd {name} の gid を読めない: {e}"))?;
+    let home = PathBuf::from(field(5, "home")?);
+    if !home.is_absolute() {
+        return Err(format!(
+            "利用者 {name} の home {} が絶対の道ではない",
+            home.display()
+        ));
+    }
+    // group: name:x:gid:members
+    let group = getent("group", &gid.to_string())?
+        .first()
+        .cloned()
+        .ok_or_else(|| format!("getent group {gid} の名の欄が無い"))?;
+    Ok(Account {
+        name: name.to_string(),
+        uid,
+        gid,
+        group,
+        home,
+    })
+}
+
+/// `--system` と `--user` から据え先を決める。判断はここ 1 箇所(should/0135):
+/// - `--user` は `--system` のときだけ(user 単位は自分で走る)。
+/// - system 単位の実行ユーザは `--user`、無ければ環境変数 SUDO_USER、それも無ければ断る。
+///   root では常駐させない。
+/// - system 単位は root で走っていなければ断る(/etc/systemd/system に書き、systemctl を
+///   機械のマネージャに掛けるため)。文言に sudo で走らせる形を含める。
+///
+/// euid と SUDO_USER を引数で受けるのは、環境を読むのを呼び手の 1 箇所にし、ここを純関数に
+/// するため。実行ユーザの実物(uid・home)は最後に NSS で引く。
+pub fn scope(
+    system: bool,
+    user: Option<String>,
+    sudo_user: Option<String>,
+    euid: u32,
+) -> Result<Scope, String> {
+    if !system {
+        return match user {
+            Some(name) => Err(format!(
+                "--user {name} は --system のときだけ受け付ける(user 単位は自分の systemd に\
+                 自分で載る)"
+            )),
+            None => Ok(Scope::User),
+        };
+    }
+    let name = user
+        .or_else(|| sudo_user.filter(|name| !name.is_empty()))
+        .ok_or_else(|| {
+            "--system は常駐させる利用者が要る: --user <name> で指すか、その利用者から sudo で\
+             走らせる(SUDO_USER を読む)。root では常駐させない"
+                .to_string()
+        })?;
+    if name == "root" {
+        return Err("--system の実行ユーザに root は使えない(root で常駐させない。--user で\
+                    ストアの所有者を指す)"
+            .to_string());
+    }
+    if euid != 0 {
+        return Err(format!(
+            "--system は root で走らせる({SYSTEM_UNIT_DIR} に書き、機械の systemd に掛ける)。\
+             同じ引数を sudo で、出力をファイルに残す形で: \
+             sudo <bin>/uniqnode install <dir> --system … 2>&1 | tee /tmp/uniqnode-install-system.log\
+             (常駐は {name} で走る)"
+        ));
+    }
+    lookup_account(&name).map(Scope::System)
+}
+
 pub struct Options {
     pub data_dir: PathBuf,
     /// serve の待ち受け(UNIQNODE_LISTEN)。viewer の転送先もここから導く。
@@ -189,15 +426,20 @@ pub struct Options {
     pub backup_dir: PathBuf,
     /// 実行ファイルを置く道。走っている自分自身を写す。
     pub binary: PathBuf,
-    /// unit と drop-in を置くディレクトリ(既定 ~/.config/systemd/user)。
+    /// unit と drop-in を置くディレクトリ(既定は Scope::default_unit_dir)。
     pub unit_dir: PathBuf,
     /// false なら daemon-reload まで行い、enable/start と確認を省く。
     pub start: bool,
+    pub scope: Scope,
+    /// drop-in の [Unit] に After= と Wants= で書く unit(`--after`。system 単位だけ)。
+    pub after: Vec<String>,
+    /// 読み口の待ち受け(`--listen-agent`)。serve の第 2 の TcpListener。
+    pub agent_listen: Option<String>,
 }
 
 impl Options {
-    /// home の下の既定で組む。
-    pub fn defaults(data_dir: PathBuf, home: &Path) -> Options {
+    /// home の下の既定で組む(system 単位なら home は実行ユーザのもの)。
+    pub fn defaults(data_dir: PathBuf, home: &Path, scope: Scope) -> Options {
         Options {
             data_dir,
             listen: DEFAULT_LISTEN.to_string(),
@@ -205,8 +447,19 @@ impl Options {
             serve_options: String::new(),
             backup_dir: home.join("uniqnode-backup"),
             binary: home.join(".local").join("bin").join("uniqnode"),
-            unit_dir: home.join(".config").join("systemd").join("user"),
+            unit_dir: scope.default_unit_dir(home),
             start: true,
+            scope,
+            after: Vec::new(),
+            agent_listen: None,
+        }
+    }
+
+    /// 置く unit(名前, 中身)。据え先で user/system を切り替える。
+    pub fn units(&self) -> &'static [(&'static str, &'static str); 4] {
+        match self.scope {
+            Scope::User => &USER_UNITS,
+            Scope::System(_) => &SYSTEM_UNITS,
         }
     }
 }
@@ -289,17 +542,33 @@ pub fn exec_start_with_binary(unit_text: &str, binary_word: &str) -> Result<Stri
 }
 
 /// unit の中身を名前で引く。
-fn unit_text(name: &str) -> &'static str {
-    UNITS
+fn unit_text(units: &[(&str, &'static str)], name: &str) -> &'static str {
+    units
         .iter()
         .find(|(unit, _)| *unit == name)
         .map(|(_, text)| *text)
         .expect("UNITS に載っている名前")
 }
 
+/// ProtectHome= が隠す下にある道(バイナリ・ストア・写し先)。1 つでもあれば system 単位の
+/// drop-in は ProtectHome=read-only を書く(判断はここ 1 箇所。should/0135)。
+pub fn paths_under_protected_home(options: &Options) -> Vec<&Path> {
+    [&options.binary, &options.data_dir, &options.backup_dir]
+        .into_iter()
+        .filter(|path| PROTECTED_HOME_ROOTS.iter().any(|root| path.starts_with(root)))
+        .map(PathBuf::as_path)
+        .collect()
+}
+
 /// 3 つの service の drop-in を描く: (unit 名, override.conf の中身)。ExecStart= と
 /// ReadWritePaths= は追記型なので、空の行で unit の値を一度消してから書く。tool_path は
 /// tool_path() の value(Environment=PATH= に書く値)。
+///
+/// system 単位では [Service] の先頭に User=/Group=(unit の専用ユーザー uniqnode を実行ユーザに
+/// 替える)と StateDirectory=(空で打ち消す。データディレクトリは明示なので %S は要らず、
+/// 残すと /var/lib/uniqnode を無駄に作る)を書く。`--after` は [Unit] の After= と Wants= に
+/// 3 つとも書く(待つ相手が wg1 でもストアのマウントでも、どの unit が待つかを unit ごとに
+/// 追わせない)。読み口(`--listen-agent`)は serve だけ。
 pub fn drop_ins(
     options: &Options,
     tool_path: &str,
@@ -307,19 +576,48 @@ pub fn drop_ins(
     let data_dir = options.data_dir.to_string_lossy();
     let backup_dir = options.backup_dir.to_string_lossy();
     let binary = unit_word(&options.binary.to_string_lossy())?;
-    let header = "# uniqnode install が書いた drop-in。再実行で書き直されるので、手で変えるなら\n\
-                  # 別の名前の *.conf を隣に置く。\n\
-                  [Service]\n";
+    let mut header = String::from(
+        "# uniqnode install が書いた drop-in。再実行で書き直されるので、手で変えるなら\n\
+         # 別の名前の *.conf を隣に置く。\n",
+    );
+    if !options.after.is_empty() {
+        let mut units = Vec::new();
+        for unit in &options.after {
+            units.push(unit_word(unit)?);
+        }
+        let units = units.join(" ");
+        header.push_str(&format!("[Unit]\nAfter={units}\nWants={units}\n"));
+    }
+    header.push_str("[Service]\n");
+    let mut service_head = Vec::new();
+    if let Some(account) = options.scope.account() {
+        service_head.push(format!("User={}", unit_word(&account.name)?));
+        service_head.push(format!("Group={}", unit_word(&account.group)?));
+        service_head.push("StateDirectory=".to_string());
+        let under_home = paths_under_protected_home(options);
+        if !under_home.is_empty() {
+            service_head.push(format!(
+                "# {} は ProtectHome= が隠す下にあるので、unit の yes を read-only に緩める\n\
+                 ProtectHome=read-only",
+                under_home
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" と ")
+            ));
+        }
+    }
     let mut rendered = Vec::new();
     for unit in [SERVE_UNIT, VIEWER_UNIT, BACKUP_UNIT] {
         // PATH は 3 つとも同じ値。外部の道具(DELEGATES)を起こすのは serve だけだが、unit ごとに
         // 違う PATH を書くと「どの unit がどの道具を見るか」を読み手が unit ごとに追うことになる。
         // 同じ値なら drop-in を 1 つ読めば全部が分かる。
-        let mut lines = vec![
-            environment_line("PATH", tool_path)?,
-            environment_line("UNIQNODE_DATA_DIR", &data_dir)?,
-        ];
+        let mut lines = service_head.clone();
+        lines.push(environment_line("PATH", tool_path)?);
+        lines.push(environment_line("UNIQNODE_DATA_DIR", &data_dir)?);
         let mut writable: Vec<&str> = Vec::new();
+        // ExecStart= の末尾に足す引数(読み口)。
+        let mut exec_tail = String::new();
         match unit {
             SERVE_UNIT => {
                 lines.push(environment_line("UNIQNODE_LISTEN", &options.listen)?);
@@ -327,6 +625,10 @@ pub fn drop_ins(
                     "UNIQNODE_SERVE_OPTIONS",
                     &options.serve_options,
                 )?);
+                if let Some(agent_listen) = &options.agent_listen {
+                    lines.push(environment_line(AGENT_LISTEN_ENV, agent_listen)?);
+                    exec_tail = format!(" {AGENT_LISTEN_FLAG} ${{{AGENT_LISTEN_ENV}}}");
+                }
                 writable.push(&data_dir);
             }
             VIEWER_UNIT => {
@@ -353,12 +655,31 @@ pub fn drop_ins(
         }
         lines.push("ExecStart=".to_string());
         lines.push(format!(
-            "ExecStart={}",
-            exec_start_with_binary(unit_text(unit), &binary)?
+            "ExecStart={}{exec_tail}",
+            exec_start_with_binary(unit_text(options.units(), unit), &binary)?
         ));
         rendered.push((unit, format!("{header}{}\n", lines.join("\n"))));
     }
     Ok(rendered)
+}
+
+/// `--after` の unit 名を検める: 空でなく、空白を含まず、種類の拡張子(.service や .mount)
+/// を持つこと。拡張子の無い名は systemd が .service と読むので、wg-quick@wg1 のつもりが
+/// 通ってしまう前に断る。
+pub fn check_after_unit(unit: &str) -> Result<(), String> {
+    if unit.is_empty() || unit.chars().any(char::is_whitespace) {
+        return Err(format!("--after {unit:?}: unit 名は空白を含まない 1 語"));
+    }
+    let known_suffix = [
+        ".service", ".mount", ".target", ".socket", ".device", ".path", ".timer", ".slice",
+        ".scope", ".swap", ".automount",
+    ];
+    if !known_suffix.iter().any(|suffix| unit.ends_with(suffix)) {
+        return Err(format!(
+            "--after {unit}: unit の種類の拡張子(.service や .mount)まで書く"
+        ));
+    }
+    Ok(())
 }
 
 /// 待ち受けの指定を検める: 解決でき、ポートが固定されていること(`:0` の自動割当は、
@@ -381,6 +702,25 @@ pub fn check_listen(listen: &str, what: &str) -> Result<(), String> {
 pub fn normalize(options: Options) -> Result<Options, String> {
     check_listen(&options.listen, "--listen")?;
     check_listen(&options.viewer_listen, "--viewer-listen")?;
+    if let Some(agent_listen) = &options.agent_listen {
+        check_listen(agent_listen, AGENT_LISTEN_FLAG)?;
+        if agent_listen == &options.listen {
+            return Err(format!(
+                "{AGENT_LISTEN_FLAG} {agent_listen} が --listen と同じ(読み口は主の口と別の\
+                 アドレスに束縛する)"
+            ));
+        }
+    }
+    if !options.after.is_empty() && !options.scope.is_system() {
+        return Err(format!(
+            "--after {} は --system のときだけ受け付ける(user unit は system unit を待てない: \
+             user 単位のマネージャは機械の unit を知らない)",
+            options.after.join(" ")
+        ));
+    }
+    for unit in &options.after {
+        check_after_unit(unit)?;
+    }
     let data_dir = absolute(&options.data_dir)?;
     let backup_dir = absolute(&options.backup_dir)?;
     refuse_private_tmp(&data_dir, "ストア")?;
@@ -412,7 +752,49 @@ pub fn normalize(options: Options) -> Result<Options, String> {
         binary,
         unit_dir: absolute(&options.unit_dir)?,
         start: options.start,
+        scope: options.scope,
+        after: options.after,
+        agent_listen: options.agent_listen,
     })
+}
+
+/// path を account の所有にする(root で走る system 単位の据え付けが作ったものを、実行ユーザが
+/// 書ける形で残すため)。
+fn chown_to(path: &Path, account: &Account) -> Result<(), String> {
+    std::os::unix::fs::chown(path, Some(account.uid), Some(account.gid)).map_err(|e| {
+        format!(
+            "{} を {}:{} の所有にできない: {e}",
+            path.display(),
+            account.name,
+            account.group
+        )
+    })
+}
+
+/// dir の下(dir 自身を含む。symlink は辿らない)で uid の所有でないものを集める。
+/// system 単位の据え付けの最後に、root が触ったストアと写し先に root 所有のものが残って
+/// いないことを見るための観測。
+pub fn paths_not_owned_by(dir: &Path, uid: u32) -> Result<Vec<PathBuf>, String> {
+    use std::os::unix::fs::MetadataExt;
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|e| format!("{} の所有者を読めない: {e}", path.display()))?;
+        if metadata.uid() != uid {
+            found.push(path.clone());
+        }
+        if metadata.is_dir() {
+            let entries = std::fs::read_dir(&path)
+                .map_err(|e| format!("{} を読めない: {e}", path.display()))?;
+            for entry in entries {
+                let entry = entry.map_err(|e| format!("{} の項を読めない: {e}", path.display()))?;
+                pending.push(entry.path());
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 fn write_file(path: &Path, content: &str) -> Result<(), String> {
@@ -425,8 +807,9 @@ fn write_file(path: &Path, content: &str) -> Result<(), String> {
 
 /// 走っている自分自身を destination に写す。隣に書いてから rename で据えるので、走行中の
 /// 実行ファイルを上書きせず(Text file busy にならず)、途中で止まっても半分のファイルが
-/// その名前で残らない。destination が自分自身なら写さない。返り値は報告の 1 行。
-pub fn install_binary(destination: &Path) -> Result<String, String> {
+/// その名前で残らない。destination が自分自身なら写さない。owner があれば(system 単位。
+/// root が写す)据える前にその所有にする。返り値は報告の 1 行。
+pub fn install_binary(destination: &Path, owner: Option<&Account>) -> Result<String, String> {
     let current = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(|e| format!("自分自身の実行ファイルが分からない: {e}"))?;
@@ -456,6 +839,9 @@ pub fn install_binary(destination: &Path) -> Result<String, String> {
         std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("{} の許可ビット: {e}", staging.display()))?;
     }
+    if let Some(account) = owner {
+        chown_to(&staging, account)?;
+    }
     std::fs::rename(&staging, destination).map_err(|e| {
         format!(
             "{} → {} の rename: {e}",
@@ -470,27 +856,32 @@ pub fn install_binary(destination: &Path) -> Result<String, String> {
     ))
 }
 
-/// systemctl --user を 1 命令 1 exec で呼ぶ。見つからない・呼べないは Err。終了コードと
-/// 出力は呼び手が読む(is-active のように非 0 が答えである命令があるため)。
-fn systemctl(arguments: &[&str]) -> Result<std::process::Output, String> {
+/// systemctl(user 単位なら --user 付き)を 1 命令 1 exec で呼ぶ。見つからない・呼べないは
+/// Err。終了コードと出力は呼び手が読む(is-active のように非 0 が答えである命令があるため)。
+fn systemctl(scope: &Scope, arguments: &[&str]) -> Result<std::process::Output, String> {
     Command::new("systemctl")
-        .arg("--user")
+        .args(scope.manager_flags())
         .args(arguments)
         .output()
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => {
                 "systemctl が PATH に無い(systemd の無い機械では install は使えない)".to_string()
             }
-            _ => format!("systemctl --user {} を起こせない: {e}", arguments.join(" ")),
+            _ => format!(
+                "{}{} を起こせない: {e}",
+                scope.systemctl_prefix(),
+                arguments.join(" ")
+            ),
         })
 }
 
 /// 成功(終了 0)を要する systemctl。失敗は標準エラーを添えて言う。
-fn systemctl_ok(arguments: &[&str]) -> Result<String, String> {
-    let output = systemctl(arguments)?;
+fn systemctl_ok(scope: &Scope, arguments: &[&str]) -> Result<String, String> {
+    let output = systemctl(scope, arguments)?;
     if !output.status.success() {
         return Err(format!(
-            "systemctl --user {} が {} で終わった: {}",
+            "{}{} が {} で終わった: {}",
+            scope.systemctl_prefix(),
             arguments.join(" "),
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
@@ -499,10 +890,18 @@ fn systemctl_ok(arguments: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// `systemctl --user is-active <unit>` の答え(active / inactive / failed / …)。
-fn unit_state(unit: &str) -> Result<String, String> {
-    let output = systemctl(&["is-active", unit])?;
+/// `systemctl [--user] is-active <unit>` の答え(active / inactive / failed / …)。
+fn unit_state(scope: &Scope, unit: &str) -> Result<String, String> {
+    let output = systemctl(scope, &["is-active", unit])?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// `<unit> が failed になった` の言い方(journal の読み方を添える)。
+fn failed_unit_message(scope: &Scope, unit: &str) -> String {
+    format!(
+        "{unit} が failed になった。理由は {}-u {unit} -n 20",
+        scope.journalctl_prefix()
+    )
 }
 
 /// /v1/status を 1 本引いて node_id を読む。
@@ -533,10 +932,10 @@ fn status_node_id(address: &str) -> Result<String, String> {
 /// 安全の網で、越えたら最後に見た結果を添えて失敗する。serve の unit が failed に落ちたら
 /// 上限を待たずに言う(should/0104)。
 fn wait_for_matching_status(
+    scope: &Scope,
     listen: &str,
     viewer_listen: &str,
 ) -> Result<(String, Duration), String> {
-    const BOUND: Duration = Duration::from_secs(30);
     const TICK: Duration = Duration::from_millis(200);
     let started = Instant::now();
     loop {
@@ -548,13 +947,11 @@ fn wait_for_matching_status(
             }
         }
         for unit in [SERVE_UNIT, VIEWER_UNIT] {
-            if unit_state(unit)? == "failed" {
-                return Err(format!(
-                    "{unit} が failed になった。理由は journalctl --user -u {unit} -n 20"
-                ));
+            if unit_state(scope, unit)? == "failed" {
+                return Err(failed_unit_message(scope, unit));
             }
         }
-        if started.elapsed() >= BOUND {
+        if started.elapsed() >= WAIT_BOUND {
             let describe = |r: &Result<String, String>| match r {
                 Ok(id) => format!("node_id {id}"),
                 Err(e) => e.clone(),
@@ -562,10 +959,67 @@ fn wait_for_matching_status(
             return Err(format!(
                 "{} 秒待っても serve と viewer の /v1/status が揃わない。serve({listen}): {}。\
                  viewer({viewer_listen}): {}",
-                BOUND.as_secs(),
+                WAIT_BOUND.as_secs(),
                 describe(&serve),
                 describe(&viewer)
             ));
+        }
+        std::thread::sleep(TICK);
+    }
+}
+
+/// 読み口(agent_listen)が主の口と同じ node_id を /v1/status で返し、許可表の外の
+/// POST /v1/admin/gc を 403 で断るまで待つ。返り値は掛かった時間。
+///
+/// 待つ理由: 読み口は wg1 のような後から上がるインターフェースのアドレスに束縛されることが
+/// あり、serve は読み口の bind に失敗しても主の口を殺さず再試行する。上限は WAIT_BOUND で、
+/// serve の unit が failed に落ちたら待たずに言う。node_id が違う・403 以外で答える、は
+/// 待っても直らないのでその場で断る(別のものが同じアドレスで答えている、許可表が壊れている)。
+/// gc に送る本文は dry_run: true にする: 許可表が壊れていて通ってしまっても、確認の 1 本が
+/// 本番のストアの pack を回収してしまわないように。
+fn wait_for_agent_door(scope: &Scope, node_id: &str, agent_listen: &str) -> Result<Duration, String> {
+    const TICK: Duration = Duration::from_millis(200);
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+    const GC_PATH: &str = "/v1/admin/gc";
+    let started = Instant::now();
+    loop {
+        match status_node_id(agent_listen) {
+            Ok(seen) if seen == node_id => {
+                let response = http::post_json(
+                    agent_listen,
+                    GC_PATH,
+                    br#"{"dry_run":true}"#,
+                    REQUEST_TIMEOUT,
+                )?;
+                if response.status != 403 {
+                    return Err(format!(
+                        "読み口 {agent_listen} が POST {GC_PATH} を 403 で断らず {} を返した: {}",
+                        response.status,
+                        http::body_head(&response.body)
+                    ));
+                }
+                return Ok(started.elapsed());
+            }
+            Ok(seen) => {
+                return Err(format!(
+                    "読み口 {agent_listen} の /v1/status の node_id {seen} が主の口の {node_id} と\
+                     違う(別のものが同じアドレスで答えている)"
+                ));
+            }
+            Err(reason) => {
+                if unit_state(scope, SERVE_UNIT)? == "failed" {
+                    return Err(failed_unit_message(scope, SERVE_UNIT));
+                }
+                if started.elapsed() >= WAIT_BOUND {
+                    return Err(format!(
+                        "{} 秒待っても読み口 {agent_listen} が /v1/status に答えない: {reason}。\
+                         束縛先のアドレスを持つインターフェースが上がっているか(--after で\
+                         待つ unit の状態)と、{}-u {SERVE_UNIT} の bind の行を見る",
+                        WAIT_BOUND.as_secs(),
+                        scope.journalctl_prefix()
+                    ));
+                }
+            }
         }
         std::thread::sleep(TICK);
     }
@@ -580,20 +1034,97 @@ fn fsck_summary(report: &FsckReport) -> String {
     )
 }
 
+/// 写し先を開いて fsck し、緑なら報告の 1 行の右側を返す。判断(写しが健全か)は
+/// backup::verify_copy の 1 箇所だが、写しを開くと未封印の尻尾の切り詰めで写し先に書くので、
+/// system 単位では root のこのプロセスで開かず、実行ユーザで `<bin> fsck <dir>` を起こす
+/// (root 所有のファイルを写し先に残さないため)。user 単位は自分のプロセスで開く。
+fn verify_backup(options: &Options) -> Result<String, String> {
+    let backup_dir = &options.backup_dir;
+    let Some(account) = options.scope.account() else {
+        let verification = crate::backup::verify_copy(backup_dir)
+            .map_err(|e| format!("写し先 {} を開けない: {e}", backup_dir.display()))?;
+        if !verification.errors.is_empty() {
+            return Err(format!(
+                "写し先 {} の fsck が赤: {}",
+                backup_dir.display(),
+                verification.errors.join("; ")
+            ));
+        }
+        return Ok(fsck_summary(&verification));
+    };
+    let mut command = Command::new("runuser");
+    command
+        .arg("-u")
+        .arg(&account.name)
+        .arg("--")
+        .arg(&options.binary)
+        .arg("fsck")
+        .arg(backup_dir);
+    let output = command
+        .output()
+        .map_err(|e| format!("runuser -u {} -- {} fsck を起こせない: {e}", account.name, options.binary.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "写し先 {} の fsck({} で走らせた)が {} で終わった: {} {}",
+            backup_dir.display(),
+            account.name,
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
+    Ok(format!("{}({} で走らせた)", stdout.trim(), account.name))
+}
+
+/// 外部の道具を探す PATH。user 単位は install 自身の PATH。system 単位はそれに実行ユーザの
+/// home の下(SERVICE_USER_TOOL_DIRS)を後ろに足す(sudo の secure_path には利用者の
+/// ~/.local/bin が無い)。
+pub fn tool_search_path(path_env: &str, scope: &Scope) -> String {
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(path_env).collect();
+    if let Some(account) = scope.account() {
+        for dir in SERVICE_USER_TOOL_DIRS {
+            let dir = account.home.join(dir);
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    std::env::join_paths(&dirs)
+        .expect("PATH の項は join_paths で繋げる")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// install の本体。手順ごとに 1 行を out へ書き、失敗はその場で Err(呼び手が理由を出して
 /// exit 1)。
 pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     let options = normalize(options)?;
+    let scope = &options.scope;
     let say = |out: &mut dyn Write, line: &str| -> Result<(), String> {
         writeln!(out, "install: {line}").map_err(|e| format!("標準出力に書けない: {e}"))
     };
+    if let Some(account) = scope.account() {
+        say(
+            out,
+            &format!(
+                "system 単位。unit は {} に置き、{}:{}(uid {})で走らせる。ストアと写し先に \
+                 root 所有のものは残さない(最後に所有者を見て確かめる)",
+                options.unit_dir.display(),
+                account.name,
+                account.group,
+                account.uid
+            ),
+        )?;
+    }
 
     // (1) バイナリ。
-    let binary_line = install_binary(&options.binary)?;
+    let binary_line = install_binary(&options.binary, scope.account())?;
     say(out, &binary_line)?;
 
-    // (2) unit。docs/mop/systemd/user/ の現物をそのまま。
-    for (name, text) in UNITS {
+    // (2) unit。docs/mop/systemd/{user,system}/ の現物をそのまま。
+    for (name, text) in options.units() {
         let path = options.unit_dir.join(name);
         write_file(&path, text)?;
         say(out, &format!("unit {}", path.display()))?;
@@ -604,8 +1135,15 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     // (黙って進めない。must/0022)が、止めない: 道具が無くても serve は起き、無い機能だけが
     // 503 で答える(should/0114 と同じ扱い)。環境から PATH を読むのはここだけ。
     let path_env = std::env::var_os("PATH").unwrap_or_default();
-    let tools = tool_path(&path_env.to_string_lossy());
-    say(out, &format!("PATH={}(serve が起こす外部の道具の探し先)", tools.value))?;
+    let search_path = tool_search_path(&path_env.to_string_lossy(), scope);
+    let tools = tool_path(&search_path);
+    say(
+        out,
+        &format!(
+            "PATH={}(serve が起こす外部の道具の探し先。探したのは {search_path})",
+            tools.value
+        ),
+    )?;
     for (delegate, dir) in &tools.beside_pdftotext {
         say(
             out,
@@ -637,25 +1175,36 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         (&options.data_dir, "ストア"),
         (&options.backup_dir, "写し先"),
     ] {
+        let existed = dir.exists();
         std::fs::create_dir_all(dir).map_err(|e| format!("{} を作れない: {e}", dir.display()))?;
+        // root が作ったディレクトリは実行ユーザの所有にする。在ったものの所有者は変えない
+        // (最後の確認が見る)。
+        let owner_note = match scope.account() {
+            Some(account) if !existed => {
+                chown_to(dir, account)?;
+                format!("。作ったので {} の所有にした", account.name)
+            }
+            _ => String::new(),
+        };
         say(
             out,
             &format!(
-                "{what} {}(ReadWritePaths= は無い道を作らないので先に作る)",
+                "{what} {}(ReadWritePaths= は無い道を作らないので先に作る{owner_note})",
                 dir.display()
             ),
         )?;
     }
 
     // (4) daemon-reload。
-    systemctl_ok(&["daemon-reload"])?;
-    say(out, "systemctl --user daemon-reload: 済み")?;
+    systemctl_ok(scope, &["daemon-reload"])?;
+    say(out, &format!("{}daemon-reload: 済み", scope.systemctl_prefix()))?;
 
     if !options.start {
         say(
             out,
             &format!(
-                "--no-start なので起こしていない。起こすには systemctl --user enable --now {}",
+                "--no-start なので起こしていない。起こすには {}enable --now {}",
+                scope.systemctl_prefix(),
                 STARTED_UNITS.join(" ")
             ),
         )?;
@@ -663,13 +1212,22 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     }
 
     // (5) 起こす前にロックを探る。unit は exit 1 で起こし直さない設計なので、落ちてから journal
-    // を読ませるより先に言う。
+    // を読ませるより先に言う。system 単位への移行では、持ち主は user 単位の serve であることが
+    // 多い: 止めて外す命令を添えるが、黙って止めはしない。
     if store::opened_by_another_process(&options.data_dir).map_err(|e| e.to_string())? {
-        let serve_state = unit_state(SERVE_UNIT)?;
+        let serve_state = unit_state(scope, SERVE_UNIT)?;
         if serve_state != "active" {
+            let migration_hint = match scope {
+                Scope::User => String::new(),
+                Scope::System(account) => format!(
+                    "。user 単位で常駐させていたなら、{} で {} を打って止めて外してから再実行する",
+                    account.name,
+                    user_units_disable_command()
+                ),
+            };
             return Err(format!(
                 "{} は別プロセスが開いている(unit の serve ではない。{SERVE_UNIT} は {serve_state})。\
-                 そのプロセスを止めてから再実行するか、--no-start で unit だけ置く",
+                 そのプロセスを止めてから再実行するか、--no-start で unit だけ置く{migration_hint}",
                 options.data_dir.display()
             ));
         }
@@ -677,9 +1235,9 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
 
     // (6) enable と restart(restart は止まっている unit も起こすので、初回と更新で同じ手順)。
     for unit in STARTED_UNITS {
-        let before = unit_state(unit)?;
-        systemctl_ok(&["enable", unit])?;
-        systemctl_ok(&["restart", unit])?;
+        let before = unit_state(scope, unit)?;
+        systemctl_ok(scope, &["enable", unit])?;
+        systemctl_ok(scope, &["restart", unit])?;
         let verb = if before == "active" {
             "起こし直した"
         } else {
@@ -688,27 +1246,31 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         say(out, &format!("{unit}: enable、{verb}(直前は {before})"))?;
     }
 
-    // (7) linger。無ければログアウトで user 単位のマネージャごと止まる。取れないのは警告に
-    // とどめる(polkit の設定次第で対話が要る)。
-    match Command::new("loginctl").arg("enable-linger").output() {
-        Ok(output) if output.status.success() => say(out, "loginctl enable-linger: 済み")?,
-        Ok(output) => say(
-            out,
-            &format!(
-                "警告: loginctl enable-linger が {} で終わった({})。ログアウトすると unit も\
-                 止まるので、手で有効にする",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        )?,
-        Err(e) => say(
-            out,
-            &format!("警告: loginctl を起こせない({e})。linger は手で有効にする"),
-        )?,
+    // (7) linger(user 単位だけ)。無ければログアウトで user 単位のマネージャごと止まる。
+    // 取れないのは警告にとどめる(polkit の設定次第で対話が要る)。system 単位は機械と共に
+    // 起きるので要らない。
+    if !scope.is_system() {
+        match Command::new("loginctl").arg("enable-linger").output() {
+            Ok(output) if output.status.success() => say(out, "loginctl enable-linger: 済み")?,
+            Ok(output) => say(
+                out,
+                &format!(
+                    "警告: loginctl enable-linger が {} で終わった({})。ログアウトすると unit も\
+                     止まるので、手で有効にする",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            )?,
+            Err(e) => say(
+                out,
+                &format!("警告: loginctl を起こせない({e})。linger は手で有効にする"),
+            )?,
+        }
     }
 
     // (8) 確認。効果を見るまでは完了ではない(should/0116)。
-    let (node_id, waited) = wait_for_matching_status(&options.listen, &options.viewer_listen)?;
+    let (node_id, waited) =
+        wait_for_matching_status(scope, &options.listen, &options.viewer_listen)?;
     say(
         out,
         &format!(
@@ -718,32 +1280,77 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
             waited.as_millis()
         ),
     )?;
-    systemctl_ok(&["start", BACKUP_UNIT])
-        .map_err(|e| format!("{e}。理由は journalctl --user -u {BACKUP_UNIT} -n 20"))?;
-    let verification = crate::backup::verify_copy(&options.backup_dir)
-        .map_err(|e| format!("写し先 {} を開けない: {e}", options.backup_dir.display()))?;
-    if !verification.errors.is_empty() {
-        return Err(format!(
-            "写し先 {} の fsck が赤: {}",
-            options.backup_dir.display(),
-            verification.errors.join("; ")
-        ));
+    if let Some(agent_listen) = &options.agent_listen {
+        let waited = wait_for_agent_door(scope, &node_id, agent_listen)?;
+        say(
+            out,
+            &format!(
+                "確認: 読み口 {}/v1/status が同じ node_id {node_id} を返し、POST /v1/admin/gc を \
+                 403 で断った({} ms)",
+                serve_url_of(agent_listen),
+                waited.as_millis()
+            ),
+        )?;
     }
+    systemctl_ok(scope, &["start", BACKUP_UNIT]).map_err(|e| {
+        format!(
+            "{e}。理由は {}-u {BACKUP_UNIT} -n 20",
+            scope.journalctl_prefix()
+        )
+    })?;
+    let verification = verify_backup(&options)?;
     say(
         out,
         &format!(
-            "確認: {BACKUP_UNIT} を 1 回走らせ、写し先 {} を開いて fsck: {}",
-            options.backup_dir.display(),
-            fsck_summary(&verification)
+            "確認: {BACKUP_UNIT} を 1 回走らせ、写し先 {} を開いて fsck: {verification}",
+            options.backup_dir.display()
         ),
     )?;
+    if let Some(account) = scope.account() {
+        for (dir, what) in [
+            (&options.data_dir, "ストア"),
+            (&options.backup_dir, "写し先"),
+        ] {
+            let foreign = paths_not_owned_by(dir, account.uid)?;
+            if !foreign.is_empty() {
+                return Err(format!(
+                    "{what} {} に {} 以外の所有のものが {} 件ある(root で触った跡。unit は {} で\
+                     走るので書けなくなる): {}",
+                    dir.display(),
+                    account.name,
+                    foreign.len(),
+                    account.name,
+                    foreign
+                        .iter()
+                        .take(5)
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            say(
+                out,
+                &format!(
+                    "確認: {what} {} の下に {} 以外の所有のものは無い",
+                    dir.display(),
+                    account.name
+                ),
+            )?;
+        }
+    }
 
     // (9) 次の刻み。systemctl の表は見出しと行の後に空行と件数の脚注が付くので、表だけを載せる。
-    let timers = systemctl_ok(&["list-timers", BACKUP_TIMER, "--no-pager"])?;
+    let timers = systemctl_ok(scope, &["list-timers", BACKUP_TIMER, "--no-pager"])?;
     for line in timers.lines().take_while(|line| !line.trim().is_empty()) {
         say(out, &format!("次の刻み: {line}"))?;
     }
     Ok(())
+}
+
+/// user 単位の常駐を止めて外す命令(system 単位へ移るときに操作者が打つもの。文書と文言が
+/// 同じ字句を使う。must/0023)。
+pub fn user_units_disable_command() -> String {
+    format!("systemctl --user disable --now {}", STARTED_UNITS.join(" "))
 }
 
 #[cfg(test)]
@@ -760,6 +1367,19 @@ mod tests {
             binary: PathBuf::from("/home/op/.local/bin/uniqnode"),
             unit_dir: PathBuf::from("/home/op/.config/systemd/user"),
             start: true,
+            scope: Scope::User,
+            after: Vec::new(),
+            agent_listen: None,
+        }
+    }
+
+    fn sample_account() -> Account {
+        Account {
+            name: "op".to_string(),
+            uid: 1000,
+            gid: 1000,
+            group: "op".to_string(),
+            home: PathBuf::from("/home/op"),
         }
     }
 
@@ -987,11 +1607,102 @@ mod tests {
         std::fs::remove_dir_all(&linked).expect("cleanup");
     }
 
+    /// 据え先の判断: user 単位に --user は付かず、system 単位は --user → SUDO_USER の順で
+    /// 実行ユーザを決め、root は断り、root で走っていなければ断る(順序は「利用者が要る」が
+    /// 先。root でなくても文言を観測できるように)。実在する利用者の引き当ては最後なので、
+    /// ここまでの判断は実在しない名でも見られる。
+    #[test]
+    fn the_scope_decides_the_service_user_before_asking_for_root() {
+        let system = |user: Option<&str>, sudo_user: Option<&str>, euid: u32| {
+            scope(
+                true,
+                user.map(str::to_string),
+                sudo_user.map(str::to_string),
+                euid,
+            )
+        };
+        assert_eq!(scope(false, None, None, 1000).expect("user"), Scope::User);
+        assert_eq!(
+            scope(false, None, Some("op".to_string()), 1000).expect("user"),
+            Scope::User,
+            "user 単位は SUDO_USER を見ない"
+        );
+        let user_with_user = scope(false, Some("op".to_string()), None, 1000)
+            .err()
+            .expect("断る");
+        assert!(user_with_user.contains("--system のときだけ"), "{user_with_user}");
+        let no_user = system(None, None, 0).err().expect("断る");
+        assert!(no_user.contains("--user <name>"), "{no_user}");
+        let empty_sudo_user = system(None, Some(""), 0).err().expect("断る");
+        assert!(empty_sudo_user.contains("--user <name>"), "{empty_sudo_user}");
+        let root_user = system(Some("root"), None, 0).err().expect("断る");
+        assert!(root_user.contains("root は使えない"), "{root_user}");
+        let root_sudo = system(None, Some("root"), 0).err().expect("断る");
+        assert!(root_sudo.contains("root は使えない"), "{root_sudo}");
+        let not_root = system(Some("no-such-user"), None, 1000).err().expect("断る");
+        assert!(
+            not_root.contains("sudo ") && not_root.contains("tee /tmp/uniqnode-install-system.log"),
+            "{not_root}"
+        );
+        let sudo_user_not_root = system(None, Some("no-such-user"), 1000).err().expect("断る");
+        assert!(sudo_user_not_root.contains("no-such-user"), "{sudo_user_not_root}");
+    }
+
+    /// 所有者の観測: 自分が作った木は自分の uid で「他人のものは無い」、別の uid で見れば
+    /// 全項目が挙がる(ディレクトリ自身を含む)。
+    #[test]
+    fn foreign_owners_are_listed_with_the_directory_itself() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!(
+            "uniqnode-install-unit-{}-owners",
+            std::process::id()
+        ));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+        std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
+        std::fs::write(dir.join("sub").join("file"), "x").expect("write");
+        let me = std::fs::metadata(&dir).expect("metadata").uid();
+        assert!(paths_not_owned_by(&dir, me).expect("walk").is_empty());
+        let foreign = paths_not_owned_by(&dir, me.wrapping_add(1)).expect("walk");
+        assert_eq!(
+            foreign,
+            vec![dir.clone(), dir.join("sub"), dir.join("sub").join("file")]
+        );
+        assert!(paths_not_owned_by(&dir.join("missing"), me).is_err());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// system 単位で家の下に何かがあれば ProtectHome=read-only に緩め、無ければ unit のまま。
+    #[test]
+    fn protected_home_paths_are_named() {
+        let mut options = sample_options();
+        options.scope = Scope::System(sample_account());
+        options.data_dir = PathBuf::from("/srv/store");
+        let under = paths_under_protected_home(&options);
+        assert_eq!(
+            under,
+            vec![
+                Path::new("/home/op/.local/bin/uniqnode"),
+                Path::new("/home/op/uniqnode-backup")
+            ]
+        );
+        options.binary = PathBuf::from("/usr/local/bin/uniqnode");
+        options.backup_dir = PathBuf::from("/var/backups/uniqnode");
+        assert!(paths_under_protected_home(&options).is_empty());
+        options.data_dir = PathBuf::from("/root/store");
+        assert_eq!(
+            paths_under_protected_home(&options),
+            vec![Path::new("/root/store")]
+        );
+    }
+
     /// ExecStart= の差し替えは先頭の道だけを替え、残りの並びを unit から写す。
     #[test]
     fn exec_start_rewrite_replaces_only_the_binary() {
         let rewritten =
-            exec_start_with_binary(unit_text(SERVE_UNIT), "/opt/u/uniqnode").expect("rewrite");
+            exec_start_with_binary(unit_text(&USER_UNITS, SERVE_UNIT), "/opt/u/uniqnode")
+                .expect("rewrite");
         assert_eq!(
             rewritten,
             "/opt/u/uniqnode serve ${UNIQNODE_DATA_DIR} ${UNIQNODE_LISTEN} $UNIQNODE_SERVE_OPTIONS"

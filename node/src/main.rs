@@ -135,9 +135,10 @@ fn usage() -> ! {
            flood <dir>                書き込み続ける(クラッシュ試験用の内部コマンド)\n\
            install <dir> [--listen <addr>] [--viewer-listen <addr>]\n\
                          [--serve-options \"<引数列>\"] [--backup-dir <dir>] [--bin <path>]\n\
-                         [--unit-dir <dir>] [--no-start]\n\
-                                      serve・viewer・毎日の backup を user 単位の systemd に\n\
-                                      据える(docs/mop/SYSTEMD.md)。走っている自分自身を\n\
+                         [--unit-dir <dir>] [--no-start] [--listen-agent <addr>]\n\
+                         [--system [--user <name>] [--after <unit>]...]\n\
+                                      serve・viewer・毎日の backup を systemd に据える\n\
+                                      (docs/mop/SYSTEMD.md)。走っている自分自身を\n\
                                       --bin(既定 ~/.local/bin/uniqnode)へ写し、unit 4 本と\n\
                                       drop-in 3 本を --unit-dir(既定 ~/.config/systemd/user)\n\
                                       に書き、daemon-reload、enable と restart、\n\
@@ -150,8 +151,18 @@ fn usage() -> ! {
                                       1 つの文字列で。--no-start は daemon-reload までで\n\
                                       止める。再実行は更新(写し直し・書き直し・restart)。\n\
                                       <dir> は /tmp の下に置けない(unit の PrivateTmp)。\n\
-                                      system 単位(/etc/systemd/system)は未実装で、\n\
-                                      SYSTEMD.md の手順で行う\n\
+                                      --listen-agent は serve の読み口(第 2 の待ち受け。\n\
+                                      許可表の外は 403)で、drop-in に UNIQNODE_AGENT_LISTEN\n\
+                                      を書き、確認に「読み口の /v1/status が同じ node_id」\n\
+                                      「読み口の POST /v1/admin/gc が 403」を足す。\n\
+                                      --system は system 単位(/etc/systemd/system)に据える:\n\
+                                      root で走らせ(sudo)、unit は --user の利用者(無ければ\n\
+                                      SUDO_USER。root は不可)で走る。既定の置き場もその\n\
+                                      利用者の home の下。backup と fsck もその利用者で走らせ、\n\
+                                      ストアと写し先に root 所有のものを残さない。--after は\n\
+                                      drop-in の After=/Wants= に書く unit(wg-quick@wg1.service\n\
+                                      など。複数可。--system のときだけ)。既に user 単位で\n\
+                                      常駐しているなら先に止めて外す(SYSTEMD.md の移行)\n\
          \n\
          serve・mcp・viewer のログの指定(常駐する命令だけが持つ。既定は保存する):\n\
            --log <path>               保存先を変える(既定 <dir>/logs/<serve|mcp|viewer>.log。\n\
@@ -800,30 +811,43 @@ fn parse_mcp_options(rest: &[String]) -> McpOptions {
     McpOptions { serve_url, writable, run: parse_run_options(&others) }
 }
 
-/// install の指定。既定は home の下(node/src/install.rs の Options::defaults)。知らない
-/// 引数は黙って捨てず usage で落とす。
+/// install の指定。既定は home の下(node/src/install.rs の Options::defaults。--system なら
+/// 実行ユーザの home)。知らない引数は黙って捨てず usage で落とす。据え先(user/system と
+/// 実行ユーザ)の判断は install::scope にあり、ここは環境(HOME・SUDO_USER・実効 uid)を
+/// 読んで渡すだけ。
 fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Options {
-    let home = match std::env::var_os("HOME") {
-        Some(home) if !home.is_empty() => std::path::PathBuf::from(home),
-        _ => {
-            eprintln!("uniqnode: install: HOME が無いので既定の置き場を決められない");
-            std::process::exit(2);
-        }
-    };
-    let mut options =
-        uniqnode::install::Options::defaults(std::path::PathBuf::from(dir), &home);
+    // 1 巡目: 引数を集める(既定は据え先が決まってから組む)。
+    let mut system = false;
+    let mut user: Option<String> = None;
+    let mut after: Vec<String> = Vec::new();
+    let mut agent_listen: Option<String> = None;
+    let mut listen: Option<String> = None;
+    let mut viewer_listen: Option<String> = None;
+    let mut serve_options: Option<String> = None;
+    let mut backup_dir: Option<std::path::PathBuf> = None;
+    let mut binary: Option<std::path::PathBuf> = None;
+    let mut unit_dir: Option<std::path::PathBuf> = None;
+    let mut start = true;
     let mut at = 0;
     while at < rest.len() {
         let value = || rest.get(at + 1).cloned().unwrap_or_else(|| usage());
         match rest[at].as_str() {
-            "--listen" => options.listen = value(),
-            "--viewer-listen" => options.viewer_listen = value(),
-            "--serve-options" => options.serve_options = value(),
-            "--backup-dir" => options.backup_dir = std::path::PathBuf::from(value()),
-            "--bin" => options.binary = std::path::PathBuf::from(value()),
-            "--unit-dir" => options.unit_dir = std::path::PathBuf::from(value()),
+            "--listen" => listen = Some(value()),
+            "--viewer-listen" => viewer_listen = Some(value()),
+            "--serve-options" => serve_options = Some(value()),
+            "--backup-dir" => backup_dir = Some(std::path::PathBuf::from(value())),
+            "--bin" => binary = Some(std::path::PathBuf::from(value())),
+            "--unit-dir" => unit_dir = Some(std::path::PathBuf::from(value())),
+            "--user" => user = Some(value()),
+            "--after" => after.push(value()),
+            "--listen-agent" => agent_listen = Some(value()),
             "--no-start" => {
-                options.start = false;
+                start = false;
+                at += 1;
+                continue;
+            }
+            "--system" => {
+                system = true;
                 at += 1;
                 continue;
             }
@@ -831,6 +855,53 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
         }
         at += 2;
     }
+    let fail = |message: String| -> ! {
+        eprintln!("uniqnode: install: {message}");
+        std::process::exit(1);
+    };
+    let euid = uniqnode::install::effective_uid().unwrap_or_else(|e| fail(e));
+    let scope = uniqnode::install::scope(
+        system,
+        user,
+        std::env::var("SUDO_USER").ok(),
+        euid,
+    )
+    .unwrap_or_else(|e| fail(e));
+    // 既定の置き場の根。system 単位なら実行ユーザの home(sudo は HOME を root のものに
+    // 替えるので、HOME は据える相手の home ではない)。
+    let home = match scope.account() {
+        Some(account) => account.home.clone(),
+        None => match std::env::var_os("HOME") {
+            Some(home) if !home.is_empty() => std::path::PathBuf::from(home),
+            _ => {
+                eprintln!("uniqnode: install: HOME が無いので既定の置き場を決められない");
+                std::process::exit(2);
+            }
+        },
+    };
+    let mut options =
+        uniqnode::install::Options::defaults(std::path::PathBuf::from(dir), &home, scope);
+    if let Some(listen) = listen {
+        options.listen = listen;
+    }
+    if let Some(viewer_listen) = viewer_listen {
+        options.viewer_listen = viewer_listen;
+    }
+    if let Some(serve_options) = serve_options {
+        options.serve_options = serve_options;
+    }
+    if let Some(backup_dir) = backup_dir {
+        options.backup_dir = backup_dir;
+    }
+    if let Some(binary) = binary {
+        options.binary = binary;
+    }
+    if let Some(unit_dir) = unit_dir {
+        options.unit_dir = unit_dir;
+    }
+    options.start = start;
+    options.after = after;
+    options.agent_listen = agent_listen;
     options
 }
 

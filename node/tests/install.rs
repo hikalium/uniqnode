@@ -325,9 +325,313 @@ fn a_store_under_tmp_is_refused_and_nothing_is_written() {
 /// 知らない引数は usage(2)で落ちる。
 #[test]
 fn an_unknown_option_is_refused_with_usage() {
-    let outcome = uniqnode(&["install", "/nonexistent/store", "--system"]);
+    let outcome = uniqnode(&["install", "/nonexistent/store", "--sytem"]);
     assert_eq!(outcome.status, 2, "{}\n{}", outcome.stdout, outcome.stderr);
     assert!(outcome.stderr.contains("usage:"), "{}", outcome.stderr);
+}
+
+/// SUDO_USER を消して走らせる(--system の実行ユーザの既定はそこから来るので、無い状態を
+/// 作って「断る」を観測する)。
+fn uniqnode_without_sudo_user(arguments: &[&str]) -> CommandOutcome {
+    let output = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
+        .args(arguments)
+        .env_remove("SUDO_USER")
+        .output()
+        .expect("spawn uniqnode");
+    CommandOutcome {
+        status: output.status.code().expect("exit code"),
+        stdout: String::from_utf8(output.stdout).expect("utf-8 stdout"),
+        stderr: String::from_utf8(output.stderr).expect("utf-8 stderr"),
+    }
+}
+
+/// このテストは root で走らない前提(root なら --system は断られず、本物の
+/// /etc/systemd/system に unit を書きに行く)。root なら理由を出して戻る。
+fn not_root() -> bool {
+    let euid = uniqnode::install::effective_uid().expect("euid");
+    if euid == 0 {
+        println!("root で走っているので、root でないときに断るテストは走らせない");
+    }
+    euid != 0
+}
+
+/// --system は root でなければ、何も置かずに断る。文言は sudo で走らせることと、出力を tee で
+/// ファイルに残す形を含む(操作者に渡す命令の形。CLAUDE.md)。実行ユーザの名は
+/// 引き当てる前に断るので、実在しない名でよい。
+/// should/0137: install::scope の euid の検査を外すと、getent が無い利用者で落ちる
+/// (別の文言)ので、この 2 つの assert が赤になる。
+#[test]
+fn a_system_install_without_root_is_refused_with_the_sudo_and_tee_form() {
+    if !not_root() {
+        return;
+    }
+    let work = work_dir("system-not-root");
+    let unit_dir = work.join("units");
+    let outcome = uniqnode(&[
+        "install",
+        work.join("store").to_str().expect("utf-8"),
+        "--system",
+        "--user",
+        "uniqnode-no-such-user",
+        "--unit-dir",
+        unit_dir.to_str().expect("utf-8"),
+        "--no-start",
+    ]);
+    assert_eq!(outcome.status, 1, "{}\n{}", outcome.stdout, outcome.stderr);
+    assert!(
+        outcome.stderr.contains("root で走らせる") && outcome.stderr.contains("sudo "),
+        "sudo で走らせることを言う: {}",
+        outcome.stderr
+    );
+    assert!(
+        outcome.stderr.contains("2>&1 | tee /tmp/uniqnode-install-system.log"),
+        "出力をファイルに残す形を含む: {}",
+        outcome.stderr
+    );
+    assert!(!unit_dir.exists(), "unit を置かない");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// --system に --user が無く SUDO_USER も無ければ、root かどうかを見る前に「実行ユーザが要る」
+/// で断る(root で常駐させない)。--user root も断る。
+/// should/0137: install::scope の `sudo_user` の既定を "root" に替えると 1 つ目が通ってしまい、
+/// name == "root" の検査を外すと 2 つ目が root の検査の文言に変わって赤になる。
+#[test]
+fn a_system_install_needs_a_service_user_and_refuses_root() {
+    let work = work_dir("system-no-user");
+    let store = work.join("store");
+    let outcome = uniqnode_without_sudo_user(&[
+        "install",
+        store.to_str().expect("utf-8"),
+        "--system",
+        "--no-start",
+    ]);
+    assert_eq!(outcome.status, 1, "{}\n{}", outcome.stdout, outcome.stderr);
+    assert!(
+        outcome.stderr.contains("--user <name>") && outcome.stderr.contains("SUDO_USER"),
+        "{}",
+        outcome.stderr
+    );
+    assert!(outcome.stderr.contains("root では常駐させない"), "{}", outcome.stderr);
+    let as_root = uniqnode(&[
+        "install",
+        store.to_str().expect("utf-8"),
+        "--system",
+        "--user",
+        "root",
+        "--no-start",
+    ]);
+    assert_eq!(as_root.status, 1, "{}\n{}", as_root.stdout, as_root.stderr);
+    assert!(
+        as_root.stderr.contains("root は使えない"),
+        "{}",
+        as_root.stderr
+    );
+    assert!(!store.exists(), "ストアを作らない");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// --user は --system のときだけ、--after も --system のときだけ(user unit は system unit を
+/// 待てない)。--listen-agent の形は --listen と同じ検査(ポート 0 は断る)。どれも何も置かない。
+/// should/0137: normalize の --after の検査を外すと --after の status の assert が 0 で赤になる
+/// (--no-start で unit が書かれてしまう。実験した)。
+#[test]
+fn after_and_user_are_system_only_and_the_agent_listen_is_checked() {
+    let work = work_dir("user-scope-refusals");
+    let unit_dir = work.join("units");
+    let base = |extra: &[&str]| -> CommandOutcome {
+        let mut arguments = vec![
+            "install",
+            work.join("store").to_str().expect("utf-8"),
+            "--bin",
+            work.join("bin").join("uniqnode").to_str().expect("utf-8"),
+            "--unit-dir",
+            unit_dir.to_str().expect("utf-8"),
+            "--no-start",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        arguments.extend(extra.iter().map(|s| s.to_string()));
+        let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        uniqnode(&borrowed)
+    };
+    let with_user = base(&["--user", "op"]);
+    assert_eq!(with_user.status, 1, "{}\n{}", with_user.stdout, with_user.stderr);
+    assert!(
+        with_user.stderr.contains("--user op は --system のときだけ"),
+        "{}",
+        with_user.stderr
+    );
+    let with_after = base(&["--after", "wg-quick@wg1.service"]);
+    assert_eq!(with_after.status, 1, "{}\n{}", with_after.stdout, with_after.stderr);
+    assert!(
+        with_after.stderr.contains("user unit は system unit を待てない"),
+        "{}",
+        with_after.stderr
+    );
+    assert!(!unit_dir.exists(), "断るときは unit を置かない");
+    let zero_port = base(&["--listen-agent", "127.0.0.1:0"]);
+    assert_eq!(zero_port.status, 1, "{}\n{}", zero_port.stdout, zero_port.stderr);
+    assert!(
+        zero_port.stderr.contains("--listen-agent 127.0.0.1:0")
+            && zero_port.stderr.contains("ポートは固定する"),
+        "{}",
+        zero_port.stderr
+    );
+    let same_as_main = base(&["--listen-agent", "127.0.0.1:7440"]);
+    assert_eq!(same_as_main.status, 1, "{}\n{}", same_as_main.stdout, same_as_main.stderr);
+    assert!(
+        same_as_main.stderr.contains("--listen と同じ"),
+        "{}",
+        same_as_main.stderr
+    );
+    assert!(!unit_dir.exists(), "断るときは unit を置かない");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// system 単位の指定(root は要らない: drop-in を描く関数を直に呼ぶ)。実行ユーザは引き当てた
+/// 実物の形で与える。
+fn system_options() -> uniqnode::install::Options {
+    use uniqnode::install::{Account, Options, Scope};
+    let account = Account {
+        name: "op".to_string(),
+        uid: 1000,
+        gid: 1000,
+        group: "op".to_string(),
+        home: PathBuf::from("/home/op"),
+    };
+    let home = account.home.clone();
+    let mut options = Options::defaults(
+        PathBuf::from("/srv/uniqnode-store"),
+        &home,
+        Scope::System(account),
+    );
+    options.after = vec!["wg-quick@wg1.service".to_string()];
+    options.agent_listen = Some("10.10.128.1:7441".to_string());
+    options
+}
+
+/// system 単位の drop-in: [Unit] に After=/Wants=、[Service] の先頭に User=/Group= と
+/// StateDirectory= の打ち消し、バイナリと写し先が home の下なので ProtectHome=read-only、
+/// serve には UNIQNODE_AGENT_LISTEN と ExecStart= 末尾の --listen-agent。unit の置き場の既定は
+/// /etc/systemd/system で、埋め込む unit は docs/mop/systemd/system/ の現物。
+/// should/0137: drop_ins の service_head から StateDirectory= の行を消すと 3 つ目の assert が、
+/// exec_tail を空にすると serve の ExecStart= の assert が赤になる(どちらも実験した)。
+#[test]
+fn a_system_drop_in_names_the_user_cancels_the_state_directory_and_waits_for_the_unit() {
+    use uniqnode::install::{drop_ins, SYSTEMD_DEFAULT_PATH, SYSTEM_UNIT_DIR};
+    let options = system_options();
+    assert_eq!(options.unit_dir, Path::new(SYSTEM_UNIT_DIR));
+    assert_eq!(options.binary, Path::new("/home/op/.local/bin/uniqnode"));
+    assert_eq!(options.backup_dir, Path::new("/home/op/uniqnode-backup"));
+    let source = repo_root()
+        .join("docs")
+        .join("mop")
+        .join("systemd")
+        .join("system");
+    for (name, embedded) in options.units() {
+        assert_eq!(
+            *embedded,
+            text(&source.join(name)),
+            "{name} は docs/mop/systemd/system/ の現物と同じ中身"
+        );
+    }
+    let rendered = drop_ins(&options, SYSTEMD_DEFAULT_PATH).expect("描ける");
+    let of = |unit: &str| -> String {
+        rendered
+            .iter()
+            .find(|(name, _)| *name == unit)
+            .map(|(_, text)| text.clone())
+            .expect("3 つの service の 1 つ")
+    };
+    let serve = of("uniqnode-serve.service");
+    assert!(
+        serve.contains("[Unit]\nAfter=wg-quick@wg1.service\nWants=wg-quick@wg1.service\n[Service]\n"),
+        "{serve}"
+    );
+    assert!(
+        serve.contains("[Service]\nUser=op\nGroup=op\nStateDirectory=\n"),
+        "{serve}"
+    );
+    assert!(
+        serve.contains("\nProtectHome=read-only\nEnvironment=PATH="),
+        "home の下のバイナリと写し先のために緩める: {serve}"
+    );
+    assert!(
+        serve.contains("\nEnvironment=UNIQNODE_AGENT_LISTEN=10.10.128.1:7441\n"),
+        "{serve}"
+    );
+    assert!(
+        serve.ends_with(
+            "ExecStart=\nExecStart=/home/op/.local/bin/uniqnode serve ${UNIQNODE_DATA_DIR} \
+             ${UNIQNODE_LISTEN} $UNIQNODE_SERVE_OPTIONS --listen-agent ${UNIQNODE_AGENT_LISTEN}\n"
+        ),
+        "{serve}"
+    );
+    // viewer と backup も同じ [Unit] と User=/Group= を持ち、読み口は持たない。
+    for unit in ["uniqnode-viewer.service", "uniqnode-backup.service"] {
+        let text = of(unit);
+        assert!(
+            text.contains("[Unit]\nAfter=wg-quick@wg1.service\nWants=wg-quick@wg1.service\n"),
+            "{unit}:\n{text}"
+        );
+        assert!(
+            text.contains("[Service]\nUser=op\nGroup=op\nStateDirectory=\n"),
+            "{unit}:\n{text}"
+        );
+        assert!(!text.contains("UNIQNODE_AGENT_LISTEN"), "{unit}:\n{text}");
+        assert!(!text.contains("--listen-agent"), "{unit}:\n{text}");
+    }
+    let backup = of("uniqnode-backup.service");
+    assert!(
+        backup.ends_with(
+            "ExecStart=\nExecStart=/home/op/.local/bin/uniqnode backup ${UNIQNODE_DATA_DIR} \
+             ${UNIQNODE_BACKUP_DIR}\n"
+        ),
+        "{backup}"
+    );
+
+    // 何も home の下に無ければ ProtectHome= は unit の yes のまま(緩めない)。--after が無ければ
+    // [Unit] も無い。user 単位には User=/Group= も StateDirectory= も出ない。
+    let mut bare = system_options();
+    bare.binary = PathBuf::from("/usr/local/bin/uniqnode");
+    bare.backup_dir = PathBuf::from("/var/backups/uniqnode");
+    bare.after.clear();
+    bare.agent_listen = None;
+    let bare_serve = drop_ins(&bare, SYSTEMD_DEFAULT_PATH).expect("描ける")[0].1.clone();
+    assert!(!bare_serve.contains("ProtectHome"), "{bare_serve}");
+    assert!(!bare_serve.contains("[Unit]"), "{bare_serve}");
+    assert!(bare_serve.contains("\n[Service]\nUser=op\nGroup=op\nStateDirectory=\nEnvironment=PATH="), "{bare_serve}");
+    let user_serve = {
+        let account_home = PathBuf::from("/home/op");
+        let options = uniqnode::install::Options::defaults(
+            PathBuf::from("/home/op/store"),
+            &account_home,
+            uniqnode::install::Scope::User,
+        );
+        drop_ins(&options, SYSTEMD_DEFAULT_PATH).expect("描ける")[0].1.clone()
+    };
+    assert!(!user_serve.contains("User="), "{user_serve}");
+    assert!(!user_serve.contains("StateDirectory="), "{user_serve}");
+    assert!(!user_serve.contains("ProtectHome"), "{user_serve}");
+}
+
+/// --after の unit 名の検査と、system 単位で外部の道具を探す PATH(実行ユーザの ~/.local/bin と
+/// ~/bin を後ろに足す。sudo の secure_path には無いため)。
+#[test]
+fn after_units_need_a_type_suffix_and_the_system_tool_search_reaches_the_users_local_bin() {
+    use uniqnode::install::{check_after_unit, tool_search_path, Scope};
+    assert!(check_after_unit("wg-quick@wg1.service").is_ok());
+    assert!(check_after_unit("srv-store.mount").is_ok());
+    let no_suffix = check_after_unit("wg-quick@wg1").err().expect("断る");
+    assert!(no_suffix.contains("拡張子"), "{no_suffix}");
+    assert!(check_after_unit("").is_err());
+    assert!(check_after_unit("a b.service").is_err());
+    let options = system_options();
+    let path = tool_search_path("/usr/bin:/bin", &options.scope);
+    assert_eq!(path, "/usr/bin:/bin:/home/op/.local/bin:/home/op/bin");
+    assert_eq!(tool_search_path("/usr/bin:/bin", &Scope::User), "/usr/bin:/bin");
 }
 
 /// ロックの探りは別プロセス(実プロセスの serve)が開いているストアを見分ける。install が

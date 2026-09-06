@@ -67,8 +67,9 @@ serve・mcp・viewer のログは、何も指定しなくても `<データデ�
 
 常駐は systemd に任せる。自分のアカウントで動かすなら `uniqnode install <dir>` の 1 命令で、
 serve・viewer・毎日の backup が user 単位の unit として載り、命令は serve と viewer が同じ
-node_id を返し backup の写しが fsck で緑であることを見てから戻る(再実行は更新)。unit の
-中身と、起動・停止・更新・二重起動の手順は
+node_id を返し backup の写しが fsck で緑であることを見てから戻る(再実行は更新)。機械の
+unit として載せるなら同じ命令を sudo で `--system` 付きで打つ(常駐は sudo を打った利用者で
+走る)。unit の中身と、起動・停止・更新・二重起動・user 単位から system 単位への移行の手順は
 [docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2)。
 
 バックアップは `uniqnode backup <dir> <写し先>` で取る。serve を止めずに取れ(ロックを取らない)、

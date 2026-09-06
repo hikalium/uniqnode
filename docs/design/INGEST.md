@@ -309,12 +309,19 @@ sync サブコマンドと同じ扱い)。形の正典は node/src/main.rs の u
   注釈索引の取り込み(注釈の取り込みと照合の節)。
 - `uniqnode correct <dir> <コレクション名> <誤った言明ID> <新しい言明ID> <理由>`: 訂正の
   発行(訂正の発行の節)。
-- `PUT /v1/collections/{collection}/documents/{name}`: 文書 1 件の取り込み。本文は生バイト列
-  で、種別は name の拡張子で判定し、ref 名には拡張子を残さない。応答は doc_rev の ID・
-  new_objects・ref_updated・previous(上書きなら前版の doc_rev、新規なら null。同じ内容で
-  ref_updated が false のときは現行の doc_rev)。本体は node/src/api.rs の put_document で、
-  MCP の add_document([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))も同じ
-  関数を通る。
+- `PUT /v1/collections/{collection}/documents/{name}[?meta.<key>=<value>&...]`: 文書 1 件の
+  取り込み。本文は生バイト列で、種別は name の拡張子で判定し、ref 名には拡張子を残さない。
+  応答は doc_rev の ID・new_objects・ref_updated・previous(上書きなら前版の doc_rev、新規なら
+  null。同じ内容で ref_updated が false のときは現行の doc_rev)。本体は node/src/api.rs の
+  put_document で、MCP の add_document([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))
+  も同じ関数を通る。query の `meta.<key>=<value>` は出所を doc_rev.meta に足す欄(取り込みの
+  extra_meta。URL からの取り込みが source_url などを足すのと同じ場所): key は `[a-z0-9_]{1,32}`、
+  value は %XX をデコードして 1..=200 字(`+` は空白に読み替えない)。name・media・extractor は
+  取り込みが決めるので query で名乗れず、同じ鍵の繰り返し・`meta.` 以外の鍵・壊れた % も 400 で
+  理由を言い、何も書かれない(読み方は api.rs の parse_meta_query)。meta は doc_rev にだけ写り、
+  検索の citation の形は変えない。同じ本文の再 PUT は meta が違っても no-op(同一内容の判定は
+  source と chunks 列で、meta を見ない)。serve の読み口からのこの PUT は
+  [docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d) の「書く口」。
 - `POST /v1/collections/{collection}/fetch`: URL からの取り込み(URL からの取り込みの節)。
   ボディは `{"url": "...", "name": "..."}`(name は省略可)。応答は PUT documents と同じ
   doc_rev・new_objects・ref_updated・previous に final_url・name・media を足し、HTML なら

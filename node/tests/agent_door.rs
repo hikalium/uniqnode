@@ -205,6 +205,8 @@ fn every_row_of_the_table_passes_through_the_door() {
 
 /// 表に無い要求は method と path を言って 403 で断り、ストアには何も起きない。
 /// 許可表に行を足す(例: `POST /v1/admin/gc`)と、その行の 403 の assert が落ちる。
+/// `--agent-writable` を与えていないので、PUT は第 1 段と同じ「許可されていない」で断られる
+/// (書く口の有無で本文が変わらないことは、この行の全文一致が見張る)。
 #[test]
 fn everything_outside_the_table_is_refused_with_403() {
     let server = DoorServer::start("door-refuse", &["--listen-agent", "127.0.0.1:0"]);
@@ -246,6 +248,146 @@ fn everything_outside_the_table_is_refused_with_403() {
     assert!(!body_text(&found).contains("\"document\":\"door\""), "{}", body_text(&found));
     // 断った shutdown は効いていない: 主の口はまだ答える。
     assert_eq!(simple(&main, "GET", "/healthz", b"").status, 200);
+}
+
+/// 書く口(第 2 段): `--agent-writable notes` で notes への PUT が読み口を通って 200 になり、
+/// query の `meta.<key>=<value>` が doc_rev.meta に写る(doc_rev は主の口で読む。読み口の
+/// objects はチャンクしか通さない)。検索の citation と /citation に meta は出ない(citation の
+/// 形は変えない)。許していないコレクションへの PUT は許した一覧を言う 403、fetch は許した
+/// コレクションでも従来の 403、meta の形が違えば 400 で理由を言い、どれもストアに届かない。
+/// 読み口の log 行は PUT でも同じ形。
+///
+/// should/0137: admit の PUT の腕を消すと最初の 200 が 403 に、put_document の extra_meta を
+/// `&[]` に戻すと meta の全文一致が、handle の parse_meta_query の 400 を消すと 400 の段が
+/// (200 になって)落ち、admit の集合の検査を消すと other の 403 の本文が落ちる。
+#[test]
+fn an_allowed_collection_takes_a_put_through_the_door_and_records_where_it_came_from() {
+    let server = DoorServer::start(
+        "door-write",
+        &["--listen-agent", "127.0.0.1:0", "--agent-writable", "notes", "--agent-writable", "scratch"],
+    );
+    let main = server.main().to_string();
+    let door = server.door();
+
+    // lamalium が付ける形: ?meta.agent=<id>&meta.task=<id>(値は %XX で符号化)。
+    let path = "/v1/collections/notes/documents/memo.md?meta.agent=agent-7&meta.task=task%2F42";
+    let written = simple(&door, "PUT", path, "# memo\n\n読み口から書いた覚え書き\n".as_bytes());
+    assert_eq!(written.status, 200, "{}", body_text(&written));
+    let doc_rev = json_text_field(&body_text(&written), "doc_rev").expect("doc_rev");
+
+    // doc_rev.meta に出所が写る(鍵は正規形の順。name・media は取り込みが決めたまま)。
+    let object = simple(&main, "GET", &format!("/v1/objects/{doc_rev}"), b"");
+    assert_eq!(object.status, 200, "{}", body_text(&object));
+    let text = body_text(&object);
+    assert!(
+        text.contains(
+            "\"meta\":{\"agent\":\"agent-7\",\"media\":\"markdown\",\"name\":\"memo\",\"task\":\"task/42\"}"
+        ),
+        "{text}"
+    );
+    // 読み口からは doc_rev は読めない(チャンク限定はそのまま)。
+    assert_eq!(simple(&door, "GET", &format!("/v1/objects/{doc_rev}"), b"").status, 403);
+
+    // 検索の citation と /citation に meta は出ない。
+    let found = simple(&door, "POST", "/v1/search", "{\"query\":\"覚え書き\"}".as_bytes());
+    assert_eq!(found.status, 200, "{}", body_text(&found));
+    let found_text = body_text(&found);
+    assert!(found_text.contains("\"document\":\"memo\""), "{found_text}");
+    assert!(!found_text.contains("agent-7") && !found_text.contains("task/42"), "{found_text}");
+    let chunk_id = json_text_field(&found_text, "id").expect("チャンク ID");
+    let citation = simple(&door, "GET", &format!("/v1/objects/{chunk_id}/citation"), b"");
+    assert_eq!(citation.status, 200, "{}", body_text(&citation));
+    assert!(
+        !body_text(&citation).contains("agent") && !body_text(&citation).contains("task"),
+        "{}",
+        body_text(&citation)
+    );
+
+    // 許していないコレクション: 許した一覧を言って 403。
+    let other = simple(&door, "PUT", "/v1/collections/other/documents/memo.md", b"# other\n\nother\n");
+    assert_eq!(other.status, 403, "{}", body_text(&other));
+    assert_eq!(
+        body_text(&other),
+        "{\"error\":\"agent door: コレクション other は書けない(--agent-writable で許したのは notes, scratch)\"}"
+    );
+    // fetch は許したコレクションでも表に無い(コンテナが網に出る道)。
+    let fetch = simple(&door, "POST", "/v1/collections/notes/fetch", b"{\"url\":\"http://127.0.0.1:1/\"}");
+    assert_eq!(fetch.status, 403, "{}", body_text(&fetch));
+    assert_eq!(
+        body_text(&fetch),
+        "{\"error\":\"agent door: POST /v1/collections/notes/fetch は許可されていない\"}"
+    );
+
+    // meta の形が違えば 400 で理由を言う(門は越えている: 本文は門の断りでない)。
+    for (query, expected) in [
+        (
+            "meta.Agent=x",
+            "{\"error\":\"meta の鍵 \\\"Agent\\\" は [a-z0-9_] の 1..=32 字\"}",
+        ),
+        (
+            "agent=x",
+            "{\"error\":\"query の鍵 \\\"agent\\\" は受け付けない(受け付けるのは meta.<key> だけ)\"}",
+        ),
+        ("meta.agent=", "{\"error\":\"meta.agent の値は 1..=200 字(与えられたのは 0 字)\"}"),
+        ("meta.name=x", "{\"error\":\"meta.name は取り込みが決める鍵(query では与えられない)\"}"),
+        (
+            "meta.agent=%zz",
+            "{\"error\":\"meta.agent の値 \\\"%zz\\\": 1 バイト目の % の後に 16 進 2 桁が無い\"}",
+        ),
+    ] {
+        let bad_path = format!("/v1/collections/notes/documents/bad.md?{query}");
+        let response = simple(&door, "PUT", &bad_path, b"# bad\n\nbad\n");
+        assert_eq!(response.status, 400, "{query}: {}", body_text(&response));
+        assert_eq!(body_text(&response), expected, "{query}");
+    }
+
+    // 断った PUT はどれもストアに届いていない: 文書は notes の memo 1 件だけ。
+    let collections = simple(&main, "GET", "/v1/collections", b"");
+    assert_eq!(
+        body_text(&collections),
+        "{\"collections\":[{\"documents\":1,\"name\":\"notes\"}]}"
+    );
+
+    // 読み口の log 行は PUT でも `agent <peer> PUT <path> <status> <ms>` のまま。
+    let log = std::fs::read_to_string(server.server.dir.join("logs").join("serve.log")).expect("serve.log");
+    let mark = format!(" {} 127.0.0.1:", uniqnode::agent_door::LOG_MARK);
+    let put_line = log
+        .lines()
+        .find(|line| line.contains(&mark) && line.contains(" PUT "))
+        .unwrap_or_else(|| panic!("PUT の行が無い: {log}"));
+    assert!(put_line.contains(&format!(" PUT {path} 200 ")), "{put_line}");
+    // 起動時に、読み口から書けるコレクションを 1 行で言う。
+    assert!(log.contains("読み口から書けるコレクション: notes, scratch"), "{log}");
+}
+
+/// `--agent-writable` は `--listen-agent` があるときだけ。無いのに与えれば serve は何も
+/// 開かずに 2 で終わる(黙って捨てると「許したつもり」が残る)。名前の形が違うときも同じ。
+/// should/0137: parse_run_options の「--listen-agent が無い」の検査を消すと最初の段が
+/// (serve が上がってしまい)落ちる。
+#[test]
+fn agent_writable_without_a_door_is_refused_with_exit_2() {
+    let dir = unique_dir("door-writable-alone");
+    let run = |args: &[&str]| -> (Option<i32>, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
+            .args(["serve", dir.to_str().expect("utf-8"), "127.0.0.1:0"])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run");
+        (output.status.code(), String::from_utf8_lossy(&output.stderr).to_string())
+    };
+    let (code, stderr) = run(&["--agent-writable", "notes"]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        stderr.contains("--agent-writable notes は --listen-agent があるときだけ"),
+        "{stderr}"
+    );
+    assert!(!dir.exists(), "断るときはストアを作らない");
+    let (code, stderr) = run(&["--listen-agent", "127.0.0.1:0", "--agent-writable", "a/b"]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("--agent-writable はコレクション名"), "{stderr}");
+    assert!(!dir.exists(), "断るときはストアを作らない");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// peers を名指しした search は 400 で断る(ストアに届かない)。admit の peers の検査を

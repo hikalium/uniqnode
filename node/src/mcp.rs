@@ -145,7 +145,9 @@ impl Backend {
     ) -> Result<Written, String> {
         match self {
             Backend::Local(context) => {
-                Ok(Written::from(api::put_document(context, collection, file_name, body)))
+                // 出所の meta は持たない(ストアを直接開く形の add_document は操作者の
+                // 手元の道具で、出所は署名者で足りる)。
+                Ok(Written::from(api::put_document(context, collection, file_name, body, &[])))
             }
             Backend::Forward(client) => client.put_document(collection, file_name, body),
         }

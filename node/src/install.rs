@@ -16,9 +16,11 @@
 //! 1 手順 1 exec で、失敗は理由を言って止まる(黙って飛ばさない。must/0022)。設定は
 //! 書いた時点ではなく効果を見た時点で完了なので(should/0116)、起こした後に serve と
 //! viewer 経由の /v1/status が同じ node_id を返すこと、読み口(`--listen-agent`)があれば
-//! その /v1/status が同じ node_id を返し POST /v1/admin/gc が 403 であること、backup の unit
-//! を 1 回走らせた写し先が開けて fsck が緑であること、system 単位ならストアと写し先に
-//! 実行ユーザ以外の所有のファイルが無いことまで見る。
+//! その /v1/status が同じ node_id を返し POST /v1/admin/gc が 403 であること、書く口
+//! (`--agent-writable`)があれば許したコレクションへの PUT が門を越え許していない
+//! コレクションへの PUT が 403 であること(書かずに見る)、backup の unit を 1 回走らせた
+//! 写し先が開けて fsck が緑であること、system 単位ならストアと写し先に実行ユーザ以外の
+//! 所有のファイルが無いことまで見る。
 
 use crate::http;
 use crate::json::Json;
@@ -91,6 +93,13 @@ pub const DEFAULT_VIEWER_LISTEN: &str = "127.0.0.1:7450";
 /// `--listen-agent ${UNIQNODE_AGENT_LISTEN}` を書く(serve 側の引数の名と同じ字句)。
 pub const AGENT_LISTEN_ENV: &str = "UNIQNODE_AGENT_LISTEN";
 pub const AGENT_LISTEN_FLAG: &str = "--listen-agent";
+/// 読み口から書けるコレクション(第 2 段。docs/design/AGENT_DOOR.md)。serve の引数は
+/// `--agent-writable <c>` の繰り返しで、drop-in は集合を空白で分けた
+/// `Environment=UNIQNODE_AGENT_WRITABLE="<c1> <c2>"` に写し、ExecStart= の末尾に
+/// `--agent-writable <c>` を集合の数だけそのまま並べる(環境変数の展開に頼らない。値を
+/// そのまま書くのが一番単純で、読み手が unit だけで集合を読める)。
+pub const AGENT_WRITABLE_ENV: &str = "UNIQNODE_AGENT_WRITABLE";
+pub const AGENT_WRITABLE_FLAG: &str = "--agent-writable";
 /// user 単位の常駐を install 自身が止めて外す指定(`--system` のときだけ)。
 pub const TAKE_OVER_FLAG: &str = "--take-over-user-units";
 /// 読み口へ届いてよい相手を firewall(ufw)に入れる指定(`--system` と `--listen-agent` の
@@ -449,6 +458,9 @@ pub struct Options {
     pub after: Vec<String>,
     /// 読み口の待ち受け(`--listen-agent`)。serve の第 2 の TcpListener。
     pub agent_listen: Option<String>,
+    /// 読み口から書けるコレクション(`--agent-writable`。与えられた順)。読み口があるとき
+    /// だけ。空なら読み口は読むだけ。
+    pub agent_writable: Vec<String>,
     /// true なら、据える前に実行ユーザの user 単位の常駐(STARTED_UNITS)を止めて外す
     /// (`--take-over-user-units`。system 単位だけ)。
     pub take_over_user_units: bool,
@@ -483,6 +495,7 @@ impl Options {
             scope,
             after: Vec::new(),
             agent_listen: None,
+            agent_writable: Vec::new(),
             take_over_user_units: false,
             firewall_allow: None,
             firewall_backend: None,
@@ -667,6 +680,20 @@ pub fn drop_ins(
                 if let Some(agent_listen) = &options.agent_listen {
                     lines.push(environment_line(AGENT_LISTEN_ENV, agent_listen)?);
                     exec_tail = format!(" {AGENT_LISTEN_FLAG} ${{{AGENT_LISTEN_ENV}}}");
+                    if !options.agent_writable.is_empty() {
+                        // 集合は環境変数に 1 本で写し(読み手のため)、ExecStart= には値を
+                        // そのまま並べる(1 語ずつの展開に頼らない)。
+                        lines.push(environment_line(
+                            AGENT_WRITABLE_ENV,
+                            &options.agent_writable.join(" "),
+                        )?);
+                        for collection in &options.agent_writable {
+                            exec_tail.push_str(&format!(
+                                " {AGENT_WRITABLE_FLAG} {}",
+                                unit_word(collection)?
+                            ));
+                        }
+                    }
                 }
                 if let Some(FirewallBackend::Nft(nft)) = &options.firewall_backend {
                     // 読み口の firewall は serve を起こすたびに入れ直す(nftables.service が
@@ -761,6 +788,16 @@ pub fn normalize(options: Options) -> Result<Options, String> {
             ));
         }
     }
+    for collection in &options.agent_writable {
+        check_agent_writable(collection)?;
+    }
+    if !options.agent_writable.is_empty() && options.agent_listen.is_none() {
+        return Err(format!(
+            "{AGENT_WRITABLE_FLAG} {} は {AGENT_LISTEN_FLAG} があるときだけ受け付ける(書く\
+             許可は読み口に掛かるもので、読み口が無ければ効かせる先が無い)",
+            options.agent_writable.join(" ")
+        ));
+    }
     if !options.after.is_empty() && !options.scope.is_system() {
         return Err(format!(
             "--after {} は --system のときだけ受け付ける(user unit は system unit を待てない: \
@@ -820,10 +857,24 @@ pub fn normalize(options: Options) -> Result<Options, String> {
         scope: options.scope,
         after: options.after,
         agent_listen: options.agent_listen,
+        agent_writable: options.agent_writable,
         take_over_user_units: options.take_over_user_units,
         firewall_allow: options.firewall_allow,
         firewall_backend: options.firewall_backend,
     })
+}
+
+/// `--agent-writable` の値はコレクション名 1 つ: 空でなく、/ と空白を含まない 1 語(空白を
+/// 断るのは、drop-in が集合を空白で分けて 1 つの環境変数に写すため)。serve の引数の読み手
+/// (node/src/main.rs)と install の normalize が同じ検査を使う(should/0135)。
+pub fn check_agent_writable(collection: &str) -> Result<(), String> {
+    if collection.is_empty() || collection.contains('/') || collection.chars().any(char::is_whitespace)
+    {
+        return Err(format!(
+            "{AGENT_WRITABLE_FLAG} はコレクション名(空でなく / と空白を含まない 1 語): {collection:?}"
+        ));
+    }
+    Ok(())
 }
 
 /// `--firewall-allow` の値は IPv4 アドレス 1 つ(範囲や名前は受けない。ufw と nft に渡す
@@ -1102,6 +1153,68 @@ fn wait_for_agent_door(scope: &Scope, node_id: &str, agent_listen: &str) -> Resu
         }
         std::thread::sleep(TICK);
     }
+}
+
+/// 書く口の確認に使う文書名。拡張子が無いので api.rs の put_document が 400 で断り、ストア
+/// には何も書かれない(試し書きはしない)。読み口の門を越えた証拠は「403 でなく、本文が門の
+/// 断りでない」ことで、api.rs まで届かなければこの 400 は出ない。
+pub const WRITABLE_PROBE_NAME: &str = "uniqnode-install-probe";
+
+/// 読み口の書く口(`--agent-writable`)を、書かずに確かめる。許した各コレクションへの PUT
+/// (拡張子の無い文書名、空の本文)が門を越えて api.rs の 400 で止まること、許していない
+/// コレクションへの PUT が門の 403 の文言で断られること。返り値は報告の右側。
+fn verify_agent_writable(agent_listen: &str, writable: &[String]) -> Result<String, String> {
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+    let put = |collection: &str| -> Result<http::ClientResponse, String> {
+        http::request(
+            agent_listen,
+            "PUT",
+            &format!("/v1/collections/{collection}/documents/{WRITABLE_PROBE_NAME}"),
+            Some(("application/octet-stream", b"")),
+            REQUEST_TIMEOUT,
+        )
+    };
+    for collection in writable {
+        let response = put(collection)?;
+        let body = String::from_utf8_lossy(&response.body).to_string();
+        if response.status == 403 || body.contains(crate::agent_door::ERROR_PREFIX) {
+            return Err(format!(
+                "読み口 {agent_listen} が {AGENT_WRITABLE_FLAG} {collection} への PUT を門で断った\
+                 ({}: {})",
+                response.status,
+                http::body_head(&response.body)
+            ));
+        }
+        if response.status != 400 {
+            return Err(format!(
+                "読み口 {agent_listen} が {collection} への拡張子の無い PUT を 400 で断らず {} を\
+                 返した(何かを書いたかもしれない): {}",
+                response.status,
+                http::body_head(&response.body)
+            ));
+        }
+    }
+    // 許していない名前: 集合に無いことを確かめてから使う。
+    let mut unallowed = WRITABLE_PROBE_NAME.to_string();
+    while writable.iter().any(|allowed| *allowed == unallowed) {
+        unallowed.push_str("-x");
+    }
+    let response = put(&unallowed)?;
+    let body = String::from_utf8_lossy(&response.body).to_string();
+    let refusal_mark = format!("は書けない({AGENT_WRITABLE_FLAG} で許したのは");
+    if response.status != 403 || !body.contains(&refusal_mark) {
+        return Err(format!(
+            "読み口 {agent_listen} が許していないコレクション {unallowed} への PUT を 403 の文言で\
+             断らず {} を返した: {}",
+            response.status,
+            http::body_head(&response.body)
+        ));
+    }
+    Ok(format!(
+        "{} への PUT が門を越えて 400 で止まり(何も書かない)、{unallowed} への PUT は 403 で\
+         断られた",
+        writable.join(", ")
+    ))
 }
 
 fn fsck_summary(report: &FsckReport) -> String {
@@ -1682,6 +1795,10 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
                 waited.as_millis()
             ),
         )?;
+        if !options.agent_writable.is_empty() {
+            let seen = verify_agent_writable(agent_listen, &options.agent_writable)?;
+            say(out, &format!("確認: 読み口の書く口: {seen}"))?;
+        }
     }
     systemctl_ok(scope, &["start", BACKUP_UNIT]).map_err(|e| {
         format!(
@@ -1767,6 +1884,7 @@ mod tests {
             scope: Scope::User,
             after: Vec::new(),
             agent_listen: None,
+            agent_writable: Vec::new(),
             take_over_user_units: false,
             firewall_allow: None,
             firewall_backend: None,

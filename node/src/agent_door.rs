@@ -1,10 +1,12 @@
 //! serve の読み口(agent door。AGENT_DOOR (uuid:02f79aec-2f12-41e6-bede-1557d4719e4d))。
 //!
 //! `uniqnode serve <dir> <listen> --listen-agent <addr>` で束縛する第 2 の TcpListener。
-//! 別の機械で走る LLM エージェントに、ストアを読む口だけを見せるためのもので、
-//! (method, path) の許可表 1 つを持ち、表に無い要求は 403 で断り、表にある要求だけを
-//! 主の口と同じ api::handle に委ねる。何を返すかの判断は api.rs の 1 箇所にあり
-//! (should/0135)、ここは門でしかない。
+//! 別の機械で走る LLM エージェントに、ストアを読む口と、許したコレクションへ書く口だけを
+//! 見せるためのもので、(method, path) の許可表 1 つを持ち、表に無い要求は 403 で断り、
+//! 表にある要求だけを主の口と同じ api::handle に委ねる。書く口は
+//! `--agent-writable <collection>`(複数可)で許したコレクションへの
+//! `PUT /v1/collections/{c}/documents/{name}` だけで、1 つも許していなければ表に載らない。
+//! 何を返すかの判断は api.rs の 1 箇所にあり(should/0135)、ここは門でしかない。
 //!
 //! 境界は 3 つで、この module が持つのはそのうちの 1 つ(許可表)である。残りの 2 つ
 //! (束縛先を WireGuard の口に限ること、firewall)は運用が持つ。
@@ -49,12 +51,23 @@ pub enum Row {
     Object,
     Citation,
     Collections,
+    /// `PUT /v1/collections/{c}/documents/{name}`。c が `--agent-writable` の集合にある
+    /// ときだけ(第 2 段)。
+    PutDocument,
 }
 
 /// 要求を許可表に当てる。表に無ければ 403、表にある search の本文に peers があれば 400。
+/// writable は `--agent-writable` で許したコレクション(与えられた順)。PUT は c がその
+/// 集合にあるときだけ表にあり、集合が空なら PUT は表に無い要求として断る。
 /// 本文の JSON が壊れているときは断らず通す(壊れた本文を断るのは api::handle の仕事で、
 /// ここで断ると同じ判断が 2 箇所に生える)。
-pub fn admit(method: &str, path: &str, body: &[u8]) -> Result<Row, Response> {
+pub fn admit(method: &str, path: &str, body: &[u8], writable: &[String]) -> Result<Row, Response> {
+    // 書く口の的(PUT で、1 つでも許したコレクションがあるときだけ形を見る)。path の分け方は
+    // 主の口と同じ api::document_path(should/0135)。
+    let put_target = match method {
+        "PUT" if !writable.is_empty() => api::document_path(path),
+        _ => None,
+    };
     let row = match (method, path) {
         ("GET", "/healthz") => Row::Healthz,
         ("GET", "/v1/status") => Row::Status,
@@ -62,6 +75,21 @@ pub fn admit(method: &str, path: &str, body: &[u8]) -> Result<Row, Response> {
         ("GET", "/v1/collections") => Row::Collections,
         ("GET", _) if object_row(path) == Some(Row::Object) => Row::Object,
         ("GET", _) if object_row(path) == Some(Row::Citation) => Row::Citation,
+        ("PUT", _) if put_target.is_some() => {
+            let target = put_target.expect("直前に見た形");
+            if !writable.iter().any(|allowed| allowed == target.collection) {
+                return Err(api::error_response(
+                    403,
+                    &format!(
+                        "{ERROR_PREFIX}コレクション {} は書けない({} で許したのは {})",
+                        target.collection,
+                        crate::install::AGENT_WRITABLE_FLAG,
+                        writable.join(", ")
+                    ),
+                ));
+            }
+            Row::PutDocument
+        }
         _ => {
             return Err(api::error_response(
                 403,
@@ -117,10 +145,15 @@ pub fn screen(row: Row, response: Response) -> Response {
 
 /// 読み口の要求 1 本を捌く: 許可表に当て、通れば主の口と同じ api::handle に委ね、応答を
 /// 検め、1 行を記録する。記録は断った要求にも残る(誰が何を試したかは、通した要求と
-/// 同じだけ読みたい記録である)。
-pub fn handle(context: &ApiContext, request: &Request, peer: std::net::SocketAddr) -> Response {
+/// 同じだけ読みたい記録である)。writable は `--agent-writable` の集合(admit に渡す)。
+pub fn handle(
+    context: &ApiContext,
+    request: &Request,
+    peer: std::net::SocketAddr,
+    writable: &[String],
+) -> Response {
     let started = Instant::now();
-    let response = match admit(&request.method, &request.path, &request.body) {
+    let response = match admit(&request.method, &request.path, &request.body, writable) {
         Ok(row) => screen(row, api::handle(context, request)),
         Err(refused) => refused,
     };
@@ -194,38 +227,88 @@ mod tests {
         String::from_utf8(response.body.clone()).expect("utf-8")
     }
 
+    /// 読むだけの読み口(--agent-writable 無し)。
+    const READ_ONLY: &[String] = &[];
+
+    fn writable(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
     /// 許可表の各行は行として当たり、表に無いものは 403 の本文に method と path を
     /// そのまま言う。期待値はリテラルで書く(should/0137)。
     #[test]
     fn the_table_admits_its_rows_and_names_what_it_refuses() {
         let id = format!("s256:{}", "a".repeat(64));
-        assert_eq!(admit("GET", "/healthz", b"").ok(), Some(Row::Healthz));
-        assert_eq!(admit("GET", "/v1/status", b"").ok(), Some(Row::Status));
-        assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\"}").ok(), Some(Row::Search));
-        assert_eq!(admit("GET", &format!("/v1/objects/{id}"), b"").ok(), Some(Row::Object));
-        assert_eq!(admit("GET", &format!("/v1/objects/{id}/citation"), b"").ok(), Some(Row::Citation));
-        assert_eq!(admit("GET", "/v1/collections", b"").ok(), Some(Row::Collections));
+        assert_eq!(admit("GET", "/healthz", b"", READ_ONLY).ok(), Some(Row::Healthz));
+        assert_eq!(admit("GET", "/v1/status", b"", READ_ONLY).ok(), Some(Row::Status));
+        assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\"}", READ_ONLY).ok(), Some(Row::Search));
+        assert_eq!(admit("GET", &format!("/v1/objects/{id}"), b"", READ_ONLY).ok(), Some(Row::Object));
+        assert_eq!(
+            admit("GET", &format!("/v1/objects/{id}/citation"), b"", READ_ONLY).ok(),
+            Some(Row::Citation)
+        );
+        assert_eq!(admit("GET", "/v1/collections", b"", READ_ONLY).ok(), Some(Row::Collections));
 
-        let refused = admit("POST", "/v1/admin/gc", b"").expect_err("表に無い");
+        let refused = admit("POST", "/v1/admin/gc", b"", READ_ONLY).expect_err("表に無い");
         assert_eq!(refused.status, 403);
         assert_eq!(
             body(&refused),
             "{\"error\":\"agent door: POST /v1/admin/gc は許可されていない\"}"
         );
         // 同じ path でも method が違えば表に無い。
-        assert_eq!(admit("POST", "/v1/status", b"").expect_err("表に無い").status, 403);
-        assert_eq!(admit("GET", "/v1/search", b"").expect_err("表に無い").status, 403);
+        assert_eq!(admit("POST", "/v1/status", b"", READ_ONLY).expect_err("表に無い").status, 403);
+        assert_eq!(admit("GET", "/v1/search", b"", READ_ONLY).expect_err("表に無い").status, 403);
         // オブジェクトの下の他の口(rendition・referrers)と、ID の形でない id。
         assert_eq!(
-            admit("GET", &format!("/v1/objects/{id}/rendition"), b"").expect_err("表に無い").status,
+            admit("GET", &format!("/v1/objects/{id}/rendition"), b"", READ_ONLY).expect_err("表に無い").status,
             403
         );
         assert_eq!(
-            admit("GET", &format!("/v1/objects/{id}/referrers"), b"").expect_err("表に無い").status,
+            admit("GET", &format!("/v1/objects/{id}/referrers"), b"", READ_ONLY).expect_err("表に無い").status,
             403
         );
-        assert_eq!(admit("GET", "/v1/objects/abc", b"").expect_err("ID でない").status, 403);
-        assert_eq!(admit("GET", "/v1/objects/abc/citation", b"").expect_err("ID でない").status, 403);
+        assert_eq!(admit("GET", "/v1/objects/abc", b"", READ_ONLY).expect_err("ID でない").status, 403);
+        assert_eq!(admit("GET", "/v1/objects/abc/citation", b"", READ_ONLY).expect_err("ID でない").status, 403);
+    }
+
+    /// 書く口(第 2 段): PUT は --agent-writable の集合にあるコレクションだけ通り、集合に
+    /// 無いコレクションは許した一覧を言って 403、集合が空なら従来どおり「許可されていない」。
+    /// fetch はコレクションを許していても表に無い。should/0137: admit の PUT の腕を消すと
+    /// 最初の Ok の assert が落ち、集合の検査を消すと other の 403 の本文の assert が落ちる。
+    #[test]
+    fn a_put_passes_only_for_a_collection_that_was_allowed() {
+        let allowed = writable(&["notes", "web"]);
+        let path = "/v1/collections/notes/documents/memo.md";
+        assert_eq!(admit("PUT", path, b"# memo", &allowed).ok(), Some(Row::PutDocument));
+        // query(出所の meta)が付いていても的はコレクションで決まる(query の検査は api.rs)。
+        assert_eq!(
+            admit("PUT", &format!("{path}?meta.agent=a1"), b"", &allowed).ok(),
+            Some(Row::PutDocument)
+        );
+        assert_eq!(admit("PUT", "/v1/collections/web/documents/p.html", b"", &allowed).ok(), Some(Row::PutDocument));
+
+        let other = admit("PUT", "/v1/collections/other/documents/memo.md", b"", &allowed).expect_err("集合に無い");
+        assert_eq!(other.status, 403);
+        assert_eq!(
+            body(&other),
+            "{\"error\":\"agent door: コレクション other は書けない(--agent-writable で許したのは notes, web)\"}"
+        );
+        // 集合が空なら PUT は表に無い(第 1 段と同じ本文)。
+        let read_only = admit("PUT", path, b"", READ_ONLY).expect_err("表に無い");
+        assert_eq!(read_only.status, 403);
+        assert_eq!(
+            body(&read_only),
+            "{\"error\":\"agent door: PUT /v1/collections/notes/documents/memo.md は許可されていない\"}"
+        );
+        // 許したコレクションでも fetch(網に出る道)と、documents/ の形でない PUT は表に無い。
+        let fetch = admit("POST", "/v1/collections/notes/fetch", b"{}", &allowed).expect_err("表に無い");
+        assert_eq!(fetch.status, 403);
+        assert_eq!(
+            body(&fetch),
+            "{\"error\":\"agent door: POST /v1/collections/notes/fetch は許可されていない\"}"
+        );
+        assert_eq!(admit("PUT", "/v1/collections/notes", b"", &allowed).expect_err("表に無い").status, 403);
+        assert_eq!(admit("PUT", "/v1/refs/x", b"", &allowed).expect_err("表に無い").status, 403);
     }
 
     /// peers を名指しした search は値によらず 400。壊れた JSON はここでは断らない
@@ -238,11 +321,11 @@ mod tests {
             "{\"query\":\"x\",\"peers\":null}",
             "{\"query\":\"x\",\"peers\":[\"127.0.0.1:1\"]}",
         ] {
-            let refused = admit("POST", "/v1/search", body_text.as_bytes()).expect_err(body_text);
+            let refused = admit("POST", "/v1/search", body_text.as_bytes(), READ_ONLY).expect_err(body_text);
             assert_eq!(refused.status, 400, "{body_text}");
             assert_eq!(body(&refused), "{\"error\":\"agent door: peers は使えない\"}");
         }
-        assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\",").ok(), Some(Row::Search));
+        assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\",", READ_ONLY).ok(), Some(Row::Search));
     }
 
     /// 応答の検め: オブジェクトの行だけ、チャンク以外を 403 に差し替える。他の行と、

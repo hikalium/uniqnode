@@ -2182,23 +2182,128 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
         if method != "PUT" {
             return error_response(405, "PUT のみ");
         }
-        let Some((collection, name)) = rest.split_once("/documents/") else {
+        let Some(target) = document_path(path) else {
             return error_response(404, "/v1/collections/{c}/documents/{name} の形");
         };
-        return put_document(context, collection, name, &request.body);
+        // 出所の meta(?meta.<key>=<value>)。形が違えば取り込む前に 400 で理由を言う。
+        let meta = match parse_meta_query(target.query) {
+            Ok(meta) => meta,
+            Err(reason) => return error_response(400, &reason),
+        };
+        return put_document(context, target.collection, target.name, &request.body, &meta);
     }
 
     error_response(404, "no such endpoint")
 }
 
+/// `PUT /v1/collections/{c}/documents/{name}[?query]` の path を分けたもの。読み口の許可表
+/// (node/src/agent_door.rs)は collection だけを見て通すかを決め、主の口の handle は 3 つ
+/// とも使う。分け方はここ 1 箇所(should/0135)。
+pub struct DocumentPath<'a> {
+    pub collection: &'a str,
+    pub name: &'a str,
+    /// `?` の後ろ(無ければ None。`?` だけなら Some(""))。
+    pub query: Option<&'a str>,
+}
+
+/// path が `/v1/collections/{c}/documents/{name}[?query]` の形なら分ける。c と name は空でも
+/// 通す(空を断って理由を言うのは put_document の仕事で、ここは形の見分けだけ)。
+pub fn document_path(path: &str) -> Option<DocumentPath<'_>> {
+    let (path, query) = match path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (path, None),
+    };
+    let rest = path.strip_prefix("/v1/collections/")?;
+    let (collection, name) = rest.split_once("/documents/")?;
+    Some(DocumentPath { collection, name, query })
+}
+
+/// PUT の query で受け付ける出所の鍵の頭。`?meta.agent=a1&meta.task=t7` のように書く。
+pub const META_QUERY_PREFIX: &str = "meta.";
+/// meta の鍵の長さの上限(字種は [a-z0-9_])。
+pub const META_KEY_MAX_CHARS: usize = 32;
+/// meta の値(パーセントデコード後)の長さの上限(文字数。下限は 1)。
+pub const META_VALUE_MAX_CHARS: usize = 200;
+/// 取り込みが決める鍵。query で名乗っても ingest_document は上書きしない(黙って捨てる形に
+/// なる)ので、ここで断る(must/0022)。
+pub const META_RESERVED_KEYS: [&str; 3] = ["name", "media", "extractor"];
+
+/// PUT の query を doc_rev.meta に足す鍵の列に読む。受け付けるのは `meta.<key>=<value>` だけ
+/// で、key は [a-z0-9_]{1,32}、value はパーセントデコードして 1..=200 字。同じ鍵の繰り返し、
+/// meta. 以外の鍵、取り込みが決める鍵(name・media・extractor)は 400 の理由になる。query が
+/// 無い(None)か空なら空の列。`+` は空白に読み替えない(値は %XX でだけ符号化する)。
+pub fn parse_meta_query(query: Option<&str>) -> Result<Vec<(String, c1::Value)>, String> {
+    let mut meta: Vec<(String, c1::Value)> = Vec::new();
+    for segment in query.unwrap_or("").split('&').filter(|segment| !segment.is_empty()) {
+        let Some((raw_key, raw_value)) = segment.split_once('=') else {
+            return Err(format!("query {segment:?} に = が無い(meta.<key>=<value> の形)"));
+        };
+        let Some(key) = raw_key.strip_prefix(META_QUERY_PREFIX) else {
+            return Err(format!(
+                "query の鍵 {raw_key:?} は受け付けない(受け付けるのは {META_QUERY_PREFIX}<key> だけ)"
+            ));
+        };
+        let key_is_plain =
+            key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        if key.is_empty() || key.len() > META_KEY_MAX_CHARS || !key_is_plain {
+            return Err(format!("meta の鍵 {key:?} は [a-z0-9_] の 1..={META_KEY_MAX_CHARS} 字"));
+        }
+        if META_RESERVED_KEYS.contains(&key) {
+            return Err(format!("meta.{key} は取り込みが決める鍵(query では与えられない)"));
+        }
+        if meta.iter().any(|(seen, _)| seen == key) {
+            return Err(format!("meta.{key} が 2 度ある"));
+        }
+        let value = percent_decode(raw_value)
+            .map_err(|reason| format!("meta.{key} の値 {raw_value:?}: {reason}"))?;
+        let chars = value.chars().count();
+        if chars == 0 || chars > META_VALUE_MAX_CHARS {
+            return Err(format!(
+                "meta.{key} の値は 1..={META_VALUE_MAX_CHARS} 字(与えられたのは {chars} 字)"
+            ));
+        }
+        meta.push((key.to_string(), c1::Value::Text(value)));
+    }
+    Ok(meta)
+}
+
+/// %XX をバイトに戻して UTF-8 として読む。壊れた %(16 進 2 桁が続かない)と UTF-8 に
+/// ならない列は理由を言って断る。
+fn percent_decode(text: &str) -> Result<String, String> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] != b'%' {
+            decoded.push(bytes[at]);
+            at += 1;
+            continue;
+        }
+        let pair = bytes.get(at + 1..at + 3).and_then(|pair| std::str::from_utf8(pair).ok());
+        let Some(byte) = pair.and_then(|pair| u8::from_str_radix(pair, 16).ok()) else {
+            return Err(format!("{} バイト目の % の後に 16 進 2 桁が無い", at + 1));
+        };
+        decoded.push(byte);
+        at += 3;
+    }
+    String::from_utf8(decoded).map_err(|_| "デコードした値が UTF-8 でない".to_string())
+}
+
 /// PUT /v1/collections/{collection}/documents/{name} の本体。本文は生バイト列、種別は
-/// name の拡張子で判定し、ref 名には拡張子を残さない。応答は doc_rev・new_objects・
-/// ref_updated・previous。
+/// name の拡張子で判定し、ref 名には拡張子を残さない。meta は doc_rev.meta に足す出所
+/// (主の口は query の `?meta.<key>=<value>` を parse_meta_query で読んで渡し、MCP の
+/// add_document は空で呼ぶ)。応答は doc_rev・new_objects・ref_updated・previous。
 ///
 /// HTTP の封筒を外した形で公開するのは、MCP の add_document がストアを直接開く形でも
 /// 同じ関数を呼ぶためである(転送する形は同じ口へ HTTP で回す。判断を二重に実装しない。
 /// should/0135)。
-pub fn put_document(context: &ApiContext, collection: &str, name: &str, body: &[u8]) -> Response {
+pub fn put_document(
+    context: &ApiContext,
+    collection: &str,
+    name: &str,
+    body: &[u8],
+    meta: &[(String, c1::Value)],
+) -> Response {
     if collection.is_empty() || name.is_empty() {
         return error_response(400, "コレクション名と文書名が要る");
     }
@@ -2243,7 +2348,7 @@ pub fn put_document(context: &ApiContext, collection: &str, name: &str, body: &[
         media,
         chunks: &chunks,
         extractor: extractor_label,
-        extra_meta: &[],
+        extra_meta: meta,
     };
     let mut store = context.store.lock().expect("lock");
     let outcome = match crate::ingest::ingest_document(&mut store, &input) {
@@ -2261,6 +2366,75 @@ pub fn put_document(context: &ApiContext, collection: &str, name: &str, body: &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PUT の path の分け方と、出所の meta の query の読み方。期待値はリテラル
+    /// (should/0137): parse_meta_query の鍵の字種の検査を消すと `meta.Agent` の段が、
+    /// 予約鍵の検査を消すと `meta.name` の段が、percent_decode を素通しにすると `%zz` の
+    /// 段が落ちる。
+    #[test]
+    fn a_put_path_splits_into_collection_name_and_query_and_the_meta_query_is_strict() {
+        let target = document_path("/v1/collections/notes/documents/memo.md?meta.agent=a1")
+            .expect("形");
+        assert_eq!((target.collection, target.name, target.query), ("notes", "memo.md", Some("meta.agent=a1")));
+        let bare = document_path("/v1/collections/notes/documents/memo.md").expect("形");
+        assert_eq!((bare.collection, bare.name, bare.query), ("notes", "memo.md", None));
+        assert!(document_path("/v1/collections/notes/fetch").is_none());
+        assert!(document_path("/v1/objects/x").is_none());
+
+        let read = |query: &str| parse_meta_query(Some(query));
+        let meta = read("meta.agent=agent-7&meta.task=task%2F42&meta.note=%E4%B8%96%E4%BB%A3")
+            .expect("読める");
+        assert_eq!(
+            meta,
+            vec![
+                ("agent".to_string(), c1::Value::Text("agent-7".to_string())),
+                ("task".to_string(), c1::Value::Text("task/42".to_string())),
+                ("note".to_string(), c1::Value::Text("世代".to_string())),
+            ]
+        );
+        assert_eq!(parse_meta_query(None).expect("無し"), Vec::new());
+        assert_eq!(read("").expect("空"), Vec::new());
+        assert_eq!(read("&&").expect("空の区切りだけ"), Vec::new());
+        // + は空白に読み替えない。
+        assert_eq!(read("meta.a=x+y").expect("読める")[0].1, c1::Value::Text("x+y".to_string()));
+
+        let refused = |query: &str| read(query).expect_err(query);
+        assert_eq!(
+            refused("meta.Agent=x"),
+            "meta の鍵 \"Agent\" は [a-z0-9_] の 1..=32 字"
+        );
+        assert_eq!(refused("meta.=x"), "meta の鍵 \"\" は [a-z0-9_] の 1..=32 字");
+        assert_eq!(
+            refused(&format!("meta.{}=x", "k".repeat(33))),
+            format!("meta の鍵 {:?} は [a-z0-9_] の 1..=32 字", "k".repeat(33))
+        );
+        assert_eq!(
+            refused("agent=x"),
+            "query の鍵 \"agent\" は受け付けない(受け付けるのは meta.<key> だけ)"
+        );
+        assert_eq!(refused("meta.agent"), "query \"meta.agent\" に = が無い(meta.<key>=<value> の形)");
+        assert_eq!(refused("meta.agent="), "meta.agent の値は 1..=200 字(与えられたのは 0 字)");
+        assert_eq!(
+            refused(&format!("meta.agent={}", "v".repeat(201))),
+            "meta.agent の値は 1..=200 字(与えられたのは 201 字)"
+        );
+        assert_eq!(read(&format!("meta.agent={}", "v".repeat(200))).expect("上限ちょうど").len(), 1);
+        assert_eq!(refused("meta.name=x"), "meta.name は取り込みが決める鍵(query では与えられない)");
+        assert_eq!(refused("meta.media=x"), "meta.media は取り込みが決める鍵(query では与えられない)");
+        assert_eq!(refused("meta.agent=a&meta.agent=b"), "meta.agent が 2 度ある");
+        assert_eq!(
+            refused("meta.agent=%zz"),
+            "meta.agent の値 \"%zz\": 1 バイト目の % の後に 16 進 2 桁が無い"
+        );
+        assert_eq!(
+            refused("meta.agent=ab%4"),
+            "meta.agent の値 \"ab%4\": 3 バイト目の % の後に 16 進 2 桁が無い"
+        );
+        assert_eq!(
+            refused("meta.agent=%ff"),
+            "meta.agent の値 \"%ff\": デコードした値が UTF-8 でない"
+        );
+    }
 
     /// REST の線の上の形は、書き手と読み手が噛み合う。走っている serve へ転送する形の
     /// MCP は、この読み手だけを頼りに出典を組み直すので、片方だけが直ると出典が消える。

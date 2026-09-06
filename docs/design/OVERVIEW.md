@@ -72,8 +72,10 @@ fetch の 2 つの道具として見える。返る答えには出典(文書名�
 URL を取り込む fetch_url も見える(既定は読むだけ)
 ([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))。別の機械で走るエージェントには、
 serve が `--listen-agent` で第 2 の口(読み口)を束縛して見せる。読み口は許可表にある読む要求
-(healthz・status・search・objects のチャンク・citation・collections)だけを主の口と同じ判断に
-委ね、admin・sync・fetch・PUT のような管理と書き込みの口は 403 で断る
+(healthz・status・search・objects のチャンク・citation・collections)と、`--agent-writable` で
+許したコレクションへの PUT(出所は `?meta.agent=…&meta.task=…` で doc_rev に残る)だけを主の口と
+同じ判断に委ね、admin・sync・fetch・他のコレクションへの PUT のような管理と書き込みの口は
+403 で断る
 ([docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d))。常駐するもの(serve と MCP
 アダプタ、次に述べるビューワ)は、何が起きたかの記録を既定で `<データディレクトリ>/logs/` に残す。端末を離れても
 失われず、大きさで回転するので際限なく太りもしない

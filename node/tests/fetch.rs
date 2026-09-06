@@ -1,17 +1,13 @@
 //! URL からの取り込みの統合テスト(INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の
 //! 「URL からの取り込み」節)。網には出ない: テストの中で 127.0.0.1 の別ポートに小さな
-//! HTTP サーバ(TestSite)を立て、固定の HTML・PDF・素文・転送・404 を返す。実プロセスの
+//! HTTP サーバ(common::TestSite)を立て、固定の HTML・PDF・素文・転送・404 を返す。実プロセスの
 //! serve に生 HTTP/1.1 で POST /v1/collections/{c}/fetch を投げ(should/0138)、CLI は
 //! 実プロセスで起こす。curl と pdftotext は要る(無ければ導入手順を示して落ちる。
 //! should/0128)。
 
 mod common;
 use common::*;
-use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
 
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_uniqnode")
@@ -31,139 +27,6 @@ const PAGE_HTML: &str = "<!DOCTYPE html>\n<html><head><title>紙面</title>\n\
     <img src=\"pic.png\" alt=\"絵\">\n\
     <script>var a = 1;</script>\n\
     </body></html>\n";
-
-/// 相手が返す 1 件。
-#[derive(Clone)]
-struct Canned {
-    status: u16,
-    content_type: Option<&'static str>,
-    body: Vec<u8>,
-    location: Option<String>,
-}
-
-impl Canned {
-    fn ok(content_type: Option<&'static str>, body: &[u8]) -> Canned {
-        Canned {
-            status: 200,
-            content_type,
-            body: body.to_vec(),
-            location: None,
-        }
-    }
-    fn redirect(status: u16, location: &str) -> Canned {
-        Canned {
-            status,
-            content_type: None,
-            body: Vec::new(),
-            location: Some(location.to_string()),
-        }
-    }
-}
-
-/// 127.0.0.1 の別ポートで待つ小さな HTTP サーバ。パスごとに決めた応答を返し、受けた要求の
-/// 頭(要求行とヘッダ)を記録する(curl が実際に何を送ったかを検査する。should/0138)。
-/// 知らないパスは 404。応答ごとに接続を閉じる。
-struct TestSite {
-    address: String,
-    routes: Arc<Mutex<BTreeMap<String, Canned>>>,
-    requests: Arc<Mutex<Vec<String>>>,
-}
-
-impl TestSite {
-    fn start(routes: Vec<(&str, Canned)>) -> TestSite {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test site");
-        let address = listener.local_addr().expect("addr").to_string();
-        let routes: Arc<Mutex<BTreeMap<String, Canned>>> = Arc::new(Mutex::new(
-            routes
-                .into_iter()
-                .map(|(path, canned)| (path.to_string(), canned))
-                .collect(),
-        ));
-        let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let (routes_for_thread, requests_for_thread) = (routes.clone(), requests.clone());
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { continue };
-                let (routes, requests) = (routes_for_thread.clone(), requests_for_thread.clone());
-                std::thread::spawn(move || answer(stream, &routes, &requests));
-            }
-        });
-        TestSite {
-            address,
-            routes,
-            requests,
-        }
-    }
-
-    fn url(&self, path: &str) -> String {
-        format!("http://{}{path}", self.address)
-    }
-
-    /// 応答を差し替える(同じ URL の 2 回目が別の内容になる場合を作る)。
-    fn set(&self, path: &str, canned: Canned) {
-        self.routes
-            .lock()
-            .expect("lock")
-            .insert(path.to_string(), canned);
-    }
-
-    fn requests(&self) -> Vec<String> {
-        self.requests.lock().expect("lock").clone()
-    }
-}
-
-fn answer(
-    stream: TcpStream,
-    routes: &Mutex<BTreeMap<String, Canned>>,
-    requests: &Mutex<Vec<String>>,
-) {
-    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
-    let mut head = String::new();
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            return;
-        }
-        if line.trim_end_matches(['\r', '\n']).is_empty() {
-            break;
-        }
-        head.push_str(&line);
-    }
-    requests.lock().expect("lock").push(head.clone());
-    let path = head
-        .lines()
-        .next()
-        .and_then(|l| l.split(' ').nth(1))
-        .unwrap_or("/")
-        .to_string();
-    let canned = routes
-        .lock()
-        .expect("lock")
-        .get(&path)
-        .cloned()
-        .unwrap_or(Canned {
-            status: 404,
-            content_type: Some("text/plain"),
-            body: b"not found".to_vec(),
-            location: None,
-        });
-    let mut response = format!(
-        "HTTP/1.1 {} Test\r\nContent-Length: {}\r\nConnection: close\r\n",
-        canned.status,
-        canned.body.len()
-    );
-    if let Some(content_type) = canned.content_type {
-        response.push_str(&format!("Content-Type: {content_type}\r\n"));
-    }
-    if let Some(location) = &canned.location {
-        response.push_str(&format!("Location: {location}\r\n"));
-    }
-    response.push_str("\r\n");
-    let mut writer = stream;
-    let _ = writer.write_all(response.as_bytes());
-    let _ = writer.write_all(&canned.body);
-    let _ = writer.flush();
-}
 
 /// POST /v1/collections/{collection}/fetch を実プロセスの serve に投げる。
 fn post_fetch(server: &Server, collection: &str, body: &str) -> HttpResponse {

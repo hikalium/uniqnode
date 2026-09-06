@@ -51,11 +51,16 @@ fn usage() -> ! {
                                       取り直す。届かなければ融合の順位のまま答え、\n\
                                       degraded がそれを言う。\n\
                                       ログは既定で <dir>/logs/serve.log にも残す(下記)\n\
-           mcp <dir> [--serve-url <url>] [--embed <url>] [--embedder <id>] [--rerank <url>]\n\
-                     [--reranker <id>] [ログの指定]\n\
+           mcp <dir> [--serve-url <url>] [--writable <コレクション名>]... [--embed <url>]\n\
+                     [--embedder <id>] [--rerank <url>] [--reranker <id>] [ログの指定]\n\
                                       標準入出力で MCP(Model Context Protocol)を話す。\n\
-                                      LLM エージェント(Claude Code など)に search と\n\
-                                      fetch の2ツールを出す。標準出力はプロトコル専用で、\n\
+                                      LLM エージェント(Claude Code など)に、読む 2 ツール\n\
+                                      (search・fetch)と、--writable で許したコレクション\n\
+                                      へ書く 2 ツール(add_document: テキスト知識の追加、\n\
+                                      fetch_url: URL の取り込み)を出す。--writable は繰り\n\
+                                      返せる。1 つも無ければ読むだけで、書くツールは一覧に\n\
+                                      載らない。許していないコレクションへの書き込みは\n\
+                                      ツールの失敗として断る。標準出力はプロトコル専用で、\n\
                                       ログは標準エラーと <dir>/logs/mcp.log へ出す(登録\n\
                                       した相手が標準エラーを吸うので、ファイルが唯一\n\
                                       読める記録になる)。--serve-url を与えると、\n\
@@ -71,6 +76,7 @@ fn usage() -> ! {
                                       claude mcp add --transport stdio uniqnode --\n\
                                       <この実行ファイル> mcp <dir>\n\
                                       --serve-url http://127.0.0.1:7440\n\
+                                      --writable notes --writable web\n\
            viewer <dir> <addr> [--serve-url <url>] [ログの指定]\n\
                                       RAG ビューワ(1枚のHTML)をブラウザへ出す\n\
                                       (例: 127.0.0.1:7450、:0 で自動割当)。頁が呼ぶ\n\
@@ -720,29 +726,52 @@ fn start_logging(dir: &str, role: &str, options: &LogOptions) {
     }
 }
 
-/// mcp の指定(転送先の serve と、埋め込み・ログの指定)。
+/// mcp の指定(転送先の serve、書き込みを許すコレクション、埋め込み・ログの指定)。
 struct McpOptions {
     /// 走っている serve へ転送する形の転送先(--serve-url)。無ければストアを直接開く。
     serve_url: Option<String>,
+    /// 書き込みを許すコレクション(--writable。繰り返せる)。空なら読むだけで、書く
+    /// ツール(add_document・fetch_url)は tools/list に載らない。
+    writable: Vec<String>,
     run: RunOptions,
 }
 
-/// --serve-url <url> だけを抜き取り、残りは serve と同じ読み手に渡す(埋め込みとログの
-/// 指定の読み取りを二重に実装しない。should/0135)。
+/// --serve-url <url> と --writable <コレクション名> だけを抜き取り、残りは serve と同じ
+/// 読み手に渡す(埋め込みとログの指定の読み取りを二重に実装しない。should/0135)。
+/// コレクション名は空でなく / を含まない 1 語で、外れていれば usage で落とす(黙って
+/// 捨てると、許したつもりのコレクションに書けない)。同じ名前の繰り返しは 1 つに畳む。
 fn parse_mcp_options(rest: &[String]) -> McpOptions {
     let mut serve_url = None;
+    let mut writable: Vec<String> = Vec::new();
     let mut others = Vec::new();
     let mut at = 0;
     while at < rest.len() {
-        if rest[at] == "--serve-url" {
-            serve_url = Some(rest.get(at + 1).cloned().unwrap_or_else(|| usage()));
-            at += 2;
-            continue;
+        match rest[at].as_str() {
+            "--serve-url" => {
+                serve_url = Some(rest.get(at + 1).cloned().unwrap_or_else(|| usage()));
+                at += 2;
+            }
+            "--writable" => {
+                let collection = rest.get(at + 1).cloned().unwrap_or_else(|| usage());
+                if collection.is_empty() || collection.contains('/') {
+                    eprintln!(
+                        "uniqnode: --writable はコレクション名(空でなく / を含まない 1 語): \
+                         {collection:?}"
+                    );
+                    std::process::exit(2);
+                }
+                if !writable.contains(&collection) {
+                    writable.push(collection);
+                }
+                at += 2;
+            }
+            _ => {
+                others.push(rest[at].clone());
+                at += 1;
+            }
         }
-        others.push(rest[at].clone());
-        at += 1;
     }
-    McpOptions { serve_url, run: parse_run_options(&others) }
+    McpOptions { serve_url, writable, run: parse_run_options(&others) }
 }
 
 /// install の指定。既定は home の下(node/src/install.rs の Options::defaults)。知らない
@@ -1253,7 +1282,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                     }))
                 }
             };
-            let mut server = uniqnode::mcp::StdioServer::new(backend);
+            let mut server = uniqnode::mcp::StdioServer::new(backend, options.writable);
             server.announce(dir);
             // 先読みバッファは自分で持つ。自己置換の前に「次のメッセージまで読んで
             // しまっていないか」を確かめられるのは、この BufReader だけだからである。
@@ -1357,6 +1386,15 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             let address = rest.first().map(String::as_str).unwrap_or_else(|| usage());
             let options = parse_mcp_options(&rest[1..]);
             start_logging(dir, uniqnode::log::VIEWER_ROLE, &options.run.log);
+            // ビューワは書き込みの口を持たない。mcp と読み手を共有しているので字面は
+            // 通るが、効かせる先の無い指定は黙って捨てずに断る(must/0022 の同型)。
+            if !options.writable.is_empty() {
+                uniqnode::log_line!(
+                    "uniqnode: viewer: --writable はビューワの引数ではない(書き込みを許すのは \
+                     mcp の指定である)"
+                );
+                std::process::exit(2);
+            }
             if let Some(flag) = options.run.embed.misplaced_equipment_flag() {
                 uniqnode::log_line!(
                     "uniqnode: viewer: {flag} はビューワの引数ではない\

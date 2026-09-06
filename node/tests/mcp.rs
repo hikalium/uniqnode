@@ -758,7 +758,275 @@ fn selfcheck_reports_the_marker_on_stdout() {
         reported.contains(uniqnode::mcp::SELF_CHECK_MARKER),
         "印が無い: {reported}"
     );
-    assert!(reported.contains("tools=2"), "ツールの記述を組み立てるべき: {reported}");
+    assert!(reported.contains("tools=4"), "読む 2 本と書く 2 本の記述を組み立てるべき: {reported}");
+}
+
+/// tools/list の応答に載るツール名を、載っている順に取り出す。
+fn listed_tool_names(listed: &str) -> Vec<String> {
+    listed
+        .split("\"name\":\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .filter(|name| ["search", "fetch", "add_document", "fetch_url"].contains(name))
+        .map(|name| name.to_string())
+        .collect()
+}
+
+/// (a) 書くツール(add_document・fetch_url)は、`--writable` を 1 つでも与えたときだけ
+/// tools/list に載る。与えなければ今までどおり search と fetch の 2 本で、書けない相手に
+/// 書くツールを見せない。載せていないツールを呼べば要求の誤り(-32602)で理由を言う。
+/// ビューワは同じ読み手を共有するが --writable を受けない(黙って捨てない)。
+#[test]
+fn the_write_tools_are_listed_only_when_a_collection_is_writable() {
+    let dir = store_with("mcp-writable-list", &["search_ja.md"]);
+    let server = start_server_at_with_args(dir.clone(), &[]);
+    let serve_url = format!("http://{}", server.address);
+    let list = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}";
+
+    let mut writable = McpProcess::start(&dir, &["--serve-url", &serve_url, "--writable", "notes"]);
+    let listed = writable.request(list);
+    assert_eq!(
+        listed_tool_names(&listed),
+        ["search", "fetch", "add_document", "fetch_url"],
+        "--writable があれば 4 本: {listed}"
+    );
+    assert!(listed.contains("許すのは: notes"), "書ける先が説明に無い: {listed}");
+    let exit = writable.finish();
+    assert!(
+        exit.stderr.contains("add_document・fetch_url(書き込みを許す: notes)"),
+        "起動の知らせに書ける先が無い: {}",
+        exit.stderr
+    );
+
+    let mut read_only = McpProcess::start(&dir, &["--serve-url", &serve_url]);
+    let listed = read_only.request(list);
+    assert_eq!(listed_tool_names(&listed), ["search", "fetch"], "--writable 無しは 2 本: {listed}");
+    let refused = read_only.call(
+        2,
+        "add_document",
+        "{\"collection\":\"notes\",\"name\":\"memo\",\"text\":\"x\"}",
+    );
+    assert!(refused.contains("\"code\":-32602"), "載せていないツールは要求の誤り: {refused}");
+    assert!(refused.contains("--writable"), "理由を言うべき: {refused}");
+    read_only.finish();
+
+    let output = cli_output(&["viewer", dir.to_str().expect("utf-8"), "127.0.0.1:0", "--writable", "notes"]);
+    assert_eq!(output.status.code(), Some(2), "viewer が --writable を受けて起動している");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--writable はビューワの引数ではない"),
+        "断りの理由が標準エラーに無い: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    drop(server);
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// (b) add_document で notes に markdown を入れると、応答が成功(新規)を言い、直後の
+/// search で本文が出典(コレクション/文書名・見出し)付きで出る。同じ内容の再実行は
+/// 「変わらず」、違う内容は「上書き」で前版を言う。引数の誤りは要求の誤り(-32602)。
+#[test]
+fn add_document_puts_markdown_into_a_writable_collection_and_search_finds_it() {
+    let dir = store_with("mcp-add-document", &["search_ja.md"]);
+    let server = start_server_at_with_args(dir.clone(), &[]);
+    let serve_url = format!("http://{}", server.address);
+    let mut mcp = McpProcess::start(&dir, &["--serve-url", &serve_url, "--writable", "notes"]);
+
+    let added = mcp.call(
+        1,
+        "add_document",
+        "{\"collection\":\"notes\",\"name\":\"hpet-memo\",\"text\":\
+         \"# HPET の覚え書き\\n\\nHPET main counter の周期は GCAP_ID の COUNTER_CLK_PERIOD が言う。\"}",
+    );
+    assert!(added.contains("\"isError\":false"), "{added}");
+    assert!(added.contains("入れた: notes/hpet-memo(新規。doc_rev s256:"), "{added}");
+    assert!(added.contains("検索に出る"), "{added}");
+
+    let searched = mcp.call(2, "search", "{\"query\":\"HPET main counter\",\"collection\":\"notes\"}");
+    assert!(searched.contains("notes/hpet-memo 位置 0"), "入れた文書が検索に出ない: {searched}");
+    assert!(searched.contains("見出し: HPET の覚え書き"), "markdown の見出しが出典に無い: {searched}");
+    assert!(searched.contains("COUNTER_CLK_PERIOD"), "本文の抜粋が無い: {searched}");
+
+    // 同じ内容は同じ ID に落ち、何も変わらない。
+    let same = mcp.call(
+        3,
+        "add_document",
+        "{\"collection\":\"notes\",\"name\":\"hpet-memo\",\"text\":\
+         \"# HPET の覚え書き\\n\\nHPET main counter の周期は GCAP_ID の COUNTER_CLK_PERIOD が言う。\"}",
+    );
+    assert!(same.contains("変わらず(同じ内容が既にある)"), "{same}");
+    assert!(same.contains("新規オブジェクト 0"), "{same}");
+
+    // 違う内容は上書きで、前版の doc_rev を言う。素文(media text)も受ける。
+    let overwritten = mcp.call(
+        4,
+        "add_document",
+        "{\"collection\":\"notes\",\"name\":\"hpet-memo\",\"media\":\"text\",\
+         \"text\":\"HPET の周期はフェムト秒単位で GCAP_ID に載る。\"}",
+    );
+    assert!(overwritten.contains("上書き。前版 s256:"), "{overwritten}");
+    let searched = mcp.call(5, "search", "{\"query\":\"フェムト秒\",\"collection\":\"notes\"}");
+    assert!(searched.contains("notes/hpet-memo"), "上書き後の本文が検索に出ない: {searched}");
+    assert!(searched.contains("見出し: (なし)"), "素文は見出しを持たない: {searched}");
+
+    // 引数の誤りは要求の組み立ての誤り(-32602)。ストアには何も書かない。
+    let with_extension = mcp.call(
+        6,
+        "add_document",
+        "{\"collection\":\"notes\",\"name\":\"memo.md\",\"text\":\"x\"}",
+    );
+    assert!(with_extension.contains("\"code\":-32602"), "{with_extension}");
+    assert!(with_extension.contains("拡張子なし"), "{with_extension}");
+    let no_text = mcp.call(7, "add_document", "{\"collection\":\"notes\",\"name\":\"memo\"}");
+    assert!(no_text.contains("\"code\":-32602"), "{no_text}");
+    assert!(no_text.contains("text"), "{no_text}");
+    let bad_media = mcp.call(
+        8,
+        "add_document",
+        "{\"collection\":\"notes\",\"name\":\"memo\",\"text\":\"x\",\"media\":\"pdf\"}",
+    );
+    assert!(bad_media.contains("\"code\":-32602"), "{bad_media}");
+    assert!(bad_media.contains("markdown / text"), "{bad_media}");
+    let refs = body_text(&simple(&server.address, "GET", "/v1/refs", b""));
+    assert!(!refs.contains("collections/notes/memo"), "誤った要求で ref ができている: {refs}");
+
+    mcp.finish();
+    drop(server);
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// (c) 許していないコレクションへの add_document は、ツールの失敗(isError)として理由と
+/// 書ける先を言い、serve の状態は変わらない(ref が増えない)。
+#[test]
+fn add_document_refuses_a_collection_that_is_not_writable_without_touching_the_store() {
+    let dir = store_with("mcp-add-refused", &["search_ja.md"]);
+    let server = start_server_at_with_args(dir.clone(), &[]);
+    let serve_url = format!("http://{}", server.address);
+    let refs_before = body_text(&simple(&server.address, "GET", "/v1/refs", b""));
+    let mut mcp = McpProcess::start(&dir, &["--serve-url", &serve_url, "--writable", "notes"]);
+
+    let refused = mcp.call(
+        1,
+        "add_document",
+        "{\"collection\":\"specs\",\"name\":\"memo\",\"text\":\"勝手に書く\"}",
+    );
+    assert!(refused.contains("\"isError\":true"), "{refused}");
+    assert!(!refused.contains("\"error\""), "ツールの失敗は JSON-RPC の誤りではない: {refused}");
+    assert!(
+        refused.contains("specs は書き込みを許していない(--writable で許すのは: notes)"),
+        "理由と書ける先を言うべき: {refused}"
+    );
+    let refused_fetch = mcp.call(
+        2,
+        "fetch_url",
+        "{\"collection\":\"specs\",\"url\":\"http://127.0.0.1:1/x\"}",
+    );
+    assert!(refused_fetch.contains("\"isError\":true"), "{refused_fetch}");
+    assert!(refused_fetch.contains("specs は書き込みを許していない"), "{refused_fetch}");
+
+    let refs_after = body_text(&simple(&server.address, "GET", "/v1/refs", b""));
+    assert!(!refs_after.contains("collections/specs/"), "断ったのに ref ができている: {refs_after}");
+    assert_eq!(refs_before, refs_after, "断った書き込みで serve の状態が変わった");
+
+    // 断りは標準エラーにも残る(応答を読まない運用者にも見えるように)。
+    let exit = mcp.finish();
+    assert!(
+        exit.stderr.contains("specs は書き込みを許していない"),
+        "断りが標準エラーに無い: {}",
+        exit.stderr
+    );
+    drop(server);
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// fetch_url に取りに行かせる紙面(script と img を含む。落とした数が 0 でないように)。
+const FETCHED_PAGE_HTML: &str = "<!DOCTYPE html>\n<html><head><title>紙面</title>\
+    <script src=\"/app.js\"></script></head><body>\n<h2>節</h2>\n\
+    <p>取り込みの本文はここにある。</p>\n<img src=\"pic.png\" alt=\"絵\">\n\
+    <script>var a = 1;</script>\n</body></html>\n";
+
+/// (d) fetch_url がローカルの HTTP サーバから HTML を取り込み、応答に名前・種別・転送後の
+/// URL・落とした数(dropped)が出て、本文が search に出る。name を省くと URL から導く。
+/// 取れない URL(404)は serve の 502 の理由をそのまま失敗で伝え、file: は要求の誤り。
+#[test]
+fn fetch_url_ingests_html_from_a_local_site_and_reports_what_it_dropped() {
+    require_curl();
+    let site = TestSite::start(vec![(
+        "/page.html",
+        Canned::ok(Some("text/html; charset=utf-8"), FETCHED_PAGE_HTML.as_bytes()),
+    )]);
+    let dir = store_with("mcp-fetch-url", &["search_ja.md"]);
+    let server = start_server_at_with_args(dir.clone(), &[]);
+    let serve_url = format!("http://{}", server.address);
+    let mut mcp = McpProcess::start(&dir, &["--serve-url", &serve_url, "--writable", "web"]);
+    let url = site.url("/page.html");
+
+    let fetched = mcp.call(
+        1,
+        "fetch_url",
+        &format!("{{\"collection\":\"web\",\"url\":\"{url}\",\"name\":\"page\"}}"),
+    );
+    assert!(fetched.contains("\"isError\":false"), "{fetched}");
+    assert!(fetched.contains("取り込んだ: web/page(html、final_url "), "{fetched}");
+    assert!(fetched.contains(&url), "転送後の URL を言うべき: {fetched}");
+    assert!(fetched.contains("新規。doc_rev s256:"), "{fetched}");
+    assert!(
+        fetched.contains("落とした外部依存 3 件(images 1・scripts 2)"),
+        "落とした数を言うべき: {fetched}"
+    );
+    let searched = mcp.call(2, "search", "{\"query\":\"取り込みの本文\",\"collection\":\"web\"}");
+    assert!(searched.contains("web/page 位置 0"), "取り込んだ紙面が検索に出ない: {searched}");
+    assert!(searched.contains("見出し: 紙面 > 節"), "{searched}");
+
+    // name を省くと URL から導く(ホストとパスを 1 語に)。
+    let derived = mcp.call(3, "fetch_url", &format!("{{\"collection\":\"web\",\"url\":\"{url}\"}}"));
+    assert!(derived.contains("\"isError\":false"), "{derived}");
+    let host = site.address.replace(':', "_");
+    assert!(derived.contains(&format!("取り込んだ: web/{host}_page(html")), "{derived}");
+
+    // 404 は serve が 502 で言う理由をそのまま伝える(黙って飲まない)。
+    let missing = mcp.call(
+        4,
+        "fetch_url",
+        &format!("{{\"collection\":\"web\",\"url\":\"{}\"}}", site.url("/absent")),
+    );
+    assert!(missing.contains("\"isError\":true"), "{missing}");
+    assert!(missing.contains("が 502 を返した"), "{missing}");
+    assert!(missing.contains("404"), "相手の状態を言うべき: {missing}");
+    // file: は取りに行く前に断る(要求の誤り)。
+    let file = mcp.call(5, "fetch_url", "{\"collection\":\"web\",\"url\":\"file:///etc/hosts\"}");
+    assert!(file.contains("\"code\":-32602"), "{file}");
+
+    mcp.finish();
+    drop(server);
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// (e) ストアを直接開く形(--serve-url 無し)でも add_document は同じ関数(api.rs の
+/// put_document)を通って動き、同じプロセスの search が本文を返す。
+#[test]
+fn the_local_form_adds_documents_too() {
+    let dir = store_with("mcp-add-local", &["search_ja.md"]);
+    let mut mcp = McpProcess::start(&dir, &["--writable", "notes"]);
+    let added = mcp.call(
+        1,
+        "add_document",
+        "{\"collection\":\"notes\",\"name\":\"local-memo\",\"text\":\"# 直接開く形\\n\\nロックを持ったまま書く。\"}",
+    );
+    assert!(added.contains("\"isError\":false"), "{added}");
+    assert!(added.contains("入れた: notes/local-memo(新規。doc_rev s256:"), "{added}");
+    let searched = mcp.call(2, "search", "{\"query\":\"ロックを持ったまま\",\"collection\":\"notes\"}");
+    assert!(searched.contains("notes/local-memo 位置 0"), "{searched}");
+    assert!(searched.contains("見出し: 直接開く形"), "{searched}");
+    let refused = mcp.call(
+        3,
+        "add_document",
+        "{\"collection\":\"specs\",\"name\":\"x\",\"text\":\"y\"}",
+    );
+    assert!(refused.contains("specs は書き込みを許していない"), "{refused}");
+    // 標準出力の純度は finish が検査する(書き込みの記録も標準エラーへ出ている)。
+    let exit = mcp.finish();
+    assert!(exit.stderr.contains("uniqnode: mcp:"), "{}", exit.stderr);
+    std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 
 /// 実行ファイルを書く(実行の許可を付ける)。

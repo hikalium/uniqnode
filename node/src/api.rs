@@ -1612,16 +1612,37 @@ fn handle_rendition(context: &ApiContext, chunk_id: &str, alias: &str) -> Respon
     }
 }
 
-/// POST /v1/collections/{collection}/fetch。ボディ: {"url": "...", "name"?: "..."}。URL を
-/// curl で取り、種別を見て取り込む(判断は node/src/fetch.rs、書き込みはファイルからの
-/// 取り込みと同じ ingest_document)。応答は PUT documents と同じ doc_rev・new_objects・
-/// ref_updated に、final_url・name・media と、HTML なら dropped(自足化で落としたものの
-/// 数)を足したもの。
+/// 取り込みの結果の欄(PUT documents と POST fetch の応答が共有する): doc_rev・
+/// new_objects・ref_updated・previous(上書きなら前版の doc_rev、新規なら null)。
+fn ingest_outcome_fields(outcome: crate::ingest::IngestOutcome) -> Vec<(&'static str, c1::Value)> {
+    vec![
+        ("doc_rev", c1::Value::Text(outcome.doc_rev_id)),
+        ("new_objects", c1::Value::Integer(outcome.new_objects as i64)),
+        ("ref_updated", c1::Value::Bool(outcome.ref_updated)),
+        (
+            "previous",
+            match outcome.previous {
+                Some(id) => c1::Value::Text(id),
+                None => c1::Value::Null,
+            },
+        ),
+    ]
+}
+
+/// POST /v1/collections/{collection}/fetch の本体。ボディ: {"url": "...", "name"?: "..."}。
+/// URL を curl で取り、種別を見て取り込む(判断は node/src/fetch.rs、書き込みはファイル
+/// からの取り込みと同じ ingest_document)。応答は PUT documents と同じ doc_rev・
+/// new_objects・ref_updated・previous に、final_url・name・media と、HTML なら dropped
+/// (自足化で落としたものの数)を足したもの。
+///
+/// HTTP の封筒を外した形で公開するのは、MCP の fetch_url がストアを直接開く形でも
+/// 同じ関数を呼ぶためである(転送する形は同じ口へ HTTP で回す。判断を二重に実装しない。
+/// should/0135)。
 ///
 /// ロックの規律(node/src/sync.rs・node/src/rendition.rs と同じ): curl と pdftotext を
 /// 待つあいだストアのロックを持たない。取ってから、ロックを取って書く。
-fn handle_fetch(context: &ApiContext, collection: &str, request: &Request) -> Response {
-    let body_text = match std::str::from_utf8(&request.body) {
+pub fn fetch_into(context: &ApiContext, collection: &str, body: &[u8]) -> Response {
+    let body_text = match std::str::from_utf8(body) {
         Ok(t) => t,
         Err(_) => return error_response(400, "ボディが UTF-8 でない"),
     };
@@ -1680,14 +1701,12 @@ fn handle_fetch(context: &ApiContext, collection: &str, request: &Request) -> Re
         started.elapsed().as_millis(),
         if outcome.ref_updated { "updated" } else { "no-op" }
     );
-    let mut fields = vec![
-        ("doc_rev", c1::Value::Text(outcome.doc_rev_id)),
-        ("new_objects", c1::Value::Integer(outcome.new_objects as i64)),
-        ("ref_updated", c1::Value::Bool(outcome.ref_updated)),
+    let mut fields = ingest_outcome_fields(outcome);
+    fields.extend([
         ("final_url", c1::Value::Text(document.final_url.clone())),
         ("name", c1::Value::Text(document.name.clone())),
         ("media", c1::Value::Text(document.media.to_string())),
-    ];
+    ]);
     if let Some(dropped) = &document.dropped {
         fields.push(("dropped", crate::fetch::dropped_value(dropped)));
     }
@@ -1943,7 +1962,7 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
             if collection.is_empty() || collection.contains('/') {
                 return error_response(400, "コレクション名が要る(/v1/collections/{c}/fetch)");
             }
-            return handle_fetch(context, collection, request);
+            return fetch_into(context, collection, &request.body);
         }
         if method != "PUT" {
             return error_response(405, "PUT のみ");
@@ -1951,67 +1970,71 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
         let Some((collection, name)) = rest.split_once("/documents/") else {
             return error_response(404, "/v1/collections/{c}/documents/{name} の形");
         };
-        if collection.is_empty() || name.is_empty() {
-            return error_response(400, "コレクション名と文書名が要る");
-        }
-        let Some((stem, extension)) = name.rsplit_once('.') else {
-            return error_response(400, "文書名に拡張子が要る(.md/.markdown/.txt/.html/.htm/.pdf)");
-        };
-        let Some(media) = crate::ingest::media_for_extension(extension) else {
-            return error_response(400, "対象外の拡張子(.md/.markdown/.txt/.html/.htm/.pdf のみ)");
-        };
-        let extracted;
-        let mut extractor_label = None;
-        let text: &str = if media == "pdf" {
-            // blob は PDF バイナリそのもの、チャンクは pdftotext の抽出テキストから作る。
-            let extractor = match pdf_extractor() {
-                Ok(extractor) => extractor,
-                // 委譲先が無いのはこの過程の一時的な状態であって要求の誤りではない。
-                Err(message) => return error_response(503, &message),
-            };
-            extractor_label = Some(extractor.extractor.as_str());
-            match extractor.extract(&request.body) {
-                Ok(text) => extracted = text,
-                Err(e) => return store_error_response(e),
-            }
-            &extracted
-        } else {
-            match std::str::from_utf8(&request.body) {
-                Ok(text) => text,
-                Err(_) => return error_response(400, "ボディが UTF-8 でない"),
-            }
-        };
-        // PDF は節見出しの経路も載せる(node/src/outline.rs)。取れなければ理由を記録に
-        // 残して、見出しの無いチャンクとして続ける(黙って諦めない。must/0022)。
-        let (chunks, outline_reason) =
-            crate::ingest::chunk_for_media_with_source(media, text, &request.body);
-        if let Some(reason) = outline_reason {
-            crate::log_line!("uniqnode: ingest: {collection}/{stem} の節見出し: {reason}");
-        }
-        let input = crate::ingest::DocumentInput {
-            collection,
-            name: stem,
-            source: &request.body,
-            media,
-            chunks: &chunks,
-            extractor: extractor_label,
-            extra_meta: &[],
-        };
-        let mut store = store.lock().expect("lock");
-        return match crate::ingest::ingest_document(&mut store, &input) {
-            Ok(outcome) => Response::json(
-                200,
-                json_object(vec![
-                    ("doc_rev", c1::Value::Text(outcome.doc_rev_id)),
-                    ("new_objects", c1::Value::Integer(outcome.new_objects as i64)),
-                    ("ref_updated", c1::Value::Bool(outcome.ref_updated)),
-                ]),
-            ),
-            Err(e) => store_error_response(e),
-        };
+        return put_document(context, collection, name, &request.body);
     }
 
     error_response(404, "no such endpoint")
+}
+
+/// PUT /v1/collections/{collection}/documents/{name} の本体。本文は生バイト列、種別は
+/// name の拡張子で判定し、ref 名には拡張子を残さない。応答は doc_rev・new_objects・
+/// ref_updated・previous。
+///
+/// HTTP の封筒を外した形で公開するのは、MCP の add_document がストアを直接開く形でも
+/// 同じ関数を呼ぶためである(転送する形は同じ口へ HTTP で回す。判断を二重に実装しない。
+/// should/0135)。
+pub fn put_document(context: &ApiContext, collection: &str, name: &str, body: &[u8]) -> Response {
+    if collection.is_empty() || name.is_empty() {
+        return error_response(400, "コレクション名と文書名が要る");
+    }
+    let Some((stem, extension)) = name.rsplit_once('.') else {
+        return error_response(400, "文書名に拡張子が要る(.md/.markdown/.txt/.html/.htm/.pdf)");
+    };
+    let Some(media) = crate::ingest::media_for_extension(extension) else {
+        return error_response(400, "対象外の拡張子(.md/.markdown/.txt/.html/.htm/.pdf のみ)");
+    };
+    let extracted;
+    let mut extractor_label = None;
+    let text: &str = if media == "pdf" {
+        // blob は PDF バイナリそのもの、チャンクは pdftotext の抽出テキストから作る。
+        let extractor = match pdf_extractor() {
+            Ok(extractor) => extractor,
+            // 委譲先が無いのはこの過程の一時的な状態であって要求の誤りではない。
+            Err(message) => return error_response(503, &message),
+        };
+        extractor_label = Some(extractor.extractor.as_str());
+        match extractor.extract(body) {
+            Ok(text) => extracted = text,
+            Err(e) => return store_error_response(e),
+        }
+        &extracted
+    } else {
+        match std::str::from_utf8(body) {
+            Ok(text) => text,
+            Err(_) => return error_response(400, "ボディが UTF-8 でない"),
+        }
+    };
+    // PDF は節見出しの経路も載せる(node/src/outline.rs)。取れなければ理由を記録に
+    // 残して、見出しの無いチャンクとして続ける(黙って諦めない。must/0022)。
+    let (chunks, outline_reason) =
+        crate::ingest::chunk_for_media_with_source(media, text, body);
+    if let Some(reason) = outline_reason {
+        crate::log_line!("uniqnode: ingest: {collection}/{stem} の節見出し: {reason}");
+    }
+    let input = crate::ingest::DocumentInput {
+        collection,
+        name: stem,
+        source: body,
+        media,
+        chunks: &chunks,
+        extractor: extractor_label,
+        extra_meta: &[],
+    };
+    let mut store = context.store.lock().expect("lock");
+    match crate::ingest::ingest_document(&mut store, &input) {
+        Ok(outcome) => Response::json(200, json_object(ingest_outcome_fields(outcome))),
+        Err(e) => store_error_response(e),
+    }
 }
 
 #[cfg(test)]

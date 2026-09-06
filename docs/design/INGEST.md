@@ -307,11 +307,15 @@ sync サブコマンドと同じ扱い)。形の正典は node/src/main.rs の u
   発行(訂正の発行の節)。
 - `PUT /v1/collections/{collection}/documents/{name}`: 文書 1 件の取り込み。本文は生バイト列
   で、種別は name の拡張子で判定し、ref 名には拡張子を残さない。応答は doc_rev の ID・
-  new_objects・ref_updated。
+  new_objects・ref_updated・previous(上書きなら前版の doc_rev、新規なら null。同じ内容で
+  ref_updated が false のときは現行の doc_rev)。本体は node/src/api.rs の put_document で、
+  MCP の add_document([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))も同じ
+  関数を通る。
 - `POST /v1/collections/{collection}/fetch`: URL からの取り込み(URL からの取り込みの節)。
   ボディは `{"url": "...", "name": "..."}`(name は省略可)。応答は PUT documents と同じ
-  doc_rev・new_objects・ref_updated に final_url・name・media を足し、HTML なら dropped
-  (落としたものの数)も載る。
+  doc_rev・new_objects・ref_updated・previous に final_url・name・media を足し、HTML なら
+  dropped(落としたものの数)も載る。本体は api.rs の fetch_into で、MCP の fetch_url も同じ
+  関数を通る。
 - `GET /v1/objects/{id}/referrers`: 逆引き(逆引きの節)。応答は referrers(ID の列)。
 - 引用を組み立てる専用 API は無い(ref → doc_rev → chunks の添字と、既存のオブジェクト取得
   で組める)。

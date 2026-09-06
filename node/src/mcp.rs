@@ -1,10 +1,18 @@
-//! MCP(Model Context Protocol)アダプタ: 標準入出力の JSON-RPC 2.0 で search と fetch の
-//! 2 ツールを公開する(MCP (uuid:dacd474d-424a-45d5-a278-766fc2465dd9))。
+//! MCP(Model Context Protocol)アダプタ: 標準入出力の JSON-RPC 2.0 で、読む 2 ツール
+//! (search・fetch)と、`--writable` で許したコレクションへ書く 2 ツール(add_document・
+//! fetch_url)を公開する(MCP (uuid:dacd474d-424a-45d5-a278-766fc2465dd9))。
 //!
 //! コアはあくまで REST であり、この層は薄い被せ物である。検索の判断(方式の既定・劣化の
 //! 判断・引用の組み立て)は node/src/api.rs の run_search が持ち、全文の取得は
-//! fetch_object が持つ。ここがするのは JSON-RPC の封筒の付け外しと、LLM が読む形への
-//! 整形だけである(検索の判断を二重に実装しない。should/0135)。
+//! fetch_object が持つ。書き込みも同じで、文書の取り込みは api.rs の put_document、URL
+//! からの取り込みは fetch_into が持つ(REST の PUT documents・POST fetch と同じ関数)。
+//! ここがするのは JSON-RPC の封筒の付け外しと、LLM が読む形への整形だけである(検索と
+//! 取り込みの判断を二重に実装しない。should/0135)。
+//!
+//! 書き込みは既定で閉じている。`--writable <コレクション名>` を与えたコレクションにだけ
+//! 書け、1 つも無ければ書くツールは tools/list に載せない(書けない相手に書くツールを
+//! 見せない)。許していないコレクションへの書き込みは、ツールの失敗(isError)として理由を
+//! 言って断る。
 //!
 //! 標準出力はプロトコル専用である(MCP の stdio 転送の規定)。1 行が 1 メッセージで、
 //! 行に混ざった非メッセージは相手の解析をその場で壊す。ログはすべて標準エラーへ出す。
@@ -12,7 +20,7 @@
 //! 1 行に収まることが直列化の側から保証される(実装を増やさない。should/0135)。
 //!
 //! 受け取り側の既知の制限: 要求の解析は c1(SPEC §4.1)を使うため、整数しか受けない。
-//! JSON-RPC 自体と、この 2 ツールの引数はすべて文字列・整数・真偽値・オブジェクトなので
+//! JSON-RPC 自体と、これらのツールの引数はすべて文字列・整数・真偽値・オブジェクトなので
 //! 足りるが、小数を含む要求は解析誤り(-32700)として拒む。黙って読み飛ばさない。
 //!
 //! ツールの後ろ盾は二つの形がある(Backend)。ストアを直接開く形(Local)は起動から終了
@@ -58,6 +66,17 @@ const FETCH_HINT: &str = "全文が要るときは fetch ツールにチャン�
 /// (実データ規模で約 9 秒)、埋め込みのクエリ期限(15 秒)より長く採る。期限のない待ちは
 /// 作らない(should/0104)。
 const SERVE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// fetch_url で serve を待つ期限。serve は curl が取り終わるまで答えないので、curl の
+/// 期限(node/src/fetch.rs の DEFAULT_MAX_SECONDS)を通常の期限に足す。
+const FETCH_URL_TIMEOUT: Duration =
+    Duration::from_secs(60 + crate::fetch::DEFAULT_MAX_SECONDS);
+
+/// add_document が受ける media と、PUT documents へ渡す拡張子。種別の判定そのものは
+/// 拡張子の表(crate::ingest::media_for_extension)が持ち、ここはその逆引きである。両者が
+/// 噛み合うことは単体試験 add_document_media_round_trips_through_the_extension_table が
+/// 確かめる(should/0135)。先頭が既定。
+const ADD_DOCUMENT_MEDIA: [(&str, &str); 2] = [("markdown", "md"), ("text", "txt")];
 
 /// 自己置換の前に新しいイメージを確かめるサブコマンド。呼ぶ側(このモジュール)と
 /// 答える側(node/src/main.rs)で同じ文字列を使う(must/0023)。
@@ -116,6 +135,30 @@ impl Backend {
         }
     }
 
+    /// 文書 1 件の書き込み(add_document)。file_name は拡張子つきで、種別は api.rs の
+    /// put_document が拡張子から判定する(ここでは判定しない。should/0135)。
+    fn put_document(
+        &self,
+        collection: &str,
+        file_name: &str,
+        body: &[u8],
+    ) -> Result<Written, String> {
+        match self {
+            Backend::Local(context) => {
+                Ok(Written::from(api::put_document(context, collection, file_name, body)))
+            }
+            Backend::Forward(client) => client.put_document(collection, file_name, body),
+        }
+    }
+
+    /// URL からの取り込み(fetch_url)。body は POST fetch のボディと同じ JSON。
+    fn fetch_url(&self, collection: &str, body: &[u8]) -> Result<Written, String> {
+        match self {
+            Backend::Local(context) => Ok(Written::from(api::fetch_into(context, collection, body))),
+            Backend::Forward(client) => client.fetch_url(collection, body),
+        }
+    }
+
     /// 起動の知らせに載せる、この形の説明。
     fn description(&self) -> String {
         match self {
@@ -127,8 +170,39 @@ impl Backend {
     }
 }
 
+/// 書き込みの口(PUT documents・POST fetch)の答え: 状態と JSON の本文。ストアを直接
+/// 開く形は api.rs の handler の Response から、転送する形は serve の HTTP 応答から、同じ
+/// 形に写す。読むのは written_document の 1 箇所である(should/0135)。
+pub struct Written {
+    status: u16,
+    body: Vec<u8>,
+}
+
+impl From<http::Response> for Written {
+    fn from(response: http::Response) -> Written {
+        Written { status: response.status, body: response.body }
+    }
+}
+
+impl From<http::ClientResponse> for Written {
+    fn from(response: http::ClientResponse) -> Written {
+        Written { status: response.status, body: response.body }
+    }
+}
+
+/// PUT documents の道(転送する形が呼ぶ REST の道であり、失敗の理由にもこの字面で出す)。
+fn document_path(collection: &str, file_name: &str) -> String {
+    format!("/v1/collections/{collection}/documents/{file_name}")
+}
+
+/// POST fetch の道。
+fn fetch_path(collection: &str) -> String {
+    format!("/v1/collections/{collection}/fetch")
+}
+
 /// 走っている serve への最小のクライアント。検索は POST /v1/search、全文は
-/// GET /v1/objects/{id}、その出典は GET /v1/objects/{id}/citation を呼ぶ。
+/// GET /v1/objects/{id}、その出典は GET /v1/objects/{id}/citation、書き込みは
+/// PUT /v1/collections/{c}/documents/{name} と POST /v1/collections/{c}/fetch を呼ぶ。
 pub struct ServeClient {
     /// 接続先(host:port)。
     address: String,
@@ -204,6 +278,33 @@ impl ServeClient {
         }
     }
 
+    /// 文書 1 件を PUT する。4xx/5xx は読み替えずそのまま返し、読むのは呼び手の
+    /// written_document である(届かないときだけがここの失敗)。
+    fn put_document(
+        &self,
+        collection: &str,
+        file_name: &str,
+        body: &[u8],
+    ) -> Result<Written, String> {
+        let path = document_path(collection, file_name);
+        http::request(
+            &self.address,
+            "PUT",
+            &path,
+            Some(("application/octet-stream", body)),
+            SERVE_TIMEOUT,
+        )
+        .map(Written::from)
+        .map_err(|error| self.unreachable(&error))
+    }
+
+    /// URL からの取り込みを POST する。
+    fn fetch_url(&self, collection: &str, body: &[u8]) -> Result<Written, String> {
+        http::post_json(&self.address, &fetch_path(collection), body, FETCH_URL_TIMEOUT)
+            .map(Written::from)
+            .map_err(|error| self.unreachable(&error))
+    }
+
     fn citation(&self, id: &str) -> Result<Option<Citation>, String> {
         let path = format!("/v1/objects/{id}/citation");
         let response = http::get(&self.address, &path, SERVE_TIMEOUT)
@@ -260,16 +361,19 @@ impl Handshake {
 /// 起動時に控えた実行ファイルの姿と、交渉した内容を持つ。
 pub struct StdioServer {
     backend: Backend,
+    /// 書き込みを許すコレクション(`--writable`。与えられた順)。空なら書くツールを
+    /// 出さない。
+    writable: Vec<String>,
     /// 起動時に控えた実行ファイルの姿。None なら自己置換をしない。
     binary: Option<BinaryStamp>,
     handshake: Handshake,
 }
 
 impl StdioServer {
-    /// 後ろ盾を受けて組む。実行ファイルの姿はここで控える: 置き換えられた後の
-    /// /proc/self/exe は "(deleted)" 付きの読めない道になるので、比較の相手は
-    /// 起動時のパスでなければならない。
-    pub fn new(backend: Backend) -> StdioServer {
+    /// 後ろ盾と、書き込みを許すコレクションを受けて組む。実行ファイルの姿はここで控える:
+    /// 置き換えられた後の /proc/self/exe は "(deleted)" 付きの読めない道になるので、
+    /// 比較の相手は起動時のパスでなければならない。
+    pub fn new(backend: Backend, writable: Vec<String>) -> StdioServer {
         let handshake = Handshake::inherited();
         if let Some(protocol) = &handshake.protocol {
             crate::log_line!(
@@ -278,14 +382,23 @@ impl StdioServer {
                 handshake.client.as_deref().unwrap_or("(名乗りなし)")
             );
         }
-        StdioServer { backend, binary: BinaryStamp::of_current_exe(), handshake }
+        StdioServer { backend, writable, binary: BinaryStamp::of_current_exe(), handshake }
     }
 
-    /// 起動の知らせ(標準出力はプロトコル専用なので標準エラーへ出す)。
+    /// 起動の知らせ(標準出力はプロトコル専用なので標準エラーへ出す)。出すツールと、
+    /// 書き込みを許すコレクションもここで言う。
     pub fn announce(&self, target: &str) {
+        let tools = if self.writable.is_empty() {
+            "search・fetch(読むだけ。書き込みは --writable で許す)".to_string()
+        } else {
+            format!(
+                "search・fetch・add_document・fetch_url(書き込みを許す: {})",
+                self.writable.join(", ")
+            )
+        };
         crate::log_line!(
             "uniqnode: mcp: {target} を stdio で提供する(protocol {PROTOCOL_VERSION}、\
-             tools: search・fetch、{})",
+             tools: {tools}、{})",
             self.backend.description()
         );
     }
@@ -365,8 +478,8 @@ impl StdioServer {
             "initialize" => success(&id, self.initialize_result(params)),
             // 生存確認。空の結果が規定の答えである。
             "ping" => success(&id, Value::Object(BTreeMap::new())),
-            "tools/list" => success(&id, tools_result()),
-            "tools/call" => call_tool(&self.backend, &id, params),
+            "tools/list" => success(&id, tools_result(&self.writable)),
+            "tools/call" => call_tool(&self.backend, &self.writable, &id, params),
             other => failure(&id, METHOD_NOT_FOUND, &format!("知らないメソッド: {other}")),
         })
     }
@@ -407,15 +520,25 @@ impl StdioServer {
                     ("title", text("uniqnode RAG ストレージ")),
                 ]),
             ),
-            (
-                "instructions",
-                text(
-                    "uniqnode は取り込んだ文書をチャンク単位で検索できる知識ストアである。\
-                     search で問い、返った出典(文書名・ページ・見出し・取得日時)を答えに\
-                     添える。抜粋で足りなければ fetch にチャンク ID を渡して全文を読む。",
-                ),
-            ),
+            ("instructions", text(&self.instructions())),
         ])
+    }
+
+    /// initialize の instructions。読む道具の使い方に、書き込みを許しているときだけ書く
+    /// 道具の使い方を足す(許していないのに書けると言わない)。
+    fn instructions(&self) -> String {
+        let mut instructions = "uniqnode は取り込んだ文書をチャンク単位で検索できる知識ストアで\
+             ある。search で問い、返った出典(文書名・ページ・見出し・取得日時)を答えに\
+             添える。抜粋で足りなければ fetch にチャンク ID を渡して全文を読む。"
+            .to_string();
+        if !self.writable.is_empty() {
+            instructions.push_str(&format!(
+                "利用者が『覚えておいて』『保存して』と言ったら add_document で、URL を取り\
+                 込めと言ったら fetch_url で、書き込みを許されたコレクション({})に入れる。",
+                self.writable.join(", ")
+            ));
+        }
+        instructions
     }
 
     /// 実行ファイルが更新されていたら、自分を exec で差し替える。
@@ -584,7 +707,10 @@ fn self_check(path: &Path) -> Result<(), String> {
 /// 数えるので、新しいイメージがこの層まで動くことを確かめられる。文言の家はここである
 /// (書く側と読む側が同じ印を使う。must/0023)。
 pub fn self_check_report() -> String {
-    let tools = match tool_descriptors() {
+    // 書くツールの記述まで組み立てる(起動の指定に関わらず、この層の全部が動くことを
+    // 確かめる)。コレクション名は記述の文言に入るだけで、何にも書かない。
+    let sample = ["notes".to_string()];
+    let tools = match tool_descriptors(&sample) {
         Value::Array(tools) => tools.len(),
         _ => 0,
     };
@@ -593,12 +719,22 @@ pub fn self_check_report() -> String {
 
 /// tools/list の結果。ツールの一覧は result.tools に入る(result そのものを配列に
 /// してはならない)。ページ分割はしないので nextCursor は載せない。
-fn tools_result() -> Value {
-    object(vec![("tools", tool_descriptors())])
+fn tools_result(writable: &[String]) -> Value {
+    object(vec![("tools", tool_descriptors(writable))])
 }
 
-/// 公開する 2 ツールの記述。
-fn tool_descriptors() -> Value {
+/// 公開するツールの記述。読む 2 本(search・fetch)は常に、書く 2 本(add_document・
+/// fetch_url)は書き込みを許すコレクションが 1 つでもあるときだけ出す。
+fn tool_descriptors(writable: &[String]) -> Value {
+    let mut tools = read_tool_descriptors();
+    if !writable.is_empty() {
+        tools.extend(write_tool_descriptors(writable));
+    }
+    Value::Array(tools)
+}
+
+/// 読む 2 ツールの記述。
+fn read_tool_descriptors() -> Vec<Value> {
     let search_properties = object(vec![
         (
             "query",
@@ -653,7 +789,7 @@ fn tool_descriptors() -> Value {
          得点は同じ応答の中の順位付けにだけ意味があり、応答をまたいだ比較には使えない。",
         crate::embed::EMBEDDING_ONLY_TOP_K
     );
-    Value::Array(vec![
+    vec![
         object(vec![
             ("name", text("search")),
             ("title", text("uniqnode 検索")),
@@ -688,7 +824,120 @@ fn tool_descriptors() -> Value {
             ),
             ("annotations", read_only_annotations("uniqnode 全文取得")),
         ]),
-    ])
+    ]
+}
+
+/// 書く 2 ツールの記述。説明文は模型が読む唯一の手引きなので、いつ使い・いつ使わないかと、
+/// 書ける先をそこに書く。
+fn write_tool_descriptors(writable: &[String]) -> Vec<Value> {
+    let allowed = writable.join(", ");
+    let collection_property = schema_property(
+        "string",
+        &format!("書き込む先のコレクション名(許すのは: {allowed}。それ以外は断られる)"),
+    );
+    let name_description = format!(
+        "文書名(拡張子なし。例: hpet-notes)。空でなく、/ ? # % と空白を含まず、. で始まらず、\
+         {} 文字以内。同じ名前への再実行は上書きで、前版は残る",
+        crate::fetch::MAX_NAME_CHARS
+    );
+    let media_values: Vec<Value> =
+        ADD_DOCUMENT_MEDIA.iter().map(|(media, _)| text(media)).collect();
+    let add_document_properties = object(vec![
+        ("collection", collection_property.clone()),
+        ("name", schema_property("string", &name_description)),
+        ("text", schema_property("string", "本文(空でない文字列)")),
+        (
+            "media",
+            object(vec![
+                ("type", text("string")),
+                (
+                    "description",
+                    text(&format!(
+                        "本文の種別(省略時は {}。markdown なら見出しがチャンクの出典に載る)",
+                        ADD_DOCUMENT_MEDIA[0].0
+                    )),
+                ),
+                ("enum", Value::Array(media_values)),
+            ]),
+        ),
+    ]);
+    let add_document_description = format!(
+        "任意のテキスト知識(markdown か素文)を文書としてコレクションに入れる。入れた文書は\
+         次の search から出典付きで出る。\n\
+         使うとき: 利用者が『覚えておいて』『保存して』『メモしておいて』と言ったとき、\
+         会話で確かめた事実・決めごと・手順を後で引けるように残すとき。\n\
+         使わないとき: 仕様書や取り込んだ原本のコレクションには書かない(この mcp が書き込みを\
+         許すのは {allowed} だけで、それ以外は断られる)。利用者が頼んでいないものを勝手に\
+         残さない。\n\
+         同じ name への再実行は上書き(前版は残る)、同じ内容なら何も変わらない。"
+    );
+    let fetch_url_properties = object(vec![
+        ("collection", collection_property),
+        (
+            "url",
+            schema_property("string", "取りに行く URL(http か https。file: や ftp: は断る)"),
+        ),
+        (
+            "name",
+            schema_property(
+                "string",
+                &format!(
+                    "文書名(拡張子なし。規則は add_document の name と同じ)。省くと URL から\
+                     導く(ホストとパスを 1 語に。{} 文字以内)ので、同じ URL の再取得は同じ\
+                     名前への上書きになる",
+                    crate::fetch::MAX_NAME_CHARS
+                ),
+            ),
+        ),
+    ]);
+    let fetch_url_description = format!(
+        "URL の文書を取りに行き、コレクションに取り込む。HTML は外部への依存(スクリプト・\
+         画像・フォント・外部スタイル)を落として自足した 1 枚にしてから、PDF は本文を抜いて、\
+         素文はそのまま入れる。取り込んだ文書は次の search から出典付きで出る。\n\
+         使うとき: 利用者が『このページを取り込んで』『この URL を保存して』と言ったとき。\n\
+         使わないとき: ただ読みたいだけのとき(取り込みは永続する。読むだけなら別の道具で\
+         読む)。許されたコレクション({allowed})以外には書けない。\n\
+         取りに行く先は http/https だけで、{} 秒・{} バイトを超えるものは断られる。",
+        crate::fetch::DEFAULT_MAX_SECONDS,
+        crate::fetch::DEFAULT_MAX_BYTES
+    );
+    vec![
+        object(vec![
+            ("name", text("add_document")),
+            ("title", text("uniqnode 文書の追加")),
+            ("description", text(&add_document_description)),
+            (
+                "inputSchema",
+                object(vec![
+                    ("type", text("object")),
+                    ("properties", add_document_properties),
+                    (
+                        "required",
+                        Value::Array(vec![text("collection"), text("name"), text("text")]),
+                    ),
+                ]),
+            ),
+            // 上書きは起こるが消さない(destructiveHint false)。同じ内容は同じ ID に
+            // 落ちるので、繰り返しても状態は変わらない(idempotentHint true)。
+            ("annotations", write_annotations("uniqnode 文書の追加", true, false)),
+        ]),
+        object(vec![
+            ("name", text("fetch_url")),
+            ("title", text("uniqnode URL の取り込み")),
+            ("description", text(&fetch_url_description)),
+            (
+                "inputSchema",
+                object(vec![
+                    ("type", text("object")),
+                    ("properties", fetch_url_properties),
+                    ("required", Value::Array(vec![text("collection"), text("url")])),
+                ]),
+            ),
+            // 取るたびに相手の内容が変わりうる(idempotentHint false)し、外の世界(網)に
+            // 出る(openWorldHint true)。
+            ("annotations", write_annotations("uniqnode URL の取り込み", false, true)),
+        ]),
+    ]
 }
 
 /// JSON Schema の 1 項目(型と説明)。
@@ -721,7 +970,7 @@ fn method_property() -> Value {
     ])
 }
 
-/// どちらのツールも読むだけで、外の世界を変えない。
+/// 読む 2 ツールの annotations: 読むだけで、外の世界を変えない。
 fn read_only_annotations(title: &str) -> Value {
     object(vec![
         ("title", text(title)),
@@ -732,10 +981,22 @@ fn read_only_annotations(title: &str) -> Value {
     ])
 }
 
+/// 書く 2 ツールの annotations: 書くが消さない(上書きしても前版は残る)。べき等かと、
+/// 外の世界に出るかはツールごとに違う。
+fn write_annotations(title: &str, idempotent: bool, open_world: bool) -> Value {
+    object(vec![
+        ("title", text(title)),
+        ("readOnlyHint", Value::Bool(false)),
+        ("destructiveHint", Value::Bool(false)),
+        ("idempotentHint", Value::Bool(idempotent)),
+        ("openWorldHint", Value::Bool(open_world)),
+    ])
+}
+
 /// tools/call の振り分け。知らないツール名と引数の誤りはプロトコルの誤り
 /// (-32602)、ツールを実行したうえでの失敗は isError の結果で返す(前者は要求の
 /// 組み立てが誤っている話、後者はモデルが読んで次の手を選べる話である)。
-fn call_tool(backend: &Backend, id: &Value, params: Option<&Value>) -> String {
+fn call_tool(backend: &Backend, writable: &[String], id: &Value, params: Option<&Value>) -> String {
     let Some(Value::Object(map)) = params else {
         return failure(id, INVALID_PARAMS, "params がない(オブジェクト)");
     };
@@ -747,6 +1008,18 @@ fn call_tool(backend: &Backend, id: &Value, params: Option<&Value>) -> String {
     match name.as_str() {
         "search" => call_search(backend, id, arguments),
         "fetch" => call_fetch(backend, id, arguments),
+        // 書くツールは tools/list に載せたときだけ受ける。載せていないツールを呼ぶのは
+        // 要求の組み立ての誤り(知らないツールと同じ区分)で、理由を添える。
+        write_tool @ ("add_document" | "fetch_url") if writable.is_empty() => failure(
+            id,
+            INVALID_PARAMS,
+            &format!(
+                "{write_tool} は出していない(--writable が 1 つも無いので、この mcp は\
+                 読むだけ)"
+            ),
+        ),
+        "add_document" => call_add_document(backend, writable, id, arguments),
+        "fetch_url" => call_fetch_url(backend, writable, id, arguments),
         other => failure(id, INVALID_PARAMS, &format!("知らないツール: {other}")),
     }
 }
@@ -803,6 +1076,249 @@ fn call_fetch(backend: &Backend, id: &Value, arguments: &Value) -> String {
             let is_error = matches!(fetched, Fetched::Binary { .. });
             success(id, tool_text(&render_fetch(object_id, &fetched), is_error))
         }
+    }
+}
+
+/// add_document ツール。引数を検めて PUT documents の形(拡張子つきの名前と本文)にし、
+/// 後ろ盾に渡す。種別の判定も取り込みも api.rs の put_document が持つ(should/0135)。
+fn call_add_document(backend: &Backend, writable: &[String], id: &Value, arguments: &Value) -> String {
+    let Value::Object(map) = arguments else {
+        return failure(id, INVALID_PARAMS, "引数はオブジェクトであるべき");
+    };
+    let collection = match collection_argument(map) {
+        Ok(collection) => collection,
+        Err(message) => return failure(id, INVALID_PARAMS, &message),
+    };
+    let name = match map.get("name") {
+        Some(Value::Text(name)) => name,
+        _ => return failure(id, INVALID_PARAMS, "name がない(文書名。拡張子なし)"),
+    };
+    if let Some(message) = document_name_error(name) {
+        return failure(id, INVALID_PARAMS, &message);
+    }
+    let body = match map.get("text") {
+        Some(Value::Text(body)) if !body.trim().is_empty() => body,
+        _ => return failure(id, INVALID_PARAMS, "text がない(空でない本文)"),
+    };
+    let extension = match map.get("media") {
+        None => ADD_DOCUMENT_MEDIA[0].1,
+        Some(Value::Text(media)) => match ADD_DOCUMENT_MEDIA.iter().find(|(m, _)| m == media) {
+            Some((_, extension)) => extension,
+            None => {
+                return failure(
+                    id,
+                    INVALID_PARAMS,
+                    &format!(
+                        "media は {} のどれか: {media}",
+                        ADD_DOCUMENT_MEDIA.map(|(media, _)| media).join(" / ")
+                    ),
+                )
+            }
+        },
+        Some(_) => return failure(id, INVALID_PARAMS, "media は文字列であるべき"),
+    };
+    if let Some(refusal) = write_refusal(collection, writable) {
+        return tool_failure(id, "文書を入れなかった", &refusal);
+    }
+    let file_name = format!("{name}.{extension}");
+    let what = format!("PUT {}", document_path(collection, &file_name));
+    let written = backend
+        .put_document(collection, &file_name, body.as_bytes())
+        .and_then(|written| written_document(&what, written));
+    match written {
+        Ok(fields) => success(
+            id,
+            tool_text(&render_added(collection, name, &fields), false),
+        ),
+        Err(reason) => tool_failure(id, "文書を入れられなかった", &reason),
+    }
+}
+
+/// fetch_url ツール。引数を検めて POST fetch のボディにし、後ろ盾に渡す。取りに行く
+/// 判断も取り込みも api.rs の fetch_into(と node/src/fetch.rs)が持つ(should/0135)。
+fn call_fetch_url(backend: &Backend, writable: &[String], id: &Value, arguments: &Value) -> String {
+    let Value::Object(map) = arguments else {
+        return failure(id, INVALID_PARAMS, "引数はオブジェクトであるべき");
+    };
+    let collection = match collection_argument(map) {
+        Ok(collection) => collection,
+        Err(message) => return failure(id, INVALID_PARAMS, &message),
+    };
+    let url = match map.get("url") {
+        Some(Value::Text(url)) if !url.is_empty() => url,
+        _ => return failure(id, INVALID_PARAMS, "url がない(http か https の URL)"),
+    };
+    // 取りに行ける URL かの判断は node/src/fetch.rs の 1 箇所に問う(should/0135)。
+    // ここで断るのは、要求の組み立ての誤り(-32602)として返すためである。
+    if let Err(message) = crate::fetch::validate_url(url) {
+        return failure(id, INVALID_PARAMS, &message);
+    }
+    let mut body = vec![("url", text(url))];
+    match map.get("name") {
+        None | Some(Value::Null) => {}
+        Some(Value::Text(name)) => {
+            if let Some(message) = document_name_error(name) {
+                return failure(id, INVALID_PARAMS, &message);
+            }
+            body.push(("name", text(name)));
+        }
+        Some(_) => return failure(id, INVALID_PARAMS, "name は文字列であるべき(省けば URL から導く)"),
+    }
+    if let Some(refusal) = write_refusal(collection, writable) {
+        return tool_failure(id, "取り込まなかった", &refusal);
+    }
+    let what = format!("POST {}", fetch_path(collection));
+    let written = backend
+        .fetch_url(collection, &c1::to_canonical_bytes(&object(body)))
+        .and_then(|written| written_document(&what, written));
+    match written {
+        Ok(fields) => success(id, tool_text(&render_fetched_url(collection, &fields), false)),
+        Err(reason) => tool_failure(id, "取り込めなかった", &reason),
+    }
+}
+
+/// 書くツールの共通の引数 collection(空でなく、/ を含まない 1 語)。
+fn collection_argument(map: &BTreeMap<String, Value>) -> Result<&str, String> {
+    match map.get("collection") {
+        Some(Value::Text(collection)) if !collection.is_empty() && !collection.contains('/') => {
+            Ok(collection)
+        }
+        _ => Err("collection がない(コレクション名。/ を含まない 1 語)".to_string()),
+    }
+}
+
+/// 書き込みを許していないコレクションへの断り(許しているなら None)。ツール実行の失敗
+/// として返す文言で、どこなら書けるかを添える(模型が次の手を選べるように)。
+fn write_refusal(collection: &str, writable: &[String]) -> Option<String> {
+    if writable.iter().any(|allowed| allowed == collection) {
+        return None;
+    }
+    Some(format!(
+        "{collection} は書き込みを許していない(--writable で許すのは: {})",
+        writable.join(", ")
+    ))
+}
+
+/// 文書名(拡張子なし)の規則に外れていれば、その理由。ref 名の末尾になり、転送する形では
+/// URL の道にそのまま載るので、道を壊す字と階層を作る / を断る。拡張子の付いた名前
+/// (foo.md)は、PUT documents が拡張子を足すので二重になる前に断る(拡張子の判定は
+/// 取り込みと同じ表 crate::ingest::media_for_extension に問う。should/0135)。
+fn document_name_error(name: &str) -> Option<String> {
+    let rule = format!(
+        "name は文書名(拡張子なし)。空でなく、/ ? # % と空白・制御文字を含まず、. で始まらず、\
+         {} 文字以内",
+        crate::fetch::MAX_NAME_CHARS
+    );
+    if name.is_empty()
+        || name.starts_with('.')
+        || name.chars().count() > crate::fetch::MAX_NAME_CHARS
+        || name
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "/?#%".contains(c))
+    {
+        return Some(format!("{rule}: {name:?}"));
+    }
+    if let Some((_, extension)) = name.rsplit_once('.') {
+        if crate::ingest::media_for_extension(&extension.to_ascii_lowercase()).is_some() {
+            return Some(format!(
+                "name は拡張子なし(.{extension} を除いた名前にする。種別は media で言う): {name:?}"
+            ));
+        }
+    }
+    None
+}
+
+/// 書き込みの口の答えを読む。200 なら本文の JSON(オブジェクト)を返し、それ以外は
+/// handler(転送する形なら serve)が言った理由をそのまま失敗にする(4xx/5xx を黙って
+/// 飲まない。must/0022)。ストアを直接開く形と転送する形が同じ読み手を通る(should/0135)。
+fn written_document(what: &str, written: Written) -> Result<BTreeMap<String, Value>, String> {
+    let parsed = std::str::from_utf8(&written.body)
+        .ok()
+        .and_then(|text| c1::parse(text).ok())
+        .and_then(|value| match value {
+            Value::Object(map) => Some(map),
+            _ => None,
+        });
+    if written.status != 200 {
+        let reason = match parsed.as_ref().and_then(|map| map.get("error")) {
+            Some(Value::Text(message)) => message.clone(),
+            _ => http::body_head(&written.body),
+        };
+        return Err(format!("{what} が {} を返した: {reason}", written.status));
+    }
+    parsed.ok_or_else(|| {
+        format!("{what} の応答を読めない(JSON のオブジェクトでない): {}", http::body_head(&written.body))
+    })
+}
+
+/// add_document の応答(1 行)。新規か上書きか、同じ内容で変わらなかったかを言う。
+fn render_added(collection: &str, name: &str, fields: &BTreeMap<String, Value>) -> String {
+    format!(
+        "入れた: {collection}/{name}({})。検索に出る。",
+        revision_summary(fields)
+    )
+}
+
+/// fetch_url の応答(1 行)。取り込んだ名前・種別・転送後の URL と、HTML なら落とした
+/// 外部依存の数。
+fn render_fetched_url(collection: &str, fields: &BTreeMap<String, Value>) -> String {
+    let name = field_text(fields, "name").unwrap_or("(名前なし)");
+    let media = field_text(fields, "media").unwrap_or("(種別なし)");
+    let final_url = field_text(fields, "final_url").unwrap_or("(URL なし)");
+    let mut line = format!(
+        "取り込んだ: {collection}/{name}({media}、final_url {final_url}、{}",
+        revision_summary(fields)
+    );
+    if let Some(Value::Object(dropped)) = fields.get("dropped") {
+        let counts: Vec<(&str, i64)> = dropped
+            .iter()
+            .filter_map(|(kind, count)| match count {
+                Value::Integer(count) if *count > 0 => Some((kind.as_str(), *count)),
+                _ => None,
+            })
+            .collect();
+        let total: i64 = counts.iter().map(|(_, count)| count).sum();
+        line.push_str(&format!("、落とした外部依存 {total} 件"));
+        if !counts.is_empty() {
+            let detail: Vec<String> =
+                counts.iter().map(|(kind, count)| format!("{kind} {count}")).collect();
+            line.push_str(&format!("({})", detail.join("・")));
+        }
+    }
+    line.push_str(")。検索に出る。");
+    line
+}
+
+/// 取り込みの結果の要約: 新規 / 上書き(前版) / 変わらず、doc_rev の短縮、新規オブジェクト数。
+fn revision_summary(fields: &BTreeMap<String, Value>) -> String {
+    let doc_rev = field_text(fields, "doc_rev").map(short_id).unwrap_or_else(|| "(なし)".to_string());
+    let new_objects = match fields.get("new_objects") {
+        Some(Value::Integer(count)) => *count,
+        _ => 0,
+    };
+    let previous = field_text(fields, "previous");
+    let revision = match (fields.get("ref_updated"), previous) {
+        (Some(Value::Bool(false)), _) => "変わらず(同じ内容が既にある)".to_string(),
+
+        (_, Some(previous)) => format!("上書き。前版 {}", short_id(previous)),
+        (_, None) => "新規".to_string(),
+    };
+    format!("{revision}。doc_rev {doc_rev}、新規オブジェクト {new_objects}")
+}
+
+fn field_text<'a>(fields: &'a BTreeMap<String, Value>, key: &str) -> Option<&'a str> {
+    match fields.get(key) {
+        Some(Value::Text(value)) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+/// オブジェクト ID の短縮(s256: と先頭 8 桁)。応答の 1 行に収めるためで、全文が要る
+/// ときは REST で引ける。
+fn short_id(id: &str) -> String {
+    match id.char_indices().nth(13) {
+        Some((cut, _)) => format!("{}…", &id[..cut]),
+        None => id.to_string(),
     }
 }
 
@@ -1084,6 +1600,154 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
+    /// add_document の media の表は、取り込みの拡張子の表の逆引きである。片方だけを
+    /// 直すと、受けた media と入る種別が食い違う(should/0135 の合意の試験)。
+    #[test]
+    fn add_document_media_round_trips_through_the_extension_table() {
+        for (media, extension) in ADD_DOCUMENT_MEDIA {
+            assert_eq!(
+                crate::ingest::media_for_extension(extension),
+                Some(media),
+                "media {media} と拡張子 {extension} が取り込みの表と食い違う"
+            );
+        }
+        assert_eq!(ADD_DOCUMENT_MEDIA[0].0, "markdown", "既定は markdown");
+    }
+
+    /// 文書名の規則: 拡張子つき・階層・URL を壊す字・空白は断り、日本語の 1 語は通す。
+    #[test]
+    fn document_names_are_one_word_without_an_extension() {
+        assert_eq!(document_name_error("hpet-notes"), None);
+        assert_eq!(document_name_error("覚え書き_2026"), None);
+        assert_eq!(document_name_error("v1.2-notes"), None, "拡張子でない . は通す");
+        for bad in ["", "a/b", "a b", ".hidden", "a?b", "a#b", "a%b", "a\nb"] {
+            let error = document_name_error(bad).unwrap_or_else(|| panic!("{bad:?} を通した"));
+            assert!(error.contains("name は文書名"), "{error}");
+        }
+        let extension = document_name_error("notes.md").expect("拡張子つきは断る");
+        assert!(extension.contains("拡張子なし"), "{extension}");
+        assert!(document_name_error("notes.PDF").is_some(), "大文字の拡張子も断る");
+        let long = "x".repeat(crate::fetch::MAX_NAME_CHARS + 1);
+        assert!(document_name_error(&long).is_some(), "長すぎる名前は断る");
+    }
+
+    /// 書くツールは、書き込みを許すコレクションがあるときだけ tools/list に出る。無い
+    /// ときに呼べば、載せていないツールとして要求の誤り(-32602)で断る。
+    #[test]
+    fn write_tools_are_listed_only_when_a_collection_is_writable() {
+        let (dir, mut server) = local_server("writable");
+        let list = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}";
+        let read_only = server.handle_message(list).expect("応答");
+        assert!(!read_only.contains("\"name\":\"add_document\""), "{read_only}");
+        assert!(!read_only.contains("\"name\":\"fetch_url\""), "{read_only}");
+        let refused = server
+            .handle_message(
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":\
+                 {\"name\":\"add_document\",\"arguments\":{\"collection\":\"notes\",\
+                 \"name\":\"n\",\"text\":\"t\"}}}",
+            )
+            .expect("応答");
+        assert!(refused.contains("\"code\":-32602"), "{refused}");
+        assert!(refused.contains("--writable"), "理由を言うべき: {refused}");
+
+        server.writable = vec!["notes".to_string(), "web".to_string()];
+        let listed = server.handle_message(list).expect("応答");
+        assert!(listed.contains("\"name\":\"add_document\""), "{listed}");
+        assert!(listed.contains("\"name\":\"fetch_url\""), "{listed}");
+        assert!(
+            listed.contains("\"required\":[\"collection\",\"name\",\"text\"]"),
+            "{listed}"
+        );
+        assert!(listed.contains("\"required\":[\"collection\",\"url\"]"), "{listed}");
+        // 書ける先は説明文に出る(模型が読むのはここだけである)。
+        assert!(listed.contains("許すのは: notes, web"), "{listed}");
+        assert!(listed.contains("\"readOnlyHint\":false"), "{listed}");
+        // 許していないコレクションはツールの失敗(isError)で、どこなら書けるかを言う。
+        let refused = server
+            .handle_message(
+                "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":\
+                 {\"name\":\"add_document\",\"arguments\":{\"collection\":\"specs\",\
+                 \"name\":\"n\",\"text\":\"t\"}}}",
+            )
+            .expect("応答");
+        assert!(refused.contains("\"isError\":true"), "{refused}");
+        assert!(
+            refused.contains("specs は書き込みを許していない(--writable で許すのは: notes, web)"),
+            "{refused}"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 書き込みの口の 4xx/5xx は、handler(転送する形なら serve)の言った理由をそのまま
+    /// 失敗にする(黙って飲まない。must/0022)。200 は本文のオブジェクトを返す。
+    #[test]
+    fn written_document_passes_the_handlers_reason_through() {
+        let refused = Written {
+            status: 400,
+            body: b"{\"error\":\"\xe5\xaf\xbe\xe8\xb1\xa1\xe5\xa4\x96\xe3\x81\xae\xe6\x8b\xa1\xe5\xbc\xb5\xe5\xad\x90\"}".to_vec(),
+        };
+        let error = written_document("PUT /x", refused).expect_err("400 は失敗");
+        assert_eq!(error, "PUT /x が 400 を返した: 対象外の拡張子");
+        let plain = Written { status: 502, body: b"bad gateway".to_vec() };
+        let error = written_document("POST /y", plain).expect_err("502 は失敗");
+        assert!(error.starts_with("POST /y が 502 を返した: bad gateway"), "{error}");
+        let ok = Written {
+            status: 200,
+            body: b"{\"doc_rev\":\"s256:ab\",\"new_objects\":2,\"previous\":null,\"ref_updated\":true}".to_vec(),
+        };
+        let fields = written_document("PUT /x", ok).expect("200 は成功");
+        assert_eq!(fields.get("new_objects"), Some(&Value::Integer(2)));
+        let broken = Written { status: 200, body: b"[]".to_vec() };
+        assert!(written_document("PUT /x", broken).is_err(), "オブジェクトでない本文は失敗");
+    }
+
+    /// 応答の 1 行は新規・上書き・変わらずを言い分ける(期待値はリテラル。should/0137)。
+    #[test]
+    fn the_write_responses_say_whether_the_document_is_new_or_overwritten() {
+        let doc_rev = format!("s256:{}", "1".repeat(64));
+        let previous = format!("s256:{}", "2".repeat(64));
+        let mut fields = BTreeMap::new();
+        fields.insert("doc_rev".to_string(), text(&doc_rev));
+        fields.insert("new_objects".to_string(), Value::Integer(3));
+        fields.insert("ref_updated".to_string(), Value::Bool(true));
+        fields.insert("previous".to_string(), Value::Null);
+        assert_eq!(
+            render_added("notes", "memo", &fields),
+            "入れた: notes/memo(新規。doc_rev s256:11111111…、新規オブジェクト 3)。検索に出る。"
+        );
+        fields.insert("previous".to_string(), text(&previous));
+        assert_eq!(
+            render_added("notes", "memo", &fields),
+            "入れた: notes/memo(上書き。前版 s256:22222222…。doc_rev s256:11111111…、\
+             新規オブジェクト 3)。検索に出る。"
+        );
+        fields.insert("ref_updated".to_string(), Value::Bool(false));
+        fields.insert("new_objects".to_string(), Value::Integer(0));
+        assert_eq!(
+            render_added("notes", "memo", &fields),
+            "入れた: notes/memo(変わらず(同じ内容が既にある)。doc_rev s256:11111111…、\
+             新規オブジェクト 0)。検索に出る。"
+        );
+        // fetch_url は名前・種別・転送後の URL と、HTML なら落とした数を添える。
+        fields.insert("ref_updated".to_string(), Value::Bool(true));
+        fields.insert("previous".to_string(), Value::Null);
+        fields.insert("new_objects".to_string(), Value::Integer(2));
+        fields.insert("name".to_string(), text("example.com_page"));
+        fields.insert("media".to_string(), text("html"));
+        fields.insert("final_url".to_string(), text("http://example.com/page.html"));
+        let mut dropped = BTreeMap::new();
+        for (kind, count) in [("scripts", 2), ("images", 1), ("fonts", 0)] {
+            dropped.insert(kind.to_string(), Value::Integer(count));
+        }
+        fields.insert("dropped".to_string(), Value::Object(dropped));
+        assert_eq!(
+            render_fetched_url("web", &fields),
+            "取り込んだ: web/example.com_page(html、final_url http://example.com/page.html、\
+             新規。doc_rev s256:11111111…、新規オブジェクト 2、落とした外部依存 3 件\
+             (images 1・scripts 2))。検索に出る。"
+        );
+    }
+
     /// 先読みバッファの検査(自己置換の前提)。1 行読んだ後に次のメッセージがバッファに
     /// 載っていれば、そのバイト列は exec で消えるので、差し替えは見送らねばならない。
     #[test]
@@ -1130,6 +1794,6 @@ mod tests {
             reranker: None,
             data_dir: dir.clone(),
         };
-        (dir, StdioServer::new(Backend::Local(Box::new(context))))
+        (dir, StdioServer::new(Backend::Local(Box::new(context)), Vec::new()))
     }
 }

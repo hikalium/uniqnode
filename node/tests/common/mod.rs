@@ -3,10 +3,12 @@
 // 統合テストクレートごとに個別コンパイルされ、どのクレートも全ヘルパは使わないため。
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 pub struct Server {
     pub child: Child,
@@ -325,4 +327,140 @@ pub fn put_ref(address: &str, path: &str, target: Option<&str>) {
     };
     let response = simple(address, "PUT", &format!("/v1/refs/{path}"), body.as_bytes());
     assert_eq!(response.status, 200, "{}", body_text(&response));
+}
+
+// ---- 取りに行かせる相手(URL からの取り込みのテスト用の小さな HTTP サーバ) ----
+
+/// 相手が返す 1 件。
+#[derive(Clone)]
+pub struct Canned {
+    pub status: u16,
+    pub content_type: Option<&'static str>,
+    pub body: Vec<u8>,
+    pub location: Option<String>,
+}
+
+impl Canned {
+    pub fn ok(content_type: Option<&'static str>, body: &[u8]) -> Canned {
+        Canned {
+            status: 200,
+            content_type,
+            body: body.to_vec(),
+            location: None,
+        }
+    }
+    pub fn redirect(status: u16, location: &str) -> Canned {
+        Canned {
+            status,
+            content_type: None,
+            body: Vec::new(),
+            location: Some(location.to_string()),
+        }
+    }
+}
+
+/// 127.0.0.1 の別ポートで待つ小さな HTTP サーバ。パスごとに決めた応答を返し、受けた要求の
+/// 頭(要求行とヘッダ)を記録する(curl が実際に何を送ったかを検査する。should/0138)。
+/// 知らないパスは 404。応答ごとに接続を閉じる。URL からの取り込み(tests/fetch.rs)と
+/// MCP の fetch_url(tests/mcp.rs)が共用する。網には出ない。
+pub struct TestSite {
+    pub address: String,
+    routes: Arc<Mutex<BTreeMap<String, Canned>>>,
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl TestSite {
+    pub fn start(routes: Vec<(&str, Canned)>) -> TestSite {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test site");
+        let address = listener.local_addr().expect("addr").to_string();
+        let routes: Arc<Mutex<BTreeMap<String, Canned>>> = Arc::new(Mutex::new(
+            routes
+                .into_iter()
+                .map(|(path, canned)| (path.to_string(), canned))
+                .collect(),
+        ));
+        let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let (routes_for_thread, requests_for_thread) = (routes.clone(), requests.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let (routes, requests) = (routes_for_thread.clone(), requests_for_thread.clone());
+                std::thread::spawn(move || answer(stream, &routes, &requests));
+            }
+        });
+        TestSite {
+            address,
+            routes,
+            requests,
+        }
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.address)
+    }
+
+    /// 応答を差し替える(同じ URL の 2 回目が別の内容になる場合を作る)。
+    pub fn set(&self, path: &str, canned: Canned) {
+        self.routes
+            .lock()
+            .expect("lock")
+            .insert(path.to_string(), canned);
+    }
+
+    pub fn requests(&self) -> Vec<String> {
+        self.requests.lock().expect("lock").clone()
+    }
+}
+
+fn answer(
+    stream: TcpStream,
+    routes: &Mutex<BTreeMap<String, Canned>>,
+    requests: &Mutex<Vec<String>>,
+) {
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+    let mut head = String::new();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        if line.trim_end_matches(['\r', '\n']).is_empty() {
+            break;
+        }
+        head.push_str(&line);
+    }
+    requests.lock().expect("lock").push(head.clone());
+    let path = head
+        .lines()
+        .next()
+        .and_then(|l| l.split(' ').nth(1))
+        .unwrap_or("/")
+        .to_string();
+    let canned = routes
+        .lock()
+        .expect("lock")
+        .get(&path)
+        .cloned()
+        .unwrap_or(Canned {
+            status: 404,
+            content_type: Some("text/plain"),
+            body: b"not found".to_vec(),
+            location: None,
+        });
+    let mut response = format!(
+        "HTTP/1.1 {} Test\r\nContent-Length: {}\r\nConnection: close\r\n",
+        canned.status,
+        canned.body.len()
+    );
+    if let Some(content_type) = canned.content_type {
+        response.push_str(&format!("Content-Type: {content_type}\r\n"));
+    }
+    if let Some(location) = &canned.location {
+        response.push_str(&format!("Location: {location}\r\n"));
+    }
+    response.push_str("\r\n");
+    let mut writer = stream;
+    let _ = writer.write_all(response.as_bytes());
+    let _ = writer.write_all(&canned.body);
+    let _ = writer.flush();
 }

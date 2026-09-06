@@ -375,6 +375,9 @@ pub struct IngestOutcome {
     pub new_objects: usize,
     /// ref を張り替えたか。false = 完全な no-op。
     pub ref_updated: bool,
+    /// 取り込む前にその ref が指していた doc_rev(無ければ新規の文書)。上書きと新規を
+    /// 呼び手が言い分けるために返す(MCP の add_document の応答がこれを読む)。
+    pub previous: Option<String>,
 }
 
 fn text_value(text: &str) -> Value {
@@ -446,6 +449,7 @@ pub fn ingest_document(store: &mut Store, input: &DocumentInput) -> Result<Inges
                             doc_rev_id: current_id.clone(),
                             new_objects,
                             ref_updated: false,
+                            previous: Some(current_id.clone()),
                         });
                     }
                 }
@@ -478,7 +482,7 @@ pub fn ingest_document(store: &mut Store, input: &DocumentInput) -> Result<Inges
     let (doc_rev_id, is_new) = store.put_object(&bytes)?;
     new_objects += usize::from(is_new);
     store.set_ref(&ref_path, Some(&doc_rev_id))?;
-    Ok(IngestOutcome { doc_rev_id, new_objects, ref_updated: true })
+    Ok(IngestOutcome { doc_rev_id, new_objects, ref_updated: true, previous: current_target })
 }
 
 // ---- 注釈の取り込み(INGEST の「注釈の取り込みと照合」節) ----

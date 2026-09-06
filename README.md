@@ -23,7 +23,8 @@ SPEC §11)を実装済み。依存クレートなし。
   CLI、HTTP API。その上に、文書の取り込み
   ([docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b))、出典付きの検索
   ([docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580))、LLM エージェント向けの
-  MCP アダプタ([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))、ブラウザから
+  MCP アダプタ(読むだけが既定で、`--writable` で許したコレクションにはエージェントから文書を
+  足せる。[docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))、ブラウザから
   引く 1 枚の RAG ビューワ([docs/design/VIEWER.md](#4cd4c71a-ecf3-44a8-a97b-bb2c8d8fe847))、
   ピアへ問いを散布する分散検索
   ([docs/design/DISTRIBUTED_SEARCH.md](#e577f6db-659e-4eb8-a152-3b7780e4a9d1))。

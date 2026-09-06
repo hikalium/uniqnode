@@ -29,7 +29,7 @@ const MAX_REDIRECTS: &str = "10";
 const USER_AGENT: &str = concat!("uniqnode/", env!("CARGO_PKG_VERSION"));
 
 /// 文書名の長さの上限(文字)。超えたら切って末尾に短いハッシュを付ける。
-const MAX_NAME_CHARS: usize = 100;
+pub const MAX_NAME_CHARS: usize = 100;
 /// 切ったときに残す先頭の長さ(文字)。
 const TRUNCATED_NAME_CHARS: usize = 80;
 

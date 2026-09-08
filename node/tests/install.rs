@@ -148,10 +148,10 @@ fn install_without_start_places_the_binary_the_units_and_the_drop_ins() {
         .join("systemd")
         .join("user");
     for name in [
-        "uniqnode-serve.service",
-        "uniqnode-viewer.service",
-        "uniqnode-backup.service",
-        "uniqnode-backup.timer",
+        "uniqnode-serve@.service",
+        "uniqnode-viewer@.service",
+        "uniqnode-backup@.service",
+        "uniqnode-backup@.timer",
     ] {
         assert_eq!(
             text(&unit_dir.join(name)),
@@ -163,7 +163,7 @@ fn install_without_start_places_the_binary_the_units_and_the_drop_ins() {
     // drop-in 3 本: 指定した値が載り、ExecStart= は置いたバイナリを指す。
     let serve = text(
         &unit_dir
-            .join("uniqnode-serve.service.d")
+            .join("uniqnode-serve@default.service.d")
             .join("override.conf"),
     );
     assert!(
@@ -203,7 +203,7 @@ fn install_without_start_places_the_binary_the_units_and_the_drop_ins() {
     );
     let viewer = text(
         &unit_dir
-            .join("uniqnode-viewer.service.d")
+            .join("uniqnode-viewer@default.service.d")
             .join("override.conf"),
     );
     assert!(
@@ -216,7 +216,7 @@ fn install_without_start_places_the_binary_the_units_and_the_drop_ins() {
     );
     let backup = text(
         &unit_dir
-            .join("uniqnode-backup.service.d")
+            .join("uniqnode-backup@default.service.d")
             .join("override.conf"),
     );
     assert!(
@@ -275,7 +275,7 @@ fn install_without_start_places_the_binary_the_units_and_the_drop_ins() {
     assert_eq!(
         text(
             &unit_dir
-                .join("uniqnode-serve.service.d")
+                .join("uniqnode-serve@default.service.d")
                 .join("override.conf")
         ),
         serve,
@@ -653,11 +653,11 @@ fn a_system_drop_in_names_the_user_cancels_the_state_directory_and_waits_for_the
     let of = |unit: &str| -> String {
         rendered
             .iter()
-            .find(|(name, _)| *name == unit)
+            .find(|(name, _)| name == unit)
             .map(|(_, text)| text.clone())
             .expect("3 つの service の 1 つ")
     };
-    let serve = of("uniqnode-serve.service");
+    let serve = of("uniqnode-serve@default.service");
     assert!(
         serve.contains("[Unit]\nAfter=wg-quick@wg1.service\nWants=wg-quick@wg1.service\n[Service]\n"),
         "{serve}"
@@ -682,7 +682,7 @@ fn a_system_drop_in_names_the_user_cancels_the_state_directory_and_waits_for_the
         "{serve}"
     );
     // viewer と backup も同じ [Unit] と User=/Group= を持ち、読み口は持たない。
-    for unit in ["uniqnode-viewer.service", "uniqnode-backup.service"] {
+    for unit in ["uniqnode-viewer@default.service", "uniqnode-backup@default.service"] {
         let text = of(unit);
         assert!(
             text.contains("[Unit]\nAfter=wg-quick@wg1.service\nWants=wg-quick@wg1.service\n"),
@@ -695,7 +695,7 @@ fn a_system_drop_in_names_the_user_cancels_the_state_directory_and_waits_for_the
         assert!(!text.contains("UNIQNODE_AGENT_LISTEN"), "{unit}:\n{text}");
         assert!(!text.contains("--listen-agent"), "{unit}:\n{text}");
     }
-    let backup = of("uniqnode-backup.service");
+    let backup = of("uniqnode-backup@default.service");
     assert!(
         backup.ends_with(
             "ExecStart=\nExecStart=/home/op/.local/bin/uniqnode backup ${UNIQNODE_DATA_DIR} \
@@ -744,11 +744,11 @@ fn the_writable_collections_are_written_to_the_drop_in_as_values_not_expansions(
     let of = |unit: &str| -> String {
         rendered
             .iter()
-            .find(|(name, _)| *name == unit)
+            .find(|(name, _)| name == unit)
             .map(|(_, text)| text.clone())
             .expect("3 つの service の 1 つ")
     };
-    let serve = of("uniqnode-serve.service");
+    let serve = of("uniqnode-serve@default.service");
     assert!(
         serve.contains(
             "\nEnvironment=UNIQNODE_AGENT_LISTEN=10.10.128.1:7441\n\
@@ -764,7 +764,7 @@ fn the_writable_collections_are_written_to_the_drop_in_as_values_not_expansions(
         ),
         "{serve}"
     );
-    for unit in ["uniqnode-viewer.service", "uniqnode-backup.service"] {
+    for unit in ["uniqnode-viewer@default.service", "uniqnode-backup@default.service"] {
         let text = of(unit);
         assert!(!text.contains("UNIQNODE_AGENT_WRITABLE"), "{unit}:\n{text}");
         assert!(!text.contains("--agent-writable"), "{unit}:\n{text}");
@@ -811,11 +811,11 @@ fn the_readable_collections_are_written_to_the_drop_in_as_values_not_expansions(
     let of = |unit: &str| -> String {
         rendered
             .iter()
-            .find(|(name, _)| *name == unit)
+            .find(|(name, _)| name == unit)
             .map(|(_, text)| text.clone())
             .expect("3 つの service の 1 つ")
     };
-    let serve = of("uniqnode-serve.service");
+    let serve = of("uniqnode-serve@default.service");
     assert!(
         serve.contains(
             "\nEnvironment=UNIQNODE_AGENT_WRITABLE=lamalium-notes\n\
@@ -832,7 +832,7 @@ fn the_readable_collections_are_written_to_the_drop_in_as_values_not_expansions(
         ),
         "{serve}"
     );
-    for unit in ["uniqnode-viewer.service", "uniqnode-backup.service"] {
+    for unit in ["uniqnode-viewer@default.service", "uniqnode-backup@default.service"] {
         let text = of(unit);
         assert!(!text.contains("UNIQNODE_AGENT_COLLECTIONS"), "{unit}:\n{text}");
         assert!(!text.contains("--agent-collections"), "{unit}:\n{text}");
@@ -915,9 +915,9 @@ fn the_take_over_and_firewall_steps_use_fixed_words_and_judge_by_effect() {
     };
     assert_eq!(user_manager_flags("op"), vec!["--user", "-M", "op@"]);
     assert_eq!(
-        take_over_command("op"),
-        "systemctl --user -M op@ disable --now uniqnode-serve.service uniqnode-viewer.service \
-         uniqnode-backup.timer"
+        take_over_command("op", "default"),
+        "systemctl --user -M op@ disable --now uniqnode-serve@default.service \
+         uniqnode-viewer@default.service uniqnode-backup@default.timer"
     );
     assert!(unit_is_running("active") && unit_is_running("deactivating"));
     assert!(!unit_is_running("inactive") && !unit_is_running("failed") && !unit_is_running(""));
@@ -967,11 +967,12 @@ fn the_take_over_and_firewall_steps_use_fixed_words_and_judge_by_effect() {
 #[test]
 fn the_nft_road_writes_one_table_and_lets_the_serve_unit_load_it_on_every_start() {
     use uniqnode::install::{
-        drop_ins, nft_rule_listed, nft_rules_text, FirewallBackend, NFT_RULES_NAME, NFT_TABLE,
+        drop_ins, nft_rule_listed, nft_rules_text, nft_table_for, FirewallBackend, NFT_RULES_NAME,
     };
-    let text = nft_rules_text("10.10.128.4", "10.10.128.1:7441").expect("組める");
-    assert!(text.contains("table inet uniqnode {}\n"), "{text}");
-    assert!(text.contains("delete table inet uniqnode\n"), "{text}");
+    let table = nft_table_for("default");
+    let text = nft_rules_text(&table, "10.10.128.4", "10.10.128.1:7441").expect("組める");
+    assert!(text.contains("table inet uniqnode_default {}\n"), "{text}");
+    assert!(text.contains("delete table inet uniqnode_default\n"), "{text}");
     assert!(
         text.contains("type filter hook input priority filter; policy accept;"),
         "{text}"
@@ -985,10 +986,13 @@ fn the_nft_road_writes_one_table_and_lets_the_serve_unit_load_it_on_every_start(
         ),
         "{text}"
     );
-    assert_eq!(NFT_TABLE, "inet uniqnode");
+    assert_eq!(table, "inet uniqnode_default");
+    // 表の名はインスタンスごとに別である(1 つの名を共有すると、後から起きた serve が
+    // 先の実体の規則を消す。据える前に見つけた 2026-09-08 の件)。
+    assert_eq!(nft_table_for("graph"), "inet uniqnode_graph");
 
     // nft list table の答え(counter の数は変わり、集合の並びも変わりうる)。
-    let listing = "table inet uniqnode {\n\tchain agent_door {\n\t\ttype filter hook input priority filter; policy accept;\n\t\tip daddr 10.10.128.1 tcp dport 7441 ip saddr != { 10.10.128.1, 10.10.128.4 } counter packets 3 bytes 180 drop\n\t}\n}\n";
+    let listing = "table inet uniqnode_default {\n\tchain agent_door {\n\t\ttype filter hook input priority filter; policy accept;\n\t\tip daddr 10.10.128.1 tcp dport 7441 ip saddr != { 10.10.128.1, 10.10.128.4 } counter packets 3 bytes 180 drop\n\t}\n}\n";
     assert!(nft_rule_listed(listing, "10.10.128.4", "10.10.128.1:7441").expect("読める"));
     assert!(!nft_rule_listed(listing, "10.10.128.5", "10.10.128.1:7441").expect("読める"));
     assert!(!nft_rule_listed(listing, "10.10.128.4", "10.10.128.1:7442").expect("読める"));
@@ -1003,18 +1007,23 @@ fn the_nft_road_writes_one_table_and_lets_the_serve_unit_load_it_on_every_start(
     options.firewall_backend = Some(FirewallBackend::Nft(PathBuf::from("/usr/sbin/nft")));
     assert_eq!(
         options.nft_rules_path(),
-        PathBuf::from("/etc/systemd/system/uniqnode-serve.service.d").join(NFT_RULES_NAME)
+        PathBuf::from("/etc/systemd/system/uniqnode-serve@default.service.d").join(NFT_RULES_NAME)
     );
     let rendered = drop_ins(&options, "/usr/bin").expect("描ける");
-    let serve = &rendered.iter().find(|(unit, _)| *unit == "uniqnode-serve.service").expect("serve").1;
+    let serve = &rendered
+        .iter()
+        .find(|(unit, _)| unit == "uniqnode-serve@default.service")
+        .expect("serve")
+        .1;
     assert!(
         serve.contains(
-            "ExecStartPre=+/usr/sbin/nft -f /etc/systemd/system/uniqnode-serve.service.d/agent-door.nft"
+            "ExecStartPre=+/usr/sbin/nft -f \
+             /etc/systemd/system/uniqnode-serve@default.service.d/agent-door.nft"
         ),
         "{serve}"
     );
     for (unit, content) in &rendered {
-        if *unit != "uniqnode-serve.service" {
+        if unit != "uniqnode-serve@default.service" {
             assert!(!content.contains("ExecStartPre="), "{unit} には要らない: {content}");
         }
     }
@@ -1026,4 +1035,177 @@ fn the_nft_road_writes_one_table_and_lets_the_serve_unit_load_it_on_every_start(
         rendered.iter().all(|(_, content)| !content.contains("ExecStartPre=")),
         "ufw の道では unit に足すものは無い"
     );
+}
+
+/// 2 つ目のストアを同じ機械で: `--instance` を変えれば、unit の名も drop-in の置き場も
+/// nft の表の名も分かれる。テンプレート unit は 1 組しか置かれない(写しではなく設定の
+/// 1 項目で増える。should/0118)。
+/// should/0137: unit_for の差し込みを消して名を固定にすると 2 つ目の install が 1 つ目の
+/// drop-in を上書きし、最後の assert が赤になる(実験した)。
+#[test]
+fn a_second_instance_gets_its_own_units_drop_ins_and_firewall_table() {
+    if !systemctl_available() {
+        return;
+    }
+    let work = work_dir("two-instances");
+    let unit_dir = work.join("units");
+    let mut listen = 7460;
+    for instance in ["default", "graph"] {
+        let outcome = uniqnode(&[
+            "install",
+            work.join(format!("store-{instance}"))
+                .to_str()
+                .expect("utf-8"),
+            "--instance",
+            instance,
+            "--listen",
+            &format!("127.0.0.1:{listen}"),
+            "--viewer-listen",
+            &format!("127.0.0.1:{}", listen + 1),
+            "--backup-dir",
+            work.join(format!("copy-{instance}")).to_str().expect("utf-8"),
+            "--bin",
+            work.join("bin").join("uniqnode").to_str().expect("utf-8"),
+            "--unit-dir",
+            unit_dir.to_str().expect("utf-8"),
+            "--no-start",
+        ]);
+        assert_eq!(outcome.status, 0, "{}\n{}", outcome.stdout, outcome.stderr);
+        assert!(
+            outcome
+                .stdout
+                .contains(&format!("install: インスタンス {instance}(unit は uniqnode-serve@{instance}.service、nft の表は inet uniqnode_{instance})")),
+            "{}",
+            outcome.stdout
+        );
+        listen += 10;
+    }
+
+    // テンプレート unit は 1 組だけ。インスタンスの数だけ写されはしない。
+    let mut placed: Vec<String> = std::fs::read_dir(&unit_dir)
+        .expect("read_dir")
+        .map(|entry| entry.expect("entry").file_name().to_string_lossy().to_string())
+        .collect();
+    placed.sort();
+    assert_eq!(
+        placed,
+        vec![
+            "uniqnode-backup@.service",
+            "uniqnode-backup@.timer",
+            "uniqnode-backup@default.service.d",
+            "uniqnode-backup@graph.service.d",
+            "uniqnode-serve@.service",
+            "uniqnode-serve@default.service.d",
+            "uniqnode-serve@graph.service.d",
+            "uniqnode-viewer@.service",
+            "uniqnode-viewer@default.service.d",
+            "uniqnode-viewer@graph.service.d",
+        ],
+        "テンプレート 4 本と、インスタンスごとの drop-in の置き場"
+    );
+
+    // 2 つ目の drop-in が 1 つ目を上書きしていない(それぞれのストアと待ち受けを指す)。
+    for (instance, port) in [("default", 7460), ("graph", 7470)] {
+        let serve = text(
+            &unit_dir
+                .join(format!("uniqnode-serve@{instance}.service.d"))
+                .join("override.conf"),
+        );
+        assert!(
+            serve.contains(&format!("\nEnvironment=UNIQNODE_LISTEN=127.0.0.1:{port}\n")),
+            "{serve}"
+        );
+        assert!(
+            serve.contains(&format!(
+                "\nEnvironment=UNIQNODE_DATA_DIR={}\n",
+                work.join(format!("store-{instance}")).display()
+            )),
+            "{serve}"
+        );
+    }
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// インスタンス名は 3 つの場所(unit の名・nft の表の名・drop-in の道)に同じ字が入るので、
+/// 3 つとも通る字種に限る。断りは何が通るかを言う。
+#[test]
+fn an_instance_name_that_does_not_fit_all_three_places_is_refused() {
+    use uniqnode::install::{check_instance, nft_table_for, unit_for, DEFAULT_INSTANCE};
+    assert!(check_instance("default").is_ok());
+    assert!(check_instance("graph_b").is_ok());
+    assert!(check_instance("b2").is_ok());
+    // nft の識別子に - は使えない。systemd の unit の名に / は階層の意味を持つ。
+    for bad in ["graph-b", "a/b", "", "Graph", "a b", &"x".repeat(33)] {
+        let message = check_instance(bad).expect_err(&format!("{bad:?} は断る"));
+        assert!(
+            message.contains("ASCII の小文字と数字と _ の 1..=32 字"),
+            "{message}"
+        );
+    }
+    assert_eq!(
+        unit_for("uniqnode-serve@.service", DEFAULT_INSTANCE),
+        "uniqnode-serve@default.service"
+    );
+    assert_eq!(nft_table_for("graph"), "inet uniqnode_graph");
+}
+
+/// テンプレートになる前の名の unit が据え先に残っているとき: 既定のインスタンスは取り合うので
+/// 断り、外す命令を添える。別の名のインスタンスは取り合わないので、そのまま進む。
+/// should/0137: legacy_units_present の判定を空の Vec に固定すると、1 つ目の assert が赤に
+/// なる(実験した)。
+#[test]
+fn the_units_from_before_the_template_stop_only_the_default_instance() {
+    if !systemctl_available() {
+        return;
+    }
+    let work = work_dir("legacy-units");
+    let unit_dir = work.join("units");
+    std::fs::create_dir_all(&unit_dir).expect("mkdir");
+    std::fs::write(unit_dir.join("uniqnode-serve.service"), "# 古い名の unit\n").expect("write");
+
+    let arguments = |instance: &str, port: u16, store: &str| {
+        vec![
+            "install".to_string(),
+            work.join(store).to_string_lossy().to_string(),
+            "--instance".to_string(),
+            instance.to_string(),
+            "--listen".to_string(),
+            format!("127.0.0.1:{port}"),
+            "--viewer-listen".to_string(),
+            format!("127.0.0.1:{}", port + 1),
+            "--backup-dir".to_string(),
+            work.join(format!("copy-{instance}")).to_string_lossy().to_string(),
+            "--bin".to_string(),
+            work.join("bin").join("uniqnode").to_string_lossy().to_string(),
+            "--unit-dir".to_string(),
+            unit_dir.to_string_lossy().to_string(),
+            "--no-start".to_string(),
+        ]
+    };
+    let run = |words: &[String]| uniqnode(&words.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let outcome = run(&arguments("default", 7480, "store-default"));
+    assert_eq!(outcome.status, 1, "{}\n{}", outcome.stdout, outcome.stderr);
+    assert!(
+        outcome.stderr.contains("uniqnode-serve.service")
+            && outcome.stderr.contains("disable --now")
+            && outcome.stderr.contains("nft delete table inet uniqnode"),
+        "外す命令と古い表の始末を添える: {}",
+        outcome.stderr
+    );
+    assert!(
+        !unit_dir.join("uniqnode-serve@.service").exists(),
+        "断ったのだから何も置かない"
+    );
+
+    let outcome = run(&arguments("graph", 7490, "store-graph"));
+    assert_eq!(outcome.status, 0, "{}\n{}", outcome.stdout, outcome.stderr);
+    assert!(
+        outcome.stdout.contains("据え先に古い名の unit がある")
+            && outcome.stdout.contains("取り合わない"),
+        "{}",
+        outcome.stdout
+    );
+    assert!(unit_dir.join("uniqnode-serve@.service").exists());
+    std::fs::remove_dir_all(&work).expect("cleanup");
 }

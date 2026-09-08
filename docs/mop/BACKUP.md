@@ -101,7 +101,7 @@ verify: objects 55433 refs 204 errors 0
 終了コードは fsck 命令と同じ: 0 が緑、3 が検証に異常、1 が写せない・開けない。
 
 定期的に取るなら systemd の timer から一回きりの命令として呼ぶ。unit の例は docs/mop/systemd/ の
-uniqnode-backup.service と uniqnode-backup.timer(毎日 1 回)で、置き方と写し先の変え方は
+uniqnode-backup@default.service と uniqnode-backup@default.timer(毎日 1 回)で、置き方と写し先の変え方は
 [docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) にある。写し先はローカルの
 別ディスクでも、外付けでも、ネットワーク越しのマウントでもよい。
 
@@ -151,11 +151,11 @@ systemd で常駐しているノード([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930
 その最中に走ると壊れた写し元をそのまま写し先へ運ぶ:
 
 ```
-systemctl --user stop uniqnode-backup.timer uniqnode-serve uniqnode-viewer
+systemctl --user stop uniqnode-backup@default.timer uniqnode-serve@default uniqnode-viewer@default
 mv <data_dir> <data_dir>.broken-<日付>
 uniqnode backup ~/uniqnode-backup <data_dir>     # 写し先の既定は install の --backup-dir
 uniqnode fsck <data_dir>
-systemctl --user start uniqnode-serve uniqnode-viewer uniqnode-backup.timer
+systemctl --user start uniqnode-serve@default uniqnode-viewer@default uniqnode-backup@default.timer
 ```
 
 起こした後は serve の journal に埋め込みとリランカーの行が出ること、`/v1/status` の

@@ -350,7 +350,7 @@ PUT と同じ規律。[docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c242402
 
 | 段 | 内容 | 粒度 |
 |---|---|---|
-| 0 | テンプレート unit 化(`uniqnode-serve@.service`)と install の複数実体対応。これが無いと 2 つ目の実体を据える 1 つの命令が書けない([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「2 つ目のストアを同じ機械で」。should/0118)。読み口の firewall の表名も実体ごとに分ける(下記) | M |
+| 0 | テンプレート unit 化(`uniqnode-serve@.service`)と install の複数実体対応。これが無いと 2 つ目の実体を据える 1 つの命令が書けない([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「2 つ目のストアを同じ機械で」。should/0118)。読み口の firewall の表名も実体ごとに分ける(下記)。2026-09-08 着地 | M |
 | 1 | グラフ層の中核と主の口(恒等・状態・ref、節点の PUT / GET / DELETE / history、辺の PUT / DELETE、一覧、全件の GET)。2026-09-08 着地 | M |
 | 2 | 読み口の許可表(`--agent-graph` / `--agent-graph-writable`)と、referrers・closure をグラフの実体に限って読み口に出す | S |
 | 3 | 部分グラフの深さ指定と batch。要ると分かってから | S |
@@ -359,10 +359,11 @@ PUT と同じ規律。[docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c242402
 また段 2 が着地するまでは、棚卸し担当は口に届かない。グラフの口は主の口(127.0.0.1)にしか
 無く、orion のホストから届くのは読み口だけだからである。それまでは文書層の繋ぎを使う。
 
-段 0 で firewall も直す。読み口を守る nft の表の名が `inet uniqnode` の 1 つに固定で、
-規則ファイルが表ごと消して作り直す形なので(node/src/install.rs の `nft_rules_text`)、
-実体が 2 つ以上あると、後から起きた serve が先の実体の規則を消す。B か A を起こした
-瞬間に本番の読み口 7441 の drop 規則が消えるということであり、据える前に直す。
+段 0 で firewall も直した。読み口を守る nft の表の名が `inet uniqnode` の 1 つに固定で、
+規則ファイルが表ごと消して作り直す形だったので(node/src/install.rs の `nft_rules_text`)、
+実体が 2 つ以上あると、後から起きた serve が先の実体の規則を消していた。B か A を起こした
+瞬間に本番の読み口 7441 の drop 規則が消えるということである。表の名を
+`inet uniqnode_<インスタンス>` にして分けた。
 
 ### 着地条件
 

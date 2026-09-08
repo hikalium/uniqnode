@@ -155,7 +155,7 @@ fn usage_text() -> String {
                                       annotations/<collection> に訂正の項が足される。\n\
                                       serve 停止中のストア用)\n\
            flood <dir>                書き込み続ける(クラッシュ試験用の内部コマンド)\n\
-           install <dir> [--listen <addr>] [--viewer-listen <addr>]\n\
+           install <dir> [--instance <名>] [--listen <addr>] [--viewer-listen <addr>]\n\
                          [--serve-options \"<引数列>\"] [--backup-dir <dir>] [--bin <path>]\n\
                          [--unit-dir <dir>] [--no-start] [--listen-agent <addr>]\n\
                          [--agent-writable <コレクション名>]...\n\
@@ -176,6 +176,11 @@ fn usage_text() -> String {
                                       1 つの文字列で。--no-start は daemon-reload までで\n\
                                       止める。再実行は更新(写し直し・書き直し・restart)。\n\
                                       <dir> は /tmp の下に置けない(unit の PrivateTmp)。\n\
+                                      --instance は同じ機械に何組も置くための名(既定\n\
+                                      {default_instance})。unit はテンプレートで、名が\n\
+                                      uniqnode-serve@<名>.service になり、既定のストアも\n\
+                                      写し先も nft の表も名ごとに分かれる。ASCII の小文字と\n\
+                                      数字と _ の {instance_max} 字まで。\n\
                                       --listen-agent は serve の読み口(第 2 の待ち受け。\n\
                                       許可表の外は 403)で、drop-in に UNIQNODE_AGENT_LISTEN\n\
                                       を書き、確認に「読み口の /v1/status が同じ node_id」\n\
@@ -203,7 +208,7 @@ fn usage_text() -> String {
                                       し、止まったこととロックが外れたことを見る)。\n\
                                       --firewall-allow <addr> は <addr> からだけ読み口へ届く\n\
                                       規則を入れて効果を見る(ufw が active なら ufw allow、\n\
-                                      そうでなければ nft の表 inet uniqnode を serve の\n\
+                                      そうでなければ nft の表 inet uniqnode_<名> を serve の\n\
                                       ExecStartPre= が起動のたびに入れる。--system と\n\
                                       --listen-agent のときだけ)。手順は SYSTEMD.md の移行\n\
          \n\
@@ -221,6 +226,8 @@ fn usage_text() -> String {
         default_gc_threshold = uniqnode::gc::DEFAULT_THRESHOLD,
         fetch_max_seconds = uniqnode::fetch::DEFAULT_MAX_SECONDS,
         fetch_max_bytes = uniqnode::fetch::DEFAULT_MAX_BYTES,
+        default_instance = uniqnode::install::DEFAULT_INSTANCE,
+        instance_max = uniqnode::install::INSTANCE_MAX_CHARS,
         default_listen = uniqnode::install::DEFAULT_LISTEN,
         default_viewer_listen = uniqnode::install::DEFAULT_VIEWER_LISTEN,
         default_max_bytes = uniqnode::log::DEFAULT_MAX_BYTES,
@@ -944,6 +951,7 @@ fn parse_mcp_options(rest: &[String]) -> McpOptions {
 fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Options {
     // 1 巡目: 引数を集める(既定は据え先が決まってから組む)。
     let mut system = false;
+    let mut instance: Option<String> = None;
     let mut user: Option<String> = None;
     let mut after: Vec<String> = Vec::new();
     let mut agent_listen: Option<String> = None;
@@ -969,6 +977,7 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
             "--bin" => binary = Some(std::path::PathBuf::from(value())),
             "--unit-dir" => unit_dir = Some(std::path::PathBuf::from(value())),
             "--user" => user = Some(value()),
+            uniqnode::install::INSTANCE_FLAG => instance = Some(value()),
             "--after" => after.push(value()),
             uniqnode::install::AGENT_LISTEN_FLAG => agent_listen = Some(value()),
             uniqnode::install::AGENT_WRITABLE_FLAG => {
@@ -1049,6 +1058,10 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
     }
     if let Some(unit_dir) = unit_dir {
         options.unit_dir = unit_dir;
+    }
+    if let Some(instance) = instance {
+        // 名の検査は install::normalize が言う(判断の家は 1 つ。should/0135)。
+        options.instance = instance;
     }
     options.start = start;
     options.after = after;

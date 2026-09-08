@@ -1,13 +1,19 @@
-# uniqnode viewer を system 単位で常駐させる unit。置き場は /etc/systemd/system/。
+# uniqnode viewer を user 単位で常駐させる unit。置き場は ~/.config/systemd/user/。
 # 読み方と手順は docs/mop/SYSTEMD.md(uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2)。
-# user 単位(~/.config/systemd/user/)には ../user/ の同名ファイルを使う。
+# ../system/ の同名ファイルとの違いは 3 点だけ: User=/Group= が無い(user 単位では
+# 指定すると exit 217 で起動できない)、閉じ込めのために PrivateUsers=yes がある
+# (無いと ProtectSystem= などは user 単位では黙って効かない)、WantedBy= が default.target。
+# テンプレート unit である。`@` の後がインスタンス名で、同じ機械に何組でも置ける
+# (uniqnode-serve@default.service、uniqnode-serve@graph.service)。unit の中の %i が
+# その名に置き換わり、既定のストアも写し先もインスタンスごとに分かれる。名を決めるのは
+# `uniqnode install <dir> --instance <名>` で、省くと default になる。
 
 [Unit]
-Description=uniqnode viewer (RAG viewer, one HTML page forwarding to serve)
+Description=uniqnode viewer (RAG viewer, one HTML page forwarding to serve) [%i]
 # serve の後に起こす。Requires= にしないのは、serve が居なくても頁は出て、届かないことを
 # 502 の本文で言うため(serve を起こし直したら、そのまま繋がる)。
-After=network.target uniqnode-serve.service
-Wants=uniqnode-serve.service
+After=network.target uniqnode-serve@%i.service
+Wants=uniqnode-serve@%i.service
 
 [Service]
 Type=exec
@@ -16,16 +22,14 @@ Type=exec
 #   UNIQNODE_VIEWER_LISTEN   ブラウザが開く待ち受け(README と同じ 7450)。
 #   UNIQNODE_SERVE_URL       転送先。serve の UNIQNODE_LISTEN を変えたらここも変える。
 #   UNIQNODE_VIEWER_OPTIONS  追加の引数(ログの指定など)。空なら引数 0 個に消える。
-Environment=UNIQNODE_DATA_DIR=%S/uniqnode
+Environment=UNIQNODE_DATA_DIR=%S/uniqnode/%i
 Environment=UNIQNODE_VIEWER_LISTEN=127.0.0.1:7450
 Environment=UNIQNODE_SERVE_URL=http://127.0.0.1:7440
 Environment=UNIQNODE_VIEWER_OPTIONS=
 ExecStart=/usr/local/bin/uniqnode viewer ${UNIQNODE_DATA_DIR} ${UNIQNODE_VIEWER_LISTEN} --serve-url ${UNIQNODE_SERVE_URL} $UNIQNODE_VIEWER_OPTIONS
 
-User=uniqnode
-Group=uniqnode
 # serve と同じディレクトリを共有する(書くのは logs/viewer.log だけ)。
-StateDirectory=uniqnode
+StateDirectory=uniqnode/%i
 StateDirectoryMode=0750
 
 # serve と同じ方針。viewer はロックを取らないので、起こし直しに条件はない。
@@ -33,9 +37,10 @@ Restart=on-failure
 RestartSec=2s
 RestartPreventExitStatus=1 2
 
+PrivateUsers=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=yes
+ProtectHome=read-only
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
@@ -46,4 +51,4 @@ LockPersonality=yes
 SystemCallArchitectures=native
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

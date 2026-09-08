@@ -31,53 +31,106 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub const SERVE_UNIT: &str = "uniqnode-serve.service";
-pub const VIEWER_UNIT: &str = "uniqnode-viewer.service";
-pub const BACKUP_UNIT: &str = "uniqnode-backup.service";
-pub const BACKUP_TIMER: &str = "uniqnode-backup.timer";
+/// テンプレート unit の名。`@` の後にインスタンス名が入り、同じ機械に何組でも置ける
+/// (`uniqnode-serve@default.service`、`uniqnode-serve@graph.service`)。1 台 1 ストアの
+/// 形から移った理由は docs/mop/SYSTEMD.md の「2 つ目のストアを同じ機械で」(should/0118:
+/// 増やすのは設定の 1 項目であって、ファイルの写しではない)。
+pub const SERVE_TEMPLATE: &str = "uniqnode-serve@.service";
+pub const VIEWER_TEMPLATE: &str = "uniqnode-viewer@.service";
+pub const BACKUP_TEMPLATE: &str = "uniqnode-backup@.service";
+pub const BACKUP_TIMER_TEMPLATE: &str = "uniqnode-backup@.timer";
 
-/// user 単位で置く unit(名前, 中身)。中身は docs/mop/systemd/user/ の現物である。
+/// テンプレート unit になる前の名。据え先に残っていると、同じ主の口と同じストアを 2 つの
+/// unit が取り合うので、既定のインスタンスを据えるときだけ見て断る(run の (5b))。
+pub const LEGACY_UNITS: [&str; 4] = [
+    "uniqnode-serve.service",
+    "uniqnode-viewer.service",
+    "uniqnode-backup.service",
+    "uniqnode-backup.timer",
+];
+
+/// `--instance` を省いたときのインスタンス名。
+pub const DEFAULT_INSTANCE: &str = "default";
+pub const INSTANCE_FLAG: &str = "--instance";
+/// インスタンス名に許す長さ。unit の名・nft の表の名・drop-in の道に入るので短く保つ。
+pub const INSTANCE_MAX_CHARS: usize = 32;
+
+/// user 単位で置く unit(テンプレートの名, 中身)。中身は docs/mop/systemd/user/ の現物である。
 pub const USER_UNITS: [(&str, &str); 4] = [
     (
-        SERVE_UNIT,
-        include_str!("../../docs/mop/systemd/user/uniqnode-serve.service"),
+        SERVE_TEMPLATE,
+        include_str!("../../docs/mop/systemd/user/uniqnode-serve@.service"),
     ),
     (
-        VIEWER_UNIT,
-        include_str!("../../docs/mop/systemd/user/uniqnode-viewer.service"),
+        VIEWER_TEMPLATE,
+        include_str!("../../docs/mop/systemd/user/uniqnode-viewer@.service"),
     ),
     (
-        BACKUP_UNIT,
-        include_str!("../../docs/mop/systemd/user/uniqnode-backup.service"),
+        BACKUP_TEMPLATE,
+        include_str!("../../docs/mop/systemd/user/uniqnode-backup@.service"),
     ),
     (
-        BACKUP_TIMER,
-        include_str!("../../docs/mop/systemd/user/uniqnode-backup.timer"),
+        BACKUP_TIMER_TEMPLATE,
+        include_str!("../../docs/mop/systemd/user/uniqnode-backup@.timer"),
     ),
 ];
 
-/// system 単位で置く unit(名前, 中身)。中身は docs/mop/systemd/system/ の現物である。
+/// system 単位で置く unit(テンプレートの名, 中身)。中身は docs/mop/systemd/system/ の現物である。
 pub const SYSTEM_UNITS: [(&str, &str); 4] = [
     (
-        SERVE_UNIT,
-        include_str!("../../docs/mop/systemd/system/uniqnode-serve.service"),
+        SERVE_TEMPLATE,
+        include_str!("../../docs/mop/systemd/system/uniqnode-serve@.service"),
     ),
     (
-        VIEWER_UNIT,
-        include_str!("../../docs/mop/systemd/system/uniqnode-viewer.service"),
+        VIEWER_TEMPLATE,
+        include_str!("../../docs/mop/systemd/system/uniqnode-viewer@.service"),
     ),
     (
-        BACKUP_UNIT,
-        include_str!("../../docs/mop/systemd/system/uniqnode-backup.service"),
+        BACKUP_TEMPLATE,
+        include_str!("../../docs/mop/systemd/system/uniqnode-backup@.service"),
     ),
     (
-        BACKUP_TIMER,
-        include_str!("../../docs/mop/systemd/system/uniqnode-backup.timer"),
+        BACKUP_TIMER_TEMPLATE,
+        include_str!("../../docs/mop/systemd/system/uniqnode-backup@.timer"),
     ),
 ];
 
-/// enable --now する unit(service は timer が起こすので backup は timer の方)。
-pub const STARTED_UNITS: [&str; 3] = [SERVE_UNIT, VIEWER_UNIT, BACKUP_TIMER];
+/// enable --now するもの(service は timer が起こすので backup は timer の方)。
+pub const STARTED_TEMPLATES: [&str; 3] = [SERVE_TEMPLATE, VIEWER_TEMPLATE, BACKUP_TIMER_TEMPLATE];
+
+/// テンプレート unit の名にインスタンス名を差し込む(`uniqnode-serve@.service` と `graph` で
+/// `uniqnode-serve@graph.service`)。差し込みの規則はここ 1 箇所にある(should/0135)。
+pub fn unit_for(template: &str, instance: &str) -> String {
+    let (stem, suffix) = template
+        .split_once('@')
+        .expect("テンプレート unit の名には @ がある");
+    format!("{stem}@{instance}{suffix}")
+}
+
+/// インスタンス名を検める。ASCII の小文字・数字・`_` だけにするのは、この名が 3 つの場所に
+/// そのまま入るからである: systemd の unit の名(`/` は階層の意味を持つ)、nft の表の名
+/// (識別子に `-` を使えない)、drop-in のディレクトリの道。3 つとも通る字種は狭い方に
+/// 合わせる(should/0135)。
+pub fn check_instance(name: &str) -> Result<(), String> {
+    let ok = !name.is_empty()
+        && name.chars().count() <= INSTANCE_MAX_CHARS
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if ok {
+        return Ok(());
+    }
+    Err(format!(
+        "{INSTANCE_FLAG} {name:?} の形が違う(ASCII の小文字と数字と _ の 1..={INSTANCE_MAX_CHARS} 字。         unit の名・nft の表の名・drop-in の道に同じ字が入るので、3 つとも通る字種に限る)"
+    ))
+}
+
+/// nft の表の名(家族名 inet)。インスタンスごとに別の表にする。1 つの名を共有すると、
+/// 規則ファイルが表ごと消して作り直す形なので、後から起きた serve が先の実体の規則を消し、
+/// その実体の読み口が誰からでも届くようになる(2026-09-08 に据える前に見つけた)。
+pub fn nft_table_for(instance: &str) -> String {
+    format!("inet uniqnode_{instance}")
+}
 
 /// drop-in のファイル名(`<unit>.d/` の下)。
 pub const DROP_IN_NAME: &str = "override.conf";
@@ -113,9 +166,9 @@ pub const TAKE_OVER_FLAG: &str = "--take-over-user-units";
 pub const FIREWALL_ALLOW_FLAG: &str = "--firewall-allow";
 /// user 単位を止めた後、ストアのロックが外れるのを待つ上限。
 pub const TAKE_OVER_WAIT: Duration = Duration::from_secs(10);
-/// nft に置く表(家族名 inet、名 uniqnode)。iptables-nft や docker が持つ表には触らず、
-/// 自分の表を 1 つ持つ(base chain は表ごとに独立に評価され、どれかの drop が勝つ)。
-pub const NFT_TABLE: &str = "inet uniqnode";
+/// nft に置く表の名は nft_table_for が組む(インスタンスごとに 1 つ)。iptables-nft や
+/// docker が持つ表には触らず、自分の表だけを持つ(base chain は表ごとに独立に評価され、
+/// どれかの drop が勝つ)。
 /// nft の規則ファイルの名(serve の drop-in の隣に置き、ExecStartPre= が読む)。
 pub const NFT_RULES_NAME: &str = "agent-door.nft";
 
@@ -447,6 +500,8 @@ pub fn scope(
 
 pub struct Options {
     pub data_dir: PathBuf,
+    /// インスタンス名(`--instance`)。unit の名・nft の表の名・既定の置き場がここから出る。
+    pub instance: String,
     /// serve の待ち受け(UNIQNODE_LISTEN)。viewer の転送先もここから導く。
     pub listen: String,
     pub viewer_listen: String,
@@ -470,7 +525,7 @@ pub struct Options {
     /// 読み口から読めるコレクション(`--agent-collections`。与えられた順)。読み口がある
     /// ときだけ。空なら読み口は全コレクションを読める(既定)。
     pub agent_collections: Vec<String>,
-    /// true なら、据える前に実行ユーザの user 単位の常駐(STARTED_UNITS)を止めて外す
+    /// true なら、据える前に実行ユーザの user 単位の常駐(STARTED_TEMPLATES)を止めて外す
     /// (`--take-over-user-units`。system 単位だけ)。
     pub take_over_user_units: bool,
     /// 読み口へ届いてよい相手のアドレス(`--firewall-allow`)。ufw が active ならその規則を
@@ -494,6 +549,7 @@ impl Options {
     pub fn defaults(data_dir: PathBuf, home: &Path, scope: Scope) -> Options {
         Options {
             data_dir,
+            instance: DEFAULT_INSTANCE.to_string(),
             listen: DEFAULT_LISTEN.to_string(),
             viewer_listen: DEFAULT_VIEWER_LISTEN.to_string(),
             serve_options: String::new(),
@@ -514,10 +570,46 @@ impl Options {
 
     /// nft の規則ファイルの置き場(serve の drop-in の隣。systemd は *.conf しか読まない)。
     pub fn nft_rules_path(&self) -> PathBuf {
-        self.unit_dir.join(format!("{SERVE_UNIT}.d")).join(NFT_RULES_NAME)
+        self.unit_dir
+            .join(format!("{}.d", self.serve_unit()))
+            .join(NFT_RULES_NAME)
     }
 
-    /// 置く unit(名前, 中身)。据え先で user/system を切り替える。
+    /// このインスタンスの unit の名。テンプレートから組む(unit_for が唯一の差し込み口)。
+    pub fn unit(&self, template: &str) -> String {
+        unit_for(template, &self.instance)
+    }
+
+    pub fn serve_unit(&self) -> String {
+        self.unit(SERVE_TEMPLATE)
+    }
+
+    pub fn viewer_unit(&self) -> String {
+        self.unit(VIEWER_TEMPLATE)
+    }
+
+    pub fn backup_unit(&self) -> String {
+        self.unit(BACKUP_TEMPLATE)
+    }
+
+    pub fn backup_timer(&self) -> String {
+        self.unit(BACKUP_TIMER_TEMPLATE)
+    }
+
+    /// enable --now するもの(テンプレートの並びと同じ順)。
+    pub fn started_units(&self) -> Vec<String> {
+        STARTED_TEMPLATES
+            .iter()
+            .map(|template| self.unit(template))
+            .collect()
+    }
+
+    /// このインスタンスの nft の表の名。
+    pub fn nft_table(&self) -> String {
+        nft_table_for(&self.instance)
+    }
+
+    /// 置く unit(テンプレートの名, 中身)。据え先で user/system を切り替える。
     pub fn units(&self) -> &'static [(&'static str, &'static str); 4] {
         match self.scope {
             Scope::User => &USER_UNITS,
@@ -634,7 +726,7 @@ pub fn paths_under_protected_home(options: &Options) -> Vec<&Path> {
 pub fn drop_ins(
     options: &Options,
     tool_path: &str,
-) -> Result<Vec<(&'static str, String)>, String> {
+) -> Result<Vec<(String, String)>, String> {
     let data_dir = options.data_dir.to_string_lossy();
     let backup_dir = options.backup_dir.to_string_lossy();
     let binary = unit_word(&options.binary.to_string_lossy())?;
@@ -670,7 +762,7 @@ pub fn drop_ins(
         }
     }
     let mut rendered = Vec::new();
-    for unit in [SERVE_UNIT, VIEWER_UNIT, BACKUP_UNIT] {
+    for template in [SERVE_TEMPLATE, VIEWER_TEMPLATE, BACKUP_TEMPLATE] {
         // PATH は 3 つとも同じ値。外部の道具(DELEGATES)を起こすのは serve だけだが、unit ごとに
         // 違う PATH を書くと「どの unit がどの道具を見るか」を読み手が unit ごとに追うことになる。
         // 同じ値なら drop-in を 1 つ読めば全部が分かる。
@@ -680,8 +772,8 @@ pub fn drop_ins(
         let mut writable: Vec<&str> = Vec::new();
         // ExecStart= の末尾に足す引数(読み口)。
         let mut exec_tail = String::new();
-        match unit {
-            SERVE_UNIT => {
+        match template {
+            SERVE_TEMPLATE => {
                 lines.push(environment_line("UNIQNODE_LISTEN", &options.listen)?);
                 lines.push(environment_line(
                     "UNIQNODE_SERVE_OPTIONS",
@@ -724,15 +816,16 @@ pub fn drop_ins(
                     // 無効な機械でも再起動で消えない)。先頭の + は User= に関わらず root で
                     // 走らせる印。
                     lines.push(format!(
-                        "# 読み口へ届いてよい相手を nft の表 {NFT_TABLE} で限る(隣の {NFT_RULES_NAME})\n\
+                        "# 読み口へ届いてよい相手を nft の表 {} で限る(隣の {NFT_RULES_NAME})\n\
                          ExecStartPre=+{} -f {}",
+                        options.nft_table(),
                         unit_word(&nft.to_string_lossy())?,
                         unit_word(&options.nft_rules_path().to_string_lossy())?
                     ));
                 }
                 writable.push(&data_dir);
             }
-            VIEWER_UNIT => {
+            VIEWER_TEMPLATE => {
                 lines.push(environment_line(
                     "UNIQNODE_VIEWER_LISTEN",
                     &options.viewer_listen,
@@ -757,9 +850,9 @@ pub fn drop_ins(
         lines.push("ExecStart=".to_string());
         lines.push(format!(
             "ExecStart={}{exec_tail}",
-            exec_start_with_binary(unit_text(options.units(), unit), &binary)?
+            exec_start_with_binary(unit_text(options.units(), template), &binary)?
         ));
-        rendered.push((unit, format!("{header}{}\n", lines.join("\n"))));
+        rendered.push((options.unit(template), format!("{header}{}\n", lines.join("\n"))));
     }
     Ok(rendered)
 }
@@ -801,6 +894,7 @@ pub fn check_listen(listen: &str, what: &str) -> Result<(), String> {
 
 /// 引数を検め、道を絶対にして整える。unit を書く前に、書いても効かない指定を断る。
 pub fn normalize(options: Options) -> Result<Options, String> {
+    check_instance(&options.instance)?;
     check_listen(&options.listen, "--listen")?;
     check_listen(&options.viewer_listen, "--viewer-listen")?;
     if let Some(agent_listen) = &options.agent_listen {
@@ -876,6 +970,7 @@ pub fn normalize(options: Options) -> Result<Options, String> {
     }
     Ok(Options {
         data_dir,
+        instance: options.instance,
         listen: options.listen,
         viewer_listen: options.viewer_listen,
         // 空白で分けて Environment= に載せる値なので、並びの空白を 1 つに揃える。
@@ -1110,6 +1205,8 @@ fn wait_for_matching_status(
     scope: &Scope,
     listen: &str,
     viewer_listen: &str,
+    serve_unit: &str,
+    viewer_unit: &str,
 ) -> Result<(String, Duration), String> {
     const TICK: Duration = Duration::from_millis(200);
     let started = Instant::now();
@@ -1121,7 +1218,7 @@ fn wait_for_matching_status(
                 return Ok((a.clone(), started.elapsed()));
             }
         }
-        for unit in [SERVE_UNIT, VIEWER_UNIT] {
+        for unit in [serve_unit, viewer_unit] {
             if unit_state(scope, unit)? == "failed" {
                 return Err(failed_unit_message(scope, unit));
             }
@@ -1152,7 +1249,12 @@ fn wait_for_matching_status(
 /// 待っても直らないのでその場で断る(別のものが同じアドレスで答えている、許可表が壊れている)。
 /// gc に送る本文は dry_run: true にする: 許可表が壊れていて通ってしまっても、確認の 1 本が
 /// 本番のストアの pack を回収してしまわないように。
-fn wait_for_agent_door(scope: &Scope, node_id: &str, agent_listen: &str) -> Result<Duration, String> {
+fn wait_for_agent_door(
+    scope: &Scope,
+    serve_unit: &str,
+    node_id: &str,
+    agent_listen: &str,
+) -> Result<Duration, String> {
     const TICK: Duration = Duration::from_millis(200);
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
     const GC_PATH: &str = "/v1/admin/gc";
@@ -1182,14 +1284,14 @@ fn wait_for_agent_door(scope: &Scope, node_id: &str, agent_listen: &str) -> Resu
                 ));
             }
             Err(reason) => {
-                if unit_state(scope, SERVE_UNIT)? == "failed" {
-                    return Err(failed_unit_message(scope, SERVE_UNIT));
+                if unit_state(scope, serve_unit)? == "failed" {
+                    return Err(failed_unit_message(scope, serve_unit));
                 }
                 if started.elapsed() >= WAIT_BOUND {
                     return Err(format!(
                         "{} 秒待っても読み口 {agent_listen} が /v1/status に答えない: {reason}。\
                          束縛先のアドレスを持つインターフェースが上がっているか(--after で\
-                         待つ unit の状態)と、{}-u {SERVE_UNIT} の bind の行を見る",
+                         待つ unit の状態)と、{}-u {serve_unit} の bind の行を見る",
                         WAIT_BOUND.as_secs(),
                         scope.journalctl_prefix()
                     ));
@@ -1380,11 +1482,15 @@ pub fn user_manager_flags(account_name: &str) -> Vec<String> {
 }
 
 /// 実行ユーザの user 単位の常駐を止めて外す命令(報告に写すもの)。
-pub fn take_over_command(account_name: &str) -> String {
+pub fn take_over_command(account_name: &str, instance: &str) -> String {
+    let units: Vec<String> = STARTED_TEMPLATES
+        .iter()
+        .map(|template| unit_for(template, instance))
+        .collect();
     format!(
         "systemctl {} disable --now {}",
         user_manager_flags(account_name).join(" "),
-        STARTED_UNITS.join(" ")
+        units.join(" ")
     )
 }
 
@@ -1401,24 +1507,34 @@ pub fn unit_is_running(state: &str) -> bool {
 fn take_over_user_units(
     scope: &Scope,
     account: &Account,
+    instance: &str,
     data_dir: &Path,
     out: &mut dyn Write,
 ) -> Result<String, String> {
+    let units: Vec<String> = STARTED_TEMPLATES
+        .iter()
+        .map(|template| unit_for(template, instance))
+        .collect();
     let flags = user_manager_flags(&account.name);
     let mut arguments: Vec<&str> = flags.iter().map(String::as_str).collect();
     arguments.extend(["disable", "--now"]);
-    arguments.extend(STARTED_UNITS);
+    arguments.extend(units.iter().map(String::as_str));
     let disable = Command::new("systemctl")
         .args(&arguments)
         .output()
-        .map_err(|e| format!("{} を起こせない: {e}", take_over_command(&account.name)))?;
+        .map_err(|e| {
+            format!(
+                "{} を起こせない: {e}",
+                take_over_command(&account.name, instance)
+            )
+        })?;
     let transcript = format!(
         "{}{}",
         String::from_utf8_lossy(&disable.stdout).trim(),
         String::from_utf8_lossy(&disable.stderr).trim()
     );
     let mut still_running = Vec::new();
-    for unit in STARTED_UNITS {
+    for unit in &units {
         let output = Command::new("systemctl")
             .args(&flags)
             .args(["is-active", unit])
@@ -1434,7 +1550,7 @@ fn take_over_user_units(
     if !still_running.is_empty() {
         return Err(format!(
             "{} を打ったが user 単位がまだ走っている({})。出力: {transcript}",
-            take_over_command(&account.name),
+            take_over_command(&account.name, instance),
             still_running.join(", ")
         ));
     }
@@ -1443,14 +1559,15 @@ fn take_over_user_units(
         if !store::opened_by_another_process(data_dir).map_err(|e| e.to_string())? {
             return Ok(format!(
                 "{}: 済み(ストアのロックは {} ms で外れた)",
-                take_over_command(&account.name),
+                take_over_command(&account.name, instance),
                 started.elapsed().as_millis()
             ));
         }
-        if unit_state(scope, SERVE_UNIT)? == "active" {
+        let serve_unit = unit_for(SERVE_TEMPLATE, instance);
+        if unit_state(scope, &serve_unit)? == "active" {
             return Ok(format!(
-                "{}: 済み(ストアのロックは system 単位の {SERVE_UNIT} が持っている。restart が引き継ぐ)",
-                take_over_command(&account.name)
+                "{}: 済み(ストアのロックは system 単位の {serve_unit} が持っている。restart が引き継ぐ)",
+                take_over_command(&account.name, instance)
             ));
         }
         if started.elapsed() >= TAKE_OVER_WAIT {
@@ -1535,14 +1652,16 @@ fn command_output(program: &str, arguments: &[String]) -> Result<String, String>
 
 /// nft の規則ファイル。表を空で作ってから消して作り直す形なので、何度読んでも同じ 1 表に
 /// なる(nft は無い表の delete を断るので、先に空で作る)。
-pub fn nft_rules_text(from: &str, agent_listen: &str) -> Result<String, String> {
+pub fn nft_rules_text(table: &str, from: &str, agent_listen: &str) -> Result<String, String> {
     let (ip, port) = agent_ip_and_port(agent_listen)?;
     Ok(format!(
         "# uniqnode install が書いた。読み口 {agent_listen} へ届いてよいのは {from} だけ。\n\
          # serve の unit の ExecStartPre= が起動のたびに読む(nft -f)。手で入れるなら同じ命令。\n\
-         table {NFT_TABLE} {{}}\n\
-         delete table {NFT_TABLE}\n\
-         table {NFT_TABLE} {{\n\
+         # 表はインスタンスごとに別である(1 つの名を共有すると、後から起きた serve が\n\
+         # 先の実体の規則を消してしまう)。\n\
+         table {table} {{}}\n\
+         delete table {table}\n\
+         table {table} {{\n\
          \tchain agent_door {{\n\
          \t\ttype filter hook input priority filter; policy accept;\n\
          \t\tip daddr {ip} tcp dport {port} ip saddr != {{ {from}, {ip} }} counter drop\n\
@@ -1631,20 +1750,23 @@ fn apply_firewall(options: &Options, out: &mut dyn Write) -> Result<String, Stri
             ))
         }
         Some(FirewallBackend::Nft(nft)) => {
-            let (family, table) = NFT_TABLE.split_once(' ').expect("NFT_TABLE は 2 語");
+            let nft_table = options.nft_table();
+            let (family, table) = nft_table
+                .split_once(' ')
+                .expect("nft_table_for は「家族名 表の名」の 2 語を返す");
             let listing = command_output(
                 &nft.to_string_lossy(),
                 &["list".to_string(), "table".to_string(), family.to_string(), table.to_string()],
             )?;
             if !nft_rule_listed(&listing, from, agent_listen)? {
                 return Err(format!(
-                    "serve の ExecStartPre= が nft の表 {NFT_TABLE} を入れたはずだが、規則が載って\
+                    "serve の ExecStartPre= が nft の表 {nft_table} を入れたはずだが、規則が載って\
                      いない: {}",
                     listing.trim()
                 ));
             }
             Ok(format!(
-                "nft の表 {NFT_TABLE} が {from} 以外から読み口 {agent_listen} への TCP を落とす\
+                "nft の表 {nft_table} が {from} 以外から読み口 {agent_listen} への TCP を落とす\
                  (規則は {} にあり、serve の起動のたびに入る)",
                 options.nft_rules_path().display()
             ))
@@ -1674,11 +1796,51 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         )?;
     }
 
+    say(
+        out,
+        &format!(
+            "インスタンス {}(unit は {}、nft の表は {})",
+            options.instance,
+            options.serve_unit(),
+            options.nft_table()
+        ),
+    )?;
+
+    // (0) テンプレート unit になる前の名が据え先に残っていないか。残ったまま既定の
+    // インスタンスを据えると、同じ主の口と同じストアを 2 つの unit が取り合う。黙って
+    // 外しはしない(操作者のものを止めるのは操作者の判断。must/0022)。別の名の
+    // インスタンスなら取り合わないので、そのまま進む。
+    let legacy = legacy_units_present(&options.unit_dir);
+    if !legacy.is_empty() {
+        if options.instance == DEFAULT_INSTANCE {
+            return Err(format!(
+                "据え先 {} にテンプレートになる前の名の unit が残っている({})。既定の\
+                 インスタンス {DEFAULT_INSTANCE} を据えると、同じ主の口と同じストアを 2 つの \
+                 unit が取り合う。先に外す: {}。nft を使っているなら古い表も消す\
+                 (nft delete table inet uniqnode)。別の実体を足すだけなら \
+                 {INSTANCE_FLAG} <名> で名前を分ける",
+                options.unit_dir.display(),
+                legacy.join(" "),
+                legacy_units_removal_command(scope, &options.unit_dir, &legacy)
+            ));
+        }
+        say(
+            out,
+            &format!(
+                "据え先に古い名の unit がある({})が、据えるのは {} なので取り合わない\
+                 (そのまま残す)",
+                legacy.join(" "),
+                options.instance
+            ),
+        )?;
+    }
+
     // (1) バイナリ。
     let binary_line = install_binary(&options.binary, scope.account())?;
     say(out, &binary_line)?;
 
-    // (2) unit。docs/mop/systemd/{user,system}/ の現物をそのまま。
+    // (2) unit。docs/mop/systemd/{user,system}/ の現物をそのまま。テンプレートなので
+    // 名前にインスタンスは入らない(`uniqnode-serve@.service` のまま置く)。
     for (name, text) in options.units() {
         let path = options.unit_dir.join(name);
         write_file(&path, text)?;
@@ -1698,11 +1860,12 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
             FirewallBackend::Ufw => say(out, "firewall: ufw が active。規則は ufw に入れる")?,
             FirewallBackend::Nft(nft) => {
                 let path = options.nft_rules_path();
-                write_file(&path, &nft_rules_text(from, agent_listen)?)?;
+                let table = options.nft_table();
+                write_file(&path, &nft_rules_text(&table, from, agent_listen)?)?;
                 say(
                     out,
                     &format!(
-                        "firewall: ufw は active でない。nft の表 {NFT_TABLE} を {} に書き、serve の \
+                        "firewall: ufw は active でない。nft の表 {table} を {} に書き、serve の \
                          ExecStartPre=+{} -f が起動のたびに入れる",
                         path.display(),
                         nft.display()
@@ -1782,7 +1945,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
             &format!(
                 "--no-start なので起こしていない。起こすには {}enable --now {}",
                 scope.systemctl_prefix(),
-                STARTED_UNITS.join(" ")
+                options.started_units().join(" ")
             ),
         )?;
         return Ok(());
@@ -1792,7 +1955,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     // 下の探針が止めて外す命令を添えて断る)。
     if options.take_over_user_units {
         let account = scope.account().expect("normalize が system 単位に限る");
-        let line = take_over_user_units(scope, account, &options.data_dir, out)?;
+        let line = take_over_user_units(scope, account, &options.instance, &options.data_dir, out)?;
         say(out, &line)?;
     }
 
@@ -1800,7 +1963,8 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     // を読ませるより先に言う。system 単位への移行では、持ち主は user 単位の serve であることが
     // 多い: 止めて外す命令を添えるが、黙って止めはしない。
     if store::opened_by_another_process(&options.data_dir).map_err(|e| e.to_string())? {
-        let serve_state = unit_state(scope, SERVE_UNIT)?;
+        let serve_unit = options.serve_unit();
+        let serve_state = unit_state(scope, &serve_unit)?;
         if serve_state != "active" {
             let migration_hint = match scope {
                 Scope::User => String::new(),
@@ -1808,11 +1972,11 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
                     "。user 単位で常駐させていたなら、{} で {} を打って止めて外してから再実行するか、\
                      {TAKE_OVER_FLAG} を足して install に止めさせる",
                     account.name,
-                    user_units_disable_command()
+                    user_units_disable_command(&options.instance)
                 ),
             };
             return Err(format!(
-                "{} は別プロセスが開いている(unit の serve ではない。{SERVE_UNIT} は {serve_state})。\
+                "{} は別プロセスが開いている(unit の serve ではない。{serve_unit} は {serve_state})。\
                  そのプロセスを止めてから再実行するか、--no-start で unit だけ置く{migration_hint}",
                 options.data_dir.display()
             ));
@@ -1820,7 +1984,8 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     }
 
     // (6) enable と restart(restart は止まっている unit も起こすので、初回と更新で同じ手順)。
-    for unit in STARTED_UNITS {
+    for unit in options.started_units() {
+        let unit = unit.as_str();
         let before = unit_state(scope, unit)?;
         systemctl_ok(scope, &["enable", unit])?;
         systemctl_ok(scope, &["restart", unit])?;
@@ -1855,8 +2020,13 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     }
 
     // (8) 確認。効果を見るまでは完了ではない(should/0116)。
-    let (node_id, waited) =
-        wait_for_matching_status(scope, &options.listen, &options.viewer_listen)?;
+    let (node_id, waited) = wait_for_matching_status(
+        scope,
+        &options.listen,
+        &options.viewer_listen,
+        &options.serve_unit(),
+        &options.viewer_unit(),
+    )?;
     say(
         out,
         &format!(
@@ -1867,7 +2037,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         ),
     )?;
     if let Some(agent_listen) = &options.agent_listen {
-        let waited = wait_for_agent_door(scope, &node_id, agent_listen)?;
+        let waited = wait_for_agent_door(scope, &options.serve_unit(), &node_id, agent_listen)?;
         say(
             out,
             &format!(
@@ -1886,9 +2056,10 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
             say(out, &format!("確認: 読み口の読める集合: {seen}"))?;
         }
     }
-    systemctl_ok(scope, &["start", BACKUP_UNIT]).map_err(|e| {
+    let backup_unit = options.backup_unit();
+    systemctl_ok(scope, &["start", &backup_unit]).map_err(|e| {
         format!(
-            "{e}。理由は {}-u {BACKUP_UNIT} -n 20",
+            "{e}。理由は {}-u {backup_unit} -n 20",
             scope.journalctl_prefix()
         )
     })?;
@@ -1896,7 +2067,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     say(
         out,
         &format!(
-            "確認: {BACKUP_UNIT} を 1 回走らせ、写し先 {} を開いて fsck: {verification}",
+            "確認: {backup_unit} を 1 回走らせ、写し先 {} を開いて fsck: {verification}",
             options.backup_dir.display()
         ),
     )?;
@@ -1940,17 +2111,56 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     }
 
     // (9) 次の刻み。systemctl の表は見出しと行の後に空行と件数の脚注が付くので、表だけを載せる。
-    let timers = systemctl_ok(scope, &["list-timers", BACKUP_TIMER, "--no-pager"])?;
+    let timers = systemctl_ok(scope, &["list-timers", &options.backup_timer(), "--no-pager"])?;
     for line in timers.lines().take_while(|line| !line.trim().is_empty()) {
         say(out, &format!("次の刻み: {line}"))?;
     }
     Ok(())
 }
 
+/// テンプレート unit になる前の名の unit で、据え先に残っているもの。
+pub fn legacy_units_present(unit_dir: &Path) -> Vec<&'static str> {
+    LEGACY_UNITS
+        .into_iter()
+        .filter(|unit| unit_dir.join(unit).exists())
+        .collect()
+}
+
+/// 古い名の unit を止めて外す命令(操作者が打つもの。文書と install の断りが同じ字句を
+/// 使う。must/0023)。drop-in のディレクトリも一緒に消す。
+pub fn legacy_units_removal_command(scope: &Scope, unit_dir: &Path, units: &[&str]) -> String {
+    let started: Vec<&str> = units
+        .iter()
+        .copied()
+        .filter(|unit| *unit != "uniqnode-backup.service")
+        .collect();
+    let paths: Vec<String> = units
+        .iter()
+        .flat_map(|unit| {
+            let path = unit_dir.join(unit);
+            [
+                path.to_string_lossy().to_string(),
+                format!("{}.d", path.to_string_lossy()),
+            ]
+        })
+        .collect();
+    format!(
+        "{}disable --now {} ; rm -rf {} ; {}daemon-reload",
+        scope.systemctl_prefix(),
+        started.join(" "),
+        paths.join(" "),
+        scope.systemctl_prefix()
+    )
+}
+
 /// user 単位の常駐を止めて外す命令(system 単位へ移るときに操作者が打つもの。文書と文言が
 /// 同じ字句を使う。must/0023)。
-pub fn user_units_disable_command() -> String {
-    format!("systemctl --user disable --now {}", STARTED_UNITS.join(" "))
+pub fn user_units_disable_command(instance: &str) -> String {
+    let units: Vec<String> = STARTED_TEMPLATES
+        .iter()
+        .map(|template| unit_for(template, instance))
+        .collect();
+    format!("systemctl --user disable --now {}", units.join(" "))
 }
 
 #[cfg(test)]
@@ -1960,6 +2170,7 @@ mod tests {
     fn sample_options() -> Options {
         Options {
             data_dir: PathBuf::from("/home/op/store"),
+            instance: DEFAULT_INSTANCE.to_string(),
             listen: "127.0.0.1:7443".to_string(),
             viewer_listen: "127.0.0.1:7453".to_string(),
             serve_options: "--embed http://127.0.0.1:8083/v1/embeddings".to_string(),
@@ -1988,7 +2199,9 @@ mod tests {
         }
     }
 
-    fn drop_in_for(unit: &str, options: &Options) -> String {
+    /// テンプレートの名で drop-in を引く(書き出す名はインスタンスが入ったもの)。
+    fn drop_in_for(template: &str, options: &Options) -> String {
+        let unit = options.unit(template);
         drop_ins(options, SYSTEMD_DEFAULT_PATH)
             .expect("描ける")
             .into_iter()
@@ -2001,7 +2214,7 @@ mod tests {
     /// は空の行で消してから書かれ、ExecStart= の引数の並びは unit のまま。
     #[test]
     fn the_serve_drop_in_quotes_options_resets_exec_start_and_keeps_the_argument_order() {
-        let text = drop_in_for(SERVE_UNIT, &sample_options());
+        let text = drop_in_for(SERVE_TEMPLATE, &sample_options());
         let expected = "[Service]\n\
                         Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n\
                         Environment=UNIQNODE_DATA_DIR=/home/op/store\n\
@@ -2024,12 +2237,12 @@ mod tests {
     fn the_viewer_and_backup_drop_ins_derive_the_serve_url_and_open_only_what_each_writes() {
         let mut options = sample_options();
         options.serve_options.clear();
-        let serve = drop_in_for(SERVE_UNIT, &options);
+        let serve = drop_in_for(SERVE_TEMPLATE, &options);
         assert!(
             serve.contains("\nEnvironment=UNIQNODE_SERVE_OPTIONS=\n"),
             "{serve}"
         );
-        let viewer = drop_in_for(VIEWER_UNIT, &options);
+        let viewer = drop_in_for(VIEWER_TEMPLATE, &options);
         assert!(
             viewer.contains("\nEnvironment=UNIQNODE_VIEWER_LISTEN=127.0.0.1:7453\n"),
             "{viewer}"
@@ -2045,7 +2258,7 @@ mod tests {
             ),
             "{viewer}"
         );
-        let backup = drop_in_for(BACKUP_UNIT, &options);
+        let backup = drop_in_for(BACKUP_TEMPLATE, &options);
         assert!(
             backup.contains("\nEnvironment=UNIQNODE_BACKUP_DIR=/home/op/uniqnode-backup\n"),
             "{backup}"
@@ -2306,7 +2519,7 @@ mod tests {
     #[test]
     fn exec_start_rewrite_replaces_only_the_binary() {
         let rewritten =
-            exec_start_with_binary(unit_text(&USER_UNITS, SERVE_UNIT), "/opt/u/uniqnode")
+            exec_start_with_binary(unit_text(&USER_UNITS, SERVE_TEMPLATE), "/opt/u/uniqnode")
                 .expect("rewrite");
         assert_eq!(
             rewritten,

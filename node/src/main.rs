@@ -5,7 +5,15 @@ use uniqnode::clock::unix_now;
 use uniqnode::store::{Store, StoreConfig, StoreError};
 
 fn usage() -> ! {
-    eprintln!(
+    eprintln!("{}", usage_text());
+    std::process::exit(2);
+}
+
+/// 使い方の全文。断るときは usage が標準エラーへ出して 2 で終わり、求められたとき
+/// (--help)は main が標準出力へ出して 0 で終わる。文面はこの 1 箇所だけにある
+/// (should/0135)。
+fn usage_text() -> String {
+    format!(
         "usage: uniqnode <command> <data_dir> [args]\n\
          commands:\n\
            init <dir>                 ストアを初期化し node id を表示する\n\
@@ -217,8 +225,7 @@ fn usage() -> ! {
         default_viewer_listen = uniqnode::install::DEFAULT_VIEWER_LISTEN,
         default_max_bytes = uniqnode::log::DEFAULT_MAX_BYTES,
         generations = uniqnode::log::RETAINED_GENERATIONS,
-    );
-    std::process::exit(2);
+    )
 }
 
 /// ディレクトリを再帰して通常ファイルを集める(名前順)。
@@ -479,11 +486,28 @@ fn main() {
         println!("{}", uniqnode::mcp::self_check_report());
         return;
     }
+    // ヘルプの求めは、どの位置にあっても使い方だけを出して 0 で終わる。位置引数の数を
+    // 数えるより前に見るのは、`uniqnode install --help` が --help をデータディレクトリと
+    // 読んで据え付けを実行してしまうからである(2026-09-08 に実際に起きた)。
+    if arguments[1..].iter().any(|argument| argument == "--help" || argument == "-h") {
+        println!("{}", usage_text());
+        return;
+    }
     if arguments.len() < 3 {
         usage();
     }
     let command = arguments[1].as_str();
     let dir = arguments[2].as_str();
+    // データディレクトリの位置に指定の字面が来ていたら、走らせずに断る。ここを通すと、
+    // install のように状態を作る命令が打ち間違いをそのまま実行する(must/0022: 黙って
+    // 別のことをしない)。`-` で始まる道を本当に指したいときは ./-dir と書く。
+    if dir.starts_with('-') {
+        eprintln!(
+            "uniqnode: {command}: データディレクトリの位置に {dir} が来ている\
+             (<command> <data_dir> [args] の順)。使い方は uniqnode --help"
+        );
+        std::process::exit(2);
+    }
     let result = run(command, dir, &arguments[3..]);
     if let Err(e) = result {
         eprintln!("uniqnode: {e}");

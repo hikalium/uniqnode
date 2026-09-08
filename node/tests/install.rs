@@ -330,6 +330,62 @@ fn an_unknown_option_is_refused_with_usage() {
     assert!(outcome.stderr.contains("usage:"), "{}", outcome.stderr);
 }
 
+/// ヘルプの求めは据え付けを実行しない。この行を消すと `uniqnode install --help` が
+/// --help をデータディレクトリと読んで unit を書き、ストアを作る(2026-09-08 に実際に
+/// 起きた)。使い方は標準出力へ出して 0 で終わる(断りではないので標準エラーではない)。
+#[test]
+fn asking_for_help_prints_the_usage_without_installing() {
+    let work = work_dir("help");
+    let outcome = uniqnode_in(&work, &["install", "--help"]);
+    assert_eq!(outcome.status, 0, "{}\n{}", outcome.stdout, outcome.stderr);
+    assert!(outcome.stdout.contains("usage:"), "{}", outcome.stdout);
+    assert!(outcome.stdout.contains("install <dir>"), "{}", outcome.stdout);
+    assert!(outcome.stderr.is_empty(), "断りではない: {}", outcome.stderr);
+    assert!(!work.join("--help").exists(), "ストアを作らない");
+    assert_eq!(
+        std::fs::read_dir(&work).expect("read_dir").count(),
+        0,
+        "何も置かない"
+    );
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// データディレクトリの位置に指定の字面が来ていたら、走らせずに 2 で断る。この行を消すと
+/// 打ち間違いがそのまま据え付けになる(must/0022)。
+#[test]
+fn an_option_in_the_data_directory_position_is_refused() {
+    let work = work_dir("misplaced-option");
+    let outcome = uniqnode_in(&work, &["install", "--sytem", "--no-start"]);
+    assert_eq!(outcome.status, 2, "{}\n{}", outcome.stdout, outcome.stderr);
+    assert!(
+        outcome.stderr.contains("データディレクトリの位置に --sytem が来ている"),
+        "何が起きたかを言う: {}",
+        outcome.stderr
+    );
+    assert!(!work.join("--sytem").exists(), "ストアを作らない");
+    assert_eq!(
+        std::fs::read_dir(&work).expect("read_dir").count(),
+        0,
+        "何も置かない"
+    );
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// 作業ディレクトリを指して走らせる(相対の道が指されたときに、何がどこへ作られるかを
+/// 観測できるようにする)。
+fn uniqnode_in(dir: &Path, arguments: &[&str]) -> CommandOutcome {
+    let output = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
+        .args(arguments)
+        .current_dir(dir)
+        .output()
+        .expect("spawn uniqnode");
+    CommandOutcome {
+        status: output.status.code().expect("exit code"),
+        stdout: String::from_utf8(output.stdout).expect("utf-8 stdout"),
+        stderr: String::from_utf8(output.stderr).expect("utf-8 stderr"),
+    }
+}
+
 /// SUDO_USER を消して走らせる(--system の実行ユーザの既定はそこから来るので、無い状態を
 /// 作って「断る」を観測する)。
 fn uniqnode_without_sudo_user(arguments: &[&str]) -> CommandOutcome {

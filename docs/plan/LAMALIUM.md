@@ -327,20 +327,16 @@ priority の意味も知らない。知ると、向こうの書式が uniqnode �
 
 ### 口
 
-```
-| Method | Path | 役割 |
-|---|---|---|
-| GET    | /v1/graphs                         | グラフ名の一覧 |
-| GET    | /v1/graphs/{g}                     | 全件(節点 + 辺 + 各節点の seq・at)。描画はこの 1 本 |
-| PUT    | /v1/graphs/{g}/nodes/{n}           | 節点の作成と更新。本文 = attrs の c1 JSON |
-| GET    | /v1/graphs/{g}/nodes/{n}           | 現在の attrs + 恒等 ID + seq + at |
-| DELETE | /v1/graphs/{g}/nodes/{n}           | tombstone |
-| GET    | /v1/graphs/{g}/nodes/{n}/history   | 版の一覧(previous の鎖と各版の at) |
-| GET    | /v1/graphs/{g}/nodes/{n}/neighbors | 隣接。?direction=in|out・?type=blocks で絞る |
-| PUT    | /v1/graphs/{g}/edges/{e}           | 辺。本文 = {"type":…,"from":…,"to":…} |
-| DELETE | /v1/graphs/{g}/edges/{e}           | tombstone |
-| GET    | /v1/graphs/{g}/edges               | 辺の一覧。?from=・?to=・?type= で絞る |
-```
+実物は [docs/design/GRAPH.md](#9d1f73a8-fabd-493e-9003-0a36503c7573) にある(段 1 で
+2026-09-08 に着地)。表をここに写さない。写しは古びるからで、現にこの節の初版に載せた案は
+着地した形と食い違った(should/0135)。相談の途中で示した案から変えた点だけ記す。
+
+- 辺の PUT は `/v1/graphs/{g}/edges/{型}/{from}/{to}` で、本文を取らない。名前が
+  `<型>/<from>/<to>` そのものなので、名前と中身が食い違う辺を作れず、冪等が名前から出る。
+- neighbors の `?direction` に `both` を足し、それを既定にした。
+- 名前(グラフ名・節点名・辺の型)は ASCII の英数字と `_` `-` `.` の 1..=64 字。
+- attrs の c1 正規形の上限は 8 KiB。節点は本文の置き場ではない(本文は文書層に置き、
+  節点は anchor で指す)。
 
 状態遷移に専用の口を作らない(「着地済みにする」は attrs.state を変える PUT である)。
 同じ attrs の再 PUT は no-op で、ref も触らず応答の updated が false でそう言う(文書の
@@ -354,12 +350,19 @@ PUT と同じ規律。[docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c242402
 
 | 段 | 内容 | 粒度 |
 |---|---|---|
-| 0 | テンプレート unit 化(`uniqnode-serve@.service`)と install の複数実体対応。これが無いと 2 つ目の実体を据える 1 つの命令が書けない([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「2 つ目のストアを同じ機械で」。should/0118) | M |
-| 1 | グラフ層の中核と主の口(恒等・状態・ref、節点の PUT / GET / DELETE / history、辺の PUT / DELETE、一覧、全件の GET) | M |
+| 0 | テンプレート unit 化(`uniqnode-serve@.service`)と install の複数実体対応。これが無いと 2 つ目の実体を据える 1 つの命令が書けない([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「2 つ目のストアを同じ機械で」。should/0118)。読み口の firewall の表名も実体ごとに分ける(下記) | M |
+| 1 | グラフ層の中核と主の口(恒等・状態・ref、節点の PUT / GET / DELETE / history、辺の PUT / DELETE、一覧、全件の GET)。2026-09-08 着地 | M |
 | 2 | 読み口の許可表(`--agent-graph` / `--agent-graph-writable`)と、referrers・closure をグラフの実体に限って読み口に出す | S |
 | 3 | 部分グラフの深さ指定と batch。要ると分かってから | S |
 
-段 0 と段 1 は独立なので順序を入れ替えてよい。段 2 は段 1 に依存する。
+段 0 と段 1 は独立なので順序を入れ替えてよい。段 2 は段 1 に依存する。段 1 が着地するまで、
+また段 2 が着地するまでは、棚卸し担当は口に届かない。グラフの口は主の口(127.0.0.1)にしか
+無く、orion のホストから届くのは読み口だけだからである。それまでは文書層の繋ぎを使う。
+
+段 0 で firewall も直す。読み口を守る nft の表の名が `inet uniqnode` の 1 つに固定で、
+規則ファイルが表ごと消して作り直す形なので(node/src/install.rs の `nft_rules_text`)、
+実体が 2 つ以上あると、後から起きた serve が先の実体の規則を消す。B か A を起こした
+瞬間に本番の読み口 7441 の drop 規則が消えるということであり、据える前に直す。
 
 ### 着地条件
 

@@ -110,6 +110,12 @@ should/0125)。同じグラフから毎回同じ HTML が出る。
   previous があるため、同じ attrs でも版が違えば別の ID になる(doc_rev の
   (source, chunks 列)の比較と同じ理由。[docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b))。
 - 同じ辺の再作成も同じで、ref を触らない。
+- 「ref が動いたか」を言う鍵の名は、PUT が `updated`、DELETE が `deleted` である。同じ問い
+  なのに綴りが違うので、両方を 1 つの分岐で読む呼び手は取りこぼす(2026-09-09 に lamalium
+  の client が実際に踏んだ: 削除は成功していたのに `updated` が無いことで断っていた)。
+  揃えないのは、口が既に据わって呼び手が付いた後だからである。DELETE は成否も status で
+  言う(消したら 200、元から無ければ 404 と `deleted` が false)ので、鍵を見るより status を
+  見る方が短い。
 - 書く順はオブジェクト(恒等 → 状態)→ ref である(set_ref は存在しない target を拒む。
   SPEC §5.3)。
 

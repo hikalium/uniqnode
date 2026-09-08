@@ -247,3 +247,38 @@ fn malformed_requests_are_refused_with_what_would_pass() {
     let missing = get(&server, "/v1/graphs/plan/nodes/n_zzz");
     assert_eq!(missing.status, 404, "{}", body_text(&missing));
 }
+
+/// query で渡す名前(`?type=`・`?from=`・`?to=`)も、道の名前と同じ形の検査を通る。
+/// 通さないと「該当 0 件」を返してしまい、呼び手には「そんな辺は無い」と「その名は名前
+/// ではない」の区別が付かない(must/0022)。形の正しい名で 0 件なのは 200 のままである。
+/// should/0137: refuse_bad_query_name の呼び出しを消すと、400 を見る 4 つの assert が
+/// (200 になって)落ちる。
+#[test]
+fn a_name_in_the_query_is_checked_like_a_name_in_the_path() {
+    let server = start_server("graph-query-names");
+    for node in ["n_a", "n_b"] {
+        put_node(&server, "plan", node, r#"{"state":"planned"}"#);
+    }
+    simple(&server.address, "PUT", "/v1/graphs/plan/edges/blocks/n_a/n_b", b"");
+
+    for (path, what) in [
+        ("/v1/graphs/plan/nodes/n_a/neighbors?type=a/b", "辺の型"),
+        ("/v1/graphs/plan/edges?type=a/b", "辺の型"),
+        ("/v1/graphs/plan/edges?from=n%20a", "節点名"),
+        ("/v1/graphs/plan/edges?to=n%20a", "節点名"),
+    ] {
+        let refused = get(&server, path);
+        assert_eq!(refused.status, 400, "{path}: {}", body_text(&refused));
+        let text = body_text(&refused);
+        assert!(text.contains(what), "{path}: 何の名前かを言う: {text}");
+        assert!(text.contains("ASCII の英数字"), "{path}: 何が通るかを言う: {text}");
+    }
+
+    // 形の正しい名で 1 本も当たらないのは誤りではない(型は自由に生えるもので、一覧は無い)。
+    let empty = get(&server, "/v1/graphs/plan/edges?type=no_such_type");
+    assert_eq!(empty.status, 200, "{}", body_text(&empty));
+    assert!(body_text(&empty).contains("\"edges\":[]"), "{}", body_text(&empty));
+    let empty = get(&server, "/v1/graphs/plan/nodes/n_a/neighbors?type=no_such_type");
+    assert_eq!(empty.status, 200, "{}", body_text(&empty));
+    assert!(body_text(&empty).contains("\"edges\":[]"), "{}", body_text(&empty));
+}

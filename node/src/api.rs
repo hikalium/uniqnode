@@ -2632,6 +2632,12 @@ fn handle_graph_node(
                     _ => return error_response(400, "query は direction= と type= だけ"),
                 }
             }
+            if let Some(refusal) = edge_type
+                .as_deref()
+                .and_then(|name| refuse_bad_query_name("辺の型", name))
+            {
+                return refusal;
+            }
             let store = store.lock().expect("lock");
             match crate::graph::get_node(&store, graph, node) {
                 Ok(None) => return error_response(404, "not held locally"),
@@ -2753,6 +2759,20 @@ fn graph_snapshot(context: &ApiContext, graph: &str) -> Response {
     )
 }
 
+/// query で渡された名前(`?type=`・`?from=`・`?to=`)も、道の名前と同じ形の検査を通す。
+/// 通さないと、形の違う名を渡した呼び手に「該当 0 件」という当たり障りのない答えを返して
+/// しまう。呼び手から見れば「そんな辺は無い」と「その名は名前ではない」は別のことである
+/// (must/0022)。判断は crate::graph の 1 箇所から借りる(should/0135)。
+fn refuse_bad_query_name(what: &str, name: &str) -> Option<Response> {
+    match crate::graph::is_valid_name(name) {
+        true => None,
+        false => Some(error_response(
+            400,
+            &crate::graph::invalid_name_refusal(what, name),
+        )),
+    }
+}
+
 fn graph_edge_list(context: &ApiContext, graph: &str, query: Option<&str>) -> Response {
     let (mut edge_type, mut from, mut to) = (None, None, None);
     for segment in query.unwrap_or("").split('&').filter(|s| !s.is_empty()) {
@@ -2761,6 +2781,15 @@ fn graph_edge_list(context: &ApiContext, graph: &str, query: Option<&str>) -> Re
             Some(("from", value)) => from = Some(value.to_string()),
             Some(("to", value)) => to = Some(value.to_string()),
             _ => return error_response(400, "query は type=・from=・to= だけ"),
+        }
+    }
+    for (what, name) in [
+        ("辺の型", edge_type.as_deref()),
+        ("節点名", from.as_deref()),
+        ("節点名", to.as_deref()),
+    ] {
+        if let Some(refusal) = name.and_then(|name| refuse_bad_query_name(what, name)) {
+            return refusal;
         }
     }
     let store = context.store.lock().expect("lock");

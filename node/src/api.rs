@@ -271,6 +271,12 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
                 .collect();
             Response::json(200, json_object(vec![("signers", c1::Value::Array(signers))]))
         }
+        ("GET", "/v1/graphs") => {
+            let store = store.lock().expect("lock");
+            let names: Vec<c1::Value> =
+                crate::graph::list_graphs(&store).into_iter().map(c1::Value::Text).collect();
+            Response::json(200, json_object(vec![("graphs", c1::Value::Array(names))]))
+        }
         ("POST", "/v1/objects") => {
             let mut store = store.lock().expect("lock");
             match store.put_object(&request.body) {
@@ -2279,6 +2285,14 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
         }
     }
 
+    // グラフ層(docs/design/GRAPH.md)。判断はすべて crate::graph にあり、ここは HTTP の
+    // 被せ物である。書き込みで索引の温めに合図を送らないのは、graph/ の ref も新しい
+    // オブジェクトも検索索引の世代(collections/ 配下の ref の束縛)を動かさないためで、
+    // 送ると 1 巡ごとに本番規模の作り直しを起こしてしまう。
+    if let Some(rest) = path.strip_prefix("/v1/graphs/") {
+        return handle_graph(context, method, rest, &request.body);
+    }
+
     // 文書の取り込み(INGEST の「CLI と API」節)。本文は生バイト列、種別は
     // {name} の拡張子で判定する。
     if let Some(rest) = path.strip_prefix("/v1/collections/") {
@@ -2474,6 +2488,365 @@ pub fn put_document(
     // 記録が増えることで見張る)。
     nudge_index_warmer(context);
     Response::json(200, json_object(ingest_outcome_fields(outcome)))
+}
+
+
+// ---- グラフ層(docs/design/GRAPH.md)----
+
+/// `/v1/graphs/<残り>` を捌く。判断(名前の形・書き込みの中身・no-op)は crate::graph に
+/// あり、ここは道の分けと JSON の組み立てだけを持つ(should/0135)。
+fn handle_graph(context: &ApiContext, method: &str, rest: &str, body: &[u8]) -> Response {
+    let (rest, query) = match rest.split_once('?') {
+        Some((rest, query)) => (rest, Some(query)),
+        None => (rest, None),
+    };
+    let (graph, tail) = match rest.split_once('/') {
+        Some((graph, tail)) => (graph, tail),
+        None => (rest, ""),
+    };
+    if !crate::graph::is_valid_name(graph) {
+        return error_response(400, &crate::graph::invalid_name_refusal("グラフ名", graph));
+    }
+    if tail.is_empty() {
+        if method != "GET" {
+            return error_response(405, "GET のみ");
+        }
+        return graph_snapshot(context, graph);
+    }
+    if tail == "edges" {
+        if method != "GET" {
+            return error_response(405, "GET のみ(1 本の辺は PUT / DELETE /v1/graphs/{g}/edges/{型}/{from}/{to})");
+        }
+        return graph_edge_list(context, graph, query);
+    }
+    if let Some(rest) = tail.strip_prefix("nodes/") {
+        return handle_graph_node(context, method, graph, rest, query, body);
+    }
+    if let Some(rest) = tail.strip_prefix("edges/") {
+        return handle_graph_edge(context, method, graph, rest);
+    }
+    error_response(
+        404,
+        "/v1/graphs/{g}・/v1/graphs/{g}/nodes/{n}[/history|/neighbors]・\
+         /v1/graphs/{g}/edges[/{型}/{from}/{to}] の形",
+    )
+}
+
+fn handle_graph_node(
+    context: &ApiContext,
+    method: &str,
+    graph: &str,
+    rest: &str,
+    query: Option<&str>,
+    body: &[u8],
+) -> Response {
+    let (node, tail) = match rest.split_once('/') {
+        Some((node, tail)) => (node, tail),
+        None => (rest, ""),
+    };
+    if !crate::graph::is_valid_name(node) {
+        return error_response(400, &crate::graph::invalid_name_refusal("節点名", node));
+    }
+    let store = &*context.store;
+    match (method, tail) {
+        ("GET", "") => {
+            let store = store.lock().expect("lock");
+            match crate::graph::get_node(&store, graph, node) {
+                Ok(Some(view)) => Response::json(200, json_object(node_entries(graph, &view))),
+                Ok(None) => error_response(404, "not held locally"),
+                Err(e) => store_error_response(e),
+            }
+        }
+        ("PUT", "") => {
+            let attrs = match parse_attrs(body) {
+                Ok(attrs) => attrs,
+                Err(reason) => return error_response(400, &reason),
+            };
+            let mut store = store.lock().expect("lock");
+            match crate::graph::put_node(&mut store, graph, node, &attrs) {
+                // 索引の温めには合図を送らない(graph/ の ref は見えを動かさない)。
+                Ok(outcome) => Response::json(
+                    if outcome.updated { 200 } else { 200 },
+                    json_object(put_entries(graph, node, &outcome)),
+                ),
+                Err(e) => store_error_response(e),
+            }
+        }
+        ("DELETE", "") => {
+            let mut store = store.lock().expect("lock");
+            match crate::graph::delete_node(&mut store, graph, node) {
+                Ok(deleted) => Response::json(
+                    if deleted { 200 } else { 404 },
+                    json_object(vec![
+                        ("graph", c1::Value::Text(graph.to_string())),
+                        ("name", c1::Value::Text(node.to_string())),
+                        ("deleted", c1::Value::Bool(deleted)),
+                    ]),
+                ),
+                Err(e) => store_error_response(e),
+            }
+        }
+        ("GET", "history") => {
+            let store = store.lock().expect("lock");
+            match crate::graph::history(&store, graph, node) {
+                Ok(Some(versions)) => {
+                    let versions: Vec<c1::Value> = versions
+                        .into_iter()
+                        .map(|version| {
+                            let mut map = BTreeMap::new();
+                            map.insert("state".to_string(), c1::Value::Text(version.state));
+                            map.insert("attrs".to_string(), version.attrs);
+                            map.insert(
+                                "at".to_string(),
+                                match version.at {
+                                    Some(at) => c1::Value::Integer(at),
+                                    None => c1::Value::Null,
+                                },
+                            );
+                            c1::Value::Object(map)
+                        })
+                        .collect();
+                    Response::json(
+                        200,
+                        json_object(vec![
+                            ("graph", c1::Value::Text(graph.to_string())),
+                            ("name", c1::Value::Text(node.to_string())),
+                            ("versions", c1::Value::Array(versions)),
+                        ]),
+                    )
+                }
+                Ok(None) => error_response(404, "not held locally"),
+                Err(e) => store_error_response(e),
+            }
+        }
+        ("GET", "neighbors") => {
+            let mut direction = crate::graph::Direction::Both;
+            let mut edge_type: Option<String> = None;
+            for segment in query.unwrap_or("").split('&').filter(|s| !s.is_empty()) {
+                match segment.split_once('=') {
+                    Some(("direction", value)) => match crate::graph::Direction::parse(value) {
+                        Some(parsed) => direction = parsed,
+                        None => return error_response(400, "direction は in・out・both のどれか"),
+                    },
+                    Some(("type", value)) => edge_type = Some(value.to_string()),
+                    _ => return error_response(400, "query は direction= と type= だけ"),
+                }
+            }
+            let store = store.lock().expect("lock");
+            match crate::graph::get_node(&store, graph, node) {
+                Ok(None) => return error_response(404, "not held locally"),
+                Err(e) => return store_error_response(e),
+                Ok(Some(_)) => {}
+            }
+            match crate::graph::neighbors(&store, graph, node, direction, edge_type.as_deref()) {
+                Ok(edges) => Response::json(
+                    200,
+                    json_object(vec![
+                        ("graph", c1::Value::Text(graph.to_string())),
+                        ("name", c1::Value::Text(node.to_string())),
+                        (
+                            "direction",
+                            c1::Value::Text(
+                                match direction {
+                                    crate::graph::Direction::In => "in",
+                                    crate::graph::Direction::Out => "out",
+                                    crate::graph::Direction::Both => "both",
+                                }
+                                .to_string(),
+                            ),
+                        ),
+                        ("edges", c1::Value::Array(edges.iter().map(edge_value).collect())),
+                    ]),
+                ),
+                Err(e) => store_error_response(e),
+            }
+        }
+        (_, "") => error_response(405, "GET・PUT・DELETE のみ"),
+        (_, "history" | "neighbors") => error_response(405, "GET のみ"),
+        _ => error_response(404, "/v1/graphs/{g}/nodes/{n}[/history|/neighbors] の形"),
+    }
+}
+
+fn handle_graph_edge(context: &ApiContext, method: &str, graph: &str, rest: &str) -> Response {
+    let parts: Vec<&str> = rest.split('/').collect();
+    let [edge_type, from, to] = parts.as_slice() else {
+        return error_response(404, "/v1/graphs/{g}/edges/{型}/{from}/{to} の形");
+    };
+    for (what, name) in [("辺の型", edge_type), ("節点名", from), ("節点名", to)] {
+        if !crate::graph::is_valid_name(name) {
+            return error_response(400, &crate::graph::invalid_name_refusal(what, name));
+        }
+    }
+    let store = &*context.store;
+    match method {
+        "PUT" => {
+            let mut store = store.lock().expect("lock");
+            match crate::graph::put_edge(&mut store, graph, edge_type, from, to) {
+                Ok(outcome) => Response::json(
+                    200,
+                    json_object(vec![
+                        ("graph", c1::Value::Text(graph.to_string())),
+                        ("type", c1::Value::Text(edge_type.to_string())),
+                        ("from", c1::Value::Text(from.to_string())),
+                        ("to", c1::Value::Text(to.to_string())),
+                        ("id", c1::Value::Text(outcome.state)),
+                        ("updated", c1::Value::Bool(outcome.updated)),
+                        (
+                            "seq",
+                            match outcome.seq {
+                                Some(seq) => c1::Value::Integer(seq as i64),
+                                None => c1::Value::Null,
+                            },
+                        ),
+                        ("new_objects", c1::Value::Integer(outcome.new_objects as i64)),
+                    ]),
+                ),
+                Err(e) => store_error_response(e),
+            }
+        }
+        "DELETE" => {
+            let mut store = store.lock().expect("lock");
+            match crate::graph::delete_edge(&mut store, graph, edge_type, from, to) {
+                Ok(deleted) => Response::json(
+                    if deleted { 200 } else { 404 },
+                    json_object(vec![
+                        ("graph", c1::Value::Text(graph.to_string())),
+                        ("type", c1::Value::Text(edge_type.to_string())),
+                        ("from", c1::Value::Text(from.to_string())),
+                        ("to", c1::Value::Text(to.to_string())),
+                        ("deleted", c1::Value::Bool(deleted)),
+                    ]),
+                ),
+                Err(e) => store_error_response(e),
+            }
+        }
+        _ => error_response(405, "PUT か DELETE のみ"),
+    }
+}
+
+/// グラフ全体(節点と辺)。描画はこの 1 本で足りる。
+fn graph_snapshot(context: &ApiContext, graph: &str) -> Response {
+    let store = context.store.lock().expect("lock");
+    let nodes = match crate::graph::list_nodes(&store, graph) {
+        Ok(nodes) => nodes,
+        Err(e) => return store_error_response(e),
+    };
+    let edges = match crate::graph::list_edges(&store, graph) {
+        Ok(edges) => edges,
+        Err(e) => return store_error_response(e),
+    };
+    Response::json(
+        200,
+        json_object(vec![
+            ("graph", c1::Value::Text(graph.to_string())),
+            (
+                "nodes",
+                c1::Value::Array(
+                    nodes
+                        .iter()
+                        .map(|view| c1::Value::Object(entries_map(node_entries(graph, view))))
+                        .collect(),
+                ),
+            ),
+            ("edges", c1::Value::Array(edges.iter().map(edge_value).collect())),
+        ]),
+    )
+}
+
+fn graph_edge_list(context: &ApiContext, graph: &str, query: Option<&str>) -> Response {
+    let (mut edge_type, mut from, mut to) = (None, None, None);
+    for segment in query.unwrap_or("").split('&').filter(|s| !s.is_empty()) {
+        match segment.split_once('=') {
+            Some(("type", value)) => edge_type = Some(value.to_string()),
+            Some(("from", value)) => from = Some(value.to_string()),
+            Some(("to", value)) => to = Some(value.to_string()),
+            _ => return error_response(400, "query は type=・from=・to= だけ"),
+        }
+    }
+    let store = context.store.lock().expect("lock");
+    match crate::graph::list_edges(&store, graph) {
+        Ok(edges) => {
+            let edges: Vec<c1::Value> = edges
+                .iter()
+                .filter(|edge| edge_type.as_ref().is_none_or(|t| &edge.edge_type == t))
+                .filter(|edge| from.as_ref().is_none_or(|f| &edge.from == f))
+                .filter(|edge| to.as_ref().is_none_or(|t| &edge.to == t))
+                .map(edge_value)
+                .collect();
+            Response::json(
+                200,
+                json_object(vec![
+                    ("graph", c1::Value::Text(graph.to_string())),
+                    ("edges", c1::Value::Array(edges)),
+                ]),
+            )
+        }
+        Err(e) => store_error_response(e),
+    }
+}
+
+/// PUT の本文を attrs として読む。オブジェクトに限るのは、読み手(描画器)が attrs.state の
+/// ように鍵で引く前提だからで、配列や裸の文字列を通すとその前提が黙って崩れる。
+fn parse_attrs(body: &[u8]) -> std::result::Result<c1::Value, String> {
+    let text = std::str::from_utf8(body).map_err(|_| "本文が UTF-8 でない".to_string())?;
+    let value = c1::parse(text).map_err(|e| format!("JSON が不正: {e}"))?;
+    match value {
+        c1::Value::Object(_) => Ok(value),
+        _ => Err("本文は attrs のオブジェクト({\"state\":…} の形)".to_string()),
+    }
+}
+
+fn entries_map(entries: Vec<(&str, c1::Value)>) -> BTreeMap<String, c1::Value> {
+    let mut map = BTreeMap::new();
+    for (key, value) in entries {
+        map.insert(key.to_string(), value);
+    }
+    map
+}
+
+fn node_entries<'a>(graph: &str, view: &'a crate::graph::NodeView) -> Vec<(&'a str, c1::Value)> {
+    vec![
+        ("graph", c1::Value::Text(graph.to_string())),
+        ("name", c1::Value::Text(view.name.clone())),
+        ("identity", c1::Value::Text(view.identity.clone())),
+        ("state", c1::Value::Text(view.state.clone())),
+        ("attrs", view.attrs.clone()),
+        ("seq", c1::Value::Integer(view.seq as i64)),
+        ("at", c1::Value::Integer(view.at)),
+    ]
+}
+
+fn put_entries<'a>(
+    graph: &str,
+    node: &str,
+    outcome: &crate::graph::PutOutcome,
+) -> Vec<(&'a str, c1::Value)> {
+    vec![
+        ("graph", c1::Value::Text(graph.to_string())),
+        ("name", c1::Value::Text(node.to_string())),
+        ("identity", c1::Value::Text(outcome.identity.clone())),
+        ("state", c1::Value::Text(outcome.state.clone())),
+        ("updated", c1::Value::Bool(outcome.updated)),
+        (
+            "seq",
+            match outcome.seq {
+                Some(seq) => c1::Value::Integer(seq as i64),
+                None => c1::Value::Null,
+            },
+        ),
+        ("new_objects", c1::Value::Integer(outcome.new_objects as i64)),
+    ]
+}
+
+fn edge_value(edge: &crate::graph::EdgeView) -> c1::Value {
+    c1::Value::Object(entries_map(vec![
+        ("type", c1::Value::Text(edge.edge_type.clone())),
+        ("from", c1::Value::Text(edge.from.clone())),
+        ("to", c1::Value::Text(edge.to.clone())),
+        ("id", c1::Value::Text(edge.id.clone())),
+        ("seq", c1::Value::Integer(edge.seq as i64)),
+        ("at", c1::Value::Integer(edge.at)),
+    ]))
 }
 
 #[cfg(test)]

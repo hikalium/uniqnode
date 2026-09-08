@@ -13,6 +13,7 @@ pub mod embed;
 pub mod eval;
 pub mod fetch;
 pub mod gc;
+pub mod graph;
 pub mod groups;
 pub mod health;
 pub mod html;

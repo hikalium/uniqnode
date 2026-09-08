@@ -49,7 +49,9 @@ fn usage_text() -> String {
            serve <dir> <addr> [--embed <url>] [--embedder <id>] [--rerank <url>]\n\
                               [--reranker <id>] [--listen-agent <addr>]\n\
                               [--agent-writable <コレクション名>]...\n\
-                              [--agent-collections <コレクション名>]... [ログの指定]\n\
+                              [--agent-collections <コレクション名>]...\n\
+                              [--agent-graph <グラフ名>]...\n\
+                              [--agent-graph-writable <グラフ名>]... [ログの指定]\n\
                                       HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)。\n\
                                       --listen-agent を与えると、そのアドレスに第 2 の口\n\
                                       (読み口)を束縛する。読み口は許可表(healthz・status・\n\
@@ -67,6 +69,12 @@ fn usage_text() -> String {
                                       ければ全コレクションが読める。与えると search・\n\
                                       collections・objects・citation の 4 か所に効き、集合の\n\
                                       外は 403 で断る。\n\
+                                      --agent-graph は読み口から読めるグラフ、\n\
+                                      --agent-graph-writable は読み書きできるグラフ(どちらも\n\
+                                      繰り返せる。--listen-agent があるときだけ)。コレクション\n\
+                                      と逆で、どちらも与えなければグラフ層は読み口に現れない。\n\
+                                      許したグラフの /v1/graphs/{{g}}/... だけを通し、外の名は\n\
+                                      403 で断る(docs/design/GRAPH.md)。\n\
                                       --embed を与えると POST /v1/search の既定が BM25 と\n\
                                       埋め込みの RRF 融合になる。ベクトルはキャッシュから\n\
                                       読むので検索が模型の計算を待つことはなく、無いぶんは\n\
@@ -160,6 +168,7 @@ fn usage_text() -> String {
                          [--unit-dir <dir>] [--no-start] [--listen-agent <addr>]\n\
                          [--agent-writable <コレクション名>]...\n\
                          [--agent-collections <コレクション名>]...\n\
+                         [--agent-graph <グラフ名>]... [--agent-graph-writable <グラフ名>]...\n\
                          [--system [--user <name>] [--after <unit>]...\n\
                           [--take-over-user-units] [--firewall-allow <addr>]]\n\
                                       serve・viewer・毎日の backup を systemd に据える\n\
@@ -196,6 +205,13 @@ fn usage_text() -> String {
                                       UNIQNODE_AGENT_COLLECTIONS を書き ExecStart= の末尾に\n\
                                       --agent-collections <c> を並べ、確認に「許していない\n\
                                       名を指した検索が 403」を足す。\n\
+                                      --agent-graph は読み口から読めるグラフ、\n\
+                                      --agent-graph-writable は読み書きできるグラフ(どちらも\n\
+                                      繰り返せる。--listen-agent のときだけ)で、drop-in に\n\
+                                      UNIQNODE_AGENT_GRAPH と UNIQNODE_AGENT_GRAPH_WRITABLE を\n\
+                                      書き ExecStart= の末尾に並べ、確認に「許したグラフが\n\
+                                      読め、外の名は 403」「許したグラフへの PUT が門を越え、\n\
+                                      許していないものは 403」を足す(試し書きはしない)。\n\
                                       --system は system 単位(/etc/systemd/system)に据える:\n\
                                       root で走らせ(sudo)、unit は --user の利用者(無ければ\n\
                                       SUDO_USER。root は不可)で走る。既定の置き場もその\n\
@@ -745,6 +761,11 @@ struct RunOptions {
     /// 空なら読み口は全コレクションを読める(既定)。--agent-writable と同じく、
     /// --listen-agent が無いのに与えられたら断る。
     agent_collections: Vec<String>,
+    /// 読み口から読めるグラフ(--agent-graph)と書けるグラフ(--agent-graph-writable)。
+    /// どちらも空ならグラフ層は読み口から見えない(コレクションと既定が逆。
+    /// docs/design/GRAPH.md)。
+    agent_graph: Vec<String>,
+    agent_graph_writable: Vec<String>,
 }
 
 /// ログの指定と読み口の指定だけを抜き取り、残りは埋め込みの読み手に渡す(読み取りを
@@ -758,6 +779,8 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
     let mut listen_agent = None;
     let mut agent_writable: Vec<String> = Vec::new();
     let mut agent_collections: Vec<String> = Vec::new();
+    let mut agent_graph: Vec<String> = Vec::new();
+    let mut agent_graph_writable: Vec<String> = Vec::new();
     let mut others = Vec::new();
     let mut at = 0;
     while at < rest.len() {
@@ -794,6 +817,24 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
                 }
                 if !agent_collections.contains(&collection) {
                     agent_collections.push(collection);
+                }
+                at += 2;
+            }
+            uniqnode::install::AGENT_GRAPH_FLAG | uniqnode::install::AGENT_GRAPH_WRITABLE_FLAG => {
+                // グラフ名の検査は install と同じ 1 箇所(should/0135)。同じ名の繰り返しは
+                // 1 つに畳む。
+                let flag = rest[at].clone();
+                let graph = value();
+                if let Err(message) = uniqnode::install::check_agent_graph(&flag, &graph) {
+                    eprintln!("uniqnode: {message}");
+                    std::process::exit(2);
+                }
+                let names = match flag == uniqnode::install::AGENT_GRAPH_FLAG {
+                    true => &mut agent_graph,
+                    false => &mut agent_graph_writable,
+                };
+                if !names.contains(&graph) {
+                    names.push(graph);
                 }
                 at += 2;
             }
@@ -842,12 +883,32 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
         );
         std::process::exit(2);
     }
+    for (flag, names) in [
+        (uniqnode::install::AGENT_GRAPH_FLAG, &agent_graph),
+        (
+            uniqnode::install::AGENT_GRAPH_WRITABLE_FLAG,
+            &agent_graph_writable,
+        ),
+    ] {
+        if !names.is_empty() && listen_agent.is_none() {
+            // グラフの許可も読み口に掛かるもの(コレクションの 2 つと同じ理由)。
+            eprintln!(
+                "uniqnode: {flag} {} は {} があるときだけ受け付ける(グラフの許可は読み口に\
+                 掛かるもので、読み口が無ければ効かせる先が無い)",
+                names.join(" "),
+                uniqnode::install::AGENT_LISTEN_FLAG
+            );
+            std::process::exit(2);
+        }
+    }
     RunOptions {
         embed: parse_embed_options(&others),
         log,
         listen_agent,
         agent_writable,
         agent_collections,
+        agent_graph,
+        agent_graph_writable,
     }
 }
 
@@ -957,6 +1018,8 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
     let mut agent_listen: Option<String> = None;
     let mut agent_writable: Vec<String> = Vec::new();
     let mut agent_collections: Vec<String> = Vec::new();
+    let mut agent_graph: Vec<String> = Vec::new();
+    let mut agent_graph_writable: Vec<String> = Vec::new();
     let mut take_over_user_units = false;
     let mut firewall_allow: Option<String> = None;
     let mut listen: Option<String> = None;
@@ -993,6 +1056,19 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
                 let collection = value();
                 if !agent_collections.contains(&collection) {
                     agent_collections.push(collection);
+                }
+            }
+            uniqnode::install::AGENT_GRAPH_FLAG => {
+                // 検査は install::normalize(判断の家は 1 つ。should/0135)。
+                let graph = value();
+                if !agent_graph.contains(&graph) {
+                    agent_graph.push(graph);
+                }
+            }
+            uniqnode::install::AGENT_GRAPH_WRITABLE_FLAG => {
+                let graph = value();
+                if !agent_graph_writable.contains(&graph) {
+                    agent_graph_writable.push(graph);
                 }
             }
             uniqnode::install::FIREWALL_ALLOW_FLAG => firewall_allow = Some(value()),
@@ -1068,6 +1144,8 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
     options.agent_listen = agent_listen;
     options.agent_writable = agent_writable;
     options.agent_collections = agent_collections;
+    options.agent_graph = agent_graph;
+    options.agent_graph_writable = agent_graph_writable;
     options.take_over_user_units = take_over_user_units;
     options.firewall_allow = firewall_allow;
     options
@@ -1665,9 +1743,27 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                         readable.join(", ")
                     );
                 }
+                // グラフ層(--agent-graph / --agent-graph-writable)。どちらも空なら
+                // 読み口からグラフは見えない。
+                let allowed = uniqnode::agent_door::Allowed {
+                    writable,
+                    readable,
+                    graphs: options.agent_graph.clone(),
+                    graphs_writable: options.agent_graph_writable.clone(),
+                };
+                if !allowed.readable_graphs().is_empty() {
+                    uniqnode::log_line!(
+                        "uniqnode: serve: 読み口から読めるグラフ: {}(書けるのは {})",
+                        allowed.readable_graphs().join(", "),
+                        match allowed.graphs_writable.is_empty() {
+                            true => "何も無い".to_string(),
+                            false => allowed.graphs_writable.join(", "),
+                        }
+                    );
+                }
                 let door: std::sync::Arc<uniqnode::http::PeerHandler> =
                     std::sync::Arc::new(move |request, peer| {
-                        uniqnode::agent_door::handle(&context, request, peer, &writable, &readable)
+                        uniqnode::agent_door::handle(&context, request, peer, &allowed)
                     });
                 uniqnode::agent_door::open(agent_address, door);
             }

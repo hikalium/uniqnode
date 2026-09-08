@@ -67,6 +67,8 @@ unit ファイルは差し替えても drop-in は残る。
 | UNIQNODE_AGENT_LISTEN | serve(install の `--listen-agent` だけが書く) | 無し | 読み口の待ち受け。unit の ExecStart= には無く、install が drop-in の ExecStart= の末尾に `--listen-agent ${UNIQNODE_AGENT_LISTEN}` を足す |
 | UNIQNODE_AGENT_WRITABLE | serve(install の `--agent-writable` だけが書く) | 無し | 読み口から書けるコレクションの集合(空白区切り。読み手のための写し)。ExecStart= には展開せず、install が drop-in の ExecStart= の末尾に `--agent-writable <c>` を集合の数だけ値のまま並べる |
 | UNIQNODE_AGENT_COLLECTIONS | serve(install の `--agent-collections` だけが書く) | 無し(全コレクションが読める) | 読み口から読めるコレクションの集合(空白区切り。読み手のための写し)。ExecStart= には展開せず、install が drop-in の ExecStart= の末尾に `--agent-collections <c>` を集合の数だけ値のまま並べる |
+| UNIQNODE_AGENT_GRAPH | serve(install の `--agent-graph` だけが書く) | 無し(グラフ層は読み口に現れない) | 読み口から読めるグラフの集合(空白区切り。読み手のための写し)。ExecStart= には展開せず、install が drop-in の ExecStart= の末尾に `--agent-graph <g>` を集合の数だけ値のまま並べる |
+| UNIQNODE_AGENT_GRAPH_WRITABLE | serve(install の `--agent-graph-writable` だけが書く) | 無し | 読み口から読み書きできるグラフの集合(空白区切り。読み手のための写し)。ExecStart= には展開せず、install が drop-in の ExecStart= の末尾に `--agent-graph-writable <g>` を集合の数だけ値のまま並べる |
 | PATH | serve(install は 3 つに同じ値) | systemd の既定 /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin | pdftotext・pdftohtml・pdftoppm・curl を探す道。unit には書かず、install が自分の PATH で見つけた場所を前に足して drop-in に書く(下) |
 
 - 埋め込みは既定で装備しない。serve は `--embed` を明示したときだけ埋め込みサーバに繋ぎ、
@@ -233,15 +235,16 @@ cargo build --release -p uniqnode && sudo target/release/uniqnode install /work2
    drop-in に `ExecStartPre=+/usr/sbin/nft -f <その道>` を足す(先頭の + は User= に関わらず
    root で走らせる印)ので、nftables.service が無効な機械でも、serve を起こすたびに規則が入る。
    ufw も nft も無ければその旨で赤。
-3. 据え付けと確認(上の「system 単位で起こす」と同じ。「確認:」が 5 本。`--agent-writable` と
-   `--agent-collections` があればそれぞれさらに 1 本、下の「読み口(--listen-agent)の確認」)。
+3. 据え付けと確認(上の「system 単位で起こす」と同じ。「確認:」が 5 本。`--agent-writable`・
+   `--agent-collections`・グラフの許し(`--agent-graph` か `--agent-graph-writable`)があれば
+   それぞれさらに 1 本、下の「読み口(--listen-agent)の確認」)。
 4. firewall の効果を見て「確認:」を 1 本足す。ufw なら `ufw allow from 10.10.128.4 to 10.10.128.1
    port 7441 proto tcp` を入れて、`ufw status` の表にその行(10.10.128.1 7441/tcp、ALLOW、
    10.10.128.4)が載ったこと。nft なら `nft list table inet uniqnode_<インスタンス>` にその規則が載っている
    こと(入れたのは serve の起動そのもので、install はここで入れ直さない: 再起動のたびに同じ
    道で入ることの証拠になる)。
 5. /tmp/uniqnode-install-system.log を読む。「確認:」の行が 6 本(`--agent-writable` と
-   `--agent-collections` があれば 8 本)並び、最後に「次の刻み:」があれば据え付けは完了である。unit の状態は
+   `--agent-collections` があれば 8 本、グラフの許しもあれば 9 本)並び、最後に「次の刻み:」があれば据え付けは完了である。unit の状態は
    `systemctl status uniqnode-serve@default uniqnode-viewer@default uniqnode-backup@default.timer`。
 6. user 単位の unit ファイル(~/.config/systemd/user/uniqnode-*)は disable しても残る。
    消すなら `rm ~/.config/systemd/user/uniqnode-*@.service ~/.config/systemd/user/uniqnode-*@.timer`
@@ -281,6 +284,20 @@ curl -X PUT http://10.10.128.1:7441/v1/collections/uniqnode-install-probe/docume
 ```
 curl -X POST http://10.10.128.1:7441/v1/search -d '{"query":"probe","collection":"uniqnode-install-probe","top_k":1}'   # 403 「は読めない」
 curl -X POST http://10.10.128.1:7441/v1/search -d '{"query":"xhci","collection":"specs","top_k":1}'                     # 200(集合の中)
+```
+
+`--agent-graph <g>` か `--agent-graph-writable <g>` があれば、グラフの確認をもう 1 本
+(「確認: 読み口のグラフ: …」)足す。読める各グラフの GET が 200 であること、許していない名
+(uniqnode_install_probe。集合にあれば -x を足す)の GET が「は読めない(--agent-graph …)」の
+403 であることを見る。書けるグラフがあれば、コレクションの書く口と同じ形で試し書きをしない:
+attrs がオブジェクトでない本文を PUT し、門を越えて api の 400 で止まること(403 でなく、本文が
+門の断りでない。何も書かれない)と、許していないグラフへの PUT が 403 であることを見る:
+
+```
+curl http://10.10.128.1:7443/v1/graphs/lamalium-plan                              # 200(読める)
+curl http://10.10.128.1:7443/v1/graphs/uniqnode_install_probe                     # 403 「は読めない」
+curl -X PUT http://10.10.128.1:7443/v1/graphs/lamalium-plan/nodes/uniqnode-install-probe --data-binary '[]'   # 400(門は越えた。書かない)
+curl -X PUT http://10.10.128.1:7443/v1/graphs/uniqnode_install_probe/nodes/uniqnode-install-probe --data-binary '[]'   # 403 「は書けない」
 ```
 
 firewall は `--firewall-allow <addr>` で install が入れる。ufw が active ならその規則、そうで
@@ -344,7 +361,8 @@ target/release/uniqnode install ~/uniqnode-store
 uniqnode install <dir> [--listen <addr>] [--viewer-listen <addr>] [--serve-options "<引数列>"]
                        [--backup-dir <dir>] [--bin <path>] [--unit-dir <dir>] [--no-start]
                        [--listen-agent <addr>] [--agent-writable <c>]...
-                       [--agent-collections <c>]...
+                       [--agent-collections <c>]... [--agent-graph <g>]...
+                       [--agent-graph-writable <g>]...
                        [--system [--user <name>] [--after <unit>]...]
 ```
 
@@ -361,6 +379,8 @@ uniqnode install <dir> [--listen <addr>] [--viewer-listen <addr>] [--serve-optio
 | `--listen-agent` | 無し | serve の読み口(第 2 の待ち受け。許可表の外は 403)。drop-in に UNIQNODE_AGENT_LISTEN を書き、ExecStart= の末尾に `--listen-agent ${UNIQNODE_AGENT_LISTEN}` を足す。--listen と別のアドレスで、ポートは固定 |
 | `--agent-writable` | 無し | 読み口から書けるコレクション(複数可。`--listen-agent` があるときだけ)。drop-in に `Environment="UNIQNODE_AGENT_WRITABLE=<c1> <c2>"` を書き、ExecStart= の末尾に `--agent-writable <c>` を集合の数だけ並べる。確認に「許したコレクションへの PUT が門を越え、許していないものは 403」を足す(試し書きはしない) |
 | `--agent-collections` | 無し(全コレクションが読める) | 読み口から読めるコレクション(複数可。`--listen-agent` があるときだけ)。drop-in に `Environment="UNIQNODE_AGENT_COLLECTIONS=<c1> <c2>"` を書き、ExecStart= の末尾に `--agent-collections <c>` を集合の数だけ並べる。確認に「許していない名を指した検索が 403」を足す(読むだけ。本番のデータに触らない) |
+| `--agent-graph` | 無し(グラフ層は読み口に現れない) | 読み口から読めるグラフ(複数可。`--listen-agent` があるときだけ)。drop-in に `Environment="UNIQNODE_AGENT_GRAPH=<g1> <g2>"` を書き、ExecStart= の末尾に `--agent-graph <g>` を集合の数だけ並べる。確認に「許したグラフが読め、外の名は 403」を足す |
+| `--agent-graph-writable` | 無し | 読み口から読み書きできるグラフ(複数可。`--listen-agent` があるときだけ)。書ける名は読めもする。drop-in に `Environment="UNIQNODE_AGENT_GRAPH_WRITABLE=<g1> <g2>"` を書き、ExecStart= の末尾に `--agent-graph-writable <g>` を集合の数だけ並べる。確認に「許したグラフへの PUT が門を越え、許していないものは 403」を足す(試し書きはしない) |
 | `--instance` | default | 同じ機械に何組も置くための名(下の「2 つ目のストアを同じ機械で」)。unit の名・drop-in の置き場・既定のストアと写し先・nft の表がこの名で分かれる。ASCII の小文字と数字と `_` の 32 字まで |
 | `--system` | — | system 単位に据える(上の「system 単位で起こす」)。root で走らせる |
 | `--user` | SUDO_USER | `--system` の実行ユーザ(unit の User=/Group=)。root は断る。`--system` のときだけ |
@@ -444,7 +464,8 @@ install は次を 1 手順 1 命令で行う。unit は docs/mop/systemd/user/ �
    に落ちたら待たずに言う)、`--listen-agent` があれば読み口の /v1/status が同じ node_id を
    返し POST /v1/admin/gc(dry_run)が 403 であることを同じ上限で待ち、`--agent-writable` が
    あれば書く口を書かずに確かめ、`--agent-collections` があれば集合の外を指した検索が 403 で
-   断られることを確かめ(どちらも上の「読み口(--listen-agent)の確認」)、
+   断られることを確かめ、`--agent-graph`(か `--agent-graph-writable`)があれば許したグラフが
+   読めて外の名が 403 であることを確かめ(いずれも上の「読み口(--listen-agent)の確認」)、
    `systemctl --user start uniqnode-backup@default.service` を 1 回走らせ、写し先をストアとして開いて
    fsck する(backup 命令の最後の検証と同じ関数。system 単位では実行ユーザで
    `<bin> fsck <写し先>` を起こし、最後にストアと写し先の所有者を見る)。

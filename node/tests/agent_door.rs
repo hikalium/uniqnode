@@ -905,3 +905,159 @@ fn mcp_and_viewer_refuse_the_flag_they_cannot_honour() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// グラフ層(第 3 段): `--agent-graph-writable lamalium-plan` で lamalium-plan の節点と辺が
+/// 読み口から書けて読み戻せ、`--agent-graph plan-archive` は読めるが書けない。許していない
+/// グラフは読みも書きも 403 で、断る本文が許した一覧を言う。グラフの一覧
+/// (GET /v1/graphs)は許可表に無い(許していないグラフの名を知らせない)。
+///
+/// should/0137: admit のグラフの 2 本の腕を消すと最初の PUT と GET が 403 に、
+/// Allowed::writes_graph の検査を消すと plan-archive への PUT の 403 が、
+/// reads_graph の検査を消すと other の GET の 403 が落ちる。
+#[test]
+fn an_allowed_graph_is_written_and_read_through_the_door() {
+    let server = DoorServer::start(
+        "door-graph",
+        &[
+            "--listen-agent",
+            "127.0.0.1:0",
+            "--agent-graph-writable",
+            "lamalium-plan",
+            "--agent-graph",
+            "plan-archive",
+        ],
+    );
+    let main = server.main().to_string();
+    let door = server.door();
+
+    // 書けるグラフ: 節点 2 つと辺 1 本が門を越える。
+    for (node, attrs) in [("n_a", "{\"title\":\"調べる\"}"), ("n_b", "{\"title\":\"直す\"}")] {
+        let put = simple(&door, "PUT", &format!("/v1/graphs/lamalium-plan/nodes/{node}"), attrs.as_bytes());
+        assert_eq!(put.status, 200, "{}", body_text(&put));
+        let text = body_text(&put);
+        assert!(text.contains("\"updated\":true"), "{text}");
+        assert!(json_text_field(&text, "identity").is_some(), "{text}");
+    }
+    let edge = simple(&door, "PUT", "/v1/graphs/lamalium-plan/edges/blocks/n_a/n_b", b"");
+    assert_eq!(edge.status, 200, "{}", body_text(&edge));
+
+    // 読み戻せる(書ける名は読めもする)。
+    let node = simple(&door, "GET", "/v1/graphs/lamalium-plan/nodes/n_a", b"");
+    assert_eq!(node.status, 200, "{}", body_text(&node));
+    assert!(body_text(&node).contains("調べる"), "{}", body_text(&node));
+    let neighbors = simple(&door, "GET", "/v1/graphs/lamalium-plan/nodes/n_a/neighbors", b"");
+    assert_eq!(neighbors.status, 200, "{}", body_text(&neighbors));
+    let neighbors_text = body_text(&neighbors);
+    assert!(neighbors_text.contains("\"direction\":\"both\""), "{neighbors_text}");
+    assert!(neighbors_text.contains("\"n_b\""), "{neighbors_text}");
+    let snapshot = simple(&door, "GET", "/v1/graphs/lamalium-plan", b"");
+    assert_eq!(snapshot.status, 200, "{}", body_text(&snapshot));
+    assert!(body_text(&snapshot).contains("\"n_b\""), "{}", body_text(&snapshot));
+
+    // 主の口から見ても同じもの(門は書き込みを素通しした。別の store を作っていない)。
+    let from_main = simple(&main, "GET", "/v1/graphs/lamalium-plan/nodes/n_a", b"");
+    assert_eq!(from_main.status, 200, "{}", body_text(&from_main));
+    assert_eq!(
+        json_text_field(&body_text(&from_main), "state"),
+        json_text_field(&body_text(&node), "state")
+    );
+
+    // 読めるだけのグラフ: GET は通り(まだ何も無いので 200 の空)、PUT は許した一覧を言う 403。
+    let archive = simple(&door, "GET", "/v1/graphs/plan-archive", b"");
+    assert_eq!(archive.status, 200, "{}", body_text(&archive));
+    let refused = simple(&door, "PUT", "/v1/graphs/plan-archive/nodes/n_a", b"{}");
+    assert_eq!(refused.status, 403, "{}", body_text(&refused));
+    assert_eq!(
+        body_text(&refused),
+        "{\"error\":\"agent door: グラフ plan-archive は書けない(--agent-graph-writable で許したのは lamalium-plan)\"}"
+    );
+    // 許していないグラフ: 読みも書きも 403 で、許した一覧を言う(書ける名は読める側にも出る)。
+    let unseen = simple(&door, "GET", "/v1/graphs/other/nodes/n_a", b"");
+    assert_eq!(unseen.status, 403, "{}", body_text(&unseen));
+    assert_eq!(
+        body_text(&unseen),
+        "{\"error\":\"agent door: グラフ other は読めない(--agent-graph で許したのは plan-archive, lamalium-plan)\"}"
+    );
+    let unwritable = simple(&door, "PUT", "/v1/graphs/other/nodes/n_a", b"{}");
+    assert_eq!(unwritable.status, 403, "{}", body_text(&unwritable));
+    // グラフの一覧は許可表に無い(許していない名を知らせないため)。
+    let list = simple(&door, "GET", "/v1/graphs", b"");
+    assert_eq!(list.status, 403, "{}", body_text(&list));
+    assert_eq!(
+        body_text(&list),
+        "{\"error\":\"agent door: GET /v1/graphs は許可されていない\"}"
+    );
+    // 主の口では一覧が出る(閉じているのは読み口だけ)。
+    let from_main = simple(&main, "GET", "/v1/graphs", b"");
+    assert_eq!(from_main.status, 200, "{}", body_text(&from_main));
+    assert!(body_text(&from_main).contains("lamalium-plan"), "{}", body_text(&from_main));
+
+    // 通した 1 本も断った 1 本も記録に残る(読み口の log 行の形はコレクションと同じ)。
+    let log = std::fs::read_to_string(server.server.dir.join("logs").join("serve.log")).expect("serve.log");
+    assert_eq!(agent_line_fields(&log, " PUT /v1/graphs/lamalium-plan/nodes/n_a 200 ").len(), 5, "{log}");
+    assert_eq!(agent_line_fields(&log, " GET /v1/graphs/other/nodes/n_a 403 ").len(), 5, "{log}");
+}
+
+/// グラフの許しを 1 つも与えなければ、グラフ層は読み口に現れない(コレクションと既定が逆:
+/// 何も言わなければ全部読めるのではなく、何も読めない)。主の口では同じ道が通る。
+/// should/0137: Allowed::reads_graph の「空なら見えない」を「空なら全部」に変えると、
+/// 読み口の GET が 200 になってこの試験の 403 が落ちる。
+#[test]
+fn without_the_graph_flags_the_door_does_not_show_the_graph_layer() {
+    let server = DoorServer::start("door-graph-closed", &["--listen-agent", "127.0.0.1:0"]);
+    let main = server.main().to_string();
+    let door = server.door();
+
+    // 主の口では書けて読める。
+    let put = simple(&main, "PUT", "/v1/graphs/plan/nodes/n_a", b"{\"title\":\"a\"}");
+    assert_eq!(put.status, 200, "{}", body_text(&put));
+
+    // 読み口には現れない。断る本文は「許したのは何も無い」と言う。
+    for (method, path) in [("GET", "/v1/graphs/plan"), ("GET", "/v1/graphs/plan/nodes/n_a")] {
+        let response = simple(&door, method, path, b"");
+        assert_eq!(response.status, 403, "{path}: {}", body_text(&response));
+        assert_eq!(
+            body_text(&response),
+            "{\"error\":\"agent door: グラフ plan は読めない(--agent-graph で許したグラフは無い)\"}",
+            "{path}"
+        );
+    }
+    let put = simple(&door, "PUT", "/v1/graphs/plan/nodes/n_b", b"{}");
+    assert_eq!(put.status, 403, "{}", body_text(&put));
+    assert_eq!(
+        body_text(&put),
+        "{\"error\":\"agent door: グラフ plan は書けない(--agent-graph-writable で許したグラフは無い)\"}"
+    );
+    // 何も書かれていない(門で止まった)。
+    let from_main = simple(&main, "GET", "/v1/graphs/plan/nodes/n_b", b"");
+    assert_eq!(from_main.status, 404, "{}", body_text(&from_main));
+}
+
+/// グラフの 2 つの許しも `--listen-agent` があるときだけ。無いのに与えれば serve は何も
+/// 開かずに 2 で終わる。名前の形が違うときも同じ。
+/// should/0137: parse_run_options の「--listen-agent が無い」の検査を消すと最初の段が
+/// (serve が上がってしまい)落ちる。
+#[test]
+fn agent_graph_without_a_door_is_refused_with_exit_2() {
+    let dir = unique_dir("door-graph-alone");
+    let run = |args: &[&str]| -> (Option<i32>, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
+            .args(["serve", dir.to_str().expect("utf-8"), "127.0.0.1:0"])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run");
+        (output.status.code(), String::from_utf8_lossy(&output.stderr).to_string())
+    };
+    for flag in ["--agent-graph", "--agent-graph-writable"] {
+        let (code, stderr) = run(&[flag, "plan"]);
+        assert_eq!(code, Some(2), "{flag}: {stderr}");
+        assert!(stderr.contains(&format!("{flag} plan は --listen-agent があるときだけ")), "{stderr}");
+        assert!(!dir.exists(), "断るときはストアを作らない");
+        let (code, stderr) = run(&["--listen-agent", "127.0.0.1:0", flag, "a b"]);
+        assert_eq!(code, Some(2), "{flag}: {stderr}");
+        assert!(stderr.contains(&format!("{flag} の値がグラフ名")), "{stderr}");
+        assert!(!dir.exists(), "断るときはストアを作らない");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

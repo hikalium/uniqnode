@@ -71,6 +71,51 @@ pub enum Row {
     /// `PUT /v1/collections/{c}/documents/{name}`。c が `--agent-writable` の集合にある
     /// ときだけ(第 2 段)。
     PutDocument,
+    /// グラフ層の読み(`GET /v1/graphs/{g}…`)。g が `--agent-graph` か
+    /// `--agent-graph-writable` の集合にあるときだけ(docs/design/GRAPH.md)。
+    Graph,
+    /// グラフ層の書き(`PUT`・`DELETE /v1/graphs/{g}…`)。g が `--agent-graph-writable` の
+    /// 集合にあるときだけ。
+    GraphWrite,
+}
+
+/// 読み口に許した集合。要求 1 本を捌くのに要る許可がここに揃う。空の集合の意味は種類で
+/// 違うので、欄ごとに書いてある(コレクションの「空 = 全部読める」は読み口の既定として
+/// 先にあり、グラフは後から足したので既定を閉じた側に置いた)。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Allowed {
+    /// 書けるコレクション(`--agent-writable`)。空なら読み口は書けない。
+    pub writable: Vec<String>,
+    /// 読めるコレクション(`--agent-collections`)。空なら全コレクションが読める。
+    pub readable: Vec<String>,
+    /// 読めるグラフ(`--agent-graph`)。空ならグラフ層は読み口から見えない。
+    pub graphs: Vec<String>,
+    /// 書けるグラフ(`--agent-graph-writable`)。書ける名は読めもする(読み戻せない書き手を
+    /// 作らない)。
+    pub graphs_writable: Vec<String>,
+}
+
+impl Allowed {
+    /// そのグラフを読めるか。書ける名は読める。
+    pub fn reads_graph(&self, graph: &str) -> bool {
+        self.graphs.iter().any(|name| name == graph) || self.writes_graph(graph)
+    }
+
+    /// そのグラフを書けるか。
+    pub fn writes_graph(&self, graph: &str) -> bool {
+        self.graphs_writable.iter().any(|name| name == graph)
+    }
+
+    /// 読めるグラフの名を、許した順で 1 本に(断りの本文と記録に使う)。
+    pub fn readable_graphs(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.graphs.iter().map(String::as_str).collect();
+        for name in &self.graphs_writable {
+            if !names.contains(&name.as_str()) {
+                names.push(name);
+            }
+        }
+        names
+    }
 }
 
 /// 読み口が読めるコレクション(`--agent-collections`)を、検索の共有ポリシー
@@ -82,6 +127,27 @@ pub fn readable_scope(readable: &[String]) -> crate::search::CollectionScope {
         true => crate::search::CollectionScope::All,
         false => crate::search::CollectionScope::Only(readable.to_vec()),
     }
+}
+
+/// 読めないグラフを断る本文。install の確認は期待する本文をこの関数で組む(must/0023)。
+pub fn ungraphed_refusal(graph: &str, allowed: &Allowed) -> String {
+    let names = allowed.readable_graphs();
+    let flag = crate::install::AGENT_GRAPH_FLAG;
+    let allowed = match names.is_empty() {
+        true => format!("{flag} で許したグラフは無い"),
+        false => format!("{flag} で許したのは {}", names.join(", ")),
+    };
+    format!("{ERROR_PREFIX}グラフ {graph} は読めない({allowed})")
+}
+
+/// 書けないグラフを断る本文。
+pub fn unwritable_graph_refusal(graph: &str, allowed: &Allowed) -> String {
+    let flag = crate::install::AGENT_GRAPH_WRITABLE_FLAG;
+    let allowed = match allowed.graphs_writable.is_empty() {
+        true => format!("{flag} で許したグラフは無い"),
+        false => format!("{flag} で許したのは {}", allowed.graphs_writable.join(", ")),
+    };
+    format!("{ERROR_PREFIX}グラフ {graph} は書けない({allowed})")
 }
 
 /// 読めないコレクションを断る本文。要求が名指しした collection も、オブジェクトの出典の
@@ -106,9 +172,10 @@ pub fn admit(
     method: &str,
     path: &str,
     body: &[u8],
-    writable: &[String],
-    readable: &[String],
+    allowed: &Allowed,
 ) -> Result<Row, Response> {
+    let writable = allowed.writable.as_slice();
+    let readable = allowed.readable.as_slice();
     // 書く口の的(PUT で、1 つでも許したコレクションがあるときだけ形を見る)。path の分け方は
     // 主の口と同じ api::document_path(should/0135)。
     let put_target = match method {
@@ -122,6 +189,25 @@ pub fn admit(
         ("GET", "/v1/collections") => Row::Collections,
         ("GET", _) if object_row(path) == Some(Row::Object) => Row::Object,
         ("GET", _) if object_row(path) == Some(Row::Citation) => Row::Citation,
+        // グラフ層。名指ししたグラフだけを見て、一覧の口(GET /v1/graphs)は開けない:
+        // 許していないグラフの名を知らせないためである(docs/design/GRAPH.md)。
+        ("GET", _) if graph_of(path).is_some() => {
+            let graph = graph_of(path).expect("直前に見た形");
+            if !allowed.reads_graph(graph) {
+                return Err(api::error_response(403, &ungraphed_refusal(graph, allowed)));
+            }
+            Row::Graph
+        }
+        ("PUT" | "DELETE", _) if graph_of(path).is_some() => {
+            let graph = graph_of(path).expect("直前に見た形");
+            if !allowed.writes_graph(graph) {
+                return Err(api::error_response(
+                    403,
+                    &unwritable_graph_refusal(graph, allowed),
+                ));
+            }
+            Row::GraphWrite
+        }
         ("PUT", _) if put_target.is_some() => {
             let target = put_target.expect("直前に見た形");
             if !writable.iter().any(|allowed| allowed == target.collection) {
@@ -160,6 +246,14 @@ pub fn admit(
         }
     }
     Ok(row)
+}
+
+/// `/v1/graphs/{g}…` の g。名の形が違えばグラフの行ではない(表に無い要求として 403 に
+/// なる)。形の判断は crate::graph の 1 箇所から借りる(should/0135)。
+fn graph_of(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/v1/graphs/")?;
+    let name = rest.split(|c| c == '/' || c == '?').next()?;
+    crate::graph::is_valid_name(name).then_some(name)
 }
 
 /// `/v1/objects/{id}` と `/v1/objects/{id}/citation` の見分け。id が ID の形でなければ
@@ -218,6 +312,8 @@ pub fn screen(
     source: Option<&str>,
     readable: &[String],
 ) -> Response {
+    // グラフ層の応答は検めない(チャンクの規律はコレクションの側のもので、グラフには
+    // 出典が無い)。
     if let (Row::Object | Row::Citation, Some(collection)) = (row, source) {
         if !readable_scope(readable).allows(collection) {
             return api::error_response(403, &unreadable_refusal(collection, readable));
@@ -272,7 +368,8 @@ pub fn recorded_tail(request: &Request) -> Result<String, Response> {
 /// 表を通った 1 本を主の口へ委ね、応答を検める。search と collections だけは、読める集合を
 /// 共有ポリシーとして受け取る入口から呼ぶ: 何を返すかの判断は api.rs の 1 箇所のままで、
 /// 読み口はそこへ集合を渡すだけである(should/0135)。
-fn answer(context: &ApiContext, request: &Request, row: Row, readable: &[String]) -> Response {
+fn answer(context: &ApiContext, request: &Request, row: Row, allowed: &Allowed) -> Response {
+    let readable = allowed.readable.as_slice();
     let response = match row {
         Row::Search => api::handle_search_within(context, request, &readable_scope(readable)),
         Row::Collections => api::handle_collections(context, &readable_scope(readable)),
@@ -310,8 +407,7 @@ pub fn handle(
     context: &ApiContext,
     request: &Request,
     peer: std::net::SocketAddr,
-    writable: &[String],
-    readable: &[String],
+    allowed: &Allowed,
 ) -> Response {
     let started = Instant::now();
     // 誰が要求したかの申告(X-Uniqnode-Task・X-Uniqnode-Agent)を先に読む。判断には入れない
@@ -319,8 +415,8 @@ pub fn handle(
     let (recorded, response) = match recorded_tail(request) {
         Ok(recorded) => (
             recorded,
-            match admit(&request.method, &request.path, &request.body, writable, readable) {
-                Ok(row) => answer(context, request, row, readable),
+            match admit(&request.method, &request.path, &request.body, allowed) {
+                Ok(row) => answer(context, request, row, allowed),
                 Err(refused) => refused,
             },
         ),
@@ -396,14 +492,29 @@ mod tests {
         String::from_utf8(response.body.clone()).expect("utf-8")
     }
 
-    /// 読むだけの読み口(--agent-writable 無し)。
-    const READ_ONLY: &[String] = &[];
+    /// 何も許していない読み口(読むだけ、コレクションは全部読める、グラフは見えない)。
+    fn read_only() -> Allowed {
+        Allowed::default()
+    }
 
-    /// 読める範囲を絞らない読み口(--agent-collections 無し。全コレクションが読める)。
-    const EVERY_COLLECTION: &[String] = &[];
-
-    fn writable(names: &[&str]) -> Vec<String> {
+    fn names(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// 書けるコレクションだけを許した読み口。
+    fn writes(collections: &[&str]) -> Allowed {
+        Allowed {
+            writable: names(collections),
+            ..Allowed::default()
+        }
+    }
+
+    /// 読めるコレクションだけを絞った読み口。
+    fn reads(collections: &[&str]) -> Allowed {
+        Allowed {
+            readable: names(collections),
+            ..Allowed::default()
+        }
     }
 
     /// 許可表の各行は行として当たり、表に無いものは 403 の本文に method と path を
@@ -411,36 +522,36 @@ mod tests {
     #[test]
     fn the_table_admits_its_rows_and_names_what_it_refuses() {
         let id = format!("s256:{}", "a".repeat(64));
-        assert_eq!(admit("GET", "/healthz", b"", READ_ONLY, EVERY_COLLECTION).ok(), Some(Row::Healthz));
-        assert_eq!(admit("GET", "/v1/status", b"", READ_ONLY, EVERY_COLLECTION).ok(), Some(Row::Status));
-        assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\"}", READ_ONLY, EVERY_COLLECTION).ok(), Some(Row::Search));
-        assert_eq!(admit("GET", &format!("/v1/objects/{id}"), b"", READ_ONLY, EVERY_COLLECTION).ok(), Some(Row::Object));
+        assert_eq!(admit("GET", "/healthz", b"", &read_only()).ok(), Some(Row::Healthz));
+        assert_eq!(admit("GET", "/v1/status", b"", &read_only()).ok(), Some(Row::Status));
+        assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\"}", &read_only()).ok(), Some(Row::Search));
+        assert_eq!(admit("GET", &format!("/v1/objects/{id}"), b"", &read_only()).ok(), Some(Row::Object));
         assert_eq!(
-            admit("GET", &format!("/v1/objects/{id}/citation"), b"", READ_ONLY, EVERY_COLLECTION).ok(),
+            admit("GET", &format!("/v1/objects/{id}/citation"), b"", &read_only()).ok(),
             Some(Row::Citation)
         );
-        assert_eq!(admit("GET", "/v1/collections", b"", READ_ONLY, EVERY_COLLECTION).ok(), Some(Row::Collections));
+        assert_eq!(admit("GET", "/v1/collections", b"", &read_only()).ok(), Some(Row::Collections));
 
-        let refused = admit("POST", "/v1/admin/gc", b"", READ_ONLY, EVERY_COLLECTION).expect_err("表に無い");
+        let refused = admit("POST", "/v1/admin/gc", b"", &read_only()).expect_err("表に無い");
         assert_eq!(refused.status, 403);
         assert_eq!(
             body(&refused),
             "{\"error\":\"agent door: POST /v1/admin/gc は許可されていない\"}"
         );
         // 同じ path でも method が違えば表に無い。
-        assert_eq!(admit("POST", "/v1/status", b"", READ_ONLY, EVERY_COLLECTION).expect_err("表に無い").status, 403);
-        assert_eq!(admit("GET", "/v1/search", b"", READ_ONLY, EVERY_COLLECTION).expect_err("表に無い").status, 403);
+        assert_eq!(admit("POST", "/v1/status", b"", &read_only()).expect_err("表に無い").status, 403);
+        assert_eq!(admit("GET", "/v1/search", b"", &read_only()).expect_err("表に無い").status, 403);
         // オブジェクトの下の他の口(rendition・referrers)と、ID の形でない id。
         assert_eq!(
-            admit("GET", &format!("/v1/objects/{id}/rendition"), b"", READ_ONLY, EVERY_COLLECTION).expect_err("表に無い").status,
+            admit("GET", &format!("/v1/objects/{id}/rendition"), b"", &read_only()).expect_err("表に無い").status,
             403
         );
         assert_eq!(
-            admit("GET", &format!("/v1/objects/{id}/referrers"), b"", READ_ONLY, EVERY_COLLECTION).expect_err("表に無い").status,
+            admit("GET", &format!("/v1/objects/{id}/referrers"), b"", &read_only()).expect_err("表に無い").status,
             403
         );
-        assert_eq!(admit("GET", "/v1/objects/abc", b"", READ_ONLY, EVERY_COLLECTION).expect_err("ID でない").status, 403);
-        assert_eq!(admit("GET", "/v1/objects/abc/citation", b"", READ_ONLY, EVERY_COLLECTION).expect_err("ID でない").status, 403);
+        assert_eq!(admit("GET", "/v1/objects/abc", b"", &read_only()).expect_err("ID でない").status, 403);
+        assert_eq!(admit("GET", "/v1/objects/abc/citation", b"", &read_only()).expect_err("ID でない").status, 403);
     }
 
     /// 書く口(第 2 段): PUT は --agent-writable の集合にあるコレクションだけ通り、集合に
@@ -449,38 +560,38 @@ mod tests {
     /// 最初の Ok の assert が落ち、集合の検査を消すと other の 403 の本文の assert が落ちる。
     #[test]
     fn a_put_passes_only_for_a_collection_that_was_allowed() {
-        let allowed = writable(&["notes", "web"]);
+        let allowed = writes(&["notes", "web"]);
         let path = "/v1/collections/notes/documents/memo.md";
-        assert_eq!(admit("PUT", path, b"# memo", &allowed, EVERY_COLLECTION).ok(), Some(Row::PutDocument));
+        assert_eq!(admit("PUT", path, b"# memo", &allowed).ok(), Some(Row::PutDocument));
         // query(出所の meta)が付いていても的はコレクションで決まる(query の検査は api.rs)。
         assert_eq!(
-            admit("PUT", &format!("{path}?meta.agent=a1"), b"", &allowed, EVERY_COLLECTION).ok(),
+            admit("PUT", &format!("{path}?meta.agent=a1"), b"", &allowed).ok(),
             Some(Row::PutDocument)
         );
-        assert_eq!(admit("PUT", "/v1/collections/web/documents/p.html", b"", &allowed, EVERY_COLLECTION).ok(), Some(Row::PutDocument));
+        assert_eq!(admit("PUT", "/v1/collections/web/documents/p.html", b"", &allowed).ok(), Some(Row::PutDocument));
 
-        let other = admit("PUT", "/v1/collections/other/documents/memo.md", b"", &allowed, EVERY_COLLECTION).expect_err("集合に無い");
+        let other = admit("PUT", "/v1/collections/other/documents/memo.md", b"", &allowed).expect_err("集合に無い");
         assert_eq!(other.status, 403);
         assert_eq!(
             body(&other),
             "{\"error\":\"agent door: コレクション other は書けない(--agent-writable で許したのは notes, web)\"}"
         );
         // 集合が空なら PUT は表に無い(第 1 段と同じ本文)。
-        let read_only = admit("PUT", path, b"", READ_ONLY, EVERY_COLLECTION).expect_err("表に無い");
+        let read_only = admit("PUT", path, b"", &read_only()).expect_err("表に無い");
         assert_eq!(read_only.status, 403);
         assert_eq!(
             body(&read_only),
             "{\"error\":\"agent door: PUT /v1/collections/notes/documents/memo.md は許可されていない\"}"
         );
         // 許したコレクションでも fetch(網に出る道)と、documents/ の形でない PUT は表に無い。
-        let fetch = admit("POST", "/v1/collections/notes/fetch", b"{}", &allowed, EVERY_COLLECTION).expect_err("表に無い");
+        let fetch = admit("POST", "/v1/collections/notes/fetch", b"{}", &allowed).expect_err("表に無い");
         assert_eq!(fetch.status, 403);
         assert_eq!(
             body(&fetch),
             "{\"error\":\"agent door: POST /v1/collections/notes/fetch は許可されていない\"}"
         );
-        assert_eq!(admit("PUT", "/v1/collections/notes", b"", &allowed, EVERY_COLLECTION).expect_err("表に無い").status, 403);
-        assert_eq!(admit("PUT", "/v1/refs/x", b"", &allowed, EVERY_COLLECTION).expect_err("表に無い").status, 403);
+        assert_eq!(admit("PUT", "/v1/collections/notes", b"", &allowed).expect_err("表に無い").status, 403);
+        assert_eq!(admit("PUT", "/v1/refs/x", b"", &allowed).expect_err("表に無い").status, 403);
     }
 
     /// 読める集合(--agent-collections): 集合の外を名指しした search は索引を引く前に 403、
@@ -490,13 +601,12 @@ mod tests {
     /// screen の source の腕を消すと出典の 403 が 200 のまま通って落ちる。
     #[test]
     fn a_collection_outside_the_readable_set_is_refused_on_the_way_in_and_on_the_way_out() {
-        let readable = writable(&["notes", "papers"]);
+        let readable = names(&["notes", "papers"]);
         let refused = admit(
             "POST",
             "/v1/search",
             b"{\"query\":\"x\",\"collection\":\"web\"}",
-            READ_ONLY,
-            &readable,
+            &reads(&["notes", "papers"]),
         )
         .expect_err("集合の外");
         assert_eq!(refused.status, 403);
@@ -506,17 +616,17 @@ mod tests {
         );
         // 集合の中と、collection を省いた検索は通る(省略は share として run_search の交差へ)。
         assert_eq!(
-            admit("POST", "/v1/search", b"{\"query\":\"x\",\"collection\":\"notes\"}", READ_ONLY, &readable).ok(),
+            admit("POST", "/v1/search", b"{\"query\":\"x\",\"collection\":\"notes\"}", &reads(&["notes", "papers"])).ok(),
             Some(Row::Search)
         );
         assert_eq!(
-            admit("POST", "/v1/search", b"{\"query\":\"x\"}", READ_ONLY, &readable).ok(),
+            admit("POST", "/v1/search", b"{\"query\":\"x\"}", &reads(&["notes", "papers"])).ok(),
             Some(Row::Search)
         );
         // 集合が空(指定が無い)なら、どのコレクションを名指ししても通る(既定は全部)。
-        assert_eq!(readable_scope(EVERY_COLLECTION), crate::search::CollectionScope::All);
+        assert_eq!(readable_scope(&[]), crate::search::CollectionScope::All);
         assert_eq!(
-            admit("POST", "/v1/search", b"{\"query\":\"x\",\"collection\":\"web\"}", READ_ONLY, EVERY_COLLECTION).ok(),
+            admit("POST", "/v1/search", b"{\"query\":\"x\",\"collection\":\"web\"}", &read_only()).ok(),
             Some(Row::Search)
         );
 
@@ -552,11 +662,11 @@ mod tests {
             "{\"query\":\"x\",\"peers\":null}",
             "{\"query\":\"x\",\"peers\":[\"127.0.0.1:1\"]}",
         ] {
-            let refused = admit("POST", "/v1/search", body_text.as_bytes(), READ_ONLY, EVERY_COLLECTION).expect_err(body_text);
+            let refused = admit("POST", "/v1/search", body_text.as_bytes(), &read_only()).expect_err(body_text);
             assert_eq!(refused.status, 400, "{body_text}");
             assert_eq!(body(&refused), "{\"error\":\"agent door: peers は使えない\"}");
         }
-        assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\",", READ_ONLY, EVERY_COLLECTION).ok(), Some(Row::Search));
+        assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\",", &read_only()).ok(), Some(Row::Search));
     }
 
     /// 記録に写すヘッダ: 在るものだけを RECORDED_HEADERS の順で末尾に足し、無いヘッダは
@@ -620,10 +730,10 @@ mod tests {
     #[test]
     fn only_chunks_leave_through_the_object_row() {
         let chunk = "{\"kind\":\"chunk\",\"meta\":{},\"text\":\"本文\",\"v\":1}".as_bytes().to_vec();
-        let passed = screen(Row::Object, Response::bytes(200, chunk.clone()), None, EVERY_COLLECTION);
+        let passed = screen(Row::Object, Response::bytes(200, chunk.clone()), None, &[]);
         assert_eq!((passed.status, passed.body), (200, chunk));
 
-        let blob = screen(Row::Object, Response::bytes(200, vec![0xff, 0xfe, 0x00]), None, EVERY_COLLECTION);
+        let blob = screen(Row::Object, Response::bytes(200, vec![0xff, 0xfe, 0x00]), None, &[]);
         assert_eq!(blob.status, 403);
         assert_eq!(
             body(&blob),
@@ -633,13 +743,13 @@ mod tests {
             Row::Object,
             Response::bytes(200, b"{\"kind\":\"doc_rev\",\"v\":1}".to_vec()),
             None,
-            EVERY_COLLECTION,
+            &[],
         );
         assert_eq!(doc_rev.status, 403);
 
-        let missing = screen(Row::Object, Response::text(404, "not held locally"), None, EVERY_COLLECTION);
+        let missing = screen(Row::Object, Response::text(404, "not held locally"), None, &[]);
         assert_eq!(missing.status, 404);
-        let status = screen(Row::Status, Response::bytes(200, vec![0xff]), None, EVERY_COLLECTION);
+        let status = screen(Row::Status, Response::bytes(200, vec![0xff]), None, &[]);
         assert_eq!(status.status, 200);
     }
 }

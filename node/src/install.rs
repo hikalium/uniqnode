@@ -159,6 +159,16 @@ pub const AGENT_WRITABLE_FLAG: &str = "--agent-writable";
 /// コレクションを読める(既定は変えない)。
 pub const AGENT_COLLECTIONS_ENV: &str = "UNIQNODE_AGENT_COLLECTIONS";
 pub const AGENT_COLLECTIONS_FLAG: &str = "--agent-collections";
+/// 読み口から読めるグラフ(docs/design/GRAPH.md)。コレクションの 2 つと全く同じ流儀で、
+/// drop-in は `Environment="UNIQNODE_AGENT_GRAPH=<g1> <g2>"` と ExecStart= 末尾の
+/// `--agent-graph <g>` の並びに写す。指定が無ければ読み口からグラフ層は見えない
+/// (コレクションの既定と逆にしてあるのは、グラフを後から足したからである。既定を開く側に
+/// すると、本番の読み口が据え直しただけでグラフを晒す)。
+pub const AGENT_GRAPH_ENV: &str = "UNIQNODE_AGENT_GRAPH";
+pub const AGENT_GRAPH_FLAG: &str = "--agent-graph";
+/// 読み口から書けるグラフ。書ける名は読めもする。
+pub const AGENT_GRAPH_WRITABLE_ENV: &str = "UNIQNODE_AGENT_GRAPH_WRITABLE";
+pub const AGENT_GRAPH_WRITABLE_FLAG: &str = "--agent-graph-writable";
 /// user 単位の常駐を install 自身が止めて外す指定(`--system` のときだけ)。
 pub const TAKE_OVER_FLAG: &str = "--take-over-user-units";
 /// 読み口へ届いてよい相手を firewall(ufw)に入れる指定(`--system` と `--listen-agent` の
@@ -525,6 +535,10 @@ pub struct Options {
     /// 読み口から読めるコレクション(`--agent-collections`。与えられた順)。読み口がある
     /// ときだけ。空なら読み口は全コレクションを読める(既定)。
     pub agent_collections: Vec<String>,
+    /// 読み口から読めるグラフ(`--agent-graph`。与えられた順)。空ならグラフ層は見えない。
+    pub agent_graph: Vec<String>,
+    /// 読み口から書けるグラフ(`--agent-graph-writable`。与えられた順)。
+    pub agent_graph_writable: Vec<String>,
     /// true なら、据える前に実行ユーザの user 単位の常駐(STARTED_TEMPLATES)を止めて外す
     /// (`--take-over-user-units`。system 単位だけ)。
     pub take_over_user_units: bool,
@@ -562,6 +576,8 @@ impl Options {
             agent_listen: None,
             agent_writable: Vec::new(),
             agent_collections: Vec::new(),
+            agent_graph: Vec::new(),
+            agent_graph_writable: Vec::new(),
             take_over_user_units: false,
             firewall_allow: None,
             firewall_backend: None,
@@ -810,6 +826,24 @@ pub fn drop_ins(
                             ));
                         }
                     }
+                    // グラフの 2 つも全く同じ流儀(環境変数は読み手のための写し、
+                    // ExecStart= には値をそのまま並べる)。
+                    for (env, flag, names) in [
+                        (AGENT_GRAPH_ENV, AGENT_GRAPH_FLAG, &options.agent_graph),
+                        (
+                            AGENT_GRAPH_WRITABLE_ENV,
+                            AGENT_GRAPH_WRITABLE_FLAG,
+                            &options.agent_graph_writable,
+                        ),
+                    ] {
+                        if names.is_empty() {
+                            continue;
+                        }
+                        lines.push(environment_line(env, &names.join(" "))?);
+                        for graph in names {
+                            exec_tail.push_str(&format!(" {flag} {}", unit_word(graph)?));
+                        }
+                    }
                 }
                 if let Some(FirewallBackend::Nft(nft)) = &options.firewall_backend {
                     // 読み口の firewall は serve を起こすたびに入れ直す(nftables.service が
@@ -926,6 +960,21 @@ pub fn normalize(options: Options) -> Result<Options, String> {
             options.agent_collections.join(" ")
         ));
     }
+    for (flag, names) in [
+        (AGENT_GRAPH_FLAG, &options.agent_graph),
+        (AGENT_GRAPH_WRITABLE_FLAG, &options.agent_graph_writable),
+    ] {
+        for graph in names {
+            check_agent_graph(flag, graph)?;
+        }
+        if !names.is_empty() && options.agent_listen.is_none() {
+            return Err(format!(
+                "{flag} {} は {AGENT_LISTEN_FLAG} があるときだけ受け付ける(グラフの許可は\
+                 読み口に掛かるもので、読み口が無ければ効かせる先が無い)",
+                names.join(" ")
+            ));
+        }
+    }
     if !options.after.is_empty() && !options.scope.is_system() {
         return Err(format!(
             "--after {} は --system のときだけ受け付ける(user unit は system unit を待てない: \
@@ -988,10 +1037,25 @@ pub fn normalize(options: Options) -> Result<Options, String> {
         agent_listen: options.agent_listen,
         agent_writable: options.agent_writable,
         agent_collections: options.agent_collections,
+        agent_graph: options.agent_graph,
+        agent_graph_writable: options.agent_graph_writable,
         take_over_user_units: options.take_over_user_units,
         firewall_allow: options.firewall_allow,
         firewall_backend: options.firewall_backend,
     })
+}
+
+/// `--agent-graph` と `--agent-graph-writable` の値はグラフ名 1 つ。形の判断は
+/// crate::graph の 1 箇所から借りる(should/0135)。serve の引数の読み手と install の
+/// normalize が同じ検査を使う。
+pub fn check_agent_graph(flag: &str, graph: &str) -> Result<(), String> {
+    match crate::graph::is_valid_name(graph) {
+        true => Ok(()),
+        false => Err(format!(
+            "{flag} の値が{}",
+            crate::graph::invalid_name_refusal("グラフ名", graph)
+        )),
+    }
 }
 
 /// `--agent-writable` の値はコレクション名 1 つ: 空でなく、/ と空白を含まない 1 語(空白を
@@ -1398,6 +1462,92 @@ fn verify_agent_collections(agent_listen: &str, readable: &[String]) -> Result<S
     Ok(format!(
         "{} だけが読め、{unallowed} を指した検索は 403 で断られた",
         readable.join(", ")
+    ))
+}
+
+/// 読み口のグラフの許可を、書かずに確かめる。読める側は許した名の `GET /v1/graphs/{g}` が
+/// 門を越えること、許していない名が 403 の文言で断られること。書ける側は、許していない名への
+/// PUT が 403 で断られること、そして許した名への PUT が門を越えて 400(attrs の形)で止まる
+/// ことである。400 で止まるので何も書かない(コレクションの確認と同じ流儀)。
+fn verify_agent_graph(agent_listen: &str, allowed: &crate::agent_door::Allowed) -> Result<String, String> {
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+    // attrs がオブジェクトでない本文。門を越えても api が 400 で止めるので、何も書かない。
+    const MALFORMED_ATTRS: &[u8] = b"[]";
+    let readable = allowed.readable_graphs();
+    for graph in &readable {
+        let response = http::request(agent_listen, "GET", &format!("/v1/graphs/{graph}"), None, REQUEST_TIMEOUT)?;
+        if response.status != 200 {
+            return Err(format!(
+                "読み口 {agent_listen} が {AGENT_GRAPH_FLAG} {graph} の GET に {} を返した: {}",
+                response.status,
+                http::body_head(&response.body)
+            ));
+        }
+    }
+    let names: Vec<String> = readable.iter().map(|name| name.to_string()).collect();
+    let unallowed = name_outside(&names).replace('-', "_");
+    let response = http::request(agent_listen, "GET", &format!("/v1/graphs/{unallowed}"), None, REQUEST_TIMEOUT)?;
+    let refusal = crate::agent_door::ungraphed_refusal(&unallowed, allowed);
+    let seen = String::from_utf8_lossy(&response.body).to_string();
+    if response.status != 403 || !seen.contains(&refusal) {
+        return Err(format!(
+            "読み口 {agent_listen} が許していないグラフ {unallowed} の GET を 403 の文言で断らず \
+             {} を返した: {}",
+            response.status,
+            http::body_head(&response.body)
+        ));
+    }
+    if allowed.graphs_writable.is_empty() {
+        return Ok(format!(
+            "{} が読め、{unallowed} は 403 で断られた(書ける名は無い)",
+            readable.join(", ")
+        ));
+    }
+    let put = |graph: &str| -> Result<http::ClientResponse, String> {
+        http::request(
+            agent_listen,
+            "PUT",
+            &format!("/v1/graphs/{graph}/nodes/{WRITABLE_PROBE_NAME}"),
+            Some(("application/json", MALFORMED_ATTRS)),
+            REQUEST_TIMEOUT,
+        )
+    };
+    for graph in &allowed.graphs_writable {
+        let response = put(graph)?;
+        let body = String::from_utf8_lossy(&response.body).to_string();
+        if response.status == 403 || body.contains(crate::agent_door::ERROR_PREFIX) {
+            return Err(format!(
+                "読み口 {agent_listen} が {AGENT_GRAPH_WRITABLE_FLAG} {graph} への PUT を門で断った\
+                 ({}: {})",
+                response.status,
+                http::body_head(&response.body)
+            ));
+        }
+        if response.status != 400 {
+            return Err(format!(
+                "読み口 {agent_listen} が {graph} への形の違う PUT を 400 で断らず {} を返した\
+                 (何かを書いたかもしれない): {}",
+                response.status,
+                http::body_head(&response.body)
+            ));
+        }
+    }
+    let response = put(&unallowed)?;
+    let refusal = crate::agent_door::unwritable_graph_refusal(&unallowed, allowed);
+    let seen = String::from_utf8_lossy(&response.body).to_string();
+    if response.status != 403 || !seen.contains(&refusal) {
+        return Err(format!(
+            "読み口 {agent_listen} が許していないグラフ {unallowed} への PUT を 403 の文言で断らず \
+             {} を返した: {}",
+            response.status,
+            http::body_head(&response.body)
+        ));
+    }
+    Ok(format!(
+        "{} が読め、{} への PUT が門を越えて 400 で止まり(何も書かない)、{unallowed} は読みも\
+         書きも 403 で断られた",
+        readable.join(", "),
+        allowed.graphs_writable.join(", ")
     ))
 }
 
@@ -2055,6 +2205,15 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
             let seen = verify_agent_collections(agent_listen, &options.agent_collections)?;
             say(out, &format!("確認: 読み口の読める集合: {seen}"))?;
         }
+        let graph_allowed = crate::agent_door::Allowed {
+            graphs: options.agent_graph.clone(),
+            graphs_writable: options.agent_graph_writable.clone(),
+            ..Default::default()
+        };
+        if !graph_allowed.readable_graphs().is_empty() {
+            let seen = verify_agent_graph(agent_listen, &graph_allowed)?;
+            say(out, &format!("確認: 読み口のグラフ: {seen}"))?;
+        }
     }
     let backup_unit = options.backup_unit();
     systemctl_ok(scope, &["start", &backup_unit]).map_err(|e| {
@@ -2183,6 +2342,8 @@ mod tests {
             agent_listen: None,
             agent_writable: Vec::new(),
             agent_collections: Vec::new(),
+            agent_graph: Vec::new(),
+            agent_graph_writable: Vec::new(),
             take_over_user_units: false,
             firewall_allow: None,
             firewall_backend: None,

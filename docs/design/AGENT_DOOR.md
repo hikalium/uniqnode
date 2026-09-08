@@ -33,8 +33,9 @@ node/src/agent_door.rs を読む者。この文書は読み口の現在の実装
 ## 許可表
 
 node/src/agent_door.rs の `admit` の match がこの表そのものである。行の順も同じ。`admit` は
-`--agent-writable` と `--agent-collections` の集合を引数に取り、PUT の行は前者で、search が
-名指しした `collection` は後者で決まる(どちらも判断はこの 1 箇所)。
+許した集合(`Allowed`: 書けるコレクション・読めるコレクション・読めるグラフ・書けるグラフ)を
+1 つ受け取り、PUT の行は書ける集合で、search が名指しした `collection` は読める集合で、
+グラフの行はグラフの 2 つで決まる(どれも判断はこの 1 箇所)。
 
 | method | path | 委ねる先での意味 | 読み口だけの扱い |
 |---|---|---|---|
@@ -45,6 +46,18 @@ node/src/agent_door.rs の `admit` の match がこの表そのものである�
 | GET | /v1/objects/{id}/citation | 出典 | id は `c1::is_object_id` の形に限る。出典のコレクションが読める集合の外なら 403 |
 | GET | /v1/collections | コレクションの一覧 | 読める集合にあるものだけ |
 | PUT | /v1/collections/{c}/documents/{name} | 文書 1 件の取り込み(第 2 段) | c が `--agent-writable` の集合にあるときだけ。集合に無い c は許した一覧を言って 403。集合が空なら表に無い |
+| GET | /v1/graphs/{g}… | グラフ層の読み(全件・節点・履歴・隣接・辺の一覧) | g が `--agent-graph` か `--agent-graph-writable` の集合にあるときだけ。どちらも空ならグラフ層は見えない |
+| PUT・DELETE | /v1/graphs/{g}… | グラフ層の書き(節点と辺) | g が `--agent-graph-writable` の集合にあるときだけ |
+
+グラフの既定はコレクションと逆で、指定が無ければ読み口からグラフ層は見えない。コレクションの
+「空 = 全部読める」は読み口の既定として先にあったもので、グラフは後から足したからである。
+既定を開く側にすると、据え直しただけで本番の読み口がグラフを晒す。
+
+`GET /v1/graphs`(グラフ名の一覧)は表に無い。許していないグラフの名を読み口に知らせない
+ためで、呼び手はグラフを名指しする([docs/design/GRAPH.md](#9d1f73a8-fabd-493e-9003-0a36503c7573))。
+`referrers` と `closure` も表に無いままである: グラフの逆引きは
+`GET /v1/graphs/{g}/nodes/{n}/neighbors` が ref の一覧から直接引くので、汎用の逆引きを読み口に
+出す呼び手が居ない。
 
 表に無いものはすべて 403 である: admin(gc・shutdown)・sync・pins・peers・refs・closure・
 referrers・rendition・fetch・query・POST objects、集合に無いコレクションへの PUT、そして同じ
@@ -56,7 +69,16 @@ path の別の method(`POST /v1/status` など)。`fetch` は `--agent-writable`
 
 - 表に無い要求: 403 `{"error":"agent door: <METHOD> <path> は許可されていない"}`。method と
   path は要求の字面をそのまま言う(何を試して断られたかが、応答だけで分かる)。
-  `--agent-writable` が 1 つも無いときの PUT もこれである。
+  `--agent-writable` が 1 つも無いときの PUT もこれである。グラフの名の形が違う
+  (`/v1/graphs/a b/…`)ときもこれである: 形の違う名はグラフの行に当たらない。
+- 許していないグラフの読み: 403 `{"error":"agent door: グラフ <g> は読めない(--agent-graph で
+  許したのは <一覧>)"}`。一覧は `--agent-graph` と `--agent-graph-writable` の合併(書ける名は
+  読めもする)で、`--agent-graph` の与えられた順、その後に `--agent-graph-writable` だけの名を
+  与えられた順、`, ` 区切り。1 つも許していなければ括弧の中は
+  `--agent-graph で許したグラフは無い`。
+- 許していないグラフへの書き: 403 `{"error":"agent door: グラフ <g> は書けない
+  (--agent-graph-writable で許したのは <一覧>)"}`。1 つも許していなければ同じく
+  `--agent-graph-writable で許したグラフは無い`。
 - 許していないコレクションへの PUT: 403 `{"error":"agent door: コレクション <c> は書けない
   (--agent-writable で許したのは <c1>, <c2>)"}`。一覧は与えられた順、`, ` 区切り。
 - 読める集合の外を読もうとしたとき: 403 `{"error":"agent door: コレクション <c> は読めない

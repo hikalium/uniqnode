@@ -395,6 +395,30 @@ PUT と同じ規律。[docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c242402
 5. 着地した節点が消えずに state が landed として読め、history に遷移が残り、at が着地の
    時刻である。
 
+### 据わった(2026-09-09 05:07 JST)
+
+graph_b と graph_a が vega に据わり、1 分ごとの取り寄せ(uniqnode-graph-pull.timer)が
+回っている。install の記録は /tmp/uniqnode-graph-install.log。「確認:」が 7 本ずつ、
+nft の表は `inet uniqnode_graph_b`(7443)と `inet uniqnode_graph_a`(7445)に分かれ、
+本番の 7440 は同じ node_id で答えたままである。
+
+同じ日の初回の 1 巡(lamalium 側の実測):
+
+- 85 ref(49 節点 + 36 辺)を 5.53 秒で書き、2 巡目は 85 ref すべて updated が false で
+  2.34 秒。条件 1 を満たす。
+- 全件 GET は 24,212 バイトで orion から 26〜30 ミリ秒、vega の中からは 4〜7 ミリ秒
+  (差は wg1 の往復)。条件 2 を満たす。
+- A の読み口への PUT は 403、75 秒後の A の全件は B と同じ 49 節点 36 辺。取り寄せが
+  効いている。
+- 段 3(部分グラフの深さ指定と batch)は要らないと双方で見た。この大きさなら 1 回の
+  GET で足りる。要るとなってから足す。
+
+実行ファイルは 3 実体で 1 つ(`/home/hikalium/.local/bin/uniqnode`)にする裁定だったので、
+本番も次の restart から同じ build になる。据える前に予行した: 本番の写し(55,455 オブジェ
+クト / 207 ref)を別の場所に複製し、fsck が errors 0、本番と同じ引数の serve が索引
+31,233 チャンクを 10.5 秒で組んで検索を返し、読み口の断りも従来どおりであることを見た
+(should/0116)。
+
 ## やらないこと
 
 - `fetch_url` と `POST /v1/collections/{c}/fetch` をコンテナへ見せること(オフライン

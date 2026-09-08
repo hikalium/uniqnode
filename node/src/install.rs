@@ -559,6 +559,21 @@ pub enum FirewallBackend {
 }
 
 impl Options {
+    /// `--instance` を決める。写し先の既定は実体ごとに分かれる(unit のテンプレートの
+    /// `%h/uniqnode-backup/%i` と同じ形)ので、既定を使っているあいだは名を変えると写し先も
+    /// 付け替わる。`--backup-dir` で明示した道はここを通らないので動かない
+    /// (node/src/main.rs は --backup-dir をこの後に上書きする)。
+    ///
+    /// 分けるのは、2 つの実体が同じ写し先を取り合うと backup が毎日「別のノードの写し
+    /// (node_key が写し元と違う)」で失敗するからである(2026-09-08、2 つ目を据える前の
+    /// 試しで踏んだ。写しは壊れない: backup は取り合いに気づいて何も書かずに終わる)。
+    pub fn set_instance(&mut self, instance: String) {
+        if self.backup_dir.file_name() == Some(std::ffi::OsStr::new(&self.instance)) {
+            self.backup_dir.set_file_name(&instance);
+        }
+        self.instance = instance;
+    }
+
     /// home の下の既定で組む(system 単位なら home は実行ユーザのもの)。
     pub fn defaults(data_dir: PathBuf, home: &Path, scope: Scope) -> Options {
         Options {
@@ -567,7 +582,7 @@ impl Options {
             listen: DEFAULT_LISTEN.to_string(),
             viewer_listen: DEFAULT_VIEWER_LISTEN.to_string(),
             serve_options: String::new(),
-            backup_dir: home.join("uniqnode-backup"),
+            backup_dir: home.join("uniqnode-backup").join(DEFAULT_INSTANCE),
             binary: home.join(".local").join("bin").join("uniqnode"),
             unit_dir: scope.default_unit_dir(home),
             start: true,

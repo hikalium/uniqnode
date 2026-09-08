@@ -1126,9 +1126,6 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
     if let Some(serve_options) = serve_options {
         options.serve_options = serve_options;
     }
-    if let Some(backup_dir) = backup_dir {
-        options.backup_dir = backup_dir;
-    }
     if let Some(binary) = binary {
         options.binary = binary;
     }
@@ -1136,8 +1133,12 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
         options.unit_dir = unit_dir;
     }
     if let Some(instance) = instance {
-        // 名の検査は install::normalize が言う(判断の家は 1 つ。should/0135)。
-        options.instance = instance;
+        // 名の検査は install::normalize が言う(判断の家は 1 つ。should/0135)。写し先の
+        // 既定も名ごとに分かれるので、--backup-dir の上書きより先に置く。
+        options.set_instance(instance);
+    }
+    if let Some(backup_dir) = backup_dir {
+        options.backup_dir = backup_dir;
     }
     options.start = start;
     options.after = after;

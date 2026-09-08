@@ -153,7 +153,7 @@ systemd で常駐しているノード([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930
 ```
 systemctl --user stop uniqnode-backup@default.timer uniqnode-serve@default uniqnode-viewer@default
 mv <data_dir> <data_dir>.broken-<日付>
-uniqnode backup ~/uniqnode-backup <data_dir>     # 写し先の既定は install の --backup-dir
+uniqnode backup ~/uniqnode-backup/default <data_dir>   # 写し先の既定は install の --backup-dir
 uniqnode fsck <data_dir>
 systemctl --user start uniqnode-serve@default uniqnode-viewer@default uniqnode-backup@default.timer
 ```

@@ -636,7 +636,8 @@ fn a_system_drop_in_names_the_user_cancels_the_state_directory_and_waits_for_the
     let options = system_options();
     assert_eq!(options.unit_dir, Path::new(SYSTEM_UNIT_DIR));
     assert_eq!(options.binary, Path::new("/home/op/.local/bin/uniqnode"));
-    assert_eq!(options.backup_dir, Path::new("/home/op/uniqnode-backup"));
+    // 写し先の既定は実体ごとに分かれる(unit の %h/uniqnode-backup/%i と同じ形)。
+    assert_eq!(options.backup_dir, Path::new("/home/op/uniqnode-backup/default"));
     let source = repo_root()
         .join("docs")
         .join("mop")
@@ -1147,6 +1148,29 @@ fn an_instance_name_that_does_not_fit_all_three_places_is_refused() {
         "uniqnode-serve@default.service"
     );
     assert_eq!(nft_table_for("graph"), "inet uniqnode_graph");
+}
+
+/// 写し先の既定は実体ごとに分かれる(unit のテンプレートの `%h/uniqnode-backup/%i` と同じ
+/// 形)。分かれていないと、2 つ目の実体の backup が毎日「別のノードの写し(node_key が写し元と
+/// 違う)」で失敗する(2026-09-08、2 つ目を据える前の試しで踏んだ)。`--backup-dir` で明示した
+/// 道は名を変えても動かない: main.rs が --instance を先に、--backup-dir を後に置くからである。
+/// should/0137: set_instance の付け替えを消すと 2 つ目の assert が赤になる。
+#[test]
+fn the_default_copy_directory_is_split_per_instance() {
+    use uniqnode::install::{Options, Scope};
+    let mut options = Options::defaults(
+        PathBuf::from("/srv/uniqnode-store"),
+        Path::new("/home/op"),
+        Scope::User,
+    );
+    assert_eq!(options.backup_dir, Path::new("/home/op/uniqnode-backup/default"));
+    options.set_instance("graph_b".to_string());
+    assert_eq!(options.backup_dir, Path::new("/home/op/uniqnode-backup/graph_b"));
+    assert_eq!(options.instance, "graph_b");
+    // 明示した道は名を変えても動かない(既定の形をしていないので付け替えない)。
+    options.backup_dir = PathBuf::from("/mnt/copies/plan");
+    options.set_instance("graph_a".to_string());
+    assert_eq!(options.backup_dir, Path::new("/mnt/copies/plan"));
 }
 
 /// テンプレートになる前の名の unit が据え先に残っているとき: 既定のインスタンスは取り合うので

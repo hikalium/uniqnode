@@ -166,7 +166,7 @@ ExecStart=/opt/uniqnode/bin/uniqnode serve ${UNIQNODE_DATA_DIR} ${UNIQNODE_LISTE
 第一の道は `uniqnode install --system` である。root で走らせ(sudo)、unit は
 /etc/systemd/system/ に置かれ、常駐は sudo を打った利用者(SUDO_USER。`--user <name>` で
 別の利用者を指せる。root は断る)で走る。既定の置き場(バイナリ ~/.local/bin/uniqnode、
-写し先 ~/uniqnode-backup)はその利用者の home の下で、root の home ではない。出力は
+写し先 ~/uniqnode-backup/<インスタンス>)はその利用者の home の下で、root の home ではない。出力は
 ファイルに残す形で渡す(CLAUDE.md):
 
 ```
@@ -354,7 +354,7 @@ target/release/uniqnode install ~/uniqnode-store
 ```
 
 これで serve(127.0.0.1:7440)・viewer(127.0.0.1:7450)・毎日 0 時の backup
-(~/uniqnode-backup)が user 単位の systemd に載り、命令は効果を見てから戻る。待ち受け・
+(~/uniqnode-backup/default)が user 単位の systemd に載り、命令は効果を見てから戻る。待ち受け・
 写し先・置き場は引数で変える:
 
 ```
@@ -372,7 +372,7 @@ uniqnode install <dir> [--listen <addr>] [--viewer-listen <addr>] [--serve-optio
 | `--listen` | 127.0.0.1:7440 | serve の待ち受け。viewer の転送先もここから導く |
 | `--viewer-listen` | 127.0.0.1:7450 | viewer の待ち受け |
 | `--serve-options` | 空 | serve の追加の引数を 1 つの文字列で(例 `"--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank"`) |
-| `--backup-dir` | ~/uniqnode-backup | 写し先 |
+| `--backup-dir` | ~/uniqnode-backup/<インスタンス> | 写し先。既定が名ごとに分かれるのは、2 つの実体が同じ写し先を取り合うと backup が毎日「別のノードの写し」で失敗するからである |
 | `--bin` | ~/.local/bin/uniqnode | 実行ファイルの置き場。走っている自分自身をここへ写す |
 | `--unit-dir` | ~/.config/systemd/user(`--system` なら /etc/systemd/system) | unit と drop-in の置き場(テスト用) |
 | `--no-start` | — | daemon-reload までで止める(unit を置くだけ) |
@@ -604,7 +604,7 @@ sudo /usr/local/bin/uniqnode install /srv/uniqnode-graph --system \
 | unit の名 | `uniqnode-serve@<名>.service`(テンプレートは 1 組しか置かれない) |
 | drop-in | `<unit_dir>/uniqnode-serve@<名>.service.d/override.conf` |
 | 既定のストア | `%S/uniqnode/<名>` |
-| 既定の写し先 | `/var/backups/uniqnode/<名>`(user 単位は `%h/uniqnode-backup/<名>`) |
+| 既定の写し先 | `<home>/uniqnode-backup/<名>`(install が drop-in に書く。手で置いた unit の既定は system が `/var/backups/uniqnode/<名>`、user が `%h/uniqnode-backup/<名>`) |
 | nft の表 | `inet uniqnode_<名>` |
 
 分かれないもの: 待ち受けのアドレスと、実行ファイルの道。ポートは install の `--listen` と
@@ -614,6 +614,16 @@ sudo /usr/local/bin/uniqnode install /srv/uniqnode-graph --system \
 nft の表を名ごとに分けるのは、規則ファイルが表ごと消して作り直す形だからである。1 つの名を
 共有すると、後から起きた serve が先の実体の規則を消し、その実体の読み口が誰からでも
 届くようになる(2026-09-08 に、2 つ目を据える前に見つけた)。
+
+写し先の既定も名ごとに分かれる(`<home>/uniqnode-backup/<名>`)。分けていないと、2 つ目の
+実体の backup が毎日「別のノードの写し(node_key が写し元と違う)」で失敗する。写しは壊れない
+(backup は取り合いに気づいて何も書かずに 1 で終わる)が、毎日 failed が積まれる。
+
+2026-09-08 より前に据えた実体は、写し先が `<home>/uniqnode-backup`(名の付かない道)を
+指している。install を打ち直すと既定が `<home>/uniqnode-backup/default` に移り、初回は全件の
+写しになる(増分の起点が無いため)。古い写しはそのまま残るので、確かめてから消す。動かし
+たくなければ `--backup-dir <home>/uniqnode-backup` を明示する(明示した道は名を変えても
+動かない)。
 
 インスタンス名は ASCII の小文字と数字と `_` の 32 字までである。この名が unit の名・nft の
 表の名・drop-in の道の 3 つにそのまま入るので、3 つとも通る字種に限る(`-` は nft の識別子に

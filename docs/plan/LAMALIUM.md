@@ -253,16 +253,27 @@ uniqnode に移す。操作者の裁定(2026-09-08): uniqnode の生の層はグ
 ストアは本番と分ける(同じ日の裁定)。書き手用の実体 B と、コンテナ向けの実体 A の 2 つを
 vega に立て、A は B から pull する。
 
-| 実体 | データディレクトリ | 主の口 | 読み口 | 誰が触るか |
-|---|---|---|---|---|
-| B(正典) | /work2/llm_playground_host_dir/uniqnode-graph | 127.0.0.1:7442 | 10.10.128.1:7443 | orion のホストの棚卸し担当が書く |
-| A(複製) | /work2/llm_playground_host_dir/uniqnode-graph-replica | 127.0.0.1:7444 | 10.10.128.1:7445 | コンテナの chat タスクが読む(server-proxy 経由) |
+| 実体 | インスタンス名 | データディレクトリ | 主の口 | 読み口 | viewer | 誰が触るか |
+|---|---|---|---|---|---|---|
+| B(正典) | graph_b | /work2/llm_playground_host_dir/uniqnode-graph | 127.0.0.1:7442 | 10.10.128.1:7443 | 127.0.0.1:7452 | orion のホストの棚卸し担当が書く |
+| A(複製) | graph_a | /work2/llm_playground_host_dir/uniqnode-graph-replica | 127.0.0.1:7444 | 10.10.128.1:7445 | 127.0.0.1:7454 | コンテナの chat タスクが読む(server-proxy 経由) |
+
+A は B の主の口から `POST /v1/sync {"peer":"127.0.0.1:7442"}` で取り寄せる。刻みは vega の
+system の timer(uniqnode-graph-pull.timer。1 分ごと)で、install が据えるものではない。
+複製の口ではなく主の口を指すのは、replication の口が読み口の許可表に無いからである。
 
 読み書きが分かれるのは口ではなく経路である。A には書ける集合を与えず、B への転送を
 server-proxy に足さない。コンテナから届くのは 10.100.0.1 だけなので、B へは到達しない。
 1 つの読み口の書ける集合は全クライアント共通であり(認証を持たない。
 [docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d))、経路で分けるのが
 いま取れる唯一の分け方である。
+
+vega の firewall は A と B を区別しない。コンテナは orion のホストの server-proxy(内容に
+触れない TCP の中継)を通るので、vega の読み口から見た出所はコンテナでもホストでも同じ
+10.10.128.4 だからである(2026-09-08 に lamalium 側が確認した)。B の `--firewall-allow` を
+狭めても守りは増えない。守っているのは server-proxy の対応表に `11441 -> 10.10.128.1:7445`
+の 1 行しか無いことと、A が書けないことの 2 つで、vega 側だけを見て「7443 は 10.10.128.4
+から丸ごと開いている」と読んではいけない。
 
 ### なぜ文書層ではなくグラフ層か
 

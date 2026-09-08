@@ -243,6 +243,137 @@ system unit に移す(`uniqnode install --system`。移行手順は
 1. BENCH に載せるモデルの集合(gemma4:31b は必須。gpt-oss-120b と Qwen3 を足すか)。
 2. 段階の順(L0〜L4)は現行どおりでよいか。
 
+## 作業グラフをグラフ層に載せる(2026-09-08 裁定)
+
+lamalium の作業グラフ(向こうの docs/plan/figures/work-graph.html。節点 = 残作業の項目、
+辺 = 依存の向き。約 45 節点 30 辺を、約 2 時間ごとの棚卸し担当が手で更新している)を
+uniqnode に移す。操作者の裁定(2026-09-08): uniqnode の生の層はグラフ DB なので、その層を
+外から操作できる口を uniqnode 側に用意してつなぎ込む。文書層(コレクション)には載せない。
+
+ストアは本番と分ける(同じ日の裁定)。書き手用の実体 B と、コンテナ向けの実体 A の 2 つを
+vega に立て、A は B から pull する。
+
+| 実体 | データディレクトリ | 主の口 | 読み口 | 誰が触るか |
+|---|---|---|---|---|
+| B(正典) | /work2/llm_playground_host_dir/uniqnode-graph | 127.0.0.1:7442 | 10.10.128.1:7443 | orion のホストの棚卸し担当が書く |
+| A(複製) | /work2/llm_playground_host_dir/uniqnode-graph-replica | 127.0.0.1:7444 | 10.10.128.1:7445 | コンテナの chat タスクが読む(server-proxy 経由) |
+
+読み書きが分かれるのは口ではなく経路である。A には書ける集合を与えず、B への転送を
+server-proxy に足さない。コンテナから届くのは 10.100.0.1 だけなので、B へは到達しない。
+1 つの読み口の書ける集合は全クライアント共通であり(認証を持たない。
+[docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d))、経路で分けるのが
+いま取れる唯一の分け方である。
+
+### なぜ文書層ではなくグラフ層か
+
+文書層に載せる形(節点 1 つ = 文書 1 つ、依存は本文に名前で書く)は 2026-09-08 に実測して
+成立することを確かめてある(300 節点の投入 12.97 秒、全件列挙 300 件 197KB を 0.006 秒、
+欠落 0、同じ本文の再 PUT が no-op、名前による逆引きが取りこぼし 0・誤り 0)。段 1 が着地する
+までの繋ぎとして使える。ただし条件が 2 つ付く。
+
+- 節点の名前は 1 語の ASCII でなければならない。索引語の切り方は「ASCII の英数字と `_` の
+  連なりが 1 語、それ以外は区切り」なので、`n-007` は `n` と `007` に割れ、`n` が全文書に
+  出るため逆引きが壊れる(実測で 300 文書中 98 件の誤ヒット。
+  [docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580) の「索引語の切り方」)。
+- Markdown のチャンカーは見出し境界を優先するので、節点の文書の見出しは 1 つだけにする。
+  そうしないと 1 節点が複数チャンクに割れ、読み戻しが 1 回で済まなくなる。
+
+グラフ層に載せる利点は、この 2 つの条件が消えることと、辺が第一級の言明として残ること、
+そして依存の走査が検索の当たり外れに依存しなくなることである。
+
+### 節点と辺の表し方
+
+オブジェクトは不変(I1)で、作業グラフの節点は状態が変わる。可変な状態は ref 層だけに置く
+(I2)ので、1 つの節点を 3 つに分ける。
+
+```jsonc
+// 恒等ノード。中身は名前だけで、二度と変わらない(ID が節点の永久の身元になる)
+{"v":1,"kind":"node","contents":{"graph":"lamalium-plan","id":"n_verbatim_measure"}}
+
+// 状態ノード。更新のたびに新しい ID。previous が前版を指す
+{"v":1,"kind":"node","contents":{
+  "identity":"s256:<恒等ノード>",
+  "attrs":{"title":"…","state":"planned","priority":3,"owner":"d4",
+           "anchor":"docs/plan/NEXT.md#…","awaiting_ruling":false,"note":"…"},
+  "previous":"s256:<前版の状態ノード>"}}
+
+// 辺。members は恒等ノードの ID(I7)。型は第一級のオブジェクト
+{"v":1,"kind":"edge","type":"s256:<型ノード>","members":["s256:<待つ側>","s256:<待たれる側>"]}
+{"v":1,"kind":"node","contents":{"edge_type":"blocks"}}
+```
+
+ref は `graph/<グラフ名>/nodes/<節点名>` が現行の状態ノードを、
+`graph/<グラフ名>/edges/<辺名>` が辺を指す。この形で得られる性質:
+
+- 辺は恒等ノードを指すので、節点をいくら更新しても張り替えが要らない。
+- 辺 1 本が ref 1 本なので gc の根に入り(根は ref・pin・保持表明の和集合。
+  [docs/design/GC.md](#9b1ceac3-f3cf-4595-87cb-6e40ce0900e5))、削除は tombstone で表せる。
+- 版は previous の鎖で全部残り、旧版は現行 ref から到達できるので gc に消されない。
+  着地の時刻は ref レコードの at である。
+- 逆引きは既存の `GET /v1/objects/{id}/referrers` がそのまま効く。専用の隣接索引は要らない。
+  実体を分ける前提だから成り立つ判断である: 逆引き索引の世代は object_count で、書き込みの
+  たびに無効化される。本番(55,455 オブジェクト)の冷えた構築は 15.07 秒だが、2,694 オブジェクトの
+  実体では 63 ミリ秒であった(2026-09-08 の実測)。
+- グラフ層は検索索引を乱さない。検索索引の世代は collections/ 配下の ref の束縛であり
+  (取りこぼしが無い限り object_count を見ない)、`graph/` の ref も新しいオブジェクトも
+  束縛を変えない。実装は温めへ合図を送らないことでこれを守る。
+
+辺の型の語彙と attrs の初期セットは lamalium 側が決める(2026-09-08 の合意)。型は
+blocks(順序制約)・lands(着地条件)・ruling(裁定待ちの門)・serial(向きを持たない直列。
+members は名前の辞書順で正規化)の 4 つ、members は [待つ側, 待たれる側] の順、辺の名前は
+`<型>/<from>/<to>`。attrs は title・state・priority・owner・anchor・awaiting_ruling・note。
+uniqnode 側は attrs の形だけを検める(c1 として妥当か、上限バイト数)。state の語彙も
+priority の意味も知らない。知ると、向こうの書式が uniqnode の仕様の一部になる。
+
+### 口
+
+```
+| Method | Path | 役割 |
+|---|---|---|
+| GET    | /v1/graphs                         | グラフ名の一覧 |
+| GET    | /v1/graphs/{g}                     | 全件(節点 + 辺 + 各節点の seq・at)。描画はこの 1 本 |
+| PUT    | /v1/graphs/{g}/nodes/{n}           | 節点の作成と更新。本文 = attrs の c1 JSON |
+| GET    | /v1/graphs/{g}/nodes/{n}           | 現在の attrs + 恒等 ID + seq + at |
+| DELETE | /v1/graphs/{g}/nodes/{n}           | tombstone |
+| GET    | /v1/graphs/{g}/nodes/{n}/history   | 版の一覧(previous の鎖と各版の at) |
+| GET    | /v1/graphs/{g}/nodes/{n}/neighbors | 隣接。?direction=in|out・?type=blocks で絞る |
+| PUT    | /v1/graphs/{g}/edges/{e}           | 辺。本文 = {"type":…,"from":…,"to":…} |
+| DELETE | /v1/graphs/{g}/edges/{e}           | tombstone |
+| GET    | /v1/graphs/{g}/edges               | 辺の一覧。?from=・?to=・?type= で絞る |
+```
+
+状態遷移に専用の口を作らない(「着地済みにする」は attrs.state を変える PUT である)。
+同じ attrs の再 PUT は no-op で、ref も触らず応答の updated が false でそう言う(文書の
+PUT と同じ規律。[docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b))。
+
+読み口の許可は `--agent-graph <g>`(読める)と `--agent-graph-writable <g>`(書ける)で、
+`--agent-collections` / `--agent-writable` と同じ流儀にする(名前の形の検査も断りの本文も
+同じ 1 箇所から出す。must/0023)。
+
+### 段
+
+| 段 | 内容 | 粒度 |
+|---|---|---|
+| 0 | テンプレート unit 化(`uniqnode-serve@.service`)と install の複数実体対応。これが無いと 2 つ目の実体を据える 1 つの命令が書けない([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「2 つ目のストアを同じ機械で」。should/0118) | M |
+| 1 | グラフ層の中核と主の口(恒等・状態・ref、節点の PUT / GET / DELETE / history、辺の PUT / DELETE、一覧、全件の GET) | M |
+| 2 | 読み口の許可表(`--agent-graph` / `--agent-graph-writable`)と、referrers・closure をグラフの実体に限って読み口に出す | S |
+| 3 | 部分グラフの深さ指定と batch。要ると分かってから | S |
+
+段 0 と段 1 は独立なので順序を入れ替えてよい。段 2 は段 1 に依存する。
+
+### 着地条件
+
+1. 棚卸し担当が 10〜30 件の 1 巡を口経由で書き、同じ 1 巡を 2 度打っても ref が動かない
+   (updated が false。冪等の実証)。
+2. lamalium 側が `GET /v1/graphs/lamalium-plan` の 1 本で全件(節点・辺・at)を読み戻し、
+   HTML を描く。
+3. chat タスクが neighbors で「X は何を待つか」を引ける。書き込みの直後でも待たされない
+   (汎用の逆引きの構築が実体の大きさに見合っていることの実証)。
+4. 1 巡の書き込みの前後で、本番の実体の chat の検索の応答時間が変わらない(実体を分けて
+   いるので自明だが、A への pull が本番に触れていないことを確かめる)。
+5. 着地した節点が消えずに state が landed として読め、history に遷移が残り、at が着地の
+   時刻である。
+
 ## やらないこと
 
 - `fetch_url` と `POST /v1/collections/{c}/fetch` をコンテナへ見せること(オフライン

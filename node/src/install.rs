@@ -542,8 +542,8 @@ pub struct Options {
     /// true なら、据える前に実行ユーザの user 単位の常駐(STARTED_TEMPLATES)を止めて外す
     /// (`--take-over-user-units`。system 単位だけ)。
     pub take_over_user_units: bool,
-    /// 読み口へ届いてよい相手のアドレス(`--firewall-allow`)。ufw が active ならその規則を
-    /// 入れ、載ったことを見る。system 単位で読み口があるときだけ。
+    /// 読み口へ届いてよい相手(`--firewall-allow`。IPv4 アドレスか CIDR をカンマで並べる)。
+    /// ufw が active ならその規則を入れ、載ったことを見る。system 単位で読み口があるときだけ。
     pub firewall_allow: Option<String>,
     /// 規則をどこに入れるか(run が ufw status を読んで決める。drop-in を描く前に要る:
     /// nft なら serve の ExecStartPre= が規則ファイルを読む)。
@@ -942,7 +942,7 @@ pub fn check_listen(listen: &str, what: &str) -> Result<(), String> {
 }
 
 /// 引数を検め、道を絶対にして整える。unit を書く前に、書いても効かない指定を断る。
-pub fn normalize(options: Options) -> Result<Options, String> {
+pub fn normalize(mut options: Options) -> Result<Options, String> {
     check_instance(&options.instance)?;
     check_listen(&options.listen, "--listen")?;
     check_listen(&options.viewer_listen, "--viewer-listen")?;
@@ -1006,8 +1006,10 @@ pub fn normalize(options: Options) -> Result<Options, String> {
              ときに、止めて外す段を install に含める指定)"
         ));
     }
-    if let Some(allow) = &options.firewall_allow {
-        check_firewall_allow(allow)?;
+    if let Some(allow) = options.firewall_allow.take() {
+        // 要素を揃えた形(`/32` を外し、重複を除き、, で詰める)で持つ。報告と規則の字句が揃う。
+        let allow = firewall_allow_entries(&allow)?.join(",");
+        options.firewall_allow = Some(allow.clone());
         if !options.scope.is_system() || options.agent_listen.is_none() {
             return Err(format!(
                 "{FIREWALL_ALLOW_FLAG} {allow} は --system で {AGENT_LISTEN_FLAG} があるときだけ\
@@ -1096,15 +1098,68 @@ fn check_collection_flag(flag: &str, collection: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `--firewall-allow` の値は IPv4 アドレス 1 つ(範囲や名前は受けない。ufw と nft に渡す
-/// 字句をここで固定する。読み口の側も `ip daddr` で書くので IPv4 に限る)。
+/// `--firewall-allow` の値は IPv4 アドレスか CIDR をカンマで並べたもの(名前は受けない。ufw と
+/// nft に渡す字句をここで固定する。読み口の側も `ip daddr` で書くので IPv4 に限る)。
 pub fn check_firewall_allow(allow: &str) -> Result<(), String> {
-    match allow.parse::<std::net::Ipv4Addr>() {
-        Ok(_) => Ok(()),
-        Err(_) => Err(format!(
-            "{FIREWALL_ALLOW_FLAG} {allow} は IPv4 アドレスでない(例 10.10.128.4)"
-        )),
+    firewall_allow_entries(allow).map(|_| ())
+}
+
+/// `--firewall-allow` の値を要素に分ける(与えられた順、重複は 1 つにする)。各要素は nft と
+/// ufw が表に書き戻す形に揃える: `/32` は素のアドレスにし、ホスト部が 0 でない CIDR は断る
+/// (nft は黙ってホスト部を落とすので、書いた字句と効く範囲が食い違う)。`/0` は誰でも許す
+/// ことになり規則の意味が無いので断る。
+pub fn firewall_allow_entries(allow: &str) -> Result<Vec<String>, String> {
+    let mut entries: Vec<String> = Vec::new();
+    for piece in allow.split(',') {
+        let piece = piece.trim();
+        let (start, prefix) = parse_ipv4_cidr(piece).ok_or_else(|| {
+            format!(
+                "{FIREWALL_ALLOW_FLAG} {allow} の {piece:?} は IPv4 アドレスでも CIDR でもない\
+                 (例 10.10.128.4 や 10.10.128.0/24 を , で並べる)"
+            )
+        })?;
+        if prefix == 0 {
+            return Err(format!(
+                "{FIREWALL_ALLOW_FLAG} {allow} の {piece} は誰でも許す(/0 は規則の意味が無い)"
+            ));
+        }
+        let mask = u32::MAX << (32 - prefix);
+        let address = std::net::Ipv4Addr::from(start);
+        if start & !mask != 0 {
+            return Err(format!(
+                "{FIREWALL_ALLOW_FLAG} {allow} の {piece} はホスト部が 0 でない(ネットワークの\
+                 アドレスで書く: {}/{prefix})",
+                std::net::Ipv4Addr::from(start & mask)
+            ));
+        }
+        let entry =
+            if prefix == 32 { address.to_string() } else { format!("{address}/{prefix}") };
+        if !entries.contains(&entry) {
+            entries.push(entry);
+        }
     }
+    Ok(entries)
+}
+
+/// `a.b.c.d` か `a.b.c.d/n`(n は 0..=32)を (先頭のアドレス, n) にする。
+fn parse_ipv4_cidr(text: &str) -> Option<(u32, u32)> {
+    let (address, prefix) = match text.split_once('/') {
+        Some((address, prefix)) => (address, prefix.parse::<u32>().ok().filter(|n| *n <= 32)?),
+        None => (text, 32),
+    };
+    Some((u32::from(address.parse::<std::net::Ipv4Addr>().ok()?), prefix))
+}
+
+/// nft の表に出る集合の要素(`a.b.c.d`・`a.b.c.d/n`・`a.b.c.d-e.f.g.h`)を閉区間にする。
+fn ipv4_interval(text: &str) -> Option<(u32, u32)> {
+    if let Some((low, high)) = text.split_once('-') {
+        let low = u32::from(low.parse::<std::net::Ipv4Addr>().ok()?);
+        let high = u32::from(high.parse::<std::net::Ipv4Addr>().ok()?);
+        return (low <= high).then_some((low, high));
+    }
+    let (start, prefix) = parse_ipv4_cidr(text)?;
+    let span = if prefix == 0 { u32::MAX } else { (1u32 << (32 - prefix)) - 1 };
+    Some((start, start | span))
 }
 
 /// path を account の所有にする(root で走る system 単位の据え付けが作ったものを、実行ユーザが
@@ -1819,8 +1874,10 @@ fn command_output(program: &str, arguments: &[String]) -> Result<String, String>
 /// なる(nft は無い表の delete を断るので、先に空で作る)。
 pub fn nft_rules_text(table: &str, from: &str, agent_listen: &str) -> Result<String, String> {
     let (ip, port) = agent_ip_and_port(agent_listen)?;
+    let entries = firewall_allow_entries(from)?;
+    let allowed = entries.join(", ");
     Ok(format!(
-        "# uniqnode install が書いた。読み口 {agent_listen} へ届いてよいのは {from} だけ。\n\
+        "# uniqnode install が書いた。読み口 {agent_listen} へ届いてよいのは {allowed} だけ。\n\
          # serve の unit の ExecStartPre= が起動のたびに読む(nft -f)。手で入れるなら同じ命令。\n\
          # 表はインスタンスごとに別である(1 つの名を共有すると、後から起きた serve が\n\
          # 先の実体の規則を消してしまう)。\n\
@@ -1829,32 +1886,62 @@ pub fn nft_rules_text(table: &str, from: &str, agent_listen: &str) -> Result<Str
          table {table} {{\n\
          \tchain agent_door {{\n\
          \t\ttype filter hook input priority filter; policy accept;\n\
-         \t\tip daddr {ip} tcp dport {port} ip saddr != {{ {from}, {ip} }} counter drop\n\
+         \t\tip daddr {ip} tcp dport {port} ip saddr != {{ {allowed}, {ip} }} counter drop\n\
          \t}}\n\
          }}\n"
     ))
 }
 
 /// `nft list table inet uniqnode` の答えに、その規則が載っているか(字句が同じ行にあること
-/// で見る。counter の数は行ごとに変わるので照合しない)。許す相手は from と読み口自身の IP
-/// の 2 つ(install の確認は同じ機械から 10.10.128.1 を源に届くので、自分を締め出さない)。
+/// で見る。counter の数は行ごとに変わるので照合しない)。許す相手は from の各要素と読み口自身の
+/// IP(install の確認は同じ機械から 10.10.128.1 を源に届くので、自分を締め出さない)。
+/// nft は集合を並べ替え、覆われた要素や隣り合う範囲をまとめ、要素が 1 つなら { } を外して
+/// 書き戻す(実測 nftables 1.0.2)ので、字句ではなく「各要素の範囲が集合に覆われている」ことで見る。
 pub fn nft_rule_listed(listing: &str, from: &str, agent_listen: &str) -> Result<bool, String> {
     let (ip, port) = agent_ip_and_port(agent_listen)?;
-    let pieces = [
-        format!("ip daddr {ip} "),
-        format!("tcp dport {port} "),
-        "ip saddr != {".to_string(),
-        " drop".to_string(),
-    ];
-    // 集合の要素は nft が並べ替えることがあるので、各要素は「, か } が続く」形で個別に見る。
-    let element = |line: &str, address: &str| {
-        line.contains(&format!(" {address},")) || line.contains(&format!(" {address} }}"))
-    };
+    let mut wanted: Vec<(u32, u32)> = Vec::new();
+    for entry in firewall_allow_entries(from)?.iter().chain(std::iter::once(&ip)) {
+        wanted.push(ipv4_interval(entry).ok_or_else(|| format!("{entry} は IPv4 でない"))?);
+    }
+    let pieces = [format!("ip daddr {ip} "), format!("tcp dport {port} "), " drop".to_string()];
     Ok(listing.lines().any(|line| {
-        pieces.iter().all(|piece| line.contains(piece.as_str()))
-            && element(line, from)
-            && element(line, &ip)
+        if !pieces.iter().all(|piece| line.contains(piece.as_str())) {
+            return false;
+        }
+        let Some((_, rest)) = line.split_once("ip saddr != ") else { return false };
+        let set = match rest.strip_prefix('{') {
+            Some(inner) => match inner.split_once('}') {
+                Some((inner, _)) => inner,
+                None => return false,
+            },
+            None => rest.split_whitespace().next().unwrap_or(""),
+        };
+        let mut listed: Vec<(u32, u32)> = Vec::new();
+        for element in set.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+            match ipv4_interval(element) {
+                Some(interval) => listed.push(interval),
+                None => return false,
+            }
+        }
+        wanted.iter().all(|want| interval_covered(*want, &listed))
     }))
+}
+
+/// want の区間が listed の区間の和に覆われているか。
+fn interval_covered(want: (u32, u32), listed: &[(u32, u32)]) -> bool {
+    let mut sorted = listed.to_vec();
+    sorted.sort();
+    let mut next = want.0 as u64;
+    for (low, high) in sorted {
+        if (low as u64) > next {
+            break;
+        }
+        next = next.max(high as u64 + 1);
+        if next > want.1 as u64 {
+            return true;
+        }
+    }
+    false
 }
 
 /// PATH から実行ファイルの絶対パスを引く(ExecStartPre= に書くため)。
@@ -1900,15 +1987,20 @@ fn apply_firewall(options: &Options, out: &mut dyn Write) -> Result<String, Stri
     };
     match &options.firewall_backend {
         Some(FirewallBackend::Ufw) => {
-            let arguments = ufw_allow_arguments(from, agent_listen)?;
-            let added = command_output("ufw", &arguments)?;
-            say(out, &format!("ufw {}: {}", arguments.join(" "), added.trim()))?;
+            let entries = firewall_allow_entries(from)?;
+            for entry in &entries {
+                let arguments = ufw_allow_arguments(entry, agent_listen)?;
+                let added = command_output("ufw", &arguments)?;
+                say(out, &format!("ufw {}: {}", arguments.join(" "), added.trim()))?;
+            }
             let after = command_output("ufw", &["status".to_string()])?;
-            if !ufw_rule_listed(&after, from, agent_listen)? {
-                return Err(format!(
-                    "ufw allow を打ったが ufw status の表に載っていない: {}",
-                    after.trim()
-                ));
+            for entry in &entries {
+                if !ufw_rule_listed(&after, entry, agent_listen)? {
+                    return Err(format!(
+                        "ufw allow を打ったが ufw status の表に {entry} の行が載っていない: {}",
+                        after.trim()
+                    ));
+                }
             }
             Ok(format!(
                 "ufw が {from} から読み口 {agent_listen} への TCP を許す規則を持つ(ufw status に載った)"

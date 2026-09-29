@@ -594,7 +594,7 @@ fn after_and_user_are_system_only_and_the_agent_listen_is_checked() {
     let bad_address = base(&["--firewall-allow", "orion"]);
     assert_eq!(bad_address.status, 1, "{}\n{}", bad_address.stdout, bad_address.stderr);
     assert!(
-        bad_address.stderr.contains("--firewall-allow orion は IPv4 アドレスでない"),
+        bad_address.stderr.contains("--firewall-allow orion の \"orion\" は IPv4 アドレスでも CIDR でもない"),
         "{}",
         bad_address.stderr
     );
@@ -910,7 +910,8 @@ fn the_lock_probe_sees_a_store_held_by_a_serving_process() {
 #[test]
 fn the_take_over_and_firewall_steps_use_fixed_words_and_judge_by_effect() {
     use uniqnode::install::{
-        agent_ip_and_port, check_firewall_allow, normalize, take_over_command,
+        agent_ip_and_port, check_firewall_allow, firewall_allow_entries, normalize,
+        take_over_command,
         ufw_allow_arguments, ufw_rule_listed, ufw_status_of, unit_is_running, user_manager_flags,
         UfwStatus,
     };
@@ -940,7 +941,20 @@ fn the_take_over_and_firewall_steps_use_fixed_words_and_judge_by_effect() {
     assert!(!ufw_rule_listed(listed, "10.10.128.4", "10.10.128.1:7442").expect("読める"));
 
     assert!(check_firewall_allow("10.10.128.4").is_ok());
-    assert!(check_firewall_allow("10.10.128.0/24").is_err(), "範囲は受けない");
+    // IPv4 アドレスか CIDR を , で並べる(2026-09-29: crystal への移行で 2 つの源を許す要が出た)。
+    assert_eq!(
+        firewall_allow_entries(" 10.10.128.4, 10.10.128.2 ,10.20.0.0/16,10.10.128.4,10.10.128.3/32")
+            .expect("受ける"),
+        vec!["10.10.128.4", "10.10.128.2", "10.20.0.0/16", "10.10.128.3"],
+        "並びは保ち、重複は 1 つ、/32 は素のアドレスにする"
+    );
+    for refused in ["", "10.10.128.4,", "vega", "10.10.128.0/33", "0.0.0.0/0", "10.10.128.5/24", "::1"] {
+        assert!(check_firewall_allow(refused).is_err(), "{refused:?} は断る");
+    }
+    let host_bits = check_firewall_allow("10.10.128.5/24").expect_err("ホスト部");
+    assert!(host_bits.contains("10.10.128.0/24"), "直した形を言う: {host_bits}");
+    let cidr = "Status: active\n\nTo                         Action      From\n--                         ------      ----\n10.10.128.1 7441/tcp       ALLOW       10.20.0.0/16\n";
+    assert!(ufw_rule_listed(cidr, "10.20.0.0/16", "10.10.128.1:7441").expect("読める"));
 
     // system 単位でも、読み口が無ければ firewall の指定は断る。
     let mut without_door = system_options();
@@ -958,6 +972,10 @@ fn the_take_over_and_firewall_steps_use_fixed_words_and_judge_by_effect() {
     let accepted = normalize(with_door).expect("読み口があれば通る");
     assert_eq!(accepted.firewall_allow.as_deref(), Some("10.10.128.4"));
     assert!(accepted.take_over_user_units);
+    let mut listed_sources = system_options();
+    listed_sources.firewall_allow = Some("10.10.128.4, 10.10.128.2/32".to_string());
+    let accepted = normalize(listed_sources).expect("並べても通る");
+    assert_eq!(accepted.firewall_allow.as_deref(), Some("10.10.128.4,10.10.128.2"), "揃えた形で持つ");
 }
 
 /// ufw が active でない機械では、規則は nft の自分の表 inet uniqnode に入れ、serve の drop-in の
@@ -1002,6 +1020,34 @@ fn the_nft_road_writes_one_table_and_lets_the_serve_unit_load_it_on_every_start(
     assert!(!nft_rule_listed(&accepting, "10.10.128.4", "10.10.128.1:7441").expect("読める"));
     let without_self = listing.replace("{ 10.10.128.1, 10.10.128.4 }", "{ 10.10.128.4 }");
     assert!(!nft_rule_listed(&without_self, "10.10.128.4", "10.10.128.1:7441").expect("読める"));
+
+    // 並べた源と CIDR。nft は覆われた要素や隣り合う範囲をまとめ、要素が 1 つなら { } を外して
+    // 書き戻す(実測 nftables 1.0.2)ので、字句でなく範囲が覆われていることで見る。
+    let text = nft_rules_text(&table, "10.10.128.4,10.10.128.2,10.20.0.0/16", "10.10.128.1:7441")
+        .expect("組める");
+    assert!(
+        text.contains(
+            "ip saddr != { 10.10.128.4, 10.10.128.2, 10.20.0.0/16, 10.10.128.1 } counter drop"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("届いてよいのは 10.10.128.4, 10.10.128.2, 10.20.0.0/16 だけ"), "{text}");
+    let many = listing.replace(
+        "{ 10.10.128.1, 10.10.128.4 }",
+        "{ 10.10.128.1, 10.10.128.2, 10.10.128.4, 10.20.0.0/16 }",
+    );
+    let from = "10.10.128.4,10.10.128.2,10.20.0.0/16";
+    assert!(nft_rule_listed(&many, from, "10.10.128.1:7441").expect("読める"));
+    assert!(!nft_rule_listed(listing, from, "10.10.128.1:7441").expect("読める"), "2 つが欠ける");
+    let merged = listing.replace("{ 10.10.128.1, 10.10.128.4 }", "10.10.128.0/24");
+    assert!(nft_rule_listed(&merged, "10.10.128.0/24", "10.10.128.1:7441").expect("読める"));
+    assert!(nft_rule_listed(&merged, "10.10.128.4,10.10.128.2", "10.10.128.1:7441").expect("読める"));
+    assert!(!nft_rule_listed(&merged, "10.10.0.0/16", "10.10.128.1:7441").expect("読める"));
+    let halves = listing.replace(
+        "{ 10.10.128.1, 10.10.128.4 }",
+        "{ 10.10.128.0-10.10.128.127, 10.10.128.128/25 }",
+    );
+    assert!(nft_rule_listed(&halves, "10.10.128.0/24", "10.10.128.1:7441").expect("読める"));
 
     let mut options = system_options();
     options.firewall_allow = Some("10.10.128.4".to_string());

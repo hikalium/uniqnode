@@ -300,8 +300,12 @@ curl -X PUT http://10.10.128.1:7443/v1/graphs/lamalium-plan/nodes/uniqnode-insta
 curl -X PUT http://10.10.128.1:7443/v1/graphs/uniqnode_install_probe/nodes/uniqnode-install-probe --data-binary '[]'   # 403 「は書けない」
 ```
 
-firewall は `--firewall-allow <addr>` で install が入れる。ufw が active ならその規則、そうで
-なければ nft の自分の表 inet uniqnode_<インスタンス>(上の「user 単位から移る」の 2 と 4)。この機械には
+firewall は `--firewall-allow <addr>` で install が入れる。<addr> は IPv4 アドレスか CIDR で、
+`--firewall-allow 10.10.128.4,10.10.128.2` や `10.10.128.0/24` のようにカンマで並べられる
+(`/32` は素のアドレスとして扱う。ホスト部が 0 でない CIDR と `/0` は断る)。ufw が active なら
+要素ごとに ufw allow を打ち、そうでなければ nft の自分の表 inet uniqnode_<インスタンス>に
+1 つの集合として書く(上の「user 単位から移る」の 2 と 4)。nft は覆われた要素や隣り合う範囲を
+まとめて書き戻すので、install の確認は字句ではなく「各要素が集合に覆われていること」で見る。この機械には
 ufw と nft の両方が入っているが、ufw は inactive で規則は iptables-nft(docker・fail2ban)が
 持っており、INPUT の policy は accept なので、nft の道で「10.10.128.4 以外から 7441 は落とす」
 を自分の表に置く形になる(実測 2026-09-06)。読み口は wg1 のアドレスにしか束縛しないので、
@@ -386,7 +390,7 @@ uniqnode install <dir> [--listen <addr>] [--viewer-listen <addr>] [--serve-optio
 | `--user` | SUDO_USER | `--system` の実行ユーザ(unit の User=/Group=)。root は断る。`--system` のときだけ |
 | `--after` | 無し | drop-in の `[Unit]` に After= と Wants= で書く unit(複数可。`--system` のときだけ) |
 | `--take-over-user-units` | — | 据える前に実行ユーザの user 単位の常駐を止めて外す(`--system` のときだけ。上の「user 単位から移る」) |
-| `--firewall-allow` | 無し | このアドレスからだけ読み口へ届く規則を入れて効果を見る。ufw が active なら ufw allow、そうでなければ nft の表 inet uniqnode_<インスタンス>(規則ファイルを drop-in の隣に置き、serve の ExecStartPre=+nft -f が起動のたびに入れる)。`--system` で `--listen-agent` があるときだけ |
+| `--firewall-allow` | 無し | このアドレス(IPv4 アドレスか CIDR。カンマで並べられる)からだけ読み口へ届く規則を入れて効果を見る。ufw が active なら ufw allow、そうでなければ nft の表 inet uniqnode_<インスタンス>(規則ファイルを drop-in の隣に置き、serve の ExecStartPre=+nft -f が起動のたびに入れる)。`--system` で `--listen-agent` があるときだけ |
 
 出力は手順ごとに 1 行で、最後に確認した観測(serve と viewer 経由の /v1/status が返した
 node_id、backup の写し先の fsck の件数)と backup の次の刻みが出る。実測(2026-09-05、

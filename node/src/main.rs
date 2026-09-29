@@ -170,7 +170,7 @@ fn usage_text() -> String {
                          [--agent-collections <コレクション名>]...\n\
                          [--agent-graph <グラフ名>]... [--agent-graph-writable <グラフ名>]...\n\
                          [--system [--user <name>] [--after <unit>]...\n\
-                          [--take-over-user-units] [--firewall-allow <addr>]]\n\
+                          [--take-over-user-units] [--firewall-allow <addr>[,<addr>]...]]\n\
                                       serve・viewer・毎日の backup を systemd に据える\n\
                                       (docs/mop/SYSTEMD.md)。走っている自分自身を\n\
                                       --bin(既定 ~/.local/bin/uniqnode)へ写し、unit 4 本と\n\
@@ -223,6 +223,7 @@ fn usage_text() -> String {
                                       止めて外させる(user 単位の 3 つの unit を disable --now\n\
                                       し、止まったこととロックが外れたことを見る)。\n\
                                       --firewall-allow <addr> は <addr> からだけ読み口へ届く\n\
+                                      (<addr> は IPv4 アドレスか CIDR。, で並べられる)\n\
                                       規則を入れて効果を見る(ufw が active なら ufw allow、\n\
                                       そうでなければ nft の表 inet uniqnode_<名> を serve の\n\
                                       ExecStartPre= が起動のたびに入れる。--system と\n\

@@ -205,12 +205,18 @@ verification・sumi・roles・config は外す)、作業ディレクトリ・未
 文書だけ新しい doc_rev になり、旧チャンクは gc が回収する。ingest-git は HTTP で serve へ
 送るので、木のある別の機械で走らせて vega の serve へ送る形でも同じ命令が使える。残るもの:
 
-- 木の取り方(操作者の裁定待ち)。候補は (a) vega に read-only の GitHub deploy key を置き、
-  clone を unit の ExecStartPre= の `git fetch` で最新にして `--ref origin/main` で読む、
-  (b) orion から vega の裸の木へ push する、(c) orion 側の timer が ingest-git を走らせて vega の
-  serve へ HTTP で送る(vega に木を置かない。7440 は loopback なので届く口が要る)。推奨は (a)
-  (vega が自分の刻みで取りに行き、鍵は読むだけに限れ、orion 側に何も足さない)。裁定が出る
-  までは何も有効にしない(unit も timer も置いていない)。
+- 木の取り方(操作者の裁定待ち。lamalium の稼働は orion から crystal 10.10.128.2 へ移っている
+  最中で、問いは lamalium 側が別モデルのレビューを経て操作者へ上げる)。候補は (A) vega に
+  read-only の GitHub deploy key を置き、clone を unit の ExecStartPre= の `git fetch` で最新に
+  して `--ref origin/main` で読む、(B) crystal から vega へ ssh で push する、(C) crystal 側の
+  timer が ingest-git を走らせて vega の serve へ HTTP で送る(vega に木も鍵も置かない)。
+  lamalium 側の推奨は 2026-09-30 時点で C。C には lamalium コレクションだけに書ける別の口
+  (例 7446。読み口とは別で、server-proxy は転送しない)が要り、見積もりは M(serve に口と
+  許可表の組を複数持たせるのが S、install と nft を口ごとにするのが残り)。消去には
+  `DELETE /v1/collections/{c}/documents/{name}` を足す(S。改名は新しい名の PUT と旧名の
+  DELETE)。消すものは送る側が前回送った名の集合との差から出す(受ける側が「この一覧が
+  全部」と受けると、空の一覧で全部消える)。裁定が出るまでは何も有効にしない(unit も
+  timer も置いていない)。
 - git から消えた文書を消すこと。取り込みは ref を tombstone しないので、lamalium で消した・
   改名した文書の旧名はコレクションに残る。要るなら、取り込んだ文書名の集合とコレクションの
   ref の集合の差を tombstone する段を足す(コレクションの中身をその木の写しと言い切れる

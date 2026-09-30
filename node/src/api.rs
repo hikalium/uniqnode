@@ -30,8 +30,8 @@ pub struct ApiContext {
     /// None なら合図は捨てられ、索引は従来どおり次の要求が作る(ストアを直接開く mcp)。
     pub search_warmer: Option<IndexWarmer>,
     /// 埋め込みの装備(serve の --embed が与えられたときだけ Some。node/src/embed.rs)。
-    /// 無ければ検索は BM25 だけで答える。search_warmer もあれば、温めの後に無いベクトルを
-    /// 裏で埋める(start_vector_filler)。
+    /// 無ければ検索は BM25 だけで答える。search_warmer もあれば、検索索引に続けてベクトルの
+    /// 索引も温め(warm_vector_index)、その後に無いベクトルを裏で埋める(start_vector_filler)。
     pub embedding: Option<crate::embed::EmbeddingService>,
     /// 順位を取り直すリランカー(serve の --rerank が与えられたときだけ Some。
     /// node/src/rerank.rs)。無ければ融合の順位のまま答える。
@@ -769,6 +769,10 @@ pub const INDEX_WARM_QUIET: std::time::Duration = std::time::Duration::from_mill
 /// ある。作り直しの最中に届いた合図は次の 1 回にまとまる(走っているものが古ければ
 /// 終わってからもう 1 回)。実測(2026-09-06、55,452 オブジェクト)では冷えた初回の
 /// 検索が 22.46 秒、温まれば 0.3〜0.7 秒である。
+///
+/// 埋め込みを装備していれば、検索索引に続けてベクトルの索引も温める(warm_vector_index)。
+/// 合成の 25,000 チャンク・1024 次元(キャッシュ 100MB)で、冷えた初回の融合検索が
+/// 2.2 秒、温まれば 6 ms である(2026-09-30)。温め終えてから補完へ合図する。
 pub fn start_index_warmer(context: Arc<ApiContext>) {
     let receiver = context
         .search_warmer
@@ -785,6 +789,7 @@ pub fn start_index_warmer(context: Arc<ApiContext>) {
     let filler = start_vector_filler(context.clone());
     std::thread::spawn(move || {
         warm_search_index(&context);
+        warm_vector_index(&context);
         nudge_vector_filler(&filler);
         loop {
             // 合図を待つ。送り手が全部消えるのは ApiContext が落ちたとき(serve の終わり)。
@@ -799,6 +804,7 @@ pub fn start_index_warmer(context: Arc<ApiContext>) {
                 }
             }
             warm_search_index(&context);
+            warm_vector_index(&context);
             nudge_vector_filler(&filler);
         }
     });
@@ -814,6 +820,75 @@ fn warm_search_index(context: &ApiContext) {
     }
 }
 
+/// ベクトルの索引の温め 1 回(埋め込みを装備していなければ何もしない)。検索索引の温めに
+/// 続けて同じスレッドで行い、終えてから補完へ合図する(補完の走査とストアのロックを
+/// 取り合わない)。判断と記録は with_current_vectors の 1 箇所で、ここは呼ぶだけである。
+///
+/// ストアのロックは 2 回に分けて短く持つ。1 回目は古いかどうかを見るだけで、古ければ
+/// ロックを放してキャッシュファイルを読む(実データ規模で 100MB の CRC 付きのパース。
+/// ストアは要らない)。2 回目で見えのチャンクに並べる。読み終えるまでの間に別の誰か
+/// (検索)が作り直していれば、2 回目の判断が何もしないので、読んだぶんは捨てるだけである。
+/// 読んでいる間にキャッシュが伸びても、索引の見かけは読み始めの札なので、次の検索が
+/// ずれに気づいて読み直す(混ざらない)。
+fn warm_vector_index(context: &ApiContext) {
+    let Some(service) = &context.embedding else { return };
+    let started = std::time::Instant::now();
+    {
+        let store = context.store.lock().expect("lock");
+        let slot = service.index.lock().expect("lock");
+        if slot.as_ref().is_some_and(|vectors| service.index_is_current(vectors, &store)) {
+            return;
+        }
+    }
+    let outcome = service.open_cache().and_then(|cache| {
+        let store = context.store.lock().expect("lock");
+        let mut slot = service.index.lock().expect("lock");
+        with_current_vectors(service, &store, &mut slot, Some(cache), started)
+    });
+    // 読めなければ理由を残して次の合図を待つ(次の検索が同じ失敗を degraded で言う)。
+    if let Err(error) = outcome {
+        crate::log_line!("uniqnode: embed: ベクトルの索引の温めに失敗した: {error}");
+    }
+}
+
+/// ベクトルの索引が古ければ作り直す(判断と記録はここ 1 箇所。検索と温めの両方が通る。
+/// should/0135)。ロックの順はストア → 索引の置き場で、呼び手はどちらも取ってから呼ぶ。
+/// cache は呼び手がストアのロックの外で先に読んだもの(温め)で、None ならここで読む
+/// (検索)。started は記録の時間の起点で、先に読んだぶんを含める。作り直すたびに
+/// 「vector index loaded in <ms> ms (<embedded>/<chunks> vectors)」の 1 行を残す。
+/// 作れなければ置き場を空にして理由を返す(古い索引で答えない)。
+fn with_current_vectors(
+    service: &crate::embed::EmbeddingService,
+    store: &Store,
+    slot: &mut Option<crate::embed::VectorIndex>,
+    cache: Option<crate::embed::VectorCache>,
+    started: std::time::Instant,
+) -> Result<(), crate::embed::EmbedError> {
+    if slot.as_ref().is_some_and(|vectors| service.index_is_current(vectors, store)) {
+        return Ok(());
+    }
+    let loaded = match cache {
+        Some(cache) => crate::embed::VectorIndex::from_cache(store, &cache),
+        None => service.load_index(store),
+    };
+    match loaded {
+        Ok(vectors) => {
+            crate::log_line!(
+                "uniqnode: embed: vector index loaded in {} ms ({}/{} vectors)",
+                started.elapsed().as_millis(),
+                vectors.embedded_count(),
+                vectors.chunk_count()
+            );
+            *slot = Some(vectors);
+            Ok(())
+        }
+        Err(error) => {
+            *slot = None;
+            Err(error)
+        }
+    }
+}
+
 /// 無いベクトルを裏で埋めるスレッドを起こし、その合図の口を返す(埋め込みを装備して
 /// いなければ None で、合図は捨てられる)。契機は索引の温めと同じ 1 本の合図で、温めの
 /// スレッドが温め終えるたびに送る(いつ埋めるかの判断は温めの側の 1 箇所。should/0135)。
@@ -825,7 +900,8 @@ fn warm_search_index(context: &ApiContext) {
 ///
 /// 検索はこれを待たない(索引の温めと違う点。SEARCH の「索引の構築と世代」): 穴が
 /// あっても BM25 で答えられ、応答の degraded が穴を言う。埋め終わってキャッシュファイルが
-/// 伸びれば、次の検索が見かけのずれで索引を読み直す(EmbeddingService::index_is_current)。
+/// 伸びれば、ベクトルの索引は見かけのずれで古くなる(EmbeddingService::index_is_current)。
+/// 埋めたものがあれば、補完のスレッドが続けて温め直す(fill_missing_vectors)。
 fn start_vector_filler(context: Arc<ApiContext>) -> Option<std::sync::mpsc::Sender<()>> {
     context.embedding.as_ref()?;
     let (sender, receiver) = std::sync::mpsc::channel::<()>();
@@ -871,6 +947,11 @@ fn fill_missing_vectors(context: &ApiContext, last_refusal: &mut Option<String>)
                     report.already_cached + report.embedded,
                     report.distinct_chunks
                 );
+                // 足したぶんでキャッシュの見かけが変わり、温めたベクトルの索引は古く
+                // なった。次の融合検索に読み直しを払わせず、ここで温め直す(温めのスレッドが
+                // 同時に温めていても、判断は with_current_vectors の 1 箇所で、置き場の
+                // ロックが 2 本目を何もしない形にする)。
+                warm_vector_index(context);
             }
         }
         Err(error) => {
@@ -925,7 +1006,9 @@ pub fn run_search(
     };
 
     let store = context.store.lock().expect("lock");
-    // ベクトルの索引も BM25 の索引と同じ遅延キャッシュで持つ。読むのはキャッシュ
+    // ベクトルの索引も BM25 の索引と同じ遅延キャッシュで持つ(serve では温めが先に
+    // 作っておくので、ここで作るのは温めより先に来た要求か、ストアを直接開く mcp)。
+    // 読むのはキャッシュ
     // ファイルだけなので、検索要求が模型の計算を待つことはない(コーパスの埋め込みは
     // 裏の補完(start_vector_filler)と CLI の uniqnode embed の仕事で、検索はそれを
     // 待たない。穴があれば degraded が言う)。
@@ -934,14 +1017,9 @@ pub fn run_search(
     if requested != crate::embed::SearchMethod::Bm25 {
         if let Some(service) = &context.embedding {
             let mut guard = service.index.lock().expect("lock");
-            if !guard.as_ref().is_some_and(|vectors| service.index_is_current(vectors, &store)) {
-                match service.load_index(&store) {
-                    Ok(vectors) => *guard = Some(vectors),
-                    Err(e) => {
-                        *guard = None;
-                        load_failure = Some(format!("{e}"));
-                    }
-                }
+            let started = std::time::Instant::now();
+            if let Err(e) = with_current_vectors(service, &store, &mut guard, None, started) {
+                load_failure = Some(format!("{e}"));
             }
             vector_cache = Some(guard);
         }

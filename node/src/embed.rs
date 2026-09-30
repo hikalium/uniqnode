@@ -1191,7 +1191,7 @@ impl EmbeddingService {
 
     /// キャッシュファイルを読む(索引を作るときも補完するときもここを通る)。捨てた末尾が
     /// あれば黙らない(must/0022)。捨てたぶんは次の補完が埋め直す。
-    fn open_cache(&self) -> Result<VectorCache, EmbedError> {
+    pub(crate) fn open_cache(&self) -> Result<VectorCache, EmbedError> {
         let cache = VectorCache::open(
             self.cache_path.clone(),
             self.embedder.embedder_id(),

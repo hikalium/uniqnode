@@ -459,7 +459,9 @@ fn search_degrades_to_bm25_when_the_embedding_server_cannot_be_reached() {
 /// いない隙に PUT が滑り込むと通ってしまうが、走査は温めの記録の直後の数ミリ秒であり、
 /// 消した欠陥を毎回は隠せない)。埋めてもファイルに追記しない(cache.extend を飛ばす)と、
 /// 記録はあっても次の検索が「ベクトルは 0/n」と言って最後の段で落ちる。index_is_current
-/// がキャッシュの見かけを見なくなると、同じく古い索引のままで落ちる。
+/// がキャッシュの見かけを見なくなると、同じく古い索引のままで落ちる。fill_missing_vectors
+/// の後の warm_vector_index(補完の後の温め直し)を消すと、「(<n>/<n> vectors)」の記録が
+/// 現れず、その待ちが落ちる(戻して確かめた)。
 #[test]
 fn the_server_fills_missing_vectors_after_a_write_without_a_request() {
     require_embedding_server();
@@ -487,6 +489,20 @@ fn the_server_fills_missing_vectors_after_a_write_without_a_request() {
     assert_eq!(fraction, format!("{count}/{count}"), "{line}");
     assert_eq!(tail, "", "{line}");
 
+    // 埋めたものがあれば、補完のスレッドがベクトルの索引を続けて温め直す。全チャンクぶんの
+    // ベクトルを持つ索引の記録が残り、次の融合検索はそれを使う(読み直しの記録が増えない)。
+    let full = format!("({count}/{count} vectors)");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !serve_log(&server).lines().any(|l| l.contains(VECTORS_LOADED) && l.ends_with(&full)) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "補完の後にベクトルの索引を温め直していない({full} の記録が無い): {}",
+            serve_log(&server)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let loads_before = log_lines_with(&server, VECTORS_LOADED);
+
     // 次の融合検索は温めた索引と伸びたキャッシュで答え、劣化を何も言わない。
     let body = body_text(&search(
         &server.address,
@@ -502,6 +518,87 @@ fn the_server_fills_missing_vectors_after_a_write_without_a_request() {
     ));
     assert!(alone.contains("\"document\":\"search_ja\""), "{alone}");
     assert!(!alone.contains("degraded"), "{alone}");
+    assert_eq!(
+        log_lines_with(&server, VECTORS_LOADED),
+        loads_before,
+        "検索が温めたベクトルの索引を使わず読み直した: {}",
+        serve_log(&server)
+    );
+    drop(server);
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// 起動直後の温めは、検索索引に続けてベクトルの索引も作る(SEARCH
+/// (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580) の「索引の構築と世代」)。要求を 1 つも
+/// 打たずに「vector index loaded in <ms> ms (<embedded>/<chunks> vectors)」の記録が残り、
+/// 初回の融合検索はそれを使う(読み直しの記録が増えない)。
+///
+/// 埋め込みサーバは要求しない。読み込むのはキャッシュファイルだけなので、届かない相手を
+/// 指し、ベクトルは試験が自分で 1 本だけ書く(1/<n> の 1 が、書いたものを読んだ証拠になる。
+/// 0 は空のキャッシュでも出る値なので使わない)。書いたベクトルが起動直後の温めで読まれる
+/// ことを見るため、書いてから serve を起こし直す(ログは同じデータディレクトリに残るので、
+/// 記録は起こし直す前の本数からの増分で数える)。
+///
+/// 欠陥を戻すとどこで落ちるか(should/0137): api.rs の start_index_warmer から
+/// warm_vector_index の呼び出しを 2 か所とも消すと、要求が無いので記録が増えず
+/// wait_for_log_lines が落ちる(戻して確かめた)。温めが索引を置き場に入れずに捨てると、
+/// 初回の融合検索が自分で読み直して記録がもう 1 本増え、最後の段で落ちる(同じく確かめた)。
+#[test]
+fn the_vector_index_is_warmed_before_the_first_hybrid_search() {
+    let dir = unique_dir("search-warm-vectors");
+    let arguments = ["--embed", "http://127.0.0.1:1"];
+    let server = start_server_at_with_args(dir.clone(), &arguments);
+    put_document(&server.address, "notes", "search_ja.md", SEARCH_JA.as_bytes());
+    let body = body_text(&search(
+        &server.address,
+        "{\"query\":\"世代の整合\",\"method\":\"bm25\"}",
+    ));
+    let chunk_id = json_text_field(&body, "id").expect("チャンク ID");
+    let mut cache = uniqnode::embed::VectorCache::open(
+        uniqnode::embed::VectorCache::path_for(&dir, "bge-m3"),
+        "bge-m3",
+        uniqnode::embed::DEFAULT_EMBEDDING_DIMENSION,
+    )
+    .expect("open cache");
+    let mut vector = vec![0.0f32; uniqnode::embed::DEFAULT_EMBEDDING_DIMENSION];
+    vector[0] = 1.0;
+    cache.extend(vec![(chunk_id, vector)]).expect("write cache");
+    drop(server);
+
+    let loads_before = {
+        let path = uniqnode::log::default_path(&dir, uniqnode::log::SERVE_ROLE);
+        std::fs::read_to_string(&path).unwrap_or_default().matches(VECTORS_LOADED).count()
+    };
+    let builds_before = {
+        let path = uniqnode::log::default_path(&dir, uniqnode::log::SERVE_ROLE);
+        std::fs::read_to_string(&path).unwrap_or_default().matches(INDEX_BUILT).count()
+    };
+    let server = start_server_at_with_args(dir.clone(), &arguments);
+    wait_for_log_lines(&server, VECTORS_LOADED, loads_before + 1);
+    let logged = serve_log(&server);
+    // 起こし直した serve の検索索引の記録から、見えのチャンク数を読む。
+    let built = logged.lines().filter(|l| l.contains(INDEX_BUILT)).nth(builds_before).expect("温め");
+    let chunks = built.split(" ms (").nth(1).expect("<ms> ms (").trim_end_matches(" chunks)");
+    let line = logged.lines().filter(|l| l.contains(VECTORS_LOADED)).nth(loads_before).expect("記録");
+    let rest = line.split(VECTORS_LOADED).nth(1).expect("行の残り");
+    let (millis, fraction) =
+        rest.split_once(" ms (").expect("<ms> ms (<embedded>/<chunks> vectors)");
+    assert!(millis.parse::<u64>().is_ok(), "ミリ秒が数でない: {line}");
+    assert_eq!(fraction, format!("1/{chunks} vectors)"), "書いた 1 本を読んでいない: {line}");
+
+    // 初回の融合検索。問いの埋め込みは届かないので BM25 に劣化して答えるが、ベクトルの
+    // 索引は要求の方式が bm25 でない限り作られる経路を通る。温めたものを使えば記録は増えない。
+    let body = body_text(&search(
+        &server.address,
+        "{\"query\":\"世代の整合\",\"method\":\"hybrid\"}",
+    ));
+    assert!(body.contains("\"document\":\"search_ja\""), "{body}");
+    assert_eq!(
+        log_lines_with(&server, VECTORS_LOADED),
+        loads_before + 1,
+        "初回の融合検索が温めたベクトルの索引を使わず読み直した: {}",
+        serve_log(&server)
+    );
     drop(server);
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
@@ -602,6 +699,8 @@ fn full_results_carry_the_whole_chunk_text() {
 const INDEX_BUILT: &str = "uniqnode: search index built in ";
 /// 無いベクトルを裏で埋めた記録(api.rs の fill_missing_vectors が残す 1 行)。
 const VECTORS_FILLED: &str = "uniqnode: embed: embedded ";
+/// ベクトルの索引を作り直した記録(api.rs の with_current_vectors が残す 1 行)。
+const VECTORS_LOADED: &str = "uniqnode: embed: vector index loaded in ";
 /// 埋められなかった記録(同じ関数。同じ理由が続くあいだは 1 本だけ)。
 const FILL_REFUSED: &str = "uniqnode: embed: 無いベクトルを埋められない: ";
 

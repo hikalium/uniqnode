@@ -146,6 +146,13 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
                 map.insert("connections_peak".to_string(), count(gauge.connected.peak()));
                 map.insert("refusing".to_string(), count(gauge.refusing.in_use()));
                 map.insert("refusing_peak".to_string(), count(gauge.refusing.peak()));
+                // 断りの枠が埋まっていて、403 もログも書かずに閉じた断りの数(起動から)。
+                map.insert(
+                    "refused_unlogged".to_string(),
+                    c1::Value::Integer(
+                        gauge.refused_unlogged.load(std::sync::atomic::Ordering::Relaxed) as i64,
+                    ),
+                );
                 fields.push(("main_door", c1::Value::Object(map)));
             }
             if let Some(health) = &context.health {

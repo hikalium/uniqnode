@@ -5,7 +5,7 @@
 //! 照会は dump ではなく、相手のソケットの 4 つ組をそのまま指定する形にする。費用は表の大きさに
 //! 依らない(/proc/net/tcp の全表の走査は、網越しに行数を増やされると主の口の全面の DoS に
 //! なる)。root は要らない。依存を持たない方針(should/0101)なので、netlink のソケットは
-//! extern "C" で libc の socket・sendto・recv・setsockopt を直に呼ぶ。
+//! extern "C" で libc の socket・sendto・recvfrom・setsockopt を直に呼ぶ。
 //!
 //! この module は 2 つに分かれる: カーネルへ問う部分(query。Linux だけ)と、答えを読む部分
 //! (judge。純関数で、固定の答えを与える試験で固める)。
@@ -221,49 +221,88 @@ fn address_field(ip: IpAddr) -> [u8; 16] {
     field
 }
 
-/// 受け取った netlink の 1 データグラムを読む。答えの inet_diag_msg を集め、NLMSG_ERROR の
-/// ENOENT(見つからない)は答え 0 件、他の誤りは Err にする。sequence の違う通知は読み飛ばす。
+/// 受け取った netlink の 1 データグラムを読む。1 件の照会(dump でない)の答えの形だけを通す:
+/// sequence の合う通知がちょうど 1 つで、それが NLM_F_MULTI の付かない SOCK_DIAG_BY_FAMILY
+/// (答えの inet_diag_msg)か NLMSG_ERROR(0 か ENOENT なら答え 0 件、他の誤りは Err)で
+/// あること。NLMSG_DONE は誤りの値が 0 のときだけ読み飛ばす(1 件の照会では来ないはずで、
+/// 来ても答えを足さない)。sequence の違う通知は読み飛ばす。NLM_F_MULTI の付いた通知、
+/// 誤りの値が 0 でない NLMSG_DONE、sequence の合う通知が 2 つ以上、末尾の端のバイト
+/// (整列の詰め物を除く)は Err にする。
 pub fn parse_reply(bytes: &[u8], sequence: u32) -> Result<Vec<Answer>, String> {
+    const HEADER: usize = 16;
     const NLMSG_ERROR: u16 = 2;
     const NLMSG_DONE: u16 = 3;
     const SOCK_DIAG_BY_FAMILY: u16 = 20;
+    const NLM_F_MULTI: u16 = 2;
     const ENOENT: i32 = 2;
+    let word = |payload: &[u8], what: &str| -> Result<i32, String> {
+        payload
+            .get(..4)
+            .map(|b| i32::from_ne_bytes(b.try_into().expect("4")))
+            .ok_or_else(|| format!("netlink の {what} が短い"))
+    };
     let mut answers = Vec::new();
+    let mut replies = 0usize;
     let mut offset = 0usize;
-    while offset + 16 <= bytes.len() {
+    while offset < bytes.len() {
+        if offset + HEADER > bytes.len() {
+            return Err(format!(
+                "netlink の答えの末尾に半端なバイトが {} ある",
+                bytes.len() - offset
+            ));
+        }
         let length = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().expect("4")) as usize;
         let kind = u16::from_ne_bytes(bytes[offset + 4..offset + 6].try_into().expect("2"));
+        let flags = u16::from_ne_bytes(bytes[offset + 6..offset + 8].try_into().expect("2"));
         let seen_sequence =
             u32::from_ne_bytes(bytes[offset + 8..offset + 12].try_into().expect("4"));
-        if length < 16 || offset + length > bytes.len() {
+        if length < HEADER || length > bytes.len() - offset {
             return Err(format!("netlink の答えの長さが不正({length})"));
         }
-        let payload = &bytes[offset + 16..offset + length];
+        let payload = &bytes[offset + HEADER..offset + length];
         if seen_sequence == sequence {
+            if flags & NLM_F_MULTI != 0 {
+                return Err(format!(
+                    "netlink の答えに NLM_F_MULTI が付いている(種類 {kind}。1 件の照会の答えではない)"
+                ));
+            }
             match kind {
-                NLMSG_ERROR => {
-                    let code = payload
-                        .get(..4)
-                        .map(|b| i32::from_ne_bytes(b.try_into().expect("4")))
-                        .ok_or_else(|| "netlink の誤りの答えが短い".to_string())?;
-                    match -code {
-                        0 => {}
-                        ENOENT => {}
-                        errno => {
-                            return Err(format!(
-                                "sock_diag の照会が誤りを返した: {}",
-                                std::io::Error::from_raw_os_error(errno)
-                            ))
+                NLMSG_DONE => match word(payload, "終わりの通知")? {
+                    0 => {}
+                    code => return Err(format!("netlink の終わりの通知が誤りの値 {code} を持つ")),
+                },
+                NLMSG_ERROR | SOCK_DIAG_BY_FAMILY => {
+                    replies += 1;
+                    if replies > 1 {
+                        return Err("netlink の答えが 2 つ以上ある(1 件の照会の答えではない)".to_string());
+                    }
+                    if kind == SOCK_DIAG_BY_FAMILY {
+                        answers.push(parse_message(payload)?);
+                    } else {
+                        let code = word(payload, "誤りの答え")?;
+                        // i32::MIN の符号は返せない(checked_neg が None)。
+                        let errno = code
+                            .checked_neg()
+                            .ok_or_else(|| format!("netlink の誤りの値が不正({code})"))?;
+                        match errno {
+                            0 | ENOENT => {}
+                            errno => {
+                                return Err(format!(
+                                    "sock_diag の照会が誤りを返した: {}",
+                                    std::io::Error::from_raw_os_error(errno)
+                                ))
+                            }
                         }
                     }
                 }
-                NLMSG_DONE => {}
-                SOCK_DIAG_BY_FAMILY => answers.push(parse_message(payload)?),
                 other => return Err(format!("netlink の答えの種類が想定外({other})")),
             }
         }
-        // NLMSG_ALIGN(4 バイト境界)
-        offset += (length + 3) & !3;
+        // NLMSG_ALIGN(4 バイト境界)。最後の通知の後の詰め物はデータグラムの外へはみ出してよい。
+        offset = offset.saturating_add((length + 3) & !3);
+    }
+    if replies == 0 {
+        return Err("netlink の答えに照会への返事が無い".to_string());
     }
     Ok(answers)
 }
@@ -306,6 +345,15 @@ fn parse_message(payload: &[u8]) -> Result<Answer, String> {
     })
 }
 
+/// 照会ソケット(AF_NETLINK)を作れないときの文。serve の起動時の自己試験
+/// (node/src/main_door.rs の MainDoor::self_test)と接続ごとの判定が同じ文を使う。
+pub fn socket_unavailable(error: &std::io::Error) -> String {
+    format!(
+        "sock_diag の照会ソケット(AF_NETLINK)を作れない: {error}(systemd の unit なら \
+         RestrictAddressFamilies= に AF_NETLINK が要る)"
+    )
+}
+
 /// 1 つの族に 1 件照会する。
 fn query(family: u8, local: SocketAddr, remote: SocketAddr) -> Result<Vec<Answer>, String> {
     platform::exchange(family, local, remote)
@@ -327,6 +375,7 @@ mod platform {
     const NETLINK_SOCK_DIAG: c_int = 4;
     const SOL_SOCKET: c_int = 1;
     const SO_RCVTIMEO: c_int = 20;
+    const MSG_TRUNC: c_int = 0x20;
 
     extern "C" {
         fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int;
@@ -338,7 +387,14 @@ mod platform {
             address: *const c_void,
             address_length: u32,
         ) -> isize;
-        fn recv(fd: c_int, buffer: *mut c_void, length: usize, flags: c_int) -> isize;
+        fn recvfrom(
+            fd: c_int,
+            buffer: *mut c_void,
+            length: usize,
+            flags: c_int,
+            address: *mut c_void,
+            address_length: *mut u32,
+        ) -> isize;
         fn setsockopt(
             fd: c_int,
             level: c_int,
@@ -370,11 +426,7 @@ mod platform {
         // SAFETY: 引数は定数で、返り値の fd は下で検めてから OwnedFd に渡す(閉じるのは OwnedFd)。
         let raw = unsafe { socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_SOCK_DIAG) };
         if raw < 0 {
-            return Err(format!(
-                "sock_diag の照会ソケット(AF_NETLINK)を作れない: {}(systemd の unit なら \
-                 RestrictAddressFamilies= に AF_NETLINK が要る)",
-                std::io::Error::last_os_error()
-            ));
+            return Err(super::socket_unavailable(&std::io::Error::last_os_error()));
         }
         // SAFETY: raw は socket が返した開いた fd で、他の誰も持っていない。
         let fd = unsafe { OwnedFd::from_raw_fd(raw) };
@@ -412,16 +464,50 @@ mod platform {
         if sent < 0 || sent as usize != request.len() {
             return Err(format!("sock_diag の照会を送れない: {}", std::io::Error::last_os_error()));
         }
-        // 1 件の照会の答えは 1 データグラムに収まる(inet_diag_msg と少しの属性)。
+        // 1 件の照会の答えは 1 データグラムに収まる(inet_diag_msg と少しの属性)。recvfrom に
+        // MSG_TRUNC を渡すと、netlink は切り詰める前の長さを返す(buffer より長ければ切れた答え
+        // なので断る)。送り手の sockaddr_nl も受け、カーネル(nl_pid 0)からでなければ断る。
         let mut buffer = vec![0u8; 8192];
-        // SAFETY: buffer は書ける長さ buffer.len() の領域。
-        let received = unsafe {
-            recv(fd.as_raw_fd(), buffer.as_mut_ptr() as *mut c_void, buffer.len(), 0)
+        let (received, sender) = loop {
+            let mut sender = SockaddrNetlink { family: 0, pad: 0, pid: u32::MAX, groups: 0 };
+            let mut sender_length = std::mem::size_of::<SockaddrNetlink>() as u32;
+            // SAFETY: buffer は書ける長さ buffer.len() の領域、sender と sender_length は呼び出しの
+            // 間生きていて、sender_length は sender の大きさを言う。
+            let received = unsafe {
+                recvfrom(
+                    fd.as_raw_fd(),
+                    buffer.as_mut_ptr() as *mut c_void,
+                    buffer.len(),
+                    MSG_TRUNC,
+                    &mut sender as *mut SockaddrNetlink as *mut c_void,
+                    &mut sender_length,
+                )
+            };
+            if received < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(format!("sock_diag の答えを受けられない: {error}"));
+            }
+            if (sender_length as usize) < std::mem::size_of::<SockaddrNetlink>() {
+                return Err(format!("sock_diag の答えの送り手の長さが不正({sender_length})"));
+            }
+            break (received as usize, sender);
         };
-        if received < 0 {
-            return Err(format!("sock_diag の答えを受けられない: {}", std::io::Error::last_os_error()));
+        if sender.family != AF_NETLINK as u16 || sender.pid != 0 {
+            return Err(format!(
+                "sock_diag の答えの送り手がカーネルでない(族 {}、nl_pid {})",
+                sender.family, sender.pid
+            ));
         }
-        parse_reply(&buffer[..received as usize], sequence)
+        if received > buffer.len() {
+            return Err(format!(
+                "sock_diag の答えが受け口({} バイト)より長い({received} バイト。切れた答えは読まない)",
+                buffer.len()
+            ));
+        }
+        parse_reply(&buffer[..received], sequence)
     }
 }
 
@@ -623,5 +709,83 @@ mod tests {
         assert_eq!(parse_reply(&error, 6), Ok(Vec::new()), "ENOENT は答え 0 件");
         error[16..20].copy_from_slice(&(-13i32).to_ne_bytes());
         assert!(parse_reply(&error, 6).is_err(), "他の誤りは照会の失敗");
+    }
+
+    /// netlink の通知 1 つ(頭と中身)。
+    fn netlink_message(kind: u16, flags: u16, sequence: u32, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(16 + payload.len() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&kind.to_ne_bytes());
+        bytes.extend_from_slice(&flags.to_ne_bytes());
+        bytes.extend_from_slice(&sequence.to_ne_bytes());
+        bytes.extend_from_slice(&0u32.to_ne_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn diag_payload() -> Vec<u8> {
+        let mut message = vec![0u8; 72];
+        message[0] = platform::AF_INET;
+        message[1] = TCP_ESTABLISHED;
+        message[4..6].copy_from_slice(&40000u16.to_be_bytes());
+        message[6..8].copy_from_slice(&7440u16.to_be_bytes());
+        message[8..12].copy_from_slice(&[127, 0, 0, 1]);
+        message[24..28].copy_from_slice(&[127, 0, 0, 1]);
+        message[44..48].copy_from_slice(&77u32.to_ne_bytes());
+        message[64..68].copy_from_slice(&1000u32.to_ne_bytes());
+        message[68..72].copy_from_slice(&12345u32.to_ne_bytes());
+        message
+    }
+
+    fn error_payload(code: i32) -> Vec<u8> {
+        let mut payload = code.to_ne_bytes().to_vec();
+        payload.extend_from_slice(&[0u8; 16]);
+        payload
+    }
+
+    /// 1 件の照会の答えの形でないもの(Codex 低 3)は断る。
+    #[test]
+    fn a_reply_that_is_not_the_single_reply_form_is_refused() {
+        let answer = netlink_message(20, 0, 5, &diag_payload());
+        // NLM_F_MULTI の付いた答え(dump の形)。
+        let multi = netlink_message(20, 2, 5, &diag_payload());
+        let error = parse_reply(&multi, 5).expect_err("断る");
+        assert!(error.contains("NLM_F_MULTI"), "{error}");
+        // 誤りの値が 0 でない NLMSG_DONE。0 なら読み飛ばす。
+        let mut done_error = answer.clone();
+        done_error.extend_from_slice(&netlink_message(3, 0, 5, &(-13i32).to_ne_bytes()));
+        assert!(parse_reply(&done_error, 5).expect_err("断る").contains("終わりの通知"));
+        let mut done_ok = answer.clone();
+        done_ok.extend_from_slice(&netlink_message(3, 0, 5, &0i32.to_ne_bytes()));
+        assert_eq!(parse_reply(&done_ok, 5), Ok(vec![established(1000)]));
+        // 末尾の端のバイト(頭に満たない)と、長さの合わない通知。
+        let mut trailing = answer.clone();
+        trailing.extend_from_slice(&[1, 2, 3, 4, 5]);
+        assert!(parse_reply(&trailing, 5).expect_err("断る").contains("半端"));
+        let mut overlong = answer.clone();
+        overlong.extend_from_slice(&netlink_message(20, 0, 5, &diag_payload())[..40]);
+        assert!(parse_reply(&overlong, 5).expect_err("断る").contains("長さ"));
+        // 返事が 2 つ(答えと答え、答えと誤り)。
+        let mut two = answer.clone();
+        two.extend_from_slice(&answer);
+        assert!(parse_reply(&two, 5).expect_err("断る").contains("2 つ以上"));
+        let mut answer_and_error = answer.clone();
+        answer_and_error.extend_from_slice(&netlink_message(2, 0, 5, &error_payload(-2)));
+        assert!(parse_reply(&answer_and_error, 5).is_err());
+        // 返事の無いデータグラム(空と、sequence の違う通知だけ)。違う通知は読み飛ばす。
+        assert!(parse_reply(&[], 5).is_err());
+        let other = netlink_message(20, 0, 4, &diag_payload());
+        assert!(parse_reply(&other, 5).is_err());
+        let mut other_then_ours = other.clone();
+        other_then_ours.extend_from_slice(&answer);
+        assert_eq!(parse_reply(&other_then_ours, 5), Ok(vec![established(1000)]));
+    }
+
+    /// 誤りの値が i32::MIN でも符号の反転で溢れず、Err を返す(Claude 低 2)。
+    #[test]
+    fn an_error_code_of_i32_min_is_refused_without_overflow() {
+        let reply = netlink_message(2, 0, 6, &error_payload(i32::MIN));
+        let error = parse_reply(&reply, 6).expect_err("断る");
+        assert!(error.contains("不正"), "{error}");
     }
 }

@@ -1993,8 +1993,9 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                     std::process::exit(2);
                 }
             };
-            // 順序は「主の口の検査 → 束縛する → ストアを開く → 装備する → listening on」。
-            // 起動時の検査(束縛先・OS・overflowuid・束縛そのもの)はすべてストアを開く前に
+            // 順序は「主の口の検査 → 束縛する → 自己試験 → ストアを開く → 装備する →
+            // listening on」。起動時の検査(束縛先・OS・overflowuid・束縛そのもの・自分の接続の
+            // uid の判定)はすべてストアを開く前に
             // 済ませ、断るときはストアに触れずに終わる(API_AUTH の 1)。標準出力の
             // listening on の 1 行は起動スクリプトとの取り決めで、待つ側は「出たら要求を
             // 受け付ける」と信じてよい。だから束縛の後でも、ストアを開いて装備し終えるまでは
@@ -2008,6 +2009,21 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                     std::process::exit(1);
                 }
             };
+            let hooks = main_door.test_hooks_in_use();
+            if !hooks.is_empty() {
+                uniqnode::log_line!(
+                    "uniqnode: serve: 主の口のテスト用の口が効いている({})。debug ビルドの試験用で、\
+                     常駐には置かない",
+                    hooks.join(", ")
+                );
+            }
+            // 起動時の自己試験(束縛の後、ストアを開く前)。自分の接続の uid を判定できなければ、
+            // 起きても全部の接続を 403 で断るだけなので、理由を言って 2 で終わる(unit の
+            // Restart= では直らない設定の誤りである)。
+            if let Err(message) = main_door.self_test(&listener) {
+                uniqnode::log_line!("uniqnode: serve: {message}");
+                std::process::exit(2);
+            }
             let data_dir = std::path::PathBuf::from(dir);
             let (capacity_bytes, health_params) = uniqnode::health::read_node_config(&data_dir);
             let mut store_config = uniqnode::store::StoreConfig::new(&data_dir);

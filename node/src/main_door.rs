@@ -20,45 +20,46 @@ pub const ALLOW_UID_FLAG: &str = "--main-allow-uid";
 /// 許す Host(authority)を足す serve の引数。
 pub const ALLOW_HOST_FLAG: &str = "--main-allow-host";
 
-/// テスト用の口: cfg(debug_assertions) のビルドだけが読む環境変数。値はミリ秒で、判定の前に
-/// その間待つ。相手が送ってすぐ閉じた接続を、相手のソケットが FIN_WAIT2・TIME_WAIT の形に
-/// なってから判定させ、判定の枠が埋まった形を作るため(node/tests/main_door.rs)。release
-/// ビルドには入らない。
+/// テスト用の口の鍵: 下の 3 つのテスト用の口は、cfg(debug_assertions) のビルドで、かつこの
+/// 環境変数が `1` のときだけ読む(debug ビルドを常駐に置いても、環境変数 1 つの取り違えで
+/// 判定が変わらないように、2 つ揃って初めて効く)。release ビルドには入らない。使っている
+/// テスト用の口は起動時にログへ言う。
+pub const TEST_HOOKS_ENV: &str = "UNIQNODE_MAIN_TEST_HOOKS";
+
+/// テスト用の口: 値はミリ秒で、判定の前にその間待つ。相手が送ってすぐ閉じた接続を、相手の
+/// ソケットが FIN_WAIT2・TIME_WAIT の形になってから判定させ、判定の枠が埋まった形を作るため
+/// (node/tests/main_door.rs)。起動時の自己試験には効かない。
 pub const CHECK_DELAY_ENV: &str = "UNIQNODE_MAIN_CHECK_DELAY_MS";
 
-/// テスト用の口: cfg(debug_assertions) のビルドだけが読む環境変数。値はファイルの道で、判定の
-/// ときにそのファイルがあれば、中身の uid を相手のソケットの uid として判定する(無ければ実際の
-/// uid のまま)。別の uid の接続は root 無しには作れないので、断られる相手と許される相手を
-/// 同じ serve に当てる試験(node/tests/main_door.rs)がこれで前者を作る。release ビルドには
-/// 入らない。
+/// テスト用の口: 値はファイルの道で、判定のときにそのファイルがあれば、中身の uid を相手の
+/// ソケットの uid として判定する(無ければ実際の uid のまま)。別の uid の接続は root 無しには
+/// 作れないので、断られる相手と許される相手を同じ serve に当てる試験(node/tests/main_door.rs)が
+/// これで前者を作る。起動時の自己試験には効かない。
 pub const PEER_UID_FILE_ENV: &str = "UNIQNODE_MAIN_PEER_UID_FILE";
 
-/// 相手の uid の差し替え(テスト用。上の PEER_UID_FILE_ENV)。
-fn peer_uid_file() -> Option<std::path::PathBuf> {
+/// テスト用の口: 値が `1` なら、sock_diag の照会ソケットを作れない(AF_NETLINK を塞いだ unit で
+/// socket が EAFNOSUPPORT を返す)形を真似る。起動時の自己試験が理由を言って 2 で終わることを
+/// 試験で固めるため。
+pub const NETLINK_UNAVAILABLE_ENV: &str = "UNIQNODE_MAIN_NETLINK_UNAVAILABLE";
+
+/// テスト用の口の値(鍵が揃わなければ None)。
+fn test_hook(name: &str) -> Option<String> {
     #[cfg(debug_assertions)]
     {
-        std::env::var_os(PEER_UID_FILE_ENV).map(std::path::PathBuf::from)
+        if std::env::var(TEST_HOOKS_ENV).is_ok_and(|value| value == "1") {
+            return std::env::var(name).ok();
+        }
+        None
     }
     #[cfg(not(debug_assertions))]
     {
+        let _ = name;
         None
     }
 }
 
-/// 判定の前に待つ時間(テスト用。上の CHECK_DELAY_ENV)。
-fn check_delay() -> Option<Duration> {
-    #[cfg(debug_assertions)]
-    {
-        std::env::var(CHECK_DELAY_ENV)
-            .ok()
-            .and_then(|text| text.parse::<u64>().ok())
-            .map(Duration::from_millis)
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        None
-    }
-}
+/// 起動時の自己試験の期限(自分への接続と、それを accept するまで)。
+pub const SELF_TEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// overflowuid の置き場(写せない uid がこの値で表示される)。
 pub const OVERFLOW_UID_PATH: &str = "/proc/sys/kernel/overflowuid";
@@ -140,9 +141,11 @@ pub fn read_overflow_uid() -> Result<u32, String> {
 /// 主の口の uid の判定。
 pub struct MainDoor {
     allowed_uids: Vec<u32>,
+    euid: u32,
     overflow_uid: u32,
     check_delay: Option<Duration>,
     peer_uid_file: Option<std::path::PathBuf>,
+    netlink_unavailable: bool,
 }
 
 impl MainDoor {
@@ -174,11 +177,76 @@ impl MainDoor {
         }
         Ok(MainDoor {
             allowed_uids,
+            euid,
             overflow_uid,
-            check_delay: check_delay(),
-            peer_uid_file: peer_uid_file(),
+            check_delay: test_hook(CHECK_DELAY_ENV)
+                .and_then(|text| text.parse::<u64>().ok())
+                .map(Duration::from_millis),
+            peer_uid_file: test_hook(PEER_UID_FILE_ENV).map(std::path::PathBuf::from),
+            netlink_unavailable: test_hook(NETLINK_UNAVAILABLE_ENV).is_some_and(|v| v == "1"),
         })
     }
+
+    /// 効いているテスト用の口の名前(起動時のログに載せる。release ビルドでは常に空)。
+    pub fn test_hooks_in_use(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.check_delay.is_some() {
+            names.push(CHECK_DELAY_ENV);
+        }
+        if self.peer_uid_file.is_some() {
+            names.push(PEER_UID_FILE_ENV);
+        }
+        if self.netlink_unavailable {
+            names.push(NETLINK_UNAVAILABLE_ENV);
+        }
+        names
+    }
+
+    /// sock_diag への照会(テスト用の口 NETLINK_UNAVAILABLE_ENV が効いていれば、照会ソケットを
+    /// 作れない形の Err を返す)。
+    fn lookup(&self, expected: sock_diag::Endpoints) -> Result<Vec<sock_diag::Answer>, String> {
+        if self.netlink_unavailable {
+            const EAFNOSUPPORT: i32 = 97;
+            return Err(sock_diag::socket_unavailable(&std::io::Error::from_raw_os_error(
+                EAFNOSUPPORT,
+            )));
+        }
+        sock_diag::lookup(expected)
+    }
+
+    /// 起動時の自己試験(束縛の後、ストアを開く前・listening on の前に 1 回)。束縛した主の口へ
+    /// ループバックで自分から 1 本繋ぎ、その接続を accept して、相手(自分)の uid が serve の
+    /// euid と判定されることを確かめる。照会ソケットを作れない(unit が AF_NETLINK を塞いでいる)
+    /// か照会が壊れていると、serve は起動しても全部の接続を 403 で断り、unit は active のまま
+    /// Restart= も効かず、/v1/admin/shutdown も届かない。その形で起き上がらないために、ここで
+    /// 理由を言って終わる。許す集合(--main-allow-uid)は問わない(集合から euid を外した
+    /// serve も起きてよい)。テスト用の口のうち判定の遅れと uid の差し替えは効かない。
+    ///
+    /// listening on の前なので、この間に届いた他人の接続は読まずに閉じる(待つ側は listening on
+    /// を見てから繋ぐ取り決め)。
+    pub fn self_test(&self, listener: &std::net::TcpListener) -> Result<(), String> {
+        let fail = |reason: String| {
+            format!(
+                "起動時の自己試験: 主の口への自分の接続の uid を判定できない: {reason}。このまま\
+                 起こすと主の口はすべての接続を 403 で断るので起動しない(systemd の unit なら\
+                 RestrictAddressFamilies= に AF_NETLINK が要る)"
+            )
+        };
+        let bound = listener.local_addr().map_err(|e| fail(format!("束縛先を読めない: {e}")))?;
+        let client = TcpStream::connect_timeout(&bound, SELF_TEST_TIMEOUT)
+            .map_err(|e| fail(format!("{bound} へ繋げない: {e}")))?;
+        let client_address =
+            client.local_addr().map_err(|e| fail(format!("自分の接続の端を読めない: {e}")))?;
+        let accepted = accept_own(listener, client_address).map_err(fail)?;
+        let peer = accepted.peer_addr().map_err(|e| fail(format!("相手のアドレスを読めない: {e}")))?;
+        let local =
+            accepted.local_addr().map_err(|e| fail(format!("自分のアドレスを読めない: {e}")))?;
+        let expected = sock_diag::Endpoints { local: peer, remote: local };
+        let answers = self.lookup(expected).map_err(fail)?;
+        sock_diag::judge(&answers, expected, self.overflow_uid, &[self.euid]).map_err(fail)?;
+        Ok(())
+    }
+
 
     pub fn allowed_uids(&self) -> &[u32] {
         &self.allowed_uids
@@ -193,7 +261,7 @@ impl MainDoor {
         let local = stream.local_addr().map_err(|e| format!("自分のアドレスを読めない: {e}"))?;
         // 相手のソケットから見た向き: local が相手、remote が自分の束縛先。
         let expected = sock_diag::Endpoints { local: peer, remote: local };
-        let mut answers = sock_diag::lookup(expected)?;
+        let mut answers = self.lookup(expected)?;
         if let Some(path) = &self.peer_uid_file {
             if let Some(uid) = std::fs::read_to_string(path).ok().and_then(|t| t.trim().parse().ok()) {
                 for answer in &mut answers {
@@ -203,6 +271,32 @@ impl MainDoor {
         }
         sock_diag::judge(&answers, expected, self.overflow_uid, &self.allowed_uids).map(|_| ())
     }
+}
+
+/// 自己試験の接続を accept する: 期限の内に、相手が client(自分の接続の端)である接続が来る
+/// まで accept し、他の接続は閉じる。listener の非ブロックは戻してから返す。
+fn accept_own(listener: &std::net::TcpListener, client: SocketAddr) -> Result<TcpStream, String> {
+    listener.set_nonblocking(true).map_err(|e| format!("束縛を非ブロックにできない: {e}"))?;
+    let deadline = std::time::Instant::now() + SELF_TEST_TIMEOUT;
+    let result = loop {
+        match listener.accept() {
+            Ok((stream, peer)) if peer == client => break Ok(stream),
+            Ok((other, _)) => drop(other),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    break Err(format!("自分の接続を {SELF_TEST_TIMEOUT:?} の内に accept できない"));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => break Err(format!("自分の接続を accept できない: {e}")),
+        }
+    };
+    let restored = listener.set_nonblocking(false).map_err(|e| format!("束縛をブロックに戻せない: {e}"));
+    let stream = result?;
+    restored?;
+    stream.set_nonblocking(false).map_err(|e| format!("接続をブロックに戻せない: {e}"))?;
+    Ok(stream)
 }
 
 /// 道ごとの本文の型の決まり(主の口だけ。読み口と feed の口には広げない)。
@@ -219,7 +313,8 @@ pub enum BodyRule {
 }
 
 /// 要求の道の本文の決まり。道の表は api::handle と同じ字面で、api.rs の道を足したらここにも
-/// 足す(足し忘れると Any になり、単純な 3 つの型の 415 だけが残る)。
+/// 足す(足し忘れると Any になり、単純な 3 つの型の 415 だけが残る)。足し忘れは試験
+/// every_route_in_api_rs_has_a_body_rule が api.rs の道の字面を拾って赤にする。
 pub fn body_rule(method: &str, path: &str) -> BodyRule {
     let path = path.split('?').next().unwrap_or("");
     match (method, path) {
@@ -384,6 +479,90 @@ mod tests {
         assert_eq!(status(&same), None);
         for simple in http::SIMPLE_CONTENT_TYPES {
             assert_eq!(status(&request("POST", "/v1/admin/shutdown", Some(simple), b"")), Some(415));
+        }
+    }
+
+    /// api.rs の道の字面(一致の腕 `("POST", "/v1/…")` と、`path.strip_prefix("/v1/…")` の接頭辞)を
+    /// 全部拾い、本文の決まりの付け忘れを赤にする(Claude 低 4)。本文を読む道(POST・PUT)は
+    /// Any でないか、本文を読まない道の一覧にあること。接頭辞の道は下の表に代表の道と決まりを
+    /// 置き、表に無い接頭辞が api.rs に現れたら赤にする(新しい道の決まりを決めさせる)。
+    #[test]
+    fn every_route_in_api_rs_has_a_body_rule() {
+        let source = include_str!("api.rs");
+        // 本文を読まない POST(型を問わない)。
+        const NO_BODY: [(&str, &str); 1] = [("POST", "/v1/admin/shutdown")];
+        let mut arms = Vec::new();
+        for method in ["GET", "POST", "PUT", "DELETE"] {
+            let opener = format!("(\"{method}\", ");
+            for (at, _) in source.match_indices(&opener) {
+                let rest = &source[at + opener.len()..];
+                let Some(end) = rest.find(')') else { continue };
+                let path_token = &rest[..end];
+                let path = match path_token {
+                    "crate::distributed_search::PEER_QUERY_PATH" => {
+                        crate::distributed_search::PEER_QUERY_PATH.to_string()
+                    }
+                    token if token.starts_with("\"/") && token.ends_with('"') => {
+                        token.trim_matches('"').to_string()
+                    }
+                    // 入れ子の腕(`("PUT", "")` など)は接頭辞の表が受け持つ。
+                    _ => continue,
+                };
+                arms.push((method, path));
+            }
+        }
+        assert!(arms.len() >= 15, "api.rs の道の腕を拾えていない: {arms:?}");
+        for (method, path) in &arms {
+            let rule = body_rule(method, path);
+            match *method {
+                "POST" | "PUT" if !NO_BODY.contains(&(method, path.as_str())) => {
+                    assert_ne!(rule, BodyRule::Any, "{method} {path} に本文の決まりが無い")
+                }
+                _ => assert_eq!(rule, BodyRule::Any, "{method} {path}"),
+            }
+        }
+        // 接頭辞の道: 接頭辞 → (method, 代表の道, 決まり)。
+        let prefixes: [(&str, &[(&str, &str, BodyRule)]); 7] = [
+            ("/v1/queries/", &[("GET", "/v1/queries/q1", BodyRule::Any)]),
+            ("/v1/replication/refs?", &[("GET", "/v1/replication/refs?signer=a", BodyRule::Any)]),
+            ("/v1/objects/", &[("GET", "/v1/objects/s256:0/citation", BodyRule::Any)]),
+            ("/v1/closure/", &[("GET", "/v1/closure/s256:0", BodyRule::Any)]),
+            (
+                "/v1/refs/",
+                &[("GET", "/v1/refs/a", BodyRule::Any), ("PUT", "/v1/refs/a", BodyRule::Json)],
+            ),
+            (
+                "/v1/graphs/",
+                &[
+                    ("PUT", "/v1/graphs/g/nodes/n", BodyRule::JsonIfPresent),
+                    ("PUT", "/v1/graphs/g/edges/t/a/b", BodyRule::JsonIfPresent),
+                    ("DELETE", "/v1/graphs/g/edges/t/a/b", BodyRule::Any),
+                ],
+            ),
+            (
+                "/v1/collections/",
+                &[
+                    ("POST", "/v1/collections/c/fetch", BodyRule::Json),
+                    ("PUT", "/v1/collections/c/documents/a.md?meta.k=v", BodyRule::Raw),
+                ],
+            ),
+        ];
+        let opener = "strip_prefix(\"";
+        for (at, _) in source.match_indices(opener) {
+            let rest = &source[at + opener.len()..];
+            let prefix = &rest[..rest.find('"').expect("閉じの引用符")];
+            if !prefix.starts_with("/v1/") {
+                continue;
+            }
+            assert!(
+                prefixes.iter().any(|(known, _)| *known == prefix),
+                "api.rs の接頭辞の道 {prefix} の本文の決まりが表に無い"
+            );
+        }
+        for (_, samples) in &prefixes {
+            for (method, path, rule) in samples.iter() {
+                assert_eq!(&body_rule(method, path), rule, "{method} {path}");
+            }
         }
     }
 }

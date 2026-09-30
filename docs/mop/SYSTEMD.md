@@ -117,7 +117,8 @@ unit ファイルは差し替えても drop-in は残る。
   (node/tests/crash.rs がそれを実プロセスで確かめている)。
 - RestartPreventExitStatus=1 2。起動時に分かる誤りは再起動で直らないので、1 回で止めて
   理由を journal に残す。1 はアドレスが塞がっている・別プロセスがストアを開いている、
-  2 は引数の誤りである。POST /v1/admin/shutdown による終了(0)は意図した停止なので、
+  2 は引数の誤りと、主の口の起動時の自己試験の失敗(自分の接続の uid を判定できない。
+  AF_NETLINK を塞いだ unit など)である。POST /v1/admin/shutdown による終了(0)は意図した停止なので、
   on-failure は起こし直さない(unit は inactive のまま。起こすなら `systemctl start`)。
 - 閉じ込めは書ける場所を StateDirectory= の下だけにし、/ と home を読むだけにする。
   RestrictAddressFamilies= に AF_UNIX を残しているのはロックが unix socket だからで、
@@ -125,14 +126,17 @@ unit ファイルは差し替えても drop-in は残る。
   なり、外の CLI と unit が互いのロックを見られなくなる(二重起動を検出できなくなる)からで
   ある。viewer と mcp が loopback で serve に届く必要もある。serve の unit に AF_NETLINK を
   足しているのは、主の口が接続の相手のソケットの uid を NETLINK_SOCK_DIAG に照会するからで、
-  無いと照会のソケットを作れず正規の接続まで 403 になる
-  ([docs/plan/API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771) の 1)。
+  無いと照会のソケットを作れない。serve は束縛の後の自己試験(自分から主の口へ 1 本繋いで
+  判定する)でこれを見つけ、listening on を出さずに理由を言って 2 で終わる(全部の接続を 403 で
+  断るまま active で居座らない。[docs/plan/API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771)
+  の 1)。
 - 主の口は serve と同じ uid(`--main-allow-uid` で集合を置き換えられる)の接続だけを受ける。
-  system 単位の serve は User=uniqnode で走るので、root の curl や操作者の利用者の curl は
-  403 になる。install の起動の確認(`GET /v1/status` の node_id の照合)は、system 単位では
+  system 単位の serve は unit の User=(既定は uniqnode。`install --system` は drop-in で sudo を
+  打った利用者に替える)で走るので、それ以外の利用者(root を含む)の curl は 403 になる。
+  install の起動の確認(`GET /v1/status` の node_id の照合)は、system 単位では
   サービスの利用者に権限を落とした子プロセス(置いたバイナリの隠しコマンド
-  `install-status-probe`)から主の口を探る。手で確かめるなら `sudo -u uniqnode curl …` の形で
-  叩く。user 単位の unit は PrivateUsers=yes なので、serve からは自分と root 以外の uid が
+  `install-status-probe`)から主の口を探る。手で確かめるなら、unit の実際の User= で
+  `sudo -u "$(systemctl show -p User --value uniqnode-serve@default)" curl …` の形で叩く。user 単位の unit は PrivateUsers=yes なので、serve からは自分と root 以外の uid が
   overflowuid に見え、断られる。
 - pdftotext・pdftohtml・pdftoppm(PDF の取り込み・見出し・写し)と curl(URL の取り込み)は
   PATH から引く。閉じ込めは /usr の実行を妨げず、ProtectHome=read-only は home の下の
@@ -686,7 +690,8 @@ useradd で作るのはユーザー(とその主グループ)だけで、/var/li
 serve が走っているあいだ、CLI の ingest・embed・sync はストアのロックに阻まれる。取り込みは
 REST(`PUT /v1/collections/{c}/documents/{name}`)か、それを 1 件ずつ打つ
 `uniqnode ingest <dir> <c> <パス> --serve-url http://127.0.0.1:7440`(ストアを開かないので
-serve を止めず、実行ユーザーでなくても打てる)で行い、CLI が要るそれ以外の作業は serve を止めて
+serve を止めずに打てる。ただし主の口は serve の uid の接続だけを受けるので、serve の実行ユーザーで
+打つ)で行い、CLI が要るそれ以外の作業は serve を止めて
 `sudo -u uniqnode /usr/local/bin/uniqnode ingest /var/lib/uniqnode/default …` のように実行ユーザーで
 行う(install --system で据えたなら、その利用者で普通に打つ)。root で走らせると root 所有の
 ファイルがストアに残り、次の serve が書けなくなる。
@@ -844,8 +849,10 @@ curl http://127.0.0.1:7440/v1/status                      # serve が答える
 curl http://127.0.0.1:7450/v1/status                      # viewer が serve へ転送して同じ答え
 ```
 
-system 単位では、主の口は serve の User= の uid の接続だけを受けるので、1 行目は
-`sudo -u uniqnode curl http://127.0.0.1:7440/v1/status` の形で叩く(操作者の利用者のままだと
+system 単位では、主の口は serve の User= の uid の接続だけを受けるので、1 行目は unit の
+実際の User=(既定は uniqnode で、`install --system` の drop-in が替えていればその利用者)で
+`sudo -u "$(systemctl show -p User --value uniqnode-serve@default)" curl http://127.0.0.1:7440/v1/status`
+の形で叩く(User= と違う利用者のままだと
 「main door: この接続の相手を受け付けない」の 403 になる。それ自体が uid の判定の効いている証である)。
 
 埋め込みを足したなら、起動直後の journal に `uniqnode: embedding: bge-m3 (http://…)` の

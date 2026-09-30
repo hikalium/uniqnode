@@ -15,7 +15,13 @@ use std::sync::Arc;
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+/// 要求を読み始めてから読み終えるまでの読みの期限(1 回の read ごと)。接続の最初の要求も、
+/// 最初のバイトまでこの期限で待つ。
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// keep-alive の接続で、応答を書いてから次の要求の最初のバイトが届くまで待つ期限。これを
+/// 過ぎたら黙って閉じる。黙った keep-alive の接続が主の口の接続の枠(CONNECTION_SLOTS)を
+/// READ_TIMEOUT の間持ち続けないように、READ_TIMEOUT より短くする。
+pub const KEEP_ALIVE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub struct Request {
     pub method: String,
@@ -216,11 +222,12 @@ impl Drop for Slot {
     }
 }
 
-/// 主の口の 3 種類の枠。
+/// 主の口の 3 種類の枠と、断りの枠が埋まっていてログも 403 も書かずに閉じた断りの数。
 pub struct DoorGauge {
     pub checking: Arc<Slots>,
     pub connected: Arc<Slots>,
     pub refusing: Arc<Slots>,
+    pub refused_unlogged: std::sync::atomic::AtomicU64,
 }
 
 impl DoorGauge {
@@ -229,6 +236,7 @@ impl DoorGauge {
             checking: Slots::new(CHECK_SLOTS),
             connected: Slots::new(CONNECTION_SLOTS),
             refusing: Slots::new(REFUSAL_SLOTS),
+            refused_unlogged: std::sync::atomic::AtomicU64::new(0),
         })
     }
 }
@@ -252,8 +260,10 @@ pub const REFUSED_PREFIX: &str = "main door: この接続の相手を受け付�
 ///   その場で閉じる(応答は書かない。書くと遅い相手に accept が止められる)。
 /// - 判定が通ったら接続の枠を待たずに取り、取れたら判定の枠を返して HTTP の処理へ移る。
 ///   取れなければ閉じて判定の枠を返す。判定の枠を接続の終わりまで持ち続けない。
-/// - 判定が断ったら、判定の枠をその場で返し、断りの枠を待たずに取る。取れたら 403 を最善努力で
-///   届け、期限の内に閉じて断りの枠を返す。取れなければ 403 を書かずにすぐ閉じる。
+/// - 判定が断ったら、断りの枠を待たずに取り、取れたら判定の枠を返して 403 を最善努力で届け、
+///   期限の内に閉じて断りの枠を返す。取れなければ 403 もログも書かずにすぐ閉じ、判定の枠を
+///   返して、その数だけを数える(DoorGauge::refused_unlogged。/v1/status の main_door)。
+///   断りのログの書き出しは、断りの枠を持っている間にだけ行う。
 pub fn serve_checked(
     listener: TcpListener,
     gauge: Arc<DoorGauge>,
@@ -270,14 +280,18 @@ pub fn serve_checked(
             .name("main-door".to_string())
             .spawn(move || {
                 if let Err(reason) = check(&stream) {
-                    drop(check_slot);
+                    // 判定の枠は断りの枠を取れるまで持ち、取れた時点で(403 を届ける前に)返す。
+                    // 取れなければ、ログを書かずに(書き込みで止まりうる同期の書き出しをせずに)
+                    // すぐ閉じ、数だけを数える。どちらの道でも、枠の外のスレッドが数えられずに
+                    // 積もることは無い。
                     let Some(refusal_slot) = gauge.refusing.try_take() else {
-                        crate::log_line!(
-                            "uniqnode: serve: 主の口が {peer} を断った(断りの枠が埋まっていて 403 を書かない): {reason}"
-                        );
                         let _ = stream.shutdown(std::net::Shutdown::Both);
+                        drop(stream);
+                        gauge.refused_unlogged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        drop(check_slot);
                         return;
                     };
+                    drop(check_slot);
                     crate::log_line!("uniqnode: serve: 主の口が {peer} を断った: {reason}");
                     refuse_connection(stream, &reason);
                     drop(refusal_slot);
@@ -426,7 +440,26 @@ fn handle_connection(
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
+    let mut first = true;
     loop {
+        if !std::mem::take(&mut first) {
+            // 次の要求の最初のバイトは短い期限で待ち、届いたら要求を読む間の期限へ戻す。
+            writer.set_read_timeout(Some(KEEP_ALIVE_IDLE_TIMEOUT))?;
+            match reader.fill_buf() {
+                Ok([]) => return Ok(()), // クライアントが正常に切った
+                Ok(_) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Ok(()); // 黙った keep-alive は閉じる
+                }
+                Err(e) => return Err(e),
+            }
+            writer.set_read_timeout(Some(READ_TIMEOUT))?;
+        }
         let request = match read_request(&mut reader, &mut writer)? {
             None => return Ok(()), // クライアントが正常に切った
             Some(ReadOutcome::Bad(status, message)) => {

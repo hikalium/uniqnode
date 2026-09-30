@@ -11,16 +11,18 @@ use common::*;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// serve を address と引数と環境変数を与えて起こし、`listening on` の行から実際の束縛先を読む。
-fn start(name: &str, address: &str, args: &[&str], envs: &[(&str, &str)]) -> Server {
-    start_with(&[], name, address, args, envs)
-}
+/// serve の起動(listening on)と、断る serve の終わりを待つ期限。debug ビルドを並べて走らせても
+/// 数秒で済む。過ぎたら子を殺して刈り取り、大きな声で失敗する(黙って止まらない)。
+const PROCESS_DEADLINE: Duration = Duration::from_secs(30);
 
-/// start と同じだが、serve の前に命令を置く(`unshare --user` の下で起こす用)。
-fn start_with(prefix: &[&str], name: &str, address: &str, args: &[&str], envs: &[(&str, &str)]) -> Server {
-    let dir = unique_dir(name);
+/// テスト用の口の鍵(main_door::TEST_HOOKS_ENV)。テスト用の口を使う serve に一緒に渡す。
+const HOOKS_ON: (&str, &str) = (uniqnode::main_door::TEST_HOOKS_ENV, "1");
+
+/// serve の命令を組む(`unshare --user` の下で起こすなら prefix に置く)。
+fn serve_command(prefix: &[&str], dir: &std::path::Path, address: &str, args: &[&str], envs: &[(&str, &str)]) -> Command {
     let binary = env!("CARGO_BIN_EXE_uniqnode");
     let mut command = match prefix.split_first() {
         Some((program, rest)) => {
@@ -33,49 +35,137 @@ fn start_with(prefix: &[&str], name: &str, address: &str, args: &[&str], envs: &
     for (key, value) in envs {
         command.env(key, value);
     }
-    let mut child = command
-        .args(["serve", dir.to_str().expect("utf-8"), address, "--no-log"])
-        .args(args)
+    command.args(["serve", dir.to_str().expect("utf-8"), address, "--no-log"]).args(args);
+    command
+}
+
+/// 子の標準出力の行を裏のスレッドで集める。
+fn collect_lines(stdout: std::process::ChildStdout) -> Arc<Mutex<Vec<String>>> {
+    let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = lines.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            sink.lock().expect("lock").push(line);
+        }
+    });
+    lines
+}
+
+/// 期限の内に wanted に合う行を待つ。子が先に終わるか期限が過ぎたら、子を殺して刈り取り、失敗する。
+fn wait_for_line(child: &mut std::process::Child, lines: &Arc<Mutex<Vec<String>>>, wanted: impl Fn(&str) -> bool) -> String {
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    loop {
+        if let Some(line) = lines.lock().expect("lock").iter().find(|line| wanted(line)) {
+            return line.clone();
+        }
+        let exited = child.try_wait().ok().flatten();
+        if exited.is_some() || Instant::now() >= deadline {
+            let _ = child.kill();
+            let status = child.wait();
+            panic!(
+                "serve の listening on が {PROCESS_DEADLINE:?} の内に出ない(終わり {status:?}、標準出力 {:?})",
+                lines.lock().expect("lock")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// serve を address と引数と環境変数を与えて起こし、`listening on` の行から実際の束縛先を読む。
+fn start(name: &str, address: &str, args: &[&str], envs: &[(&str, &str)]) -> Server {
+    start_with(&[], name, address, args, envs)
+}
+
+/// start と同じだが、serve の前に命令を置く(`unshare --user` の下で起こす用)。
+fn start_with(prefix: &[&str], name: &str, address: &str, args: &[&str], envs: &[(&str, &str)]) -> Server {
+    start_lines(prefix, name, address, args, envs).0
+}
+
+/// start と同じだが、読み口(`--listen-agent 127.0.0.1:0`)も開き、そのアドレスも返す。読み口は
+/// 主の口の判定を通らないので、主の口の枠が埋まっている間も /v1/status の main_door を読める。
+fn start_with_agent(name: &str, args: &[&str], envs: &[(&str, &str)]) -> (Server, String) {
+    let mut all = vec!["--listen-agent", "127.0.0.1:0"];
+    all.extend_from_slice(args);
+    let (mut server, lines) = start_lines(&[], name, "127.0.0.1:0", &all, envs);
+    let suffix = uniqnode::agent_door::LISTENING_LINE_SUFFIX;
+    let line = wait_for_line(&mut server.child, &lines, |line| line.starts_with("listening on ") && line.ends_with(suffix));
+    let agent = line["listening on ".len()..line.len() - suffix.len()].to_string();
+    (server, agent)
+}
+
+fn start_lines(
+    prefix: &[&str],
+    name: &str,
+    address: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> (Server, Arc<Mutex<Vec<String>>>) {
+    let dir = unique_dir(name);
+    let mut child = serve_command(prefix, &dir, address, args, envs)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .expect("spawn serve");
-    let stdout = child.stdout.take().expect("stdout");
-    let mut line = String::new();
-    BufReader::new(stdout).read_line(&mut line).expect("read listening line");
-    let address = line
-        .trim()
-        .strip_prefix("listening on ")
-        .unwrap_or_else(|| panic!("listening on が出ない: {line:?}"))
-        .to_string();
-    Server { child, address, dir, remove_dir_on_drop: true, stderr: None }
+    let lines = collect_lines(child.stdout.take().expect("stdout"));
+    let suffix = uniqnode::agent_door::LISTENING_LINE_SUFFIX;
+    let line = wait_for_line(&mut child, &lines, |line| line.starts_with("listening on ") && !line.ends_with(suffix));
+    let address = line["listening on ".len()..].to_string();
+    (Server { child, address, dir, remove_dir_on_drop: true, stderr: None }, lines)
+}
+
+/// 断る serve の出力。
+struct Refused {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
 }
 
 /// serve を起こして、束縛せずに終わるのを待つ(断りの試験)。
-fn refused_serve(address: &str, args: &[&str]) -> std::process::Output {
-    refused_serve_with(&[], address, args)
+fn refused_serve(address: &str, args: &[&str]) -> Refused {
+    refused_serve_with(&[], address, args, &[])
 }
 
-fn refused_serve_with(prefix: &[&str], address: &str, args: &[&str]) -> std::process::Output {
+/// refused_serve と同じだが、serve の前の命令と環境変数を与える。PROCESS_DEADLINE の内に
+/// 終わらなければ、子を殺して刈り取り、失敗する。
+fn refused_serve_with(prefix: &[&str], address: &str, args: &[&str], envs: &[(&str, &str)]) -> Refused {
     let dir = unique_dir("refused");
-    let binary = env!("CARGO_BIN_EXE_uniqnode");
-    let mut command = match prefix.split_first() {
-        Some((program, rest)) => {
-            let mut command = Command::new(program);
-            command.args(rest).arg(binary);
-            command
-        }
-        None => Command::new(binary),
-    };
-    let output = command
-        .args(["serve", dir.to_str().expect("utf-8"), address, "--no-log"])
-        .args(args)
-        .output()
+    let mut child = serve_command(prefix, &dir, address, args, envs)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("spawn serve");
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut text = Vec::new();
+            let _ = pipe.read_to_end(&mut text);
+            String::from_utf8_lossy(&text).into_owned()
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().expect("stdout")));
+    let stderr = drain(Box::new(child.stderr.take().expect("stderr")));
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("断るはずの serve が {PROCESS_DEADLINE:?} の内に終わらない({address} {args:?})");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let output = Refused {
+        status,
+        stdout: stdout.join().expect("stdout"),
+        stderr: stderr.join().expect("stderr"),
+    };
     // 起動時の検査はすべてストアを開く前に済む(断った serve はデータディレクトリを作らない)。
     let opened = dir.exists();
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(!opened, "断った serve がストアを開いた: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(!opened, "断った serve がストアを開いた: {}", output.stderr);
     output
 }
 
@@ -111,6 +201,7 @@ struct Gauge {
     connections_peak: i64,
     refusing: i64,
     refusing_peak: i64,
+    refused_unlogged: i64,
 }
 
 fn gauge(address: &str) -> Gauge {
@@ -125,6 +216,28 @@ fn gauge(address: &str) -> Gauge {
         connections_peak: field("connections_peak"),
         refusing: field("refusing"),
         refusing_peak: field("refusing_peak"),
+        refused_unlogged: field("refused_unlogged"),
+    }
+}
+
+/// 読み口から /v1/status の main_door を読み、wanted が真になるまで待つ(条件待ち。should/0104)。
+/// 期限は安全網で、過ぎたら最後に見た値を言って失敗する。
+fn wait_for_gauge(agent: &str, what: &str, within: Duration, wanted: impl Fn(&Gauge) -> bool) -> Gauge {
+    let deadline = Instant::now() + within;
+    loop {
+        let seen = gauge(agent);
+        if wanted(&seen) {
+            return seen;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what} にならない: checking {} connections {} refusing {} refused_unlogged {}",
+            seen.checking,
+            seen.connections,
+            seen.refusing,
+            seen.refused_unlogged
+        );
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -157,8 +270,7 @@ fn wait_until_idle(address: &str) -> Gauge {
 fn serve_refuses_a_main_door_that_is_not_a_loopback_ip_literal() {
     for address in ["0.0.0.0:0", "[::]:0", "[::ffff:127.0.0.1]:0", "10.10.128.1:0", "localhost:0"] {
         let output = refused_serve(address, &[]);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let (stdout, stderr) = (&output.stdout, &output.stderr);
         assert_eq!(output.status.code(), Some(2), "{address}: {stderr}");
         assert!(!stdout.contains("listening on"), "{address}: {stdout}");
         assert!(stderr.contains(address) && stderr.contains("ループバック"), "{address}: {stderr}");
@@ -173,8 +285,7 @@ fn a_main_door_that_cannot_bind_exits_before_opening_the_store() {
     let held = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let address = held.local_addr().expect("addr").to_string();
     let output = refused_serve(&address, &[]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stdout, stderr) = (&output.stdout, &output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(!stdout.contains("listening on"), "{stdout}");
     assert!(stderr.contains("束縛できない"), "{stderr}");
@@ -277,7 +388,7 @@ fn a_connection_that_sends_and_closes_at_once_is_not_executed() {
             &format!("send-close-{name}"),
             address,
             &["--main-allow-uid", &allow],
-            &[(uniqnode::main_door::CHECK_DELAY_ENV, "300")],
+            &[HOOKS_ON, (uniqnode::main_door::CHECK_DELAY_ENV, "300")],
         );
         let body = br#"{"target":null}"#;
         {
@@ -291,8 +402,13 @@ fn a_connection_that_sends_and_closes_at_once_is_not_executed() {
             stream.write_all(head.as_bytes()).expect("head");
             stream.write_all(body).expect("body");
         }
-        // 判定(300 ms 後)と、断りの読み捨ての期限(1.1 秒)が過ぎるまで待ってから確かめる。
-        std::thread::sleep(Duration::from_millis(1600));
+        // 判定が走って断り、断りの枠を返し終えた証(refusing_peak が 1 以上で、今の refusing が
+        // 0)を待ってから確かめる(固定の待ちだと、判定より先に確かめて素通りしうる。Claude 中 2)。
+        // この status の接続も 300 ms 遅れて判定されるが、自分の uid なので通る。
+        let seen = wait_for_gauge(&server.address, "断りの判定の終わり", Duration::from_secs(15), |g| {
+            g.refusing_peak >= 1 && g.refusing == 0
+        });
+        assert_eq!(seen.refused_unlogged, 0, "{name}");
         let refs = simple(&server.address, "GET", "/v1/refs", b"");
         assert_eq!(refs.status, 200, "{}", body_text(&refs));
         assert!(!body_text(&refs).contains("sent-and-closed"), "{name}: {}", body_text(&refs));
@@ -302,11 +418,12 @@ fn a_connection_that_sends_and_closes_at_once_is_not_executed() {
 /// 判定の枠(16)を超える接続は、スレッドを作らずに応答を書かずに閉じられ、要求は実行されない。
 #[test]
 fn a_connection_beyond_the_check_slots_is_closed_without_a_response() {
-    let server = start(
+    // 判定を 3 秒遅らせ、その間に 16 本が判定の枠を持った形を作る。枠の数は読み口から読む
+    // (主の口の status は、枠が埋まっている間は自分も閉じられる)。
+    let (server, agent) = start_with_agent(
         "check-slots",
-        "127.0.0.1:0",
         &[],
-        &[(uniqnode::main_door::CHECK_DELAY_ENV, "1500")],
+        &[HOOKS_ON, (uniqnode::main_door::CHECK_DELAY_ENV, "3000")],
     );
     let head = format!("GET /healthz HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", server.address);
     let mut held = Vec::new();
@@ -315,8 +432,10 @@ fn a_connection_beyond_the_check_slots_is_closed_without_a_response() {
         stream.write_all(head.as_bytes()).expect("head");
         held.push(stream);
     }
-    // 16 本が accept されて枠を取るまでの猶予(accept はカーネルの待ち行列から即座に取る)。
-    std::thread::sleep(Duration::from_millis(300));
+    // 16 本が accept されて判定の枠を取り終えるのを待つ(条件待ち。Claude 中 1)。
+    wait_for_gauge(&agent, "判定中 16", Duration::from_millis(2500), |g| {
+        g.checking == uniqnode::http::CHECK_SLOTS as i64
+    });
     let mut over = TcpStream::connect(&server.address).expect("connect");
     let body = br#"{"target":null}"#;
     let put = format!(
@@ -345,11 +464,10 @@ fn a_connection_beyond_the_check_slots_is_closed_without_a_response() {
 fn slow_refused_peers_do_not_shut_out_an_allowed_connection() {
     let flag = unique_dir("peer-uid-file");
     std::fs::write(&flag, (own_uid() + 1).to_string()).expect("write the peer uid file");
-    let server = start(
+    let (server, agent) = start_with_agent(
         "refusal-slots",
-        "127.0.0.1:0",
         &[],
-        &[(uniqnode::main_door::PEER_UID_FILE_ENV, flag.to_str().expect("utf-8"))],
+        &[HOOKS_ON, (uniqnode::main_door::PEER_UID_FILE_ENV, flag.to_str().expect("utf-8"))],
     );
     // 頭を言い切って黙る相手。serve は 403 を書いた後、相手が閉じるのを最長 1 秒待って読み捨てる。
     let head = format!("GET /healthz HTTP/1.1\r\nHost: {}\r\n\r\n", server.address);
@@ -359,8 +477,13 @@ fn slow_refused_peers_do_not_shut_out_an_allowed_connection() {
         stream.write_all(head.as_bytes()).expect("head");
         held.push(stream);
     }
-    // 全部が判定を終えるまでの猶予(判定は 1 本 1 ms に満たない。読み捨ての 1 秒よりずっと短い)。
-    std::thread::sleep(Duration::from_millis(200));
+    // 全部が判定を終えるのを読み口から待つ(条件待ち。Claude 中 1): 判定中が 0、断りの枠が 8 本
+    // 埋まり、残りの 40 本は 403 もログも書かずに閉じられた(refused_unlogged)。断りの枠は
+    // 読み捨ての 1 秒の間埋まったままなので、その内に見える。
+    let unlogged = (uniqnode::http::CHECK_SLOTS * 3 - uniqnode::http::REFUSAL_SLOTS) as i64;
+    wait_for_gauge(&agent, "判定中 0・断り中 8", Duration::from_millis(900), |g| {
+        g.checking == 0 && g.refusing == uniqnode::http::REFUSAL_SLOTS as i64 && g.refused_unlogged == unlogged
+    });
     std::fs::remove_file(&flag).expect("remove the peer uid file");
     let started = Instant::now();
     let seen = gauge(&server.address);
@@ -385,6 +508,7 @@ fn slow_refused_peers_do_not_shut_out_an_allowed_connection() {
     assert_eq!(closed, uniqnode::http::CHECK_SLOTS * 3 - uniqnode::http::REFUSAL_SLOTS);
     let idle = wait_until_idle(&server.address);
     assert_eq!(idle.refusing_peak, uniqnode::http::REFUSAL_SLOTS as i64);
+    assert_eq!(idle.refused_unlogged, unlogged, "枠の外の断りは数える");
 }
 
 /// 認証後の接続の枠(64)。認証済みの接続を持ったまま次の接続が判定を通り、64 本を持った後の
@@ -480,6 +604,67 @@ fn the_check_time_does_not_grow_with_many_time_wait_sockets() {
     assert!(times[19] < Duration::from_millis(500), "最大 {:?}", times[19]);
 }
 
+/// 起動時の自己試験: 照会ソケットを作れない(AF_NETLINK を塞いだ unit で socket が
+/// EAFNOSUPPORT を返す)serve は、listening on を出さず、ストアを開かずに、理由を言って 2 で
+/// 終わる(Claude 高 1)。形はテスト用の口 NETLINK_UNAVAILABLE_ENV で真似る。
+/// should/0137: main.rs の self_test の呼び出しを外すと、serve は listening on を出して起き上がり、
+/// refused_serve_with の期限で赤になる。
+#[test]
+fn a_serve_that_cannot_query_sock_diag_exits_2_before_listening() {
+    let output = refused_serve_with(
+        &[],
+        "127.0.0.1:0",
+        &[],
+        &[HOOKS_ON, (uniqnode::main_door::NETLINK_UNAVAILABLE_ENV, "1")],
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", output.stderr);
+    assert!(!output.stdout.contains("listening on"), "{}", output.stdout);
+    for needle in ["自己試験", "AF_NETLINK", "RestrictAddressFamilies"] {
+        assert!(output.stderr.contains(needle), "{needle}: {}", output.stderr);
+    }
+}
+
+/// テスト用の口は鍵(TEST_HOOKS_ENV=1)が揃わなければ効かない(Claude 低 6): 鍵の無い serve は
+/// NETLINK_UNAVAILABLE_ENV も PEER_UID_FILE_ENV も読まずに起き、自分の接続を通す。
+#[test]
+fn test_hooks_without_the_key_have_no_effect() {
+    let flag = unique_dir("peer-uid-file-no-key");
+    std::fs::write(&flag, (own_uid() + 1).to_string()).expect("write the peer uid file");
+    let server = start(
+        "hooks-no-key",
+        "127.0.0.1:0",
+        &[],
+        &[
+            (uniqnode::main_door::NETLINK_UNAVAILABLE_ENV, "1"),
+            (uniqnode::main_door::PEER_UID_FILE_ENV, flag.to_str().expect("utf-8")),
+        ],
+    );
+    let status = simple(&server.address, "GET", "/v1/status", b"");
+    assert_eq!(status.status, 200, "{}", body_text(&status));
+    let _ = std::fs::remove_file(&flag);
+}
+
+/// 黙った keep-alive の接続は、応答の後 KEEP_ALIVE_IDLE_TIMEOUT(5 秒)で閉じられ、接続の枠を
+/// 返す(読みの期限の 30 秒まで持ち続けない。Claude 低 7)。
+#[test]
+fn an_idle_keep_alive_connection_is_closed_after_the_idle_timeout() {
+    let server = start("keep-alive-idle", "127.0.0.1:0", &[], &[]);
+    let stream = TcpStream::connect(&server.address).expect("connect");
+    let mut writer = stream.try_clone().expect("clone");
+    writer
+        .write_all(format!("GET /healthz HTTP/1.1\r\nHost: {}\r\n\r\n", server.address).as_bytes())
+        .expect("head");
+    let mut reader = BufReader::new(stream);
+    assert_eq!(read_response(&mut reader).status, 200);
+    let idle = uniqnode::http::KEEP_ALIVE_IDLE_TIMEOUT;
+    let started = Instant::now();
+    let mut stream = reader.into_inner();
+    closed_without_response(&mut stream, idle + Duration::from_secs(5)).expect("黙った keep-alive は閉じる");
+    let waited = started.elapsed();
+    assert!(waited + Duration::from_millis(500) >= idle, "期限より早く閉じた: {waited:?}");
+    wait_until_idle(&server.address);
+}
+
 /// `unshare` が要る試験の前提(外部コマンドの規約。黙って飛ばさない)。
 fn require_unshare() {
     let probe = Command::new("unshare").args(["--user", "true"]).output();
@@ -493,33 +678,50 @@ fn require_unshare() {
     }
 }
 
-/// 許す集合に overflowuid を入れた serve は理由を言って起動を断り(明示でも、uid を写さない user
-/// namespace で既定の euid が overflowuid になった場合でも)、写せない uid の接続は 403 になる。
+/// 許す集合に overflowuid を入れた serve は理由を言って起動を断る(明示でも、uid を写さない user
+/// namespace で既定の euid が overflowuid になった場合でも)。uid を写さない namespace で集合を
+/// 明示した serve は、自分の接続の uid すら overflowuid に見えて起動時の自己試験に落ち、2 で
+/// 終わる(起きても全部の接続を 403 で断るだけなので)。写せない uid の接続が 403 になることは、
+/// 相手の uid を overflowuid に差し替えるテスト用の口で見る(別の uid の接続は root 無しには
+/// 作れない)。
 #[test]
 fn the_overflow_uid_refuses_to_start_and_an_unmapped_peer_gets_403() {
     let overflow = uniqnode::main_door::read_overflow_uid().expect("overflowuid");
     let output = refused_serve("127.0.0.1:0", &["--main-allow-uid", &format!("{},{overflow}", own_uid())]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = &output.stderr;
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("overflowuid"), "{stderr}");
 
     require_unshare();
-    let output = refused_serve_with(&["unshare", "--user"], "127.0.0.1:0", &[]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let output = refused_serve_with(&["unshare", "--user"], "127.0.0.1:0", &[], &[]);
+    let stderr = &output.stderr;
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("overflowuid"), "{stderr}");
 
-    // uid を写さない namespace の serve からは、外の自分の uid は写せない uid に見える。
-    let server = start_with(
+    // uid を写さない namespace の serve からは、自分の接続も写せない uid に見える。
+    let output = refused_serve_with(
         &["unshare", "--user"],
-        "unmapped",
         "127.0.0.1:0",
         &["--main-allow-uid", &own_uid().to_string()],
         &[],
     );
+    let stderr = &output.stderr;
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("自己試験") && stderr.contains("overflowuid"), "{stderr}");
+    assert!(!output.stdout.contains("listening on"), "{}", output.stdout);
+
+    let flag = unique_dir("peer-uid-overflow");
+    std::fs::write(&flag, overflow.to_string()).expect("write the peer uid file");
+    let server = start(
+        "unmapped",
+        "127.0.0.1:0",
+        &[],
+        &[HOOKS_ON, (uniqnode::main_door::PEER_UID_FILE_ENV, flag.to_str().expect("utf-8"))],
+    );
     let response = simple(&server.address, "GET", "/v1/status", b"");
     assert_eq!(response.status, 403, "{}", body_text(&response));
     assert!(body_text(&response).contains("overflowuid"), "{}", body_text(&response));
+    std::fs::remove_file(&flag).expect("remove the peer uid file");
 }
 
 // ---- A1: ブラウザの門 ----

@@ -385,7 +385,8 @@ uniqnode コアの上に応用層が載る。検索(RAG)層とその上の MCP �
   委譲する([docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580))。順位ベースの
   融合は DBノード間でスコア較正が不要であり、kind:search の分散集約と整合する。
 - エージェント接続層: 検索層を LLM エージェントへ出す MCP(Model Context Protocol)アダプタ。
-  標準入出力の JSON-RPC 2.0 で search と fetch の 2 ツールを話す。DBノード間のプロトコル(§7)
+  標準入出力の JSON-RPC 2.0 で、読む search と fetch の 2 ツールと、`--writable` で許した
+  コレクションへ書く add_document と fetch_url の 2 ツールを話す。DBノード間のプロトコル(§7)
   には現れず、§10 の API と同じ関数を呼ぶだけの局所的な被せ物なので、規範の対象は §10 のまま
   である([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))。
 - Webアーカイブ層: HTTP 応答を不変オブジェクトとして保存する日時付きスナップショット。

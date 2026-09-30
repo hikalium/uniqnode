@@ -242,7 +242,7 @@ verification・sumi・roles・config は外す)、作業ディレクトリ・未
 | L1 | uniqnode の読み口(上の「uniqnode 側の作業」1〜6)+ server-proxy の転送 + lamalium の 3 ツール(読むだけ)。最初の席は helpdesk(本物の tools API を持つ gpt-oss-120b) | 完了確認の 7 本がすべて通り、helpdesk が uniqnode_search で仕様書と設計文書の断片を出典付きで答えた(向こうのログで観測) |
 | L2 | BENCH で「引けば直る」タスクを回し、呼ばれた率と緑到達率を測る | モデル × 説明文の行列に数字がある |
 | L3 | 数字に応じた調整(説明文・位置・tip)。それでも足りないモデルにだけ push。第 2 段(書く)は uniqnode 側が先に着地した(上の「第 2 段」)ので、lamalium 側の書くツールをここで載せる | 調整前後の差が数字である |
-| L4 | vega の timer による lamalium の木の取り込み + エージェントが書いた記憶の運用(コレクションの整理、gc) | 過去タスクで書いた事実が別のタスクの uniqnode_search に出る |
+| L4 | crystal の timer が専用の書き口へ lamalium の文書を送る取り込み(2026-09-30 の裁定 C。[docs/plan/FEED.md](#fa8de6f9-59f8-4512-a815-9f41d305db15))+ エージェントが書いた記憶の運用(コレクションの整理、gc) | 過去タスクで書いた事実が別のタスクの uniqnode_search に出る |
 
 ## 判断が要ること(操作者に聞く)
 

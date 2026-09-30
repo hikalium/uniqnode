@@ -698,10 +698,10 @@ journal に載る。
 本番のバイナリに替える drop-in を書き、1 回走らせて確かめてから timer を有効にする):
 
 ```
-{ sudo install -m 0644 -t /etc/systemd/system docs/mop/systemd/system/uniqnode-ingest-git@.service docs/mop/systemd/system/uniqnode-ingest-git@.timer && sudo mkdir -p /etc/systemd/system/uniqnode-ingest-git@lamalium.service.d && printf '%s\n' '[Service]' 'User=hikalium' 'Group=hikalium' 'Environment=UNIQNODE_DATA_DIR=/work2/llm_playground_host_dir/uniqnode-store' 'ExecStart=' 'ExecStart=/home/hikalium/.local/bin/uniqnode ingest-git ${UNIQNODE_DATA_DIR} ${UNIQNODE_INGEST_COLLECTION} ${UNIQNODE_GIT_TREE} --ref ${UNIQNODE_GIT_REF} --paths ${UNIQNODE_GIT_PATHS} --serve-url ${UNIQNODE_SERVE_URL}' | sudo tee /etc/systemd/system/uniqnode-ingest-git@lamalium.service.d/override.conf && sudo systemctl daemon-reload && sudo systemctl start uniqnode-ingest-git@lamalium.service; sudo journalctl -u uniqnode-ingest-git@lamalium.service -n 40 --no-pager && sudo systemctl enable --now uniqnode-ingest-git@lamalium.timer && systemctl list-timers uniqnode-ingest-git@lamalium.timer --no-pager; } 2>&1 | ts '%Y-%m-%dT%H:%M:%S%z' | tee /tmp/uniqnode-ingest-git-lamalium.log
+{ sudo install -m 0644 -t /etc/systemd/system docs/mop/systemd/system/uniqnode-ingest-git@.service docs/mop/systemd/system/uniqnode-ingest-git@.timer && sudo mkdir -p /etc/systemd/system/uniqnode-ingest-git@lamalium.service.d && printf '%s\n' '[Service]' 'User=hikalium' 'Group=hikalium' 'Environment=UNIQNODE_DATA_DIR=/work2/llm_playground_host_dir/uniqnode-store' 'ExecStart=' 'ExecStart=/home/hikalium/.local/bin/uniqnode ingest-git ${UNIQNODE_DATA_DIR} ${UNIQNODE_INGEST_COLLECTION} ${UNIQNODE_GIT_TREE} --ref ${UNIQNODE_GIT_REF} --paths ${UNIQNODE_GIT_PATHS} --serve-url ${UNIQNODE_SERVE_URL}' | sudo tee /etc/systemd/system/uniqnode-ingest-git@lamalium.service.d/override.conf && sudo systemctl daemon-reload && sudo systemctl start uniqnode-ingest-git@lamalium.service && sudo systemctl enable --now uniqnode-ingest-git@lamalium.timer && systemctl list-timers uniqnode-ingest-git@lamalium.timer --no-pager; sudo journalctl -u uniqnode-ingest-git@lamalium.service -n 40 --no-pager; } 2>&1 | ts '%Y-%m-%dT%H:%M:%S%z' | tee /tmp/uniqnode-ingest-git-lamalium.log
 ```
 
-(リポジトリの根で打つ。`start` が失敗しても journal は出し、timer は有効にしない。) 確かめる
+(リポジトリの根で打つ。unit は Type=oneshot なので、取り込みが失敗すれば `start` が失敗を返し、timer は有効にしない。journal は成否によらず最後に出す。) 確かめる
 のは journal の 3 種の行である: `木: … の main = <コミット>(書き出し N 件、…)`、1 件ごとの
 `lamalium/<文書名>: updated|no-op …`、締めの `取り込み: N 件(updated N、no-op N)、対象外 N 件`。
 2 回目以降は変わった文書だけが updated になる。

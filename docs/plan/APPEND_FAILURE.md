@@ -2,7 +2,9 @@
 
 <a id="d973833f-4e2b-4fc8-8a49-42f6821b6a7a"></a>
 
-版: 第 5 版(2026-10-01)。第 4 版(8d55129)への vega の Codex の再レビュー(高 1: データのディレクトリの
+版: 第 6 版(2026-10-01)。第 5 版(3152f68)への vega の Codex の再レビュー(高 2: 祖先の sync の例外、
+再開時に採用するレコードの中身の sync。中: 鍵の tmp の権限)と Claude のレビュー(中 1・低 4〜7)を
+取り込んだ。第 4 版(8d55129)への vega の Codex の再レビュー(高 1: データのディレクトリの
 親と祖先の sync、高 2: node_key の中身の sync)を取り込んだ。第 1 版(a9eba65)への Claude のレビュー(高 1・中 4・低 4)、FEED 第 3 版の
 再レビューの Claude B・C、FEED 第 4 版の再確認の Claude N-3・N-4、第 2 版(e7c6b61)への Codex の
 レビュー(高 1・2、中 3〜5、低 6・7)、第 3 版(c1067dc)への vega の Codex の再レビュー(高 2 の残り、中 5)と
@@ -80,16 +82,30 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
    開くときに sync するものの全体は次のとおりで、「既に在る」ことを理由に省かない(第 4 版への
    Codex の再レビューの高 1・2):
    - `node_key` の中身(`sync_all`)。新しく作るときは、今の `std::fs::write` をやめ、tmp/ に書いて
-     `sync_all` してから rename し、データのディレクトリを sync する。途中で落ちても、短い鍵が
+     `sync_all` してから rename し、データのディレクトリを sync する。tmp は `create_new(true)` と
+     `mode(0o600)` で作り、中身を書くのはその後にする(umask に依らず、秘密鍵が一瞬も他の利用者に
+     読めない。第 5 版への Codex の再レビューの中)。途中で落ちても、短い鍵が
      `node_key` の名前で残ることは無い(残るのは tmp/ の残骸で、次に開くとき消す)。鍵が失われると
      同じノードとして署名を続けられないので、pack と同じ重さで守る。
-   - packs/・reflog/・データのディレクトリ自身・データのディレクトリの親。`create_dir_all` が
-     祖先を作った場合に備えて、さらに上の祖先も根まで順に sync する。ただし読めない祖先(開けない
-     もの。自分で作ったものなら読めるので、作っていない証拠になる)は飛ばす。
-   試験は、初めて作るストアで、ディレクトリと鍵を作った後・sync の前に落として起こし直す形と、
-   開くたびに上の全部が sync されることを数える形の 2 つを置く。
+   - recover が採用した pack と reflog のファイルの中身(`sync_data`)。対象は、封印済みとして
+     MANIFEST に載っている pack を除く全部(アクティブの pack と reflog の全セグメント)。write_all の
+     後・sync の前にプロセスが落ちると、完全なレコードが page cache にだけ在る形で再開し、recover が
+     それを採用する。そのまま同じオブジェクトの再送を「既に在る」として 200 にしたり、それを指す ref を
+     書いたりすると、後の電源断で応答済みのものが消える(第 5 版への Codex の再レビューの高 2)。
+   - packs/・reflog/・データのディレクトリ自身・データのディレクトリの親。祖先を作る道は無くす:
+     `Store::open` の `create_dir_all` をやめ、データのディレクトリだけを `mkdir` で作る(親が無ければ
+     理由を言って断る)。親より上の祖先は、既に在って永続しているものとし、この前提を文書と誤りの
+     文に書く。親を開けない(読めない)なら sync できないので、開くことの失敗にする(第 5 版への
+     Codex の再レビューの高 1。「読めない祖先は飛ばす」は撤回した: 読めなくても書けて辿れる
+     ディレクトリの下には名前を作れるので、飛ばす根拠にならない)。
+   順は、recover の削除・切り詰め → 上の中身と名前の sync → 書き込みの受け付け(FEED の起動時の
+   前進も含む)とする(Claude 低 7)。
+   試験は、初めて作るストアで、ディレクトリと鍵を作った後・sync の前に落として起こし直す形、
+   pack の write_all の後・sync の前に落として起こし直し、同じオブジェクトを再送する形(再送の 200 より
+   前に sync が済んでいることを数える口で見る)、親が読めない(0333)ときに開くことが理由を言って
+   失敗する形、開くたびに上の全部が sync されることを数える形を置く。
 2. ストアに `write_failure: Option<WriteFailure>` を持たせる。`WriteFailure` は `{reason: String,
-   op: Write | Sync | DirSync | Manifest | GcCommit, errno, cleanup: Ok | Failed | NotTried,
+   op: Write | Sync | DirSync | Manifest | GcCommit | LengthMismatch, errno, cleanup: Ok | Failed | NotTried,
    kind: NoSpace | Io, since: unix 秒}`。kind が NoSpace になるのは、op が Write で errno が ENOSPC か
    EDQUOT、かつ切り詰めとその sync が成功した場合だけである。sync の段の誤り(errno が ENOSPC でも)、
    切り詰めの失敗、ディレクトリの sync・MANIFEST・GC の確定の誤りは、すべて Io とする。sync の段の
@@ -105,7 +121,14 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
    操作者に上げる」がその 1 回目から働く(第 3 版への Codex の再レビューの中 5)。
    以後、ストアの全ての書き込みの入口(`put_object`・`append_own_record`・`ingest_ref_record`・
    pack の封印・`write_manifest`・`gc_try_begin`・`gc_commit`)は、先頭で `write_failure` を見て、
-   `StoreError::WritesDisabled` を返す。`POST /v1/admin/gc` は 503、`uniqnode gc` は終了コード 1 で
+   `StoreError::WritesDisabled` を返す。GC の C は、ロックを取った直後(`references_since` より前)にも
+   見る(切り詰めに失敗した尻切れが残っていると、先に Corruption で落ちて理由を取り違えるため。
+   Claude 低 4)。3 の fstat の検算の食い違いは、op が LengthMismatch、errno が無し、kind が Io とする
+   (Claude 低 6)。
+   rendition の GET(`GET /v1/objects/{id}/rendition/{別名}`。写しが無ければ作って `put_object` と
+   `set_ref` をする。rendition.rs の 617 行付近)も書き込みの入口に含める。その誤りは
+   `RenditionError::Store` を 500 にせず `store_error_response` に回す。書けない間は、作った写しを
+   保存せずにそのまま返す(読み出しを続けるという約束を、未生成の写しの閲覧でも守る。Claude 中 1)。`POST /v1/admin/gc` は 503、`uniqnode gc` は終了コード 1 で
    断る。読み出しは続ける。
 3. 順を「ディスクが先、メモリが後」にそろえる:
    - `seal_active_pack` は、番号を足した `sealed_packs` の写しで MANIFEST を書き、成功してから
@@ -118,8 +141,10 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      しか走らない)。
      `active_pack_number` を新 pack の次へ進めるのも C-3 の成功の後にする。
    - GC の D(確定の後、ロックの外で古い pack と参照表を消す。gc.rs の 681〜699 行付近)も、この
-     判定の外に置く。消すのに失敗しても、MANIFEST に無い古い pack は次の起動の recover が残骸として
-     消すので、その GC の実行が誤りで終わるだけでよい(FEED 第 4 版の再確認の Claude N-3)。
+     判定の外に置く。消すのに失敗しても、その GC の実行が誤りで終わるだけでよい(FEED 第 4 版の
+     再確認の Claude N-3)。MANIFEST に無い古い pack は、ふつう次の起動の recover が残骸として消す。
+     ただし消し損ねたのが封印済みの最大番号の pack で、新 pack も作らなかった形では、次の起動で
+     アクティブとして生き返る。失われるものは無く、ゴミが戻るだけで、次の GC が改めて扱う(Claude 低 5)。
    - GC の B(PackWriter の tmp/ への書き込み)は、この判定の外に置く。tmp の書き込みの失敗は
      どこからも参照されず、GC が誤りで終わって tmp を消すだけで済む(今の gc.rs の 572 行付近の
      扱い)。ロックも取らない。ただし B の後の `gc_commit` の先頭で `write_failure` を見る(B の間に
@@ -221,6 +246,8 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
   MCP の誤りの文に案内が載る。`POST /v1/sync` も 503 を返す。
 - 複製の受け側(`ingest_ref_record`)に `sync-keep` を掛けると、`export_ref_records` はその 1 本を返さない。
 - 書けない状態に入れた最初の要求そのものが 503 と案内を返す。
+- 書けない状態で、未生成の rendition の GET が写しを返し(保存はしない)、rendition の道の書き込みの
+  失敗が 503 と案内になる。
 - 新しいセグメントの最初の追記の、ファイルの sync の後・親の sync の前でプロセスを止め(注入の
   `crash-before-dirsync`)、起こし直して追記を続けると、
   開く道が packs/・reflog/ を sync してから書き込みを受け付ける(sync の呼び出しを数える口で確かめる)。

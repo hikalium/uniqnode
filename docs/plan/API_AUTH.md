@@ -2,7 +2,9 @@
 
 <a id="abde9b3c-75f8-453b-988e-bfb1e178c771"></a>
 
-版: 第 5 版(2026-10-01)。第 4 版(8d55129)への vega の Codex の再レビュー(中 3: 判定の枠をスレッドを
+版: 第 6 版(2026-10-01)。第 5 版(3152f68)への Claude のレビュー(中 3: 行数の上限が網越しの DoS に
+なる → sock_diag の 1 件の照会へ、低 1〜3)と vega の Codex の再レビュー(低: 枠の超過の応答と資源の
+完了条件)を取り込んだ。第 4 版(8d55129)への vega の Codex の再レビュー(中 3: 判定の枠をスレッドを
 作る前に取る)と、共有チャンクの出所の順(FEED 第 7 版)を取り込んだ。第 3 版(c1067dc)への Codex の再レビュー(uid の判定の高、中 3・4、低の
 namespace)と、crystal の Codex の再レビュー(同じ高を実際に再現)を取り込んだ。第 2 版(e7c6b61)への Codex のレビュー 2 本(vega の Codex の 1〜12、crystal の
 Codex の H1・H2・M1)を取り込んだ。viewer の扱い(3 と A3)は操作者の確認待ちで、第 2 版のまま置く。
@@ -64,8 +66,12 @@ distributed_search.rs の 185 行付近)。署名された要求者に対する�
   (ピアの要求)は 4 のピア口で受ける(crystal の Codex H1)。install は同じ判定を据え付けの前に
   早く当てる(Claude 中 5)。
 - uid の制限は serve の中で行う(crystal の Codex H2、vega の Codex 1)。主の口が接続を受けたら、
-  要求を 1 バイトも読む前に、/proc/net/tcp と /proc/net/tcp6 の両方から相手のソケットの行を引き、
-  その持ち主の uid を読む。許す uid の集合(既定は serve 自身の euid と 0)に無ければ 403 を返して閉じる。
+  要求を 1 バイトも読む前に、相手のソケットを NETLINK_SOCK_DIAG(inet_diag)で 1 件照会し、その
+  持ち主の uid を読む。照会は dump ではなく、下の逆向きの 4 つ組をそのまま指定する形にする(root は
+  要らない。state・uid・inode がまとめて返る)。AF_INET と AF_INET6 の両方に問う。/proc/net/tcp の
+  全表の走査は使わない: 表の行数は網越しに増やせる(LAN から viewer や読み口へ `Connection: close` の
+  要求を送り続けると、serve が先に閉じた TIME_WAIT の行が vega 側に積もる)ので、走査の費用と上限が
+  主の口の全面の DoS になる(第 5 版への Claude のレビューの中 3)。以下の「行」は照会の答えを言う。許す uid の集合(既定は serve 自身の euid と 0)に無ければ 403 を返して閉じる。
   行の選び方は厳しくする(第 3 版への Codex の再レビューの高):
   - 相手側から見た 4 つ組が完全に一致する行だけを見る: その行の local が相手のアドレスとポート、
     remote が自分の束縛先のアドレスとポート。IPv4 の接続でも、相手が AF_INET6 のソケットから
@@ -87,20 +93,23 @@ distributed_search.rs の 185 行付近)。署名された要求者に対する�
     docker のコンテナは、中の uid がそのまま見える(root で走るものは届き、それ以外は届かない)。
   - 許す uid を足す口として `--main-allow-uid <uid,...>` を置く(viewer を別の利用者で走らせる形など)。
     これは既定の集合を置き換える。テストはこれで自分の uid を外し、実際の接続が 403 になることを見る。
-  - 対象は Linux だけである(/proc/net/tcp が要る)。他の OS では serve が起動時に理由を言って断る。
+  - 対象は Linux だけである(sock_diag が要る)。他の OS では serve が起動時に理由を言って断る。
   - uid は接続ごとに 1 度判定し、HTTP のヘッダ(下の門)は要求ごとに見る。serve は keep-alive を
     受けるので、同じ接続の 2 つ目以降の要求は uid の判定を繰り返さない(Codex 中 4)。
-  - 代価は接続ごとに 2 つの表を 1 度ずつ読むこと。行数は同じ network namespace の全ソケット
-    (TIME_WAIT を含む)で、上限は無い(2026-10-01 の vega では計 75 行)。判定を同時に走らせる数に上限
-    (16)を置き、超えた接続は 503 で閉じる。読む行数にも上限(例 100,000 行)を置き、超えたら 403 に
-    する。今の http.rs は accept の直後に無条件でスレッドを作るので、判定の枠はスレッドを作る前に、
+  - 代価は接続ごとに netlink の照会を 2 回まで(AF_INET と AF_INET6)。費用は表の大きさに依らない。
+    判定を同時に走らせる数に上限(16)を置く。今の http.rs は accept の直後に無条件でスレッドを作るので、判定の枠はスレッドを作る前に、
     accept するスレッドの中で待たずに取る。枠が取れない接続は、新しいスレッドを作らずにその場で
     閉じる(応答は書かない。書くと遅い相手に accept が止められる)。判定を通った後の接続を持つ
     スレッドの数にも上限(64)を置き、超えたら同じく閉じる。こうして、判定の走査の数だけでなく、
-    未認証の接続が作るスレッドの数も抑える(第 4 版への Codex の再レビューの中 3)。
+    未認証の接続が作るスレッドの数も抑える(第 4 版への Codex の再レビューの中 3)。枠は判定の
+    スレッド・接続のスレッドが終わるとき(閉じたとき)に返す。
     TIME_WAIT を大量に作った状態での判定の時間を測る試験を置く(Codex 中 4)。
-  - namespace: /proc/net の表は serve 自身の network namespace のものである。ループバックに届くのは
-    同じ network namespace のプロセスだけなので、表に無い相手は無い。uid は serve の user namespace へ
+  - uid はソケットを作った者の uid である。許された uid のプロセスが中継すれば(viewer、操作者の
+    socat や ssh -L)そのまま通る: 中継は操作者の権限を貸す。docker グループの利用者は root の
+    コンテナで届くので、root と同じに扱う。F4 の前に vega で `getent group docker` を確かめ、
+    lamalium の利用者が入っていないことを見る(Claude 低 3)。
+  - namespace: sock_diag が答えるのは serve 自身の network namespace のソケットである。ループバックに
+    届くのは同じ network namespace のプロセスだけなので、答えに無い相手は無い。uid は serve の user namespace へ
     写した値として表示され、写せない uid は overflowuid(65534)になるので許されない。別の user namespace
     で uid を写したコンテナは、写した先の uid が許す集合に入るとき(serve の利用者か root に写したとき)
     だけ届く(第 3 版への Codex の再レビューの低)。
@@ -211,12 +220,17 @@ previous から辿れるので gc の後も残る(RAG 項目 18)。読めるコ�
   `localhost:7440` を理由を言って断り、`127.0.0.1:7440`・`127.0.0.2:7440`・`[::1]:7440` を通す
   テストがある。
 - `--main-allow-uid` で自分の uid を外した serve への実際の接続が 403 になり、既定の serve には通る
-  テストがある(別の uid からの接続を、root 無しで実際に断らせる形)。/proc/net/tcp と tcp6 の行の
-  読み方は、固定の行を与えるテストでも固める: 完全な 4 つ組、ESTABLISHED 以外の状態、inode 0 の行
-  (FIN_WAIT2・TIME_WAIT の形)、同じ 4 つ組の 2 行、IPv4 射影の行、行数の上限。
+  テストがある(別の uid からの接続を、root 無しで実際に断らせる形)。照会の答えの読み方は、固定の
+  答えを与えるテストでも固める: 完全な 4 つ組、ESTABLISHED 以外の状態、inode 0 の答え(FIN_WAIT2・
+  TIME_WAIT の形)、2 件の答え、IPv4 射影。
+- 許される側の本物の接続が、`127.0.0.1` と `[::1]` に束縛した serve の両方に通る(照合が壊れて答えが
+  0 件になっても 403 で通ってしまう、断る側の試験だけでは足りない。Claude 低 2)。
 - AF_INET6 のソケットから `[::ffff:127.0.0.1]` で IPv4 の主の口へ繋ぐ実際の接続が通る。
 - 送ってすぐ閉じる接続(IPv4 と IPv6 の両方。accept を遅らせて相手の行を FIN_WAIT2・TIME_WAIT の形に
   してから判定させる)と、判定の同時数の上限を超える接続が、どちらも要求を実行されずに終わる。
+  上限を超える接続には HTTP の応答を書かずに閉じる。
+- 大量の接続(例 1,000 本)を同時に開いたとき、serve のスレッド数が判定の 16 と接続の 64 に
+  accept の分を足した数を超えず、閉じた後に枠が戻って次の接続が通る。
 - 主の口が、一覧に無い Host に 421、Origin 付きの要求に 403、単純な要求の 3 つの型に 415、JSON の道で
   Content-Type の無い要求に 415 を返すテストがある。http.rs のクライアント・MCP・viewer の転送・install
   の確認・node/tests の共通の口は通る。
@@ -231,7 +245,7 @@ previous から辿れるので gc の後も残る(RAG 項目 18)。読めるコ�
 | 段 | 中身 | 大きさ |
 |---|---|---|
 | A1 | serve と install の束縛の検査、http.rs のブラウザの門(Host・Origin・Content-Type)、node/tests の共通の口、SPEC と design の書き直し | M |
-| A2 | serve の中の uid の判定(/proc/net/tcp、`--main-allow-uid`) | S |
+| A2 | serve の中の uid の判定(sock_diag の 1 件の照会、`--main-allow-uid`) | S |
 | A4 | 読み口の、出所を示せないチャンクの拒否 | S |
 | A3 | viewer の許可表(agent_door.rs の判定の共用、`--viewer-collections`)。本番の値は操作者の答え 1 で決める | M |
 

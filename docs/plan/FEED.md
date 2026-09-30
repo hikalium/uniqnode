@@ -211,7 +211,7 @@ feed の管理下のコレクションには使えない(409 で断られる)こ
                   "documents":{"docs/design/X.md":"s256:<doc_rev>", …}} | null,
      "pending":null | {"commit":"…","manifest":"s256:…"},
      "shrink_allowance":null | {"base":"s256:…","names":[…]},
-     "hidden":null | "<理由>", "skipped":[…], "writes_disabled":null | "<理由>"}
+     "hidden":null | "<理由>", "skipped":[…], "writes_disabled":null | {"reason":…,"kind":…,"since":…}}
 ```
 
 送り手は run の最初にこれを読み、`published.manifest` を run の基準(base)として固定する。

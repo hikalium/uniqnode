@@ -2,7 +2,7 @@
 
 <a id="abde9b3c-75f8-453b-988e-bfb1e178c771"></a>
 
-版: 第 9 版(2026-10-01)。第 8 版(601ae81)への vega の Codex の再レビュー(中: unit の
+版: 第 10 版(2026-10-01)。第 9 版(98e4b0c)への vega の Codex の再レビュー(中: overflowuid)を取り込んだ。第 8 版(601ae81)への vega の Codex の再レビュー(中: unit の
 RestrictAddressFamilies に AF_NETLINK が無い、低: 節の見出し)を取り込んだ。第 7 版(b398d42)への vega の Codex の再レビュー(中: install の起動の確認、
 低 2)を取り込んだ。第 6 版(e34d81d)への vega の Codex の再レビュー(中: 同じソケットの重複、
 低: 枠の受け渡し)と、crystal の Claude の第 3 版へのレビュー(中 2・4・5・6、低)を取り込んだ。第 5 版(3152f68)への Claude のレビュー(中 3: 行数の上限が網越しの DoS に
@@ -133,7 +133,11 @@ distributed_search.rs の 185 行付近)。署名された要求者に対する�
     lamalium の利用者が入っていないことを見る(Claude 低 3)。
   - namespace: sock_diag が答えるのは serve 自身の network namespace のソケットである。ループバックに
     届くのは同じ network namespace のプロセスだけなので、答えに無い相手は無い。uid は serve の user namespace へ
-    写した値として表示され、写せない uid は overflowuid(65534)になるので許されない。別の user namespace
+    写した値として表示され、写せない uid は overflowuid(`/proc/sys/kernel/overflowuid`、ふつう 65534)に
+    置き換わる。答えの uid だけでは、本当にその uid のソケットと区別できないので、overflowuid は認可に
+    使わない: serve は起動時に `/proc/sys/kernel/overflowuid` を読み、許す集合(既定でも明示でも)に
+    その値が入っていれば理由を言って起動を断る。答えの uid が overflowuid なら 403(第 9 版への Codex の
+    再レビューの中。user の unit は `PrivateUsers=yes` なので、この形は実際の配備にも関わる)。別の user namespace
     で uid を写したコンテナは、写した先の uid が許す集合に入るとき(serve の利用者か root に写したとき)
     だけ届く(第 3 版への Codex の再レビューの低)。
 - ブラウザの遮断: http.rs に門を置き、主の口に効かせる(Claude 高 2)。viewer に効かせるかは 3(A3)と
@@ -267,6 +271,7 @@ previous から辿れるので gc の後も残る(RAG 項目 18)。読めるコ�
 - 小さな通常の要求で断られた相手が 403 の応答を受け取る(ECONNRESET にならない)。大きな本文や遅い
   相手の要求は、実行されず、期限の内に閉じられ、判定の枠が戻る。
 - root で走る system の install の起動の確認が、root の直接の接続は断る serve に対して通る。
+- `--main-allow-uid` に overflowuid を入れた serve が理由を言って起動を断り、写せない uid の接続が 403 になる。
 - 実際の unit の制限の下(install で据え付けた serve)で、許す uid の接続が通り、許さない uid は断られ、
   install の起動の確認が通る。
 - 主の口が、一覧に無い Host に 421、Origin 付きの要求に 403、単純な要求の 3 つの型に 415、JSON の道で

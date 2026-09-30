@@ -2,7 +2,8 @@
 
 <a id="d973833f-4e2b-4fc8-8a49-42f6821b6a7a"></a>
 
-版: 第 9 版(2026-10-01)。第 8 版(601ae81)への vega の Codex の再レビュー(高 1・2: 印の置き方を
+版: 第 10 版(2026-10-01)。第 9 版(98e4b0c)への vega の Codex の再レビュー(高 1: shutdown の順、
+高 2: ログの確認は再開の根拠にならない、中: NoSpace の戻し方の矛盾)を取り込んだ。第 8 版(601ae81)への vega の Codex の再レビュー(高 1・2: 印の置き方を
 「先に置き、無事な終わり方でだけ外す」へ、中: query の開始後の失敗と非同期)を取り込んだ。第 7 版(b398d42)への vega の Codex の再レビュー(高 1: install の再実行、
 高 2: 印を残せない経路、中: query の保存、低: 完了条件の食い違い)を取り込んだ。第 6 版(e34d81d)への vega の Codex の再レビュー(高: install が作る親)と、
 crystal の Claude の第 3 版へのレビュー(中 1: 再起動で Io の状態が消える、中 2: query のキャッシュ、低)を
@@ -188,7 +189,7 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
    (store.rs の `set_ref` は同じ target を比べない)。害は reflog が 1 本伸びることだけである(Codex 中 5)。
 5. 戻るのは、ストアを開き直したときだけである。戻し方は kind で案内を分ける(欠陥 9):
    - NoSpace: 空きを作ってから serve を再起動する。
-   - Io: ホストの再起動かファイルシステムの点検をしてから serve を起こす。serve の再起動だけでは
+   - Io: ホストを再起動する(再起動できないときは、umount・fsck・mount し直しの後に release-hold)。serve の再起動だけでは
      page cache に残った「正常に見える」末尾の後ろに書くことになりうる。
    Io の状態は serve の再起動をまたいで持ち越す(crystal の Claude 中 1)。配備のし直し・systemd の
    再起動・OOM のような、ホストを再起動しない serve の起こし直しで書き込みが戻ると、書けなかった
@@ -196,32 +197,52 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
    後ろの応答済みのレコードが切り捨てられうる。
    第 8 版の「誤りを見た後に tmpfs へ印を書く」形は捨てた: 誤りを見てから印を書くまでに殺される
    形、印を書けない形、user の `$XDG_RUNTIME_DIR` がログアウトで消える形のどれでも印が残らない
-   (第 8 版への Codex の再レビューの高 1・2)。代わりに、危険な書き込みより前に印を置き、無事な
-   終わり方でだけ外す:
-   - 書く入口の開く道(serve・MCP の Local・書く CLI)は、ストアのロックを取った後、書き込みを
-     受け付ける前に、データのディレクトリに `open-marker` を書いて sync する。中身は
-     `/proc/sys/kernel/random/boot_id` と pid と開いた時刻。書けなければ開くことの失敗にする
-     (書き込みを始めない)。置き場がデータのディレクトリなので、system・user・手で起こした形・
-     CLI のどれでも同じ場所で、`ReadWritePaths` も今のままでよく、ログアウトでも消えない。
-   - 無事な終わり方(shutdown の API、CLI の正常な終わり、MCP の Local の終わり)で、書けない状態に
-     入っていなければ `open-marker` を消し、データのディレクトリを sync する。書けない状態(Io でも
-     NoSpace でも)なら消さない。消すのに失敗したら残る(安全な側に倒れる)。
-   - 開くときに `open-marker` が在り、中の boot_id が今の boot_id と同じなら、前のプロセスは同じ
-     ブートの中で無事に終わらなかった(殺された・落ちた・書けない状態で終わった)。このときは
-     書けない状態(kind は Io、reason は「前のプロセスが無事に終わらなかった」)で開き、読み出しは
-     答える。boot_id が違えば(ホストを再起動した後なら)page cache は消えているので、recover に
-     任せて普通に開き、印を書き直す。
-   - 戻し方: ホストの再起動か、操作者が `journalctl -k` で I/O の誤りが無いことを確かめた後の
-     `uniqnode store release-hold --data-dir <dir>`(印を消す。serve が開いている間は断る)。案内の文に
-     この 2 つを載せる。
-   - 代価: 同じブートの中で serve が SIGKILL・OOM・異常終了で落ちると、I/O の誤りが無くても書けない
-     状態で起きる。systemd の stop と restart を無事な終わり方にするため、unit に
-     `ExecStop=`(主の口へ `POST /v1/admin/shutdown` を送り、終わりを待つ)を足す。今の serve は
-     SIGTERM を扱わないので、これが無いと stop のたびに印が残る。`TimeoutStopSec` を過ぎて SIGKILL
-     になった形は、印が残って書けない状態で起きる(安全な側)。
-   試験は、実際の unit での stop と start で書けるまま起きること、SIGKILL の後に同じ boot_id で
-   書けない状態で起きること、印の boot_id が違えば普通に開くこと、印を書けないときに開くことが
-   失敗すること、Io の後の shutdown で印が残ること、release-hold で書けるようになることを見る。
+   (第 8 版への Codex の再レビューの高 1・2)。代わりに、危険な書き込みより前に「動いている」印を
+   置き、無事な終わり方でだけ「無事に閉じた」へ書き換える(第 9 版で、印を消す形から、状態を
+   書き換える形へ改めた。第 9 版への Codex の再レビューの高 1・中):
+   - 印はデータのディレクトリの `open-marker` で、大きさを固定(4 KiB)して作るときに領域を確保
+     (`fallocate`)し、以後は同じ場所への上書き(`pwrite` と `fdatasync`)だけで状態を変える。確保
+     済みの領域への上書きは新しい領域を要らないので、空きが無いときにも書ける見込みが高い。書けな
+     ければ、下の規則でより厳しい側(書けない側)に倒れる。中身は状態・boot_id(`/proc/sys/kernel/
+     random/boot_id`)・pid・時刻。状態は `Running`・`NoSpace`・`Io`・`Clean` の 4 つ。
+   - 書く入口の開く道(serve・MCP の Local・書く CLI)は、ストアのロックを取った後、書き込みを受け
+     付ける前に `Running` を書く。書けなければ開くことの失敗にする。置き場がデータのディレクトリ
+     なので、system・user・手で起こした形・CLI のどれでも同じ場所で、`ReadWritePaths` も今のままで
+     よく、ログアウトでも消えない。
+   - 書けない状態に入るとき: kind が Io なら、切り詰めを試みるより前に `Io` を書く。kind が NoSpace
+     (切り詰めとその sync が成功した場合だけ)なら、その後で `NoSpace` を書く。`NoSpace` を書けな
+     ければ `Running` のまま残り、次の開く道は無事に終わらなかった扱い(書けない側)になる。
+   - 無事な終わり方は、次の順で行う(第 9 版への Codex の再レビューの高 1): ストアのロックの中で
+     「閉じている」状態へ移す(以後の全ての書き込みの入口と GC の確定は `WritesDisabled` と同じ扱いで
+     断る。ロックを取れた時点で、進行中の持続的な書き込みは無い。書き込みは全てこのロックの中で
+     行うため)→ `write_failure` が無いことを確かめる → `Clean` を書く → プロセスを終える。
+     `write_failure` があれば印を書き換えずに終える。shutdown の API は今、終了の旗を返して http.rs が
+     `process::exit(0)` を呼ぶだけなので、この順を踏む関数を置き、shutdown の API・CLI の正常な
+     終わり・MCP の Local の終わりから呼ぶ。query の保存・health・他の要求のどれも、`Clean` を書いた
+     後には持続的な書き込みをしない(閉じている状態がロックの中で断るため)。
+   - 開くとき: 印が無い、`Clean`、または boot_id が今と違う(ホストを再起動した後で page cache は
+     消えている)なら、recover に任せて普通に開く。同じ boot_id の `NoSpace` なら、切り詰めは永続して
+     いるので普通に開く(空きを作ってから serve を再起動する、の戻し方がそのまま効く)。同じ boot_id
+     の `Running`(前のプロセスが殺された・落ちた)と `Io` は、書けない状態(kind は Io、reason は
+     「前のプロセスが無事に終わらなかった」か元の WriteFailure)で開き、読み出しは答える。
+   - 戻し方(Io と、無事に終わらなかったもの): 既定はホストの再起動だけである。カーネルのログに
+     誤りが無いことは再開の根拠にならない(書き戻しの誤りは報告された後は見えなくなり、sync の段の
+     ENOSPC も Io に入る。第 9 版への Codex の再レビューの高 2)。ホストを再起動できないときの代わりは、
+     ストアを置いたファイルシステムを umount して fsck し、mount し直して page cache を捨てた後に、
+     `uniqnode store release-hold --data-dir <dir>` で印を `Clean` にすることである。release-hold は
+     ストアのロックを取って行い(serve や他の CLI が開いている間は断る)、fsck と mount し直しは
+     操作者の作業として案内の文に書く。
+   - 代価: 同じブートの中で serve が SIGKILL・OOM・異常終了で落ちると、I/O の誤りが無くてもホストを
+     再起動するまで書けない状態で起きる。systemd の stop と restart を無事な終わり方にするため、unit
+     に `ExecStop=`(主の口へ `POST /v1/admin/shutdown` を送り、終わりを待つ)を足す。今の serve は
+     SIGTERM を扱わないので、これが無いと stop のたびに `Running` が残る。`TimeoutStopSec` を過ぎて
+     SIGKILL になった形は、書けない状態で起きる(安全な側)。
+   試験は、実際の unit での stop と start で書けるまま起きること、SIGKILL の後に同じ boot_id で書け
+   ない状態で起きること、boot_id が違えば普通に開くこと(boot_id の読み口は debug ビルドで差し替え
+   られるようにする)、`Running` を書けないときに開くことが失敗すること、Io の後の shutdown で印が
+   `Io` のまま残ること、NoSpace の後に serve を再起動すると書けること、shutdown と query の保存・
+   health・他の書き込みの要求を競わせて `Clean` の後に持続的な書き込みが走らないこと、release-hold が
+   開いているストアでは断られることを見る。
    空きを足しても自動では戻らない(プロセスの中では末尾の健全さを言えないため)。
 6. serve は終了しない。検索と読み出しは答え続け、書き込みだけが断られる。終了して systemd の
    Restart=on-failure に開き直させる案は採らない: 空きが無いままなら再起動の輪になり、読み出しも
@@ -303,7 +324,7 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
 - 複製の受け側(`ingest_ref_record`)に `sync-keep` を掛けると、`export_ref_records` はその 1 本を返さない。
 - 書けない状態に入れた最初の要求そのものが 503 と案内を返す。
 - kind が Io の状態で serve だけを起こし直すと、書けない状態で開く(`open-marker` が効く)。
-  release-hold の後は書ける。
+  boot_id が変わった後か、release-hold の後は書ける。
 - install が足りない経路を作って据え付けるとき、作った各要素の親が serve の起動より前に sync される。
 - 書けない状態で、手元に無いオブジェクトを取りに行く `POST /v1/query` は 503 と案内を返し、
   `stored: true` を言わない。手元に在るものの query は答える。取得の途中で書けない状態になったとき、
@@ -313,11 +334,12 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
 - 書けない状態で、未生成の rendition の GET が写しを返し(保存はしない)、rendition の道の書き込みの
   失敗が 503 と案内になる。
 - 新しいセグメントの最初の追記の、ファイルの sync の後・親の sync の前でプロセスを止め(注入の
-  `crash-before-dirsync`)、起こし直して追記を続けると、
-  開く道が packs/・reflog/ を sync してから書き込みを受け付ける(sync の呼び出しを数える口で確かめる)。
+  `crash-before-dirsync`)、同じ boot_id で起こし直すと書けない状態で開く。boot_id を差し替えて
+  (ホストの再起動に当たる)起こし直して追記を続けると、開く道が packs/・reflog/ を sync してから
+  書き込みを受け付ける(sync の呼び出しを数える口で確かめる)。
 - 開き直したときの `writes_disabled` は、kind で分かれる: NoSpace だったものは null に戻る。Io
   だったもの(と前のプロセスが無事に終わらなかったもの)は、同じ boot_id の `open-marker` がある間は
-  Io のまま開き、ホストの再起動か release-hold の後に null に戻る。
+  Io のまま開き、ホストの再起動か(umount・fsck・mount し直しの後の)release-hold の後に null に戻る。
 
 ## 段取り
 

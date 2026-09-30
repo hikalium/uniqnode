@@ -252,17 +252,37 @@ Claude のレビュー):
   service は止まらず、install が起こす新しい backup と同じ写し先へ並んで書きうる(backup はコピー全体を
   ロックせず、pack の削除と MANIFEST の更新もする)。30 分たっても終わらなければ、何も外さずに止まる
   (timer は止まったままなので、後でこの命令を打ち直すか、`systemctl start uniqnode-backup.timer` で戻す)。
-- 外す行が消す 8 つの名のうち、在るものを全部、毎回別の名の退避(/var/tmp/uniqnode-legacy-units-<時刻>.tar.gz)
-  へ写し、`tar -tzf` で全部が入っていることを確かめてから外す。退避の道は記録に 1 行残す。
-- nft の表は在るときだけ消す。外した後に nft や install が失敗して打ち直しても、前の退避を上書きせず、
-  旧い unit が既に無ければ退避と外しを飛ばして先へ進む。
+- 外す行が消す 8 つの名のうち、在るものを全部、毎回別の名の退避のディレクトリ
+  (/var/backups/uniqnode-legacy-<時刻>/units.tar.gz)へ写し、`tar -tzf` で全部が入っていることを確かめてから
+  外す。退避の道は記録に 1 行残す。退避は /var/backups に置く(/var/tmp は systemd-tmpfiles が 30 日で掃除
+  するので、後で戻すときに消えている。第 18 版の APPEND_FAILURE への Claude のレビューの低 7)。
+  /var/backups は tmpfiles の掃除の対象ではなく、退避は操作者が消すまで残る。
+- tar か確かめが失敗したら、その回の退避のディレクトリを消してから止まる(不完全な退避を残さない。同じ
+  レビューの低 6)。一覧との照らし合わせは正規表現でなく字句で行う(`grep -qxF`。同じレビューの低 8)。
+- 共有のバイナリ /home/hikalium/.local/bin/uniqnode も同じ退避のディレクトリへ写す(同じレビューの中 4)。
+  install の据え付け(install.rs の 1216〜1255 行付近の `install_binary`)はバイナリを rename で置き換え、
+  前のものを残さないので、unit だけを戻すと旧い unit が新しいバイナリを走らせる(API_AUTH の A2 のバイナリ
+  なら AF_NETLINK が無く、主の口が全部 403 になる)。戻す命令はこのバイナリも据え直す。
+- 最初に確かめ終えた退避を /var/backups/uniqnode-legacy-pinned(退避のディレクトリへの symlink)で固定し、
+  戻す命令はこれだけを使う(最新の退避ではない)。`rm -rf` の途中で止まった後にこの命令を打ち直すと、残った
+  一部だけの退避が新しく作られるが、固定は既に在るので上書きしない(第 18 版の APPEND_FAILURE への Codex の
+  レビューの中 7)。
+- nft の表は在るときだけ消す。在るかは `nft list tables` の答えで決め、その一覧の取得が失敗したら(nft が
+  無い、照会の誤り)止まる。第 18 版の `if nft list table …` は失敗も「表が無い」と扱い、完了の文と終了
+  コード 0 を出していた(同じレビューの中 8)。外した後に nft や install が失敗して打ち直しても、前の退避を
+  上書きせず、旧い unit が既に無ければ退避と外しを飛ばして先へ進む。
 - 外側のパイプラインにも `pipefail` を掛け、最後に終了コードを記録へ足す。内側の `set -euo pipefail` は
-  外側の `sudo … | ts | tee` には効かず、tee が成功すれば失敗が隠れるため。
+  外側の `sudo … | ts | tee` には効かず、tee が成功すれば失敗が隠れるため。外側の全体は `( … )` の
+  サブシェルで囲み、`pipefail` が操作者の対話のシェルに残らないようにする(同じレビューの低 9)。`echo` の
+  `$?` は、同じサブシェルの中の直前のパイプラインの終了コード(`pipefail` の下なので、sudo の側の失敗を含む)
+  である。
 
 ```
-set -o pipefail; sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee -a /tmp/uniqnode-legacy-units.log; echo "exit status: $?" | /usr/bin/tee -a /tmp/uniqnode-legacy-units.log
+( set -o pipefail; sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee -a /tmp/uniqnode-legacy-units.log; echo "exit status: $?" | /usr/bin/tee -a /tmp/uniqnode-legacy-units.log )
 set -euo pipefail
 cd /etc/systemd/system
+pin=/var/backups/uniqnode-legacy-pinned
+binary=/home/hikalium/.local/bin/uniqnode
 targets=(uniqnode-serve.service uniqnode-serve.service.d uniqnode-viewer.service uniqnode-viewer.service.d uniqnode-backup.service uniqnode-backup.service.d uniqnode-backup.timer uniqnode-backup.timer.d)
 present=()
 for t in "${targets[@]}"; do if [ -e "$t" ]; then present+=("$t"); fi; done
@@ -278,15 +298,24 @@ else
     echo "旧い backup の終わりを待つ(状態: $state)"
     sleep 10; waited=$((waited + 10))
   done
-  archive=/var/tmp/uniqnode-legacy-units-$(/usr/bin/date +%Y%m%dT%H%M%S%z).tar.gz
-  if [ -e "$archive" ]; then echo "$archive が既に在る。上書きしない"; exit 1; fi
-  /usr/bin/tar -czf "$archive" "${present[@]}"
-  listing=$(/usr/bin/tar -tzf "$archive")
-  for t in "${present[@]}"; do printf '%s\n' "$listing" | grep -qx -e "$t" -e "$t/" || { echo "$archive に $t が無い。外さずに止める"; exit 1; }; done
-  echo "退避: $archive (${present[*]})"
+  saved=/var/backups/uniqnode-legacy-$(/usr/bin/date +%Y%m%dT%H%M%S%z)
+  if [ -e "$saved" ]; then echo "$saved が既に在る。上書きしない"; exit 1; fi
+  /usr/bin/mkdir -m 0700 "$saved"
+  if ! /usr/bin/tar -czf "$saved/units.tar.gz" "${present[@]}"; then /usr/bin/rm -rf "$saved"; echo "退避の tar が失敗した。退避を消し、外さずに止める"; exit 1; fi
+  if ! listing=$(/usr/bin/tar -tzf "$saved/units.tar.gz"); then /usr/bin/rm -rf "$saved"; echo "$saved/units.tar.gz を読めない。退避を消し、外さずに止める"; exit 1; fi
+  for t in "${present[@]}"; do /usr/bin/grep -qxF -e "$t" -e "$t/" <<<"$listing" || { /usr/bin/rm -rf "$saved"; echo "退避に $t が無い。退避を消し、外さずに止める"; exit 1; }; done
+  if ! { /usr/bin/cp -p "$binary" "$saved/uniqnode" && /usr/bin/cmp -s "$binary" "$saved/uniqnode"; }; then /usr/bin/rm -rf "$saved"; echo "$binary を退避へ写せない。退避を消し、外さずに止める"; exit 1; fi
+  echo "退避: $saved (${present[*]} と $binary)"
+  if [ -e "$pin" ] || [ -L "$pin" ]; then
+    echo "固定した退避は既に在る: $(/usr/bin/readlink "$pin")。今回の退避は固定しない"
+  else
+    /usr/bin/ln -sT "$saved" "$pin"
+    echo "固定した退避: $pin -> $saved"
+  fi
   systemctl disable --now uniqnode-serve.service uniqnode-viewer.service uniqnode-backup.timer ; rm -rf /etc/systemd/system/uniqnode-serve.service /etc/systemd/system/uniqnode-serve.service.d /etc/systemd/system/uniqnode-viewer.service /etc/systemd/system/uniqnode-viewer.service.d /etc/systemd/system/uniqnode-backup.service /etc/systemd/system/uniqnode-backup.service.d /etc/systemd/system/uniqnode-backup.timer /etc/systemd/system/uniqnode-backup.timer.d ; systemctl daemon-reload
 fi
-if nft list table inet uniqnode >/dev/null 2>&1; then nft delete table inet uniqnode; fi
+tables=$(/usr/sbin/nft list tables)
+if /usr/bin/grep -qxF 'table inet uniqnode' <<<"$tables"; then /usr/sbin/nft delete table inet uniqnode; fi
 echo "旧い名の unit を外し終えた"
 EOF
 ```
@@ -310,16 +339,23 @@ EOF
 - 済んだかは、/tmp/uniqnode-legacy-units.log の最後が「旧い名の unit を外し終えた」と
   `exit status: 0` であることで確かめてから、install の命令へ進む(記録は追記なので、打ち直した分も
   時刻つきで残る)。続く /tmp/uniqnode-install-system.log も、最後の `exit status: 0` を確かめる。
-- 戻すときは、`@default` の 3 つを止めて外してから、最後に作った退避を /etc/systemd/system に展開し、
-  daemon-reload して旧い 3 つを enable --now する(同じ主の口を取り合うので、両方を同時に置かない)。
-  vega で打つ命令:
+- 戻すときは、固定した退避(/var/backups/uniqnode-legacy-pinned。最新の退避ではない)を使う。退避に
+  uniqnode-serve.service とバイナリが入っていることを、何かを変える前に確かめる(第 18 版の APPEND_FAILURE への
+  Codex のレビューの中 7、Claude のレビューの低 6)。`@default` の 3 つを止めて外し、共有のバイナリを退避の
+  ものへ据え直し(同じレビューの中 4)、unit の退避を /etc/systemd/system に展開して daemon-reload し、旧い 3 つを
+  enable --now する(同じ主の口を取り合うので、両方を同時に置かない)。バイナリは graph_a・graph_b の serve と
+  共有なので、それらも次の起動から移行の前のバイナリで走る(移行の前と同じ形。走っている間は今のイメージの
+  まま)。vega で打つ命令:
 
 ```
-set -o pipefail; sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee -a /tmp/uniqnode-legacy-rollback.log; echo "exit status: $?" | /usr/bin/tee -a /tmp/uniqnode-legacy-rollback.log
+( set -o pipefail; sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee -a /tmp/uniqnode-legacy-rollback.log; echo "exit status: $?" | /usr/bin/tee -a /tmp/uniqnode-legacy-rollback.log )
 set -euo pipefail
-archive=$(ls -1t /var/tmp/uniqnode-legacy-units-*.tar.gz | head -n 1)
-echo "戻す退避: $archive"
-/usr/bin/tar -tzf "$archive" >/dev/null
+binary=/home/hikalium/.local/bin/uniqnode
+if ! saved=$(/usr/bin/readlink -e /var/backups/uniqnode-legacy-pinned); then echo "固定した退避 /var/backups/uniqnode-legacy-pinned が無い。何も変えずに止める"; exit 1; fi
+echo "戻す退避: $saved"
+listing=$(/usr/bin/tar -tzf "$saved/units.tar.gz")
+/usr/bin/grep -qxF uniqnode-serve.service <<<"$listing" || { echo "$saved/units.tar.gz に uniqnode-serve.service が無い。何も変えずに止める"; exit 1; }
+[ -f "$saved/uniqnode" ] && [ -x "$saved/uniqnode" ] || { echo "$saved/uniqnode が無い。何も変えずに止める"; exit 1; }
 systemctl disable --now uniqnode-serve@default.service uniqnode-viewer@default.service uniqnode-backup@default.timer
 waited=0
 while :; do
@@ -329,8 +365,12 @@ while :; do
   echo "backup@default の終わりを待つ(状態: $state)"
   sleep 10; waited=$((waited + 10))
 done
-if nft list table inet uniqnode_default >/dev/null 2>&1; then nft delete table inet uniqnode_default; fi
-/usr/bin/tar -C /etc/systemd/system -xzf "$archive"
+tables=$(/usr/sbin/nft list tables)
+if /usr/bin/grep -qxF 'table inet uniqnode_default' <<<"$tables"; then /usr/sbin/nft delete table inet uniqnode_default; fi
+/usr/bin/install -m 0755 -o hikalium -g hikalium "$saved/uniqnode" /home/hikalium/.local/bin/.uniqnode.rollback
+/usr/bin/mv -f /home/hikalium/.local/bin/.uniqnode.rollback "$binary"
+echo "バイナリを戻した: $binary <- $saved/uniqnode"
+/usr/bin/tar -C /etc/systemd/system -xzf "$saved/units.tar.gz"
 systemctl daemon-reload
 systemctl enable --now uniqnode-serve.service uniqnode-viewer.service uniqnode-backup.timer
 echo "旧い名の unit に戻し終えた"
@@ -346,7 +386,7 @@ user 単位で動いているものを system 単位に載せ替える。スト�
 まま、unit の置き場と走らせ方だけが変わる。1 命令で通す(移行の間、serve と viewer は止まる):
 
 ```
-set -o pipefail; sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee /tmp/uniqnode-install-system.log; echo "exit status: $?" | /usr/bin/tee -a /tmp/uniqnode-install-system.log
+( set -o pipefail; sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee /tmp/uniqnode-install-system.log; echo "exit status: $?" | /usr/bin/tee -a /tmp/uniqnode-install-system.log )
 set -euo pipefail
 sudo -u hikalium -H /home/hikalium/.cargo/bin/cargo build --release --manifest-path /work2/llm_playground_host_dir/uniqnode/Cargo.toml -p uniqnode
 /work2/llm_playground_host_dir/uniqnode/target/release/uniqnode install /work2/llm_playground_host_dir/uniqnode-store --system --user hikalium --take-over-user-units --serve-options "--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank" --viewer-listen 0.0.0.0:7450 --backup-dir /home/hikalium/uniqnode-backup --listen-agent 10.10.128.1:7441 --agent-writable lamalium-notes --agent-collections articles --agent-collections papers --agent-collections seccamp --agent-collections specs --agent-collections trial --agent-collections web --agent-collections lamalium-notes --after wg-quick@wg1.service --firewall-allow 10.10.128.4,10.10.128.2

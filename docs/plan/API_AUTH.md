@@ -2,7 +2,7 @@
 
 <a id="abde9b3c-75f8-453b-988e-bfb1e178c771"></a>
 
-版: 第 12 版(2026-10-01)。第 11 版への Codex と Claude のレビュー(Codex 中 5: fetch の curl が curlrc と proxy の環境を継ぐ、Claude 中 5: vega で共有するバイナリと旧い名の unit、低 4: 転送の段をまたぐ予算と自分の LAN のアドレス、低 9: 読み捨ての枠の数)を取り込んだ。第 11 版(2026-10-01)。第 10 版(b4f026c)への Claude のレビュー(中 1: 起動時の断りをストアを開く前に、中 5: 旧い名の
+版: 第 13 版(2026-10-01)。第 12 版への Codex と Claude のレビュー(Codex 中 6: fetch の全体の期限が名前解決を含まない、Claude 中 5: install の断りの完了条件、低 12: `--noproxy` の引数の字面)を取り込んだ。第 12 版(2026-10-01)。第 11 版への Codex と Claude のレビュー(Codex 中 5: fetch の curl が curlrc と proxy の環境を継ぐ、Claude 中 5: vega で共有するバイナリと旧い名の unit、低 4: 転送の段をまたぐ予算と自分の LAN のアドレス、低 9: 読み捨ての枠の数)を取り込んだ。第 11 版(2026-10-01)。第 10 版(b4f026c)への Claude のレビュー(中 1: 起動時の断りをストアを開く前に、中 5: 旧い名の
 unit からの移行を A2 の本番への反映の前提に、中 6: 判定の枠を 403 の読み捨てから切り離す、低 5: fetch の転送先、低 9: ストアの
 ロックの横取り)を取り込んだ。第 10 版(2026-10-01)。第 9 版(98e4b0c)への vega の Codex の再レビュー(中: overflowuid)を取り込んだ。第 8 版(601ae81)への vega の Codex の再レビュー(中: unit の
 RestrictAddressFamilies に AF_NETLINK が無い、低: 節の見出し)を取り込んだ。第 7 版(b398d42)への vega の Codex の再レビュー(中: install の起動の確認、
@@ -252,12 +252,21 @@ serve と同じ uid で主の口に繋ぐので、A2 の uid の判定もブラ�
 curl の設定の継承を断つ(第 11 版への Codex のレビューの中 5): 今の起動(fetch.rs の 173 行付近)は環境と
 既定の curlrc を継ぐので、引数から `--location` を除いても curlrc の `location` で転送を辿りうる。また
 proxy を通すと名前解決は proxy がするので、`--resolve` で接続先を固定できない。そこで curl の先頭の引数を
-`-q`(curlrc を読まない。先頭に置かないと効かない)にし、`--noproxy '*'` を渡し、子の環境から
+`-q`(curlrc を読まない。先頭に置かないと効かない)にし、`--noproxy` とその引数の 1 文字 `*` を渡し
+(`Command::arg` で渡す argv の 1 要素で、シェルを通さないので引用符は付けない。第 12 版への Claude のレビューの
+低 12)、子の環境から
 `http_proxy`・`https_proxy`・`HTTPS_PROXY`・`all_proxy`・`ALL_PROXY`・`no_proxy`・`NO_PROXY` を消す
 (`HTTP_PROXY` の大文字は curl が読まないが、同じく消す)。
 段をまたぐ予算(第 11 版への Claude のレビューの低 4): 1 段ずつ curl を起こすと、段ごとの `--max-time` と
 `--max-filesize` が転送の数だけ掛け算になる。取得の全体の期限と全体の受け取りの上限を最初に決め、各段には
 残りの時間(期限までの秒)と残りのバイト数を渡し、使い切ったら理由を言って断る。
+名前解決も同じ期限に入れる(第 12 版への Codex のレビューの中 6): std の同期の名前解決(`ToSocketAddrs`)には
+期限を掛ける手段が無く、DNS が止まれば curl を起こす前に全体の期限を超える。そこで各段の名前解決は、
+std を呼ばず、子プロセス `getent ahosts <host>`(std と同じ NSS の解決。libc-bin にあり、この機械群では
+/usr/bin/getent)を起こし、残りの時間を期限にして待ち、過ぎたら子を kill して wait し、理由を言って断る。
+答えは各行の先頭のアドレスを読み、上の判定に掛ける(`getent` が 2 を返す「名前が無い」は、その旨を言って
+断る)。スレッドで std の解決を走らせて見捨てる形は採らない: 止まった解決のスレッドが要求ごとに残り続ける。
+子プロセスなら期限で確実に片付く。
 残る穴(第 11 版への Claude のレビューの低 4): この判定はループバックとリンクローカルだけを断るので、
 serve の機械自身の LAN・wg1 のアドレス(例えば vega の viewer の 10.10.128.1:7450)への転送は通る。viewer は
 許可表の無い全読みの転送なので、外のページがそこへ転送すれば、主の口と同じ中身が文書としてコレクションに
@@ -342,7 +351,14 @@ serve の機械自身の LAN・wg1 のアドレス(例えば vega の viewer の
 - fetch が、`location` と `proxy` を書いた curlrc を置いた HOME と、`http_proxy`・`https_proxy`・
   `ALL_PROXY` を立てた環境の下でも、ループバックへの転送を断り、proxy を通らずに `--resolve` で固定した
   先へ繋ぐ(第 11 版への Codex のレビューの中 5)。転送を重ねても、全体の期限と受け取りの上限を超えない
-  (第 11 版への Claude のレビューの低 4)。
+  (第 11 版への Claude のレビューの低 4)。名前解決が止まる形(debug ビルドだけが読む口で、解決の子を答えずに
+  眠り続けるものへ差し替える)でも、fetch は全体の期限の内に理由を言って断り、解決の子が残らない(第 12 版への
+  Codex のレビューの中 6)。curl の argv に `--noproxy` と `*` の 2 要素がそのまま並ぶことを、起動の引数を写す
+  debug の口で見る(第 12 版への Claude のレビューの低 12)。
+- install の断り(第 12 版への Claude のレビューの中 5): 据え先の unit_dir に旧い名の unit(LEGACY_UNITS の
+  どれか)を置いた試験の据え先で `install --instance graph_a` を打つと、理由と docs/mop/SYSTEMD.md の「旧い名の
+  unit から移る」を言って断り、据え先のバイナリのバイト列と mtime が前と同じである。旧い名が無ければ据わる。
+  A1 と APPEND_FAILURE の S1 のうち先に入る方の完了条件にする(APPEND_FAILURE の完了条件と同じ試験)。
 - root で走る system の install の起動の確認が、root の直接の接続は断る serve に対して通る。
 - `--main-allow-uid` に overflowuid を入れた serve が理由を言って起動を断り、写せない uid の接続が 403 になる。
 - 実際の unit の制限の下(install で据え付けた serve)で、許す uid の接続が通り、許さない uid は断られ、
@@ -363,7 +379,7 @@ serve の機械自身の LAN・wg1 のアドレス(例えば vega の viewer の
 | A1 | serve と install の束縛の検査、http.rs のブラウザの門(Host・Origin・Content-Type)、node/tests の共通の口、SPEC と design の書き直し。APPEND_FAILURE の S1 より先に入るなら、install が旧い名の unit の残る間は共有のバイナリの差し替えを断る直しも含める(下の「A2 の本番への反映の前提」) | M |
 | A2 | serve の中の uid の判定(sock_diag の 1 件の照会、`--main-allow-uid`) | S |
 | A4 | 読み口の、出所を示せないチャンクの拒否 | S |
-| A5 | fetch の転送を自分で辿り、ループバックとリンクローカルを断る。curl の `-q`・`--noproxy '*'`・proxy の環境の消去、段をまたぐ予算(5) | S |
+| A5 | fetch の転送を自分で辿り、ループバックとリンクローカルを断る。curl の `-q`・`--noproxy` と `*`・proxy の環境の消去、段をまたぐ予算、期限つきの名前解決(`getent` の子)(5) | S |
 | A3 | viewer の許可表(agent_door.rs の判定の共用、`--viewer-collections`)。本番の値は操作者の答え 1 で決める | M |
 
 A1・A2・A4・A5 はレビューで高の指摘が無いと確かめてから入る。A3 は操作者の確認の後に設計を詰める。
@@ -390,4 +406,4 @@ graph_* を据え直すと、旧い serve の次の起動(restart・再起動)�
 主の口の全ての接続が 403 になる。vega では、どのインスタンスの install も `@default` への移行の後に打つ
 (docs/mop/SYSTEMD.md の「旧い名の unit から移る」の注意)。加えて、install は据え先に旧い名の unit が
 残っている間は、インスタンスに依らず共有のバイナリの差し替えを断るように直す(A1 か S1 のうち先に入る
-方に含める)。
+方に含め、完了条件の「install の断り」の試験で閉じる。第 12 版への Claude のレビューの中 5)。

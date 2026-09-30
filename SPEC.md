@@ -206,6 +206,10 @@ GC が回収する。
   "introduced_by": <公開鍵>?, "status": "manual" | "discovered_pending" }
 ```
 
+endpoints が指すのは相手のピア口(ピアの要求を受ける待ち受け。§10 の待ち受けごとの許可)であって、
+主の口ではない。主の口はループバックにだけ束縛するので、別の機械からは届かない。ピア口は未実装で
+ある(§12)。
+
 メンバーシップの手動管理が信頼の根である。自動発見されたピアは discovered_pending に置かれ、
 手動承認または有効なグループ証明書によってのみ昇格する(MUST)。
 
@@ -277,6 +281,12 @@ ANSWER { "query_id": …, "responder": <DBノードID>, "payload": …, "at": �
   絞り込み(宛先の選択と trust_level 閾値)として送信前に効く。応答側の判定材料は
   peers.json のピアレコード(`node_id` / `trust_level` / `share.collections`。§6.3)である。
   実装は [docs/design/DISTRIBUTED_SEARCH.md](#e577f6db-659e-4eb8-a152-3b7780e4a9d1)。
+- ピアの要求を受ける口: 上の GET と `POST /v1/peer/query` は、ピアが相手の主の口を叩く形で
+  実装されている。主の口はループバックにだけ束縛するので(§10)、別の機械のピアの要求は別の
+  待ち受け(ピア口。未実装、§12)で受ける。ピア口が通す最小の集合は `GET /v1/status`、
+  `GET /v1/replication/signers`、`GET /v1/replication/refs`、`GET /v1/objects/{id}`、
+  `GET /v1/refs/{name}`、`POST /v1/peer/query` とする。同じ機械の 2 ノード(node/tests の
+  試験の構成)は、今のまま互いの主の口で動く。
 
 ### 7.2 開世界セマンティクス
 
@@ -306,7 +316,8 @@ ANSWER { "query_id": …, "responder": <DBノードID>, "payload": …, "at": �
   `GET /v1/replication/signers` が署名者と最終 seq の一覧(カーソル交換)、
   `GET /v1/replication/refs?signer=…&since=…` が since より後の署名済みレコード(seq 順・連続)、
   オブジェクトの want は `GET /v1/objects/{id}` そのもの(404 = 相手も持っていない)。
-  `POST /v1/sync {peer}` が取り寄せの実行。
+  `POST /v1/sync {peer}` が取り寄せの実行。取り寄せ先として叩く口は、別の機械の相手ならピア口
+  (§7.1 の「ピアの要求を受ける口」。未実装)で、`POST /v1/sync` 自体は自分の主の口にある。
 - 取り寄せた内容は自己認証的である: レコードは所有者の署名で、オブジェクトは受信バイト列の
   ハッシュと要求 ID の一致で検証する(MUST)。一致しない応答は保存せず数えるだけとする。
   この性質により中継(replica が他DBノードのレコードを再配布すること)は無条件に安全で、
@@ -402,17 +413,26 @@ uniqnode コアの上に応用層が載る。検索(RAG)層とその上の MCP �
 
 ## 10. ノードローカル API
 
-管理と利用のための HTTP API(LAN 内、認証は当面固定トークン)。詳細スキーマは実装
-マイルストーンで確定する。
+管理と利用のための HTTP API。認証は持たず、信頼の境界は待ち受けごとに置く。主の口は
+ループバックにだけ束縛し、接続の相手のソケットの uid が許す集合(既定は serve 自身の euid だけ。
+変えるのは `--main-allow-uid`)に入るものだけを受け(それらのプロセスは操作者とみなす)、全ての口を
+通す。ブラウザからの要求は Host・Origin・Content-Type の検査で断る。網越しに届く口(読み口・viewer、
+設計中の書き口とピア口)は用途ごとの別の待ち受けで、各々の許可表の外を 403 で断る。詳細スキーマは
+実装マイルストーンで確定する。設計と完了条件は
+[docs/plan/API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771) にある。
 
 | Method/Path | 役割 |
 |---|---|
 | `GET /healthz` | 死活 |
-| `GET /v1/status` | 版・オブジェクト数・ピア到達性・seq・健全性集計(ALERT を含む) |
+| `GET /v1/status` | 版・オブジェクト数・ピア到達性・seq・健全性集計(ALERT を含む)・主の口の枠の数(main_door: 判定中・接続中・断り中の今の数と最大) |
 | `GET /v1/objects/{id}` | オブジェクト取得(ローカル。なければ 404 = ローカル不保持の言明) |
 | `GET /v1/objects/{id}/referrers` | 逆引き(この ID を参照する既知オブジェクトの一覧。自分の知る範囲の導出データで、空は不在の言明ではない) |
+| `GET /v1/objects/{id}/citation` | チャンクの出典(検索の各件と同じ形。見えに無いチャンクは null) |
+| `GET /v1/objects/{id}/rendition` / `/rendition/{alias}` | チャンクについて出せるページの写しの目録 / 写しそのもの(原文・ページの画像など。[docs/design/RENDITION.md](#6046eeca-1d95-4d47-87da-13f86c7710dc)) |
+| `GET /v1/closure/{id}` | その ID から参照を辿って届くオブジェクトの ID の集合(members) |
 | `POST /v1/objects` | オブジェクト投入(べき等。ID を返す) |
 | `PUT /v1/collections/{c}/documents/{name}` | 文書の取り込み(本文は生バイト列。種別は name の拡張子で判定) |
+| `POST /v1/collections/{c}/fetch` | `{url}` の文書をノードが取りに行って取り込む([docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b)) |
 | `GET /v1/collections` | コレクションの一覧と各コレクションの文書数(collections/ 配下の非 tombstone ref を数える。自分の見えの範囲の導出データで、空は不在の言明ではない) |
 | `POST /v1/search` | 検索(method で bm25 / embedding / hybrid を選ぶ。既定は埋め込みサーバの設定があれば hybrid、無ければ bm25。索引もベクトルも導出データで、見え = collections/ 配下の現行文書のチャンクだけが対象。各件は出典を伴う: 文書名・位置・見出し・PDF はページ・取得日時 at = その版を見えに置いた ref レコードの時刻(§4.4)。`full` を付けると各件にチャンクの全文 text が載る(top_k は 10 まで)。`peers` を付けると登録ピアへ散布して順位を融合する(§7.1 の kind:search)) |
 | `GET /v1/refs` | ref の一覧(名前・target・seq・at) |
@@ -431,6 +451,19 @@ uniqnode コアの上に応用層が載る。検索(RAG)層とその上の MCP �
 | `GET /v1/replication/refs?signer&since` | 署名済み ref レコードの取り出し(§7.3) |
 | `POST /v1/sync` | `{peer}` からの pull 同期を実行し、結果の集計を返す |
 | `POST /v1/admin/shutdown` | 応答後に正常終了する(運用とテストの停止用) |
+| `POST /v1/admin/gc` | 生きていないオブジェクトを pack の書き直しで回収する(本文は省略可: `{threshold?, dry_run?}`。[docs/design/GC.md](#9b1ceac3-f3cf-4595-87cb-6e40ce0900e5)) |
+
+待ち受けごとの許可:
+
+| 待ち受け | 束縛 | 通すもの |
+|---|---|---|
+| 主の口(`<listen>`) | ループバックの IP リテラルだけ | 許す uid の接続の、ブラウザの門を越えた要求の全部 |
+| 読み口(`--listen-agent`) | 限られた網のアドレス | 許可表にある読む要求と、許したコレクション・グラフへの書き込み |
+| viewer(`uniqnode viewer` の `<host:port>`) | 運用者が決める | viewer の転送(許可表は設計中。API_AUTH の 3) |
+| 書き口・ピア口 | (未実装) | 設計中(書き口は [docs/plan/FEED.md](#fa8de6f9-59f8-4512-a815-9f41d305db15)、ピア口は §7.1 と §12) |
+
+読み口の許可表の正典は node/src/agent_door.rs と
+[docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d) である。
 
 404 の意味に注意: ローカル API の 404 は「このDBノードは持っていない」というローカルな事実で
 あり、ネットワークに対する不存在の言明ではない(§7.2)。
@@ -449,6 +482,10 @@ uniqnode コアの上に応用層が載る。検索(RAG)層とその上の MCP �
 ## 12. 未決事項
 
 - ファイルシステム風マウント(FUSE / 9P)の位置づけ。
+- ピア口(§7.1 の最小の集合を通す、ピアの要求を受ける別の待ち受け)の束縛と許可表。
+  `GET /v1/objects/{id}` が共有ポリシー(share)を迂回して ID を知る相手に何でも返す点
+  ([docs/design/DISTRIBUTED_SEARCH.md](#e577f6db-659e-4eb8-a152-3b7780e4a9d1) の双方向フィルタ)は、
+  ピア口の許可表の課題として残る。
 - 本仕様の検証: §8 は sim/ の離散イベントシミュレーションで検証済み
   ([docs/analysis/20260815-replica-model-simulation.md](#31e38823-b783-4dfe-bc7c-3cd268f5e7b4))。
   分断合流・反復故障の 400 実行で自傷的な複製数割れ 0、誤警報 0、全実行収束。未検証の残りは

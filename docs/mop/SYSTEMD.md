@@ -123,7 +123,17 @@ unit ファイルは差し替えても drop-in は残る。
   RestrictAddressFamilies= に AF_UNIX を残しているのはロックが unix socket だからで、
   PrivateNetwork= を使わないのは、抽象名前空間の socket がネットワーク名前空間ごとに別に
   なり、外の CLI と unit が互いのロックを見られなくなる(二重起動を検出できなくなる)からで
-  ある。viewer と mcp が loopback で serve に届く必要もある。
+  ある。viewer と mcp が loopback で serve に届く必要もある。serve の unit に AF_NETLINK を
+  足しているのは、主の口が接続の相手のソケットの uid を NETLINK_SOCK_DIAG に照会するからで、
+  無いと照会のソケットを作れず正規の接続まで 403 になる
+  ([docs/plan/API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771) の 1)。
+- 主の口は serve と同じ uid(`--main-allow-uid` で集合を置き換えられる)の接続だけを受ける。
+  system 単位の serve は User=uniqnode で走るので、root の curl や操作者の利用者の curl は
+  403 になる。install の起動の確認(`GET /v1/status` の node_id の照合)は、system 単位では
+  サービスの利用者に権限を落とした子プロセス(置いたバイナリの隠しコマンド
+  `install-status-probe`)から主の口を探る。手で確かめるなら `sudo -u uniqnode curl …` の形で
+  叩く。user 単位の unit は PrivateUsers=yes なので、serve からは自分と root 以外の uid が
+  overflowuid に見え、断られる。
 - pdftotext・pdftohtml・pdftoppm(PDF の取り込み・見出し・写し)と curl(URL の取り込み)は
   PATH から引く。閉じ込めは /usr の実行を妨げず、ProtectHome=read-only は home の下の
   実行も妨げない。ただし unit の PATH はログインシェルのものではなく systemd の既定
@@ -833,6 +843,10 @@ systemctl --user status uniqnode-serve@default uniqnode-viewer@default   # syste
 curl http://127.0.0.1:7440/v1/status                      # serve が答える
 curl http://127.0.0.1:7450/v1/status                      # viewer が serve へ転送して同じ答え
 ```
+
+system 単位では、主の口は serve の User= の uid の接続だけを受けるので、1 行目は
+`sudo -u uniqnode curl http://127.0.0.1:7440/v1/status` の形で叩く(操作者の利用者のままだと
+「main door: この接続の相手を受け付けない」の 403 になる。それ自体が uid の判定の効いている証である)。
 
 埋め込みを足したなら、起動直後の journal に `uniqnode: embedding: bge-m3 (http://…)` の
 行があること、検索の応答の `method` が hybrid になる(または `degraded` が理由を言う)

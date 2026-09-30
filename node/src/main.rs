@@ -51,8 +51,21 @@ fn usage_text() -> String {
                               [--agent-writable <コレクション名>]...\n\
                               [--agent-collections <コレクション名>]...\n\
                               [--agent-graph <グラフ名>]...\n\
-                              [--agent-graph-writable <グラフ名>]... [ログの指定]\n\
+                              [--agent-graph-writable <グラフ名>]...\n\
+                              [--main-allow-uid <uid,...>]... [--main-allow-host <host:port>]...\n\
+                              [ログの指定]\n\
                                       HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)。\n\
+                                      <addr>(主の口)はループバックの IP リテラル(127.0.0.0/8\n\
+                                      か [::1])だけを受け、名前・0.0.0.0・[::]・IPv4 射影は\n\
+                                      断る。主の口は接続の相手のソケットの uid を確かめ\n\
+                                      (Linux の sock_diag)、許す集合(既定は serve 自身の\n\
+                                      euid だけ)に無ければ 403 で断る。--main-allow-uid は\n\
+                                      その集合を置き換える(root も許すなら常駐の利用者と\n\
+                                      並べて 1000,0 のように書く)。ブラウザからの要求は\n\
+                                      断る: Host が束縛の字面か localhost:<port> でなければ\n\
+                                      421(--main-allow-host で足せる)、Origin 付きは 403、\n\
+                                      text/plain・form の型と、JSON の道の application/json\n\
+                                      以外は 415(docs/plan/API_AUTH.md)。\n\
                                       --listen-agent を与えると、そのアドレスに第 2 の口\n\
                                       (読み口)を束縛する。読み口は許可表(healthz・status・\n\
                                       search・objects のチャンク・citation・collections)の\n\
@@ -699,6 +712,19 @@ fn main() {
         println!("{}", uniqnode::mcp::self_check_report());
         return;
     }
+    // install の起動の確認(system 単位で常駐の利用者へ権限を落とした子プロセスとして起こされ、
+    // 主の口の /v1/status を引く。node/src/install.rs の status_node_id_as)。データ
+    // ディレクトリを取らない。
+    if arguments.len() == 3 && arguments[1] == uniqnode::install::STATUS_PROBE_COMMAND {
+        match uniqnode::install::status_node_id(&arguments[2]) {
+            Ok(node_id) => println!("{node_id}"),
+            Err(message) => {
+                eprintln!("uniqnode: {}: {message}", uniqnode::install::STATUS_PROBE_COMMAND);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // ヘルプの求めは、どの位置にあっても使い方だけを出して 0 で終わる。位置引数の数を
     // 数えるより前に見るのは、`uniqnode install --help` が --help をデータディレクトリと
     // 読んで据え付けを実行してしまうからである(2026-09-08 に実際に起きた)。
@@ -956,6 +982,11 @@ struct RunOptions {
     /// docs/design/GRAPH.md)。
     agent_graph: Vec<String>,
     agent_graph_writable: Vec<String>,
+    /// 主の口が許す uid の集合(--main-allow-uid。繰り返せて、与えた全部の和)。None なら
+    /// serve 自身の euid だけ(docs/plan/API_AUTH.md の 1)。serve だけが持つ。
+    main_allow_uid: Option<Vec<u32>>,
+    /// 主の口が既定に足して許す Host(--main-allow-host。繰り返せる)。serve だけが持つ。
+    main_allow_host: Vec<String>,
 }
 
 /// ログの指定と読み口の指定だけを抜き取り、残りは埋め込みの読み手に渡す(読み取りを
@@ -971,6 +1002,8 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
     let mut agent_collections: Vec<String> = Vec::new();
     let mut agent_graph: Vec<String> = Vec::new();
     let mut agent_graph_writable: Vec<String> = Vec::new();
+    let mut main_allow_uid: Option<Vec<u32>> = None;
+    let mut main_allow_host: Vec<String> = Vec::new();
     let mut others = Vec::new();
     let mut at = 0;
     while at < rest.len() {
@@ -1025,6 +1058,34 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
                 };
                 if !names.contains(&graph) {
                     names.push(graph);
+                }
+                at += 2;
+            }
+            uniqnode::main_door::ALLOW_UID_FLAG => {
+                let text = value();
+                let uids = match uniqnode::main_door::parse_uid_list(&text) {
+                    Ok(uids) => uids,
+                    Err(message) => {
+                        eprintln!("uniqnode: {message}");
+                        std::process::exit(2);
+                    }
+                };
+                let set = main_allow_uid.get_or_insert_with(Vec::new);
+                for uid in uids {
+                    if !set.contains(&uid) {
+                        set.push(uid);
+                    }
+                }
+                at += 2;
+            }
+            uniqnode::main_door::ALLOW_HOST_FLAG => {
+                let host = value();
+                if let Err(message) = uniqnode::main_door::check_allow_host(&host) {
+                    eprintln!("uniqnode: {message}");
+                    std::process::exit(2);
+                }
+                if !main_allow_host.contains(&host) {
+                    main_allow_host.push(host);
                 }
                 at += 2;
             }
@@ -1099,6 +1160,8 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
         agent_collections,
         agent_graph,
         agent_graph_writable,
+        main_allow_uid,
+        main_allow_host,
     }
 }
 
@@ -1111,6 +1174,18 @@ fn refuse_misplaced_listen_agent(role: &str, options: &RunOptions) {
         uniqnode::log_line!(
             "uniqnode: {role}: --listen-agent は {role} の引数ではない(読み口を束縛するのは \
              serve である)"
+        );
+        std::process::exit(2);
+    }
+    // 主の口の指定も serve だけのもの(同じ理由で、黙って捨てない)。
+    let main_flag = match (options.main_allow_uid.is_some(), options.main_allow_host.is_empty()) {
+        (true, _) => Some(uniqnode::main_door::ALLOW_UID_FLAG),
+        (false, false) => Some(uniqnode::main_door::ALLOW_HOST_FLAG),
+        (false, true) => None,
+    };
+    if let Some(flag) = main_flag {
+        uniqnode::log_line!(
+            "uniqnode: {role}: {flag} は {role} の引数ではない(主の口を持つのは serve である)"
         );
         std::process::exit(2);
     }
@@ -1872,6 +1947,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                         embedding,
                         reranker,
                         data_dir,
+                        main_door: None,
                     }))
                 }
             };
@@ -1896,11 +1972,42 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // ストアを開くより先にログを開く。「開けない」「そのアドレスを使えない」も
             // 残したい記録である。
             start_logging(dir, uniqnode::log::SERVE_ROLE, &options.log);
-            // 順序は「ストアを開く → 装備する → 束縛する → listening on」。標準出力の
-            // この 1 行は起動スクリプトとの取り決めで、待つ側は「出たら要求を受け付ける」
-            // と信じてよい。ここから束縛までの間で落ちるもの(ロックを持つ別プロセス、誤った
-            // URL)は、何も束縛しないうちに理由を言って終わる。束縛してから開くと、待つ側
-            // は騙され、その後で exit 1 する(2026-09-05 に systemd の据え付けで観測)。
+            // 主の口の境界(docs/plan/API_AUTH.md の 1)。束縛先と uid の集合の誤りは引数の誤り
+            // なので、ストアを開く前に 2 で断る(unit は起こし直さない)。
+            if let Err(message) = uniqnode::main_door::check_listen(address, "serve") {
+                uniqnode::log_line!("uniqnode: serve: {message}");
+                std::process::exit(2);
+            }
+            let main_door = match uniqnode::install::effective_uid()
+                .and_then(|euid| Ok((euid, uniqnode::main_door::read_overflow_uid()?)))
+                .and_then(|(euid, overflow_uid)| {
+                    uniqnode::main_door::MainDoor::new(
+                        options.main_allow_uid.clone(),
+                        euid,
+                        overflow_uid,
+                    )
+                }) {
+                Ok(door) => std::sync::Arc::new(door),
+                Err(message) => {
+                    uniqnode::log_line!("uniqnode: serve: {message}");
+                    std::process::exit(2);
+                }
+            };
+            // 順序は「主の口の検査 → 束縛する → ストアを開く → 装備する → listening on」。
+            // 起動時の検査(束縛先・OS・overflowuid・束縛そのもの)はすべてストアを開く前に
+            // 済ませ、断るときはストアに触れずに終わる(API_AUTH の 1)。標準出力の
+            // listening on の 1 行は起動スクリプトとの取り決めで、待つ側は「出たら要求を
+            // 受け付ける」と信じてよい。だから束縛の後でも、ストアを開いて装備し終えるまでは
+            // この行を出さず accept もしない。その間に落ちるもの(ロックを持つ別プロセス、
+            // 誤った URL)は、行を出さないうちに理由を言って終わる。行を出してから開くと、
+            // 待つ側は騙され、その後で exit 1 する(2026-09-05 に systemd の据え付けで観測)。
+            let listener = match std::net::TcpListener::bind(address) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    uniqnode::log_line!("uniqnode: serve: {address} に束縛できない: {error}");
+                    std::process::exit(1);
+                }
+            };
             let data_dir = std::path::PathBuf::from(dir);
             let (capacity_bytes, health_params) = uniqnode::health::read_node_config(&data_dir);
             let mut store_config = uniqnode::store::StoreConfig::new(&data_dir);
@@ -1941,13 +2048,6 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // 順位の取り直しも埋め込みと同じ扱い(明示されたときだけ・起動時に生存を
             // 確かめない)。組み立てはストアを直接開く形の mcp と共用する。
             let reranker = reranker_from(&options.embed);
-            let listener = match std::net::TcpListener::bind(address) {
-                Ok(listener) => listener,
-                Err(error) => {
-                    uniqnode::log_line!("uniqnode: serve: {address} に束縛できない: {error}");
-                    std::process::exit(1);
-                }
-            };
             // テストや起動スクリプトが実際のポートを知れるように、束縛先を必ず表示する。
             let bound = listener.local_addr()?;
             println!("listening on {bound}");
@@ -1956,6 +2056,19 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // 標準出力の 1 行は起動スクリプトとの取り決めなので形を変えない。ログにも
             // 残すのは、後から「いつ、どのアドレスで起きたか」を読めるようにするため。
             uniqnode::log_line!("uniqnode: serve: {bound} で待ち受ける");
+            let mut main_hosts = uniqnode::main_door::default_hosts(bound);
+            for host in &options.main_allow_host {
+                if !main_hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
+                    main_hosts.push(host.clone());
+                }
+            }
+            let gate = uniqnode::http::BrowserGate::new(&main_hosts);
+            uniqnode::log_line!(
+                "uniqnode: serve: 主の口が許す uid は {}、Host は {}",
+                uniqnode::sock_diag::uid_list(main_door.allowed_uids()),
+                gate.allowed_hosts().join(", ")
+            );
+            let gauge = uniqnode::http::DoorGauge::new();
             let context = std::sync::Arc::new(uniqnode::api::ApiContext {
                 store,
                 engine,
@@ -1968,6 +2081,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 // ページの写しの作業ファイル置き場を組むために持つ(健全性エンジンへ
                 // 渡した data_dir は移動済みなので、同じ dir から作り直す)。
                 data_dir: std::path::PathBuf::from(dir),
+                main_door: Some(gauge.clone()),
             });
             // 読み口(AGENT_DOOR (uuid:02f79aec-2f12-41e6-bede-1557d4719e4d))。主の口と
             // 同じ ApiContext を共有し、許可表を通った要求だけを同じ api::handle に委ねる。
@@ -2019,9 +2133,17 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // start_index_warmer)。束縛はもう済んでいるので、これが listening on を遅らせる
             // ことは無い。
             uniqnode::api::start_index_warmer(context.clone());
-            let handler: std::sync::Arc<uniqnode::http::Handler> =
-                std::sync::Arc::new(move |request| uniqnode::api::handle(&context, request));
-            uniqnode::http::serve(listener, handler);
+            // 主の口: 接続ごとに uid を判定し(要求を読む前)、要求ごとにブラウザの門と道ごとの
+            // 本文の型を見てから api::handle に委ねる。
+            let handler: std::sync::Arc<uniqnode::http::PeerHandler> =
+                std::sync::Arc::new(move |request, _peer| {
+                    gate.screen(request)
+                        .or_else(|| uniqnode::main_door::screen_content_type(request))
+                        .unwrap_or_else(|| uniqnode::api::handle(&context, request))
+                });
+            let check: std::sync::Arc<uniqnode::http::ConnectionCheck> =
+                std::sync::Arc::new(move |stream| main_door.check(stream));
+            uniqnode::http::serve_checked(listener, gauge, check, handler);
         }
         // RAG ビューワ(VIEWER (uuid:4cd4c71a-ecf3-44a8-a97b-bb2c8d8fe847))。1 枚の HTML を
         // 出し、その頁が呼ぶ /v1/* は走っている serve へ転送する。ストアを開かないので、

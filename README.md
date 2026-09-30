@@ -34,15 +34,20 @@ SPEC §11)を実装済み。依存クレートなし。
 
 ```
 cargo run -p uniqnode -- serve /tmp/uniqnode-data 127.0.0.1:7440
-curl -X POST --data-binary '{"v":1,"kind":"node","contents":"hello"}' http://127.0.0.1:7440/v1/objects
+curl -X POST -H 'Content-Type: application/json' --data-binary '{"v":1,"kind":"node","contents":"hello"}' http://127.0.0.1:7440/v1/objects
 curl http://127.0.0.1:7440/v1/status
 ```
+
+serve の主の口はループバックの IP リテラルにだけ束縛し、serve と同じ uid(`--main-allow-uid` で
+変えられる)のプロセスの接続だけを受ける。ブラウザからの要求を断るため、本文を送る要求には
+`Content-Type` が要る(JSON の道は `application/json`。
+[docs/plan/API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771))。
 
 ウェブページや PDF は URL を渡せばノードが取りに行く(取りに行くのは curl で、HTML は外部への
 依存を落とした自足する 1 枚にしてから収める。文書名を省くと URL から導く):
 
 ```
-curl -X POST -d '{"url":"https://arxiv.org/abs/2401.00001"}' http://127.0.0.1:7440/v1/collections/papers/fetch
+curl -X POST -H 'Content-Type: application/json' -d '{"url":"https://arxiv.org/abs/2401.00001"}' http://127.0.0.1:7440/v1/collections/papers/fetch
 ```
 
 ブラウザから引くには、serve を起こしたままビューワを足す(ストアのロックを取らないので同時に
@@ -56,7 +61,7 @@ cargo run -p uniqnode -- viewer /tmp/uniqnode-data 127.0.0.1:7450
 相手のアドレスと DBノードID(`GET /v1/status` の node_id)を書いてから、`peers` を付ける:
 
 ```
-curl -X POST -d '{"query":"…","peers":true,"budget_ms":3000}' http://127.0.0.1:7440/v1/search
+curl -X POST -H 'Content-Type: application/json' -d '{"query":"…","peers":true,"budget_ms":3000}' http://127.0.0.1:7440/v1/search
 ```
 
 serve・mcp・viewer のログは、何も指定しなくても `<データディレクトリ>/logs/` に残る(上の例

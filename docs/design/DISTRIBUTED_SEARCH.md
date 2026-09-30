@@ -95,6 +95,14 @@ POST /v1/query(kind:object)は found でその本文を取り寄せた
 オブジェクト単位の共有ポリシーは残作業である
 ([docs/plan/RAG.md](#86363f4a-3df6-4aa2-9c64-b99aa5cb4e7b))。
 
+どの口で受けるか: 上の peers.json の例の address(`10.0.0.3:7440`)は、相手の主の口を叩く前提で
+書かれている。主の口はループバックにだけ束縛し、同じ機械の許す uid の接続だけを受けるので
+(SPEC §10、[docs/plan/API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771))、別の機械のピアの
+`POST /v1/peer/query` は主の口には届かない。ピアの要求は別の待ち受け(ピア口)で受ける設計で、
+未実装である(SPEC §7.1 と §12)。address はピア口ができたときにその待ち受けを指す。上の
+「GET /v1/objects/{id} は share を迂回する」は、ピア口の許可表の課題として残る。試験の 2 ノード
+(node/tests/distributed_search.rs)は 127.0.0.1 同士なので、今のまま互いの主の口で動く。
+
 要求者の認証は署名で行う。名乗り(origin)を信じるのではなく、sig を origin の鍵で検証して
 初めて「この DBノードが問うている」と言える。署名は再送を防がないので、at が
 QUERY_FRESHNESS_SECONDS(300 秒)の窓の外にある封筒は受けない。窓を広く採るのは、DBノード

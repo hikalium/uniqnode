@@ -40,6 +40,9 @@ pub struct ApiContext {
     /// (crate::rendition::RenditionOptions::in_data_dir)を組むために持つ。store から
     /// 取れない(Store は自分の置き場を外へ出さない)ので、組み立てた側から渡す。
     pub data_dir: std::path::PathBuf,
+    /// 主の口の枠(判定中と接続中の数。serve でだけ Some。node/src/http.rs の serve_checked)。
+    /// /v1/status の main_door に今の数と起動からの最大を載せる。
+    pub main_door: Option<Arc<crate::http::DoorGauge>>,
 }
 
 fn json_object(entries: Vec<(&str, c1::Value)>) -> Vec<u8> {
@@ -131,6 +134,20 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
                     ),
                 ]
             };
+            if let Some(gauge) = &context.main_door {
+                // 主の口の枠の数(役割ごと)。判定中はスレッドを作る前に取る枠、接続中は判定を
+                // 通った後の枠、断り中は 403 を届けて読み捨てる間の枠で、どれも今の数と起動からの
+                // 最大を言う(API_AUTH の 1)。
+                let count = |n: usize| c1::Value::Integer(n as i64);
+                let mut map = BTreeMap::new();
+                map.insert("checking".to_string(), count(gauge.checking.in_use()));
+                map.insert("checking_peak".to_string(), count(gauge.checking.peak()));
+                map.insert("connections".to_string(), count(gauge.connected.in_use()));
+                map.insert("connections_peak".to_string(), count(gauge.connected.peak()));
+                map.insert("refusing".to_string(), count(gauge.refusing.in_use()));
+                map.insert("refusing_peak".to_string(), count(gauge.refusing.peak()));
+                fields.push(("main_door", c1::Value::Object(map)));
+            }
             if let Some(health) = &context.health {
                 let roots: Vec<c1::Value> = health
                     .roots_snapshot()

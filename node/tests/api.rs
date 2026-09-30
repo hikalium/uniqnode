@@ -86,14 +86,18 @@ fn keep_alive_serves_multiple_requests_on_one_connection() {
     let mut writer = stream.try_clone().expect("clone");
     let mut reader = BufReader::new(stream);
 
+    let address = &server.address;
     writer
-        .write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+        .write_all(format!("GET /healthz HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes())
         .expect("first request");
     let first = read_response(&mut reader);
     assert_eq!(first.status, 200);
 
     writer
-        .write_all(b"GET /v1/status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .write_all(
+            format!("GET /v1/status HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
         .expect("second request");
     let second = read_response(&mut reader);
     assert_eq!(second.status, 200);
@@ -106,7 +110,8 @@ fn expect_100_continue_is_honored() {
     let server = start_server("expect100");
     let body = b"expect test";
     let head = format!(
-        "POST /v1/objects HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+        "POST /v1/objects HTTP/1.1\r\nHost: {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+        server.address,
         body.len()
     );
     let mut stream = TcpStream::connect(&server.address).expect("connect");

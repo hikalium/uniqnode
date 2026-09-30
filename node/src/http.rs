@@ -87,12 +87,15 @@ fn status_reason(status: u16) -> &'static str {
         200 => "OK",
         201 => "Created",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         411 => "Length Required",
         413 => "Payload Too Large",
         // URL からの取り込みで、取れたものが取り込める種別でないとき(node/src/fetch.rs)。
         415 => "Unsupported Media Type",
+        // 主の口の Host が一覧に無いとき(BrowserGate。DNS rebinding を止める)。
+        421 => "Misdirected Request",
         500 => "Internal Server Error",
         501 => "Not Implemented",
         // URL からの取り込みで、向こうの相手から取れなかったとき(node/src/fetch.rs)。
@@ -118,32 +121,300 @@ pub fn serve(listener: TcpListener, handler: Arc<Handler>) -> ! {
 /// serve と同じだが、ハンドラに相手のアドレスも渡す。接続の受け方は 1 つ(should/0135)で、
 /// serve はこれの被せ物である。
 pub fn serve_with_peer(listener: TcpListener, handler: Arc<PeerHandler>) -> ! {
+    accept_loop(listener, |stream, peer| {
+        let handler = handler.clone();
+        std::thread::spawn(move || run_connection(stream, peer, handler));
+    })
+}
+
+/// accept を回し続け、受けた接続を dispatch に渡す(返らない)。接続の受け方はここ 1 つで、
+/// serve_with_peer と serve_checked はこれの上に載る(should/0135)。
+fn accept_loop(listener: TcpListener, mut dispatch: impl FnMut(TcpStream, std::net::SocketAddr)) -> ! {
     loop {
         match listener.accept() {
-            Ok((stream, peer)) => {
-                let handler = handler.clone();
-                std::thread::spawn(move || {
-                    // 接続単位のエラーはその接続を閉じるだけでよい。
-                    if let Err(e) = handle_connection(stream, peer, handler) {
-                        // タイムアウト・切断は平常運転なのでログにしない。
-                        let benign = matches!(
-                            e.kind(),
-                            std::io::ErrorKind::WouldBlock
-                                | std::io::ErrorKind::TimedOut
-                                | std::io::ErrorKind::UnexpectedEof
-                                | std::io::ErrorKind::ConnectionReset
-                                | std::io::ErrorKind::BrokenPipe
-                        );
-                        if !benign {
-                            crate::log_line!("uniqnode: http connection error: {e}");
-                        }
-                    }
-                });
-            }
+            Ok((stream, peer)) => dispatch(stream, peer),
             Err(e) => {
                 crate::log_line!("uniqnode: accept error: {e}");
             }
         }
+    }
+}
+
+/// 1 本の接続を捌き切る。接続単位のエラーはその接続を閉じるだけでよい。
+fn run_connection(stream: TcpStream, peer: std::net::SocketAddr, handler: Arc<PeerHandler>) {
+    if let Err(e) = handle_connection(stream, peer, handler) {
+        // タイムアウト・切断は平常運転なのでログにしない。
+        let benign = matches!(
+            e.kind(),
+            std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::BrokenPipe
+        );
+        if !benign {
+            crate::log_line!("uniqnode: http connection error: {e}");
+        }
+    }
+}
+
+// ---- 主の口: 接続の判定と枠(API_AUTH (uuid:abde9b3c-75f8-453b-988e-bfb1e178c771) の 1) ----
+
+/// 判定を同時に走らせる数の上限。判定のスレッドはこの枠を取れたときだけ作る。
+pub const CHECK_SLOTS: usize = 16;
+/// 判定を通った後の接続(とそのスレッド)の数の上限。
+pub const CONNECTION_SLOTS: usize = 64;
+/// 断った接続に 403 を届ける(読み捨てて閉じる)数の上限。判定の枠とは別に持つ: 403 の読み捨ては
+/// 最長で 1 秒ほど掛かるので、判定の枠で持つと、断られる相手が安く判定の枠を埋め、許す相手の
+/// 接続まで閉じられる。
+pub const REFUSAL_SLOTS: usize = 8;
+
+/// 数に上限のある枠。取れなければ待たずに None を返す。今の数と、起動からの最大を数える
+/// (役割ごとの数を外から見る口。/v1/status の main_door)。
+pub struct Slots {
+    max: usize,
+    in_use: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
+}
+
+/// 取った枠 1 つ。落とすと返る。
+pub struct Slot {
+    slots: Arc<Slots>,
+}
+
+impl Slots {
+    pub fn new(max: usize) -> Arc<Slots> {
+        Arc::new(Slots {
+            max,
+            in_use: std::sync::atomic::AtomicUsize::new(0),
+            peak: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    pub fn try_take(self: &Arc<Self>) -> Option<Slot> {
+        use std::sync::atomic::Ordering;
+        let taken = self
+            .in_use
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < self.max).then_some(n + 1))
+            .ok()?;
+        self.peak.fetch_max(taken + 1, Ordering::AcqRel);
+        Some(Slot { slots: self.clone() })
+    }
+
+    pub fn in_use(&self) -> usize {
+        self.in_use.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn peak(&self) -> usize {
+        self.peak.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.slots.in_use.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// 主の口の 3 種類の枠。
+pub struct DoorGauge {
+    pub checking: Arc<Slots>,
+    pub connected: Arc<Slots>,
+    pub refusing: Arc<Slots>,
+}
+
+impl DoorGauge {
+    pub fn new() -> Arc<DoorGauge> {
+        Arc::new(DoorGauge {
+            checking: Slots::new(CHECK_SLOTS),
+            connected: Slots::new(CONNECTION_SLOTS),
+            refusing: Slots::new(REFUSAL_SLOTS),
+        })
+    }
+}
+
+/// 接続を受けた直後、要求を 1 バイトも読む前に呼ぶ判定。Err の文は 403 の本文とログに載る。
+pub type ConnectionCheck = dyn Fn(&TcpStream) -> Result<(), String> + Send + Sync;
+
+/// 断る接続の扱いの上限(403 は最善努力で届ける)。
+const REFUSAL_HEAD_BYTES: usize = 8 * 1024;
+const REFUSAL_HEAD_TIME: std::time::Duration = std::time::Duration::from_millis(100);
+const REFUSAL_DRAIN_BYTES: usize = 64 * 1024;
+const REFUSAL_DRAIN_TIME: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// 403 の本文の頭。試験はこの頭で断りを見分ける(must/0023)。
+pub const REFUSED_PREFIX: &str = "main door: この接続の相手を受け付けない: ";
+
+/// 接続ごとに check を通してから handler に渡す(主の口。返らない)。
+///
+/// 枠の扱い:
+/// - 判定の枠は、accept するスレッドの中で待たずに取る。取れなければスレッドを作らずに
+///   その場で閉じる(応答は書かない。書くと遅い相手に accept が止められる)。
+/// - 判定が通ったら接続の枠を待たずに取り、取れたら判定の枠を返して HTTP の処理へ移る。
+///   取れなければ閉じて判定の枠を返す。判定の枠を接続の終わりまで持ち続けない。
+/// - 判定が断ったら、判定の枠をその場で返し、断りの枠を待たずに取る。取れたら 403 を最善努力で
+///   届け、期限の内に閉じて断りの枠を返す。取れなければ 403 を書かずにすぐ閉じる。
+pub fn serve_checked(
+    listener: TcpListener,
+    gauge: Arc<DoorGauge>,
+    check: Arc<ConnectionCheck>,
+    handler: Arc<PeerHandler>,
+) -> ! {
+    accept_loop(listener, |stream, peer| {
+        let Some(check_slot) = gauge.checking.try_take() else {
+            drop(stream);
+            return;
+        };
+        let (gauge, check, handler) = (gauge.clone(), check.clone(), handler.clone());
+        let spawned = std::thread::Builder::new()
+            .name("main-door".to_string())
+            .spawn(move || {
+                if let Err(reason) = check(&stream) {
+                    drop(check_slot);
+                    let Some(refusal_slot) = gauge.refusing.try_take() else {
+                        crate::log_line!(
+                            "uniqnode: serve: 主の口が {peer} を断った(断りの枠が埋まっていて 403 を書かない): {reason}"
+                        );
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                        return;
+                    };
+                    crate::log_line!("uniqnode: serve: 主の口が {peer} を断った: {reason}");
+                    refuse_connection(stream, &reason);
+                    drop(refusal_slot);
+                    return;
+                }
+                let Some(connection_slot) = gauge.connected.try_take() else {
+                    drop(stream);
+                    drop(check_slot);
+                    return;
+                };
+                drop(check_slot);
+                run_connection(stream, peer, handler);
+                drop(connection_slot);
+            });
+        // スレッドを作れなければ、閉じた接続と枠は閉包と一緒に落ちて返る。
+        if let Err(e) = spawned {
+            crate::log_line!("uniqnode: serve: 接続のスレッドを作れない: {e}");
+        }
+    })
+}
+
+/// 断る接続に 403 を最善努力で届けて閉じる。要求の頭を上限つきで読み捨ててから 403 を書き、
+/// 書く側を閉じ(shutdown(Write))、その後も総時間と総バイトの上限つきで読み捨ててから閉じる
+/// (未読のデータを残して閉じると Linux は RST を送り、相手は 403 を読む前に ECONNRESET に
+/// なる)。守るのは「要求は実行されず、期限の内に閉じる」ことで、403 が届くのは小さな通常の
+/// 要求についてである。
+fn refuse_connection(mut stream: TcpStream, reason: &str) {
+    let started = std::time::Instant::now();
+    let mut head = Vec::new();
+    let mut buffer = [0u8; 4096];
+    while head.len() < REFUSAL_HEAD_BYTES && !head.windows(4).any(|w| w == b"\r\n\r\n") {
+        let Some(left) = REFUSAL_HEAD_TIME.checked_sub(started.elapsed()).filter(|d| !d.is_zero())
+        else {
+            break;
+        };
+        if stream.set_read_timeout(Some(left)).is_err() {
+            break;
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => head.extend_from_slice(&buffer[..n]),
+        }
+    }
+    let _ = stream.set_write_timeout(Some(REFUSAL_HEAD_TIME));
+    let response = Response::text(403, &format!("{REFUSED_PREFIX}{reason}\n"));
+    if write_response(&mut stream, &response, true).is_err() {
+        return;
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let drain_started = std::time::Instant::now();
+    let mut drained = 0usize;
+    while drained < REFUSAL_DRAIN_BYTES {
+        let Some(left) =
+            REFUSAL_DRAIN_TIME.checked_sub(drain_started.elapsed()).filter(|d| !d.is_zero())
+        else {
+            break;
+        };
+        if stream.set_read_timeout(Some(left)).is_err() {
+            break;
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => drained += n,
+        }
+    }
+}
+
+// ---- ブラウザの門(主の口。API_AUTH の 1) ----
+
+/// ブラウザからの要求を断る門。要求ごとに見る(uid の判定は接続ごと)。
+///
+/// - Host が許す authority の一覧に無ければ 421(DNS rebinding を止める。比べるときは大文字と
+///   小文字を区別しない)。
+/// - Origin が付いているか、Sec-Fetch-Site が same-origin と none 以外なら 403(ブラウザは GET と
+///   HEAD 以外の要求には no-cors でも Origin を付ける)。
+/// - ブラウザが単純な要求で送れる 3 つの型の Content-Type は、どの道でも 415(重ねの守り)。
+///   道ごとの型の決まりは呼び手が別に当てる(node/src/main_door.rs)。
+pub struct BrowserGate {
+    /// 許す authority(`127.0.0.1:7440`・`localhost:7440` のような `host:port`)。小文字で持つ。
+    allowed_hosts: Vec<String>,
+}
+
+/// ブラウザが単純な要求(プリフライトの要らない要求)で送れる Content-Type。
+pub const SIMPLE_CONTENT_TYPES: [&str; 3] =
+    ["text/plain", "multipart/form-data", "application/x-www-form-urlencoded"];
+
+/// Content-Type の値から型の部分(`;` の前)を小文字で取り出す。
+pub fn media_type(value: &str) -> String {
+    value.split(';').next().unwrap_or("").trim().to_ascii_lowercase()
+}
+
+impl BrowserGate {
+    pub fn new(allowed_hosts: &[String]) -> BrowserGate {
+        BrowserGate { allowed_hosts: allowed_hosts.iter().map(|h| h.to_ascii_lowercase()).collect() }
+    }
+
+    pub fn allowed_hosts(&self) -> &[String] {
+        &self.allowed_hosts
+    }
+
+    /// 断るなら応答を返す。
+    pub fn screen(&self, request: &Request) -> Option<Response> {
+        let host = request.header("host").unwrap_or("");
+        if !self.allowed_hosts.iter().any(|allowed| allowed.eq_ignore_ascii_case(host)) {
+            return Some(Response::text(
+                421,
+                &format!(
+                    "main door: Host {host:?} はこの口の名ではない(許すのは {})\n",
+                    self.allowed_hosts.join(", ")
+                ),
+            ));
+        }
+        if request.header("origin").is_some() {
+            return Some(Response::text(403, "main door: Origin 付きの要求(ブラウザ)は受け付けない\n"));
+        }
+        if let Some(site) = request.header("sec-fetch-site") {
+            if !site.eq_ignore_ascii_case("same-origin") && !site.eq_ignore_ascii_case("none") {
+                return Some(Response::text(
+                    403,
+                    &format!("main door: Sec-Fetch-Site {site} の要求(ブラウザ)は受け付けない\n"),
+                ));
+            }
+        }
+        if let Some(value) = request.header("content-type") {
+            let media = media_type(value);
+            if SIMPLE_CONTENT_TYPES.contains(&media.as_str()) {
+                return Some(Response::text(
+                    415,
+                    &format!(
+                        "main door: Content-Type {media} は受け付けない(ブラウザが単純な要求で\
+                         送れる型。JSON は application/json、生のバイト列は \
+                         application/octet-stream で送る)\n"
+                    ),
+                ));
+            }
+        }
+        None
     }
 }
 

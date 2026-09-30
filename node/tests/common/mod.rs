@@ -20,22 +20,26 @@ pub struct Server {
     pub stderr: Option<ChildStderr>,
 }
 
-/// 正常終了を頼む(応答を読み切ってから閉じる)。頼めたら true。Drop と finish が
-/// 同じ手順を通る(should/0135)。
-fn ask_for_shutdown(address: &str) -> bool {
-    TcpStream::connect(address)
-        .ok()
-        .and_then(|mut stream| {
-            stream
-                .write_all(
-                    b"POST /v1/admin/shutdown HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .ok()?;
-            let mut response = Vec::new();
-            let _ = stream.read_to_end(&mut response);
-            Some(())
-        })
-        .is_some()
+/// 停止の応答を待つ期限。serve は停止の要求に即答する(応答を書いてから終わる)。
+const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 正常終了を頼む(応答を読み切ってから閉じる)。200 で受け付けられたら Ok、断られた・
+/// 答えが無いなら理由を Err で返す(主の口の門に断られて、終了待ちのまま止まらないように、
+/// 応答の番号と期限を見る)。Drop と finish が同じ手順を通る(should/0135)。
+fn ask_for_shutdown(address: &str) -> Result<(), String> {
+    let mut stream = TcpStream::connect(address).map_err(|e| format!("接続できない: {e}"))?;
+    stream.set_read_timeout(Some(SHUTDOWN_TIMEOUT)).map_err(|e| e.to_string())?;
+    let head = format!(
+        "POST /v1/admin/shutdown HTTP/1.1\r\nHost: {address}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).map_err(|e| format!("送れない: {e}"))?;
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+    let text = String::from_utf8_lossy(&response);
+    match text.split(' ').nth(1) {
+        Some("200") => Ok(()),
+        _ => Err(format!("停止の要求が受け付けられなかった: {text:?}")),
+    }
 }
 
 impl Server {
@@ -44,7 +48,10 @@ impl Server {
     /// 読める。
     pub fn finish(mut self) -> String {
         let mut stderr = self.stderr.take().expect("標準エラーを捕まえて起こしていない");
-        ask_for_shutdown(&self.address);
+        if let Err(reason) = ask_for_shutdown(&self.address) {
+            let _ = self.child.kill();
+            panic!("serve を止められない: {reason}");
+        }
         let _ = self.child.wait();
         let mut text = String::new();
         stderr.read_to_string(&mut text).expect("read stderr");
@@ -57,7 +64,10 @@ impl Drop for Server {
         // まず正常終了を頼む(カバレッジのプロファイル書き出しは正常終了でのみ起きる)。
         // 期限内に終わらなければ kill に切り替える。
         let asked = ask_for_shutdown(&self.address);
-        if asked {
+        if let Err(reason) = &asked {
+            eprintln!("serve {} の停止を頼めない({reason})ので kill する", self.address);
+        }
+        if asked.is_ok() {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while std::time::Instant::now() < deadline {
                 match self.child.try_wait() {
@@ -276,19 +286,25 @@ pub fn read_response(reader: &mut BufReader<TcpStream>) -> HttpResponse {
 }
 
 pub fn simple(address: &str, method: &str, path: &str, body: &[u8]) -> HttpResponse {
-    let mut stream = TcpStream::connect(address).expect("connect");
-    let head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(head.as_bytes()).expect("write head");
-    stream.write_all(body).expect("write body");
-    let mut reader = BufReader::new(stream);
-    read_response(&mut reader)
+    with_headers(address, method, path, &[], body)
+}
+
+/// 本文を持つ要求に付ける Content-Type。curl で主の口を叩くときに -H で渡す型と同じ決め方で、
+/// 生のバイト列を読む道(オブジェクトの投入と文書の PUT)は application/octet-stream、他は
+/// application/json(docs/plan/API_AUTH.md の道ごとの型)。本文の無い要求には付けない。
+pub fn content_type_for(method: &str, path: &str, body: &[u8]) -> Option<&'static str> {
+    if body.is_empty() {
+        return None;
+    }
+    let raw = (method == "POST" && path == "/v1/objects")
+        || (method == "PUT" && path.starts_with("/v1/collections/"));
+    Some(if raw { "application/octet-stream" } else { "application/json" })
 }
 
 /// simple と同じ組み立てで、追加の要求ヘッダを添える(読み口の X-Uniqnode-Task など。
-/// curl の -H に当たる)。ヘッダ名はそのまま送る(受け側が小文字化する)。
+/// curl の -H に当たる)。ヘッダ名はそのまま送る(受け側が小文字化する)。Host は接続先の
+/// address(curl が URL から組むのと同じ)で、Content-Type は content_type_for の型を、
+/// headers に Content-Type が無いときだけ付ける。
 pub fn with_headers(
     address: &str,
     method: &str,
@@ -298,9 +314,13 @@ pub fn with_headers(
 ) -> HttpResponse {
     let mut stream = TcpStream::connect(address).expect("connect");
     let mut head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
+    let named = headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-type"));
+    if let (false, Some(content_type)) = (named, content_type_for(method, path, body)) {
+        head.push_str(&format!("Content-Type: {content_type}\r\n"));
+    }
     for (name, value) in headers {
         head.push_str(&format!("{name}: {value}\r\n"));
     }

@@ -50,6 +50,9 @@ RestartPreventExitStatus=1 2
 # 閉じ込め。書けるのは StateDirectory の下だけになる。ストアのロックが unix socket なので
 # AF_UNIX を残す。PrivateNetwork= は使わない(ロックはネットワーク名前空間ごとに別になり、
 # 外の CLI と二重起動を検出し合えなくなる。viewer と mcp も loopback で serve に届く必要がある)。
+# AF_NETLINK は主の口の uid の判定(接続の相手のソケットを NETLINK_SOCK_DIAG に照会する)に
+# 要る。無いと照会のソケットを作れず、正規の接続まで 403 になる(docs/plan/API_AUTH.md)。
+# PrivateUsers=yes の下では、自分と root 以外の uid は overflowuid に写り、主の口に断られる。
 PrivateUsers=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -58,7 +61,7 @@ PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictRealtime=yes
 LockPersonality=yes
 SystemCallArchitectures=native

@@ -1820,6 +1820,7 @@ mod tests {
             embedding: None,
             reranker: None,
             data_dir: dir.clone(),
+            main_door: None,
         };
         (dir, StdioServer::new(Backend::Local(Box::new(context)), Vec::new()))
     }

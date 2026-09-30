@@ -944,6 +944,9 @@ pub fn check_listen(listen: &str, what: &str) -> Result<(), String> {
 /// 引数を検め、道を絶対にして整える。unit を書く前に、書いても効かない指定を断る。
 pub fn normalize(mut options: Options) -> Result<Options, String> {
     check_instance(&options.instance)?;
+    // 主の口はループバックの IP リテラルだけ(serve が起動時に当てるのと同じ判定を、据え付けの
+    // 前に早く当てる。docs/plan/API_AUTH.md の 1)。
+    crate::main_door::check_listen(&options.listen, "--listen")?;
     check_listen(&options.listen, "--listen")?;
     check_listen(&options.viewer_listen, "--viewer-listen")?;
     if let Some(agent_listen) = &options.agent_listen {
@@ -1308,8 +1311,99 @@ fn failed_unit_message(scope: &Scope, unit: &str) -> String {
     )
 }
 
+/// 主の口の確認を常駐の利用者として行う子プロセスの命令。`uniqnode install-status-probe <addr>`
+/// は <addr> の /v1/status を引き、node_id を標準出力へ 1 行で書いて 0 で終わる(引けなければ
+/// 理由を標準エラーへ書いて 1)。データディレクトリを取らない、install が起こすためだけの命令で、
+/// main はこれを引数の数の検査より前に見る(mcp の自己検査と同じ扱い)。
+pub const STATUS_PROBE_COMMAND: &str = "install-status-probe";
+
+/// 主の口の /v1/status を、account の利用者へ権限を落とした子プロセスから引く。
+///
+/// system の install は root で走るが、主の口は既定で serve 自身の euid(常駐の利用者)しか
+/// 受けず、root の直接の接続は 403 になる(docs/plan/API_AUTH.md の 1)。確認は常駐の利用者の
+/// 接続として行う: 子プロセスの uid・gid・補助グループを常駐の利用者のものにしてから
+/// binary(据え付けた実行ファイル。常駐の利用者が実行できる)を exec する。root でなければ
+/// 権限を落とせないので、自分がその利用者であるときだけそのまま起こし、他は断る。
+pub fn status_node_id_as(binary: &Path, account: &Account, address: &str) -> Result<String, String> {
+    let mut command = command_as(binary, account)?;
+    let output = command
+        .args([STATUS_PROBE_COMMAND, address])
+        .output()
+        .map_err(|e| format!("{} を {} として起こせない: {e}", binary.display(), account.name))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    match output.status.success() && !stdout.is_empty() {
+        true => Ok(stdout),
+        false => Err(format!(
+            "{} としての確認: {}",
+            account.name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
+/// account の利用者として program を起こす Command。root なら exec の前に補助グループ・gid・uid の
+/// 順に落とす(uid を先に落とすと、gid とグループを変える権限を失う)。
+fn command_as(program: &Path, account: &Account) -> Result<Command, String> {
+    let euid = effective_uid()?;
+    let mut command = Command::new(program);
+    if euid == account.uid {
+        return Ok(command);
+    }
+    if euid != 0 {
+        return Err(format!(
+            "uid {euid} から利用者 {}(uid {})へ権限を落とせない(root で走らせる)",
+            account.name, account.uid
+        ));
+    }
+    let groups = supplementary_groups(account)?;
+    let (uid, gid) = (account.uid, account.gid);
+    extern "C" {
+        fn setgroups(size: usize, list: *const u32) -> std::os::raw::c_int;
+        fn setgid(gid: u32) -> std::os::raw::c_int;
+        fn setuid(uid: u32) -> std::os::raw::c_int;
+    }
+    use std::os::unix::process::CommandExt;
+    // SAFETY: 閉包は fork の後・exec の前に子プロセスで走る。呼ぶのはシステムコールの薄い
+    // 包みだけで、割り当ても排他も取らない(groups は fork の前に作ったものを読むだけ)。
+    unsafe {
+        command.pre_exec(move || {
+            if setgroups(groups.len(), groups.as_ptr()) != 0
+                || setgid(gid) != 0
+                || setuid(uid) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(command)
+}
+
+/// 利用者の補助グループ(主グループを含む)。NSS を通す `id -G <name>` で引く(lookup_account が
+/// getent を使うのと同じ理由)。
+fn supplementary_groups(account: &Account) -> Result<Vec<u32>, String> {
+    let output = Command::new("id")
+        .args(["-G", &account.name])
+        .output()
+        .map_err(|e| format!("id -G {} を起こせない: {e}", account.name))?;
+    if !output.status.success() {
+        return Err(format!("id -G {}: {}", account.name, output.status));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut groups = vec![account.gid];
+    for word in text.split_whitespace() {
+        let gid: u32 = word
+            .parse()
+            .map_err(|_| format!("id -G {} の答えを読めない: {text}", account.name))?;
+        if !groups.contains(&gid) {
+            groups.push(gid);
+        }
+    }
+    Ok(groups)
+}
+
 /// /v1/status を 1 本引いて node_id を読む。
-fn status_node_id(address: &str) -> Result<String, String> {
+pub fn status_node_id(address: &str) -> Result<String, String> {
     // 1 本の期限。起動直後の serve は索引を組む前でも /v1/status には即答する。
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
     let response = http::get(address, "/v1/status", REQUEST_TIMEOUT)?;
@@ -1335,8 +1429,13 @@ fn status_node_id(address: &str) -> Result<String, String> {
 /// 束縛するまでは待たない。条件(両方が同じ node_id を答える)を短い間隔で見る。上限は
 /// 安全の網で、越えたら最後に見た結果を添えて失敗する。serve の unit が failed に落ちたら
 /// 上限を待たずに言う(should/0104)。
+///
+/// system 単位では、serve の側は常駐の利用者へ権限を落とした子プロセスから引く
+/// (status_node_id_as。root の直接の接続は主の口に断られる)。viewer は uid を見ないので
+/// そのまま引く。
 fn wait_for_matching_status(
     scope: &Scope,
+    binary: &Path,
     listen: &str,
     viewer_listen: &str,
     serve_unit: &str,
@@ -1345,7 +1444,10 @@ fn wait_for_matching_status(
     const TICK: Duration = Duration::from_millis(200);
     let started = Instant::now();
     loop {
-        let serve = status_node_id(listen);
+        let serve = match scope.account() {
+            Some(account) => status_node_id_as(binary, account, listen),
+            None => status_node_id(listen),
+        };
         let viewer = status_node_id(viewer_listen);
         if let (Ok(a), Ok(b)) = (&serve, &viewer) {
             if a == b {
@@ -2279,6 +2381,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     // (8) 確認。効果を見るまでは完了ではない(should/0116)。
     let (node_id, waited) = wait_for_matching_status(
         scope,
+        &options.binary,
         &options.listen,
         &options.viewer_listen,
         &options.serve_unit(),

@@ -25,8 +25,8 @@ uniqnode の一番の利用者は lamalium(別の機械 orion で動くマルチ
 vega にあり、2 台は WireGuard の wg1 で疎通する)になる予定である。
 計画は [docs/plan/LAMALIUM.md](#68571059-94ed-4aa2-8ae0-b2862d1de44e)。uniqnode 側の作業は、
 wg1 のアドレスに束縛する読み口(`--listen-agent`。許可表の外は 403)と第 2 段の
-`--agent-writable`、search の `full` と `GET /v1/collections`、索引の温め、serve を止めない
-ingest(`--serve-url`)、出所の meta、BENCH の問いによる評価で、lamalium 側の
+`--agent-writable`、search の `full` と `GET /v1/collections`、索引の温め、出所の meta、
+BENCH の問いによる評価で、lamalium 側の
 `uniqnode_search`・`uniqnode_get`・`uniqnode_status` ツールと組になる。方針はエージェントが
 自発的に見つけて呼ぶこと(push は測ってから)。着手順は同文書の段階 L0〜L4。1 台の uniqnode で
 効き、2 台目の uniqnode を待たないので、8 より前に置く。

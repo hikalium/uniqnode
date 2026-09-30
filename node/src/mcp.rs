@@ -72,6 +72,12 @@ const SERVE_TIMEOUT: Duration = Duration::from_secs(60);
 const FETCH_URL_TIMEOUT: Duration =
     Duration::from_secs(60 + crate::fetch::DEFAULT_MAX_SECONDS);
 
+/// 転送する形の ingest(`uniqnode ingest … --serve-url`)が PUT 1 件を待つ期限。serve は
+/// PDF なら pdftotext と節見出しの復元が終わるまで答えず、千ページ級の仕様書ではそれが
+/// 数十秒かかる(直接開く形の ingest には期限が無い)。add_document の文書は人が書く
+/// 短い本文なので SERVE_TIMEOUT のままにし、ここだけ長く採る(should/0104)。
+const INGEST_PUT_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// add_document が受ける media と、PUT documents へ渡す拡張子。種別の判定そのものは
 /// 拡張子の表(crate::ingest::media_for_extension)が持ち、ここはその逆引きである。両者が
 /// 噛み合うことは単体試験 add_document_media_round_trips_through_the_extension_table が
@@ -149,7 +155,9 @@ impl Backend {
                 // 手元の道具で、出所は署名者で足りる)。
                 Ok(Written::from(api::put_document(context, collection, file_name, body, &[])))
             }
-            Backend::Forward(client) => client.put_document(collection, file_name, body),
+            Backend::Forward(client) => {
+                client.put_document(collection, file_name, body, SERVE_TIMEOUT)
+            }
         }
     }
 
@@ -235,7 +243,8 @@ impl ServeClient {
     fn unreachable(&self, cause: &str) -> String {
         format!(
             "走っている serve に届かない({}): {cause}。\
-             転送する形の MCP は自分でストアを開かないので、先に serve を起こす: \
+             転送する形(mcp・ingest の --serve-url)は自分でストアを開かないので、\
+             先に serve を起こす: \
              uniqnode serve {} {}",
             self.url, self.data_dir, self.address
         )
@@ -287,6 +296,7 @@ impl ServeClient {
         collection: &str,
         file_name: &str,
         body: &[u8],
+        timeout: Duration,
     ) -> Result<Written, String> {
         let path = document_path(collection, file_name);
         http::request(
@@ -294,10 +304,24 @@ impl ServeClient {
             "PUT",
             &path,
             Some(("application/octet-stream", body)),
-            SERVE_TIMEOUT,
+            timeout,
         )
         .map(Written::from)
         .map_err(|error| self.unreachable(&error))
+    }
+
+    /// 転送する形の ingest が文書 1 件を PUT し、応答の欄(doc_rev・new_objects・
+    /// ref_updated・previous)を返す。2xx でなければ serve が返した理由(応答の error、
+    /// 無ければ本文の頭)を載せて失敗する。読み方は add_document と同じ written_document
+    /// の 1 箇所である(should/0135)。
+    pub fn ingest_document(
+        &self,
+        collection: &str,
+        file_name: &str,
+        body: &[u8],
+    ) -> Result<BTreeMap<String, Value>, String> {
+        let written = self.put_document(collection, file_name, body, INGEST_PUT_TIMEOUT)?;
+        written_document(&format!("PUT {}", document_path(collection, file_name)), written)
     }
 
     /// URL からの取り込みを POST する。

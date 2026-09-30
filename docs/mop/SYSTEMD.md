@@ -332,7 +332,9 @@ useradd で作るのはユーザー(とその主グループ)だけで、/var/li
 起こす)。
 
 serve が走っているあいだ、CLI の ingest・embed・sync はストアのロックに阻まれる。取り込みは
-REST(`PUT /v1/collections/{c}/documents/{name}`)で行い、CLI が要る作業は serve を止めて
+REST(`PUT /v1/collections/{c}/documents/{name}`)か、それを 1 件ずつ打つ
+`uniqnode ingest <dir> <c> <パス> --serve-url http://127.0.0.1:7440`(ストアを開かないので
+serve を止めず、実行ユーザーでなくても打てる)で行い、CLI が要るそれ以外の作業は serve を止めて
 `sudo -u uniqnode /usr/local/bin/uniqnode ingest /var/lib/uniqnode/default …` のように実行ユーザーで
 行う(install --system で据えたなら、その利用者で普通に打つ)。root で走らせると root 所有の
 ファイルがストアに残り、次の serve が書けなくなる。

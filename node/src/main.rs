@@ -132,11 +132,20 @@ fn usage_text() -> String {
            sync <dir> <peer_addr>     相手から pull で同期する(serve 停止中のストア用。\n\
                                       serve 中は POST /v1/sync を使う)\n\
            ingest <dir> <collection> <path> [--pdftotext <exe>]\n\
+           ingest <dir> <collection> <path> --serve-url <url>\n\
                                       文書を取り込む(.md/.markdown/.txt/.html/.htm/.pdf。ディレクトリ\n\
-                                      は再帰。serve 停止中のストア用。serve 中は\n\
-                                      PUT /v1/collections/{{c}}/documents/{{name}} を使う。\n\
-                                      PDF の抽出は pdftotext に委譲し、--pdftotext の明示\n\
-                                      指定が優先、無指定なら PATH を引く)\n\
+                                      は再帰。対象外は一覧で言い、最後に件数を 1 行で\n\
+                                      言う)。無指定ならストアを直接開く(serve 停止中の\n\
+                                      ストア用。PDF の抽出は pdftotext に委譲し、\n\
+                                      --pdftotext の明示指定が優先、無指定なら PATH を引く)。\n\
+                                      --serve-url を与えると、ストアを開かず(ロックを\n\
+                                      取らない)、走っている serve へ 1 件ずつ\n\
+                                      PUT /v1/collections/{{c}}/documents/{{name}} で送る\n\
+                                      (例 --serve-url http://127.0.0.1:7440)。選び方・\n\
+                                      文書名・べき等は同じで、serve が誤りを返せばその\n\
+                                      理由を言ってそこで止まる。PDF を抽出するのは serve\n\
+                                      なので --pdftotext とは併用しない。空白・制御文字・?\n\
+                                      を含む名前は送れず、1 件も送る前に断る\n\
            fetch <dir> <collection> <url> [--name <名>] [--pdftotext <exe>]\n\
                                       URL を取って取り込む(http/https のみ。取りに行くのは\n\
                                       curl で、版を doc_rev.meta.fetcher に残す。転送は 10 回\n\
@@ -267,15 +276,26 @@ fn collect_files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> s
     Ok(())
 }
 
-/// 取り込みの CLI 本体(INGEST の「CLI と API」節と「PDF 抽出」節)。対象外のファイルは
-/// 黙って捨てず、最後に一覧で報告する(must/0022 の同型)。pdftotext の起動と版の取得は
-/// 最初の PDF に当たったとき一度だけ行い、以後の PDF で使い回す。
-fn run_ingest(
-    dir: &str,
-    collection: &str,
-    root: &str,
-    pdftotext: Option<&str>,
-) -> Result<(), StoreError> {
+/// 取り込み対象の 1 件。ストアを直接開く形と serve へ送る形が同じ選び方・同じ名付けを
+/// 通るように、ファイルの選別はここ 1 箇所で決める(should/0135)。
+struct IngestTarget {
+    file: std::path::PathBuf,
+    /// 文書名: 取り込み起点からの相対パスから拡張子を除き、/ で繋いだもの(ref 名の残り)。
+    name: String,
+    /// 元の拡張子(PUT documents の {name} に付け直す。serve は拡張子で種別を判定する)。
+    extension: String,
+    media: &'static str,
+}
+
+/// 取り込み起点を歩いた結果: 対象(名前順)と、拡張子で外れたもの(起点からの相対パス)。
+struct IngestPlan {
+    targets: Vec<IngestTarget>,
+    skipped: Vec<String>,
+}
+
+/// 取り込み起点を再帰で歩き、対象の拡張子(media_for_extension の表)のファイルに文書名を
+/// 付ける。起点がファイルならその親を起点とみなす。
+fn plan_ingest(root: &str) -> Result<IngestPlan, StoreError> {
     let root_path = std::path::Path::new(root);
     if !root_path.exists() {
         return Err(StoreError::Invalid(format!("{root}: 存在しない")));
@@ -287,16 +307,75 @@ fn run_ingest(
     } else {
         root_path.parent().unwrap_or_else(|| std::path::Path::new(""))
     };
-    let mut store = open(dir);
-    let mut skipped: Vec<String> = Vec::new();
-    let mut pdf_extractor: Option<uniqnode::ingest::PdfExtractor> = None;
-    for file in &files {
-        let relative = file.strip_prefix(base).unwrap_or(file);
+    let mut plan = IngestPlan { targets: Vec::new(), skipped: Vec::new() };
+    for file in files {
+        let relative = file.strip_prefix(base).unwrap_or(&file);
         let extension = file.extension().and_then(|e| e.to_str()).unwrap_or("");
         let Some(media) = uniqnode::ingest::media_for_extension(extension) else {
-            skipped.push(relative.display().to_string());
+            plan.skipped.push(relative.display().to_string());
             continue;
         };
+        let name = relative
+            .with_extension("")
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        let extension = extension.to_string();
+        plan.targets.push(IngestTarget { file, name, extension, media });
+    }
+    Ok(plan)
+}
+
+/// 取り込みの数え上げ。1 件ごとの行の後に、両方の形が同じ締めの報告を出す。
+#[derive(Default)]
+struct IngestTally {
+    updated: usize,
+    unchanged: usize,
+}
+
+impl IngestTally {
+    /// 1 件の結果を数え、行に置く状態の語を返す。
+    fn count(&mut self, ref_updated: bool) -> &'static str {
+        if ref_updated {
+            self.updated += 1;
+            "updated"
+        } else {
+            self.unchanged += 1;
+            "no-op"
+        }
+    }
+
+    /// 対象外の一覧と締めの 1 行。対象外は黙って捨てず、ここで必ず言う(must/0022 の同型)。
+    fn report(&self, skipped: &[String]) {
+        for path in skipped {
+            println!("対象外(拡張子): {path}");
+        }
+        println!(
+            "取り込み: {} 件(updated {}、no-op {})、対象外 {} 件",
+            self.updated + self.unchanged,
+            self.updated,
+            self.unchanged,
+            skipped.len()
+        );
+    }
+}
+
+/// 取り込みの CLI 本体(INGEST の「CLI と API」節と「PDF 抽出」節)。対象外のファイルは
+/// 黙って捨てず、最後に一覧で報告する(must/0022 の同型)。pdftotext の起動と版の取得は
+/// 最初の PDF に当たったとき一度だけ行い、以後の PDF で使い回す。
+fn run_ingest(
+    dir: &str,
+    collection: &str,
+    root: &str,
+    pdftotext: Option<&str>,
+) -> Result<(), StoreError> {
+    let plan = plan_ingest(root)?;
+    let mut store = open(dir);
+    let mut tally = IngestTally::default();
+    let mut pdf_extractor: Option<uniqnode::ingest::PdfExtractor> = None;
+    for target in &plan.targets {
+        let (file, name, media) = (&target.file, &target.name, target.media);
         let bytes = std::fs::read(file)?;
         let extracted;
         let text: &str = if media == "pdf" {
@@ -321,12 +400,6 @@ fn run_ingest(
                 }
             }
         };
-        let name_path = relative.with_extension("");
-        let name = name_path
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
         // PDF は節見出しの経路も載せる(node/src/outline.rs)。取れなければ理由を出して、
         // 見出しの無いチャンクとして続ける。
         let (chunks, outline_reason) =
@@ -343,7 +416,7 @@ fn run_ingest(
             &mut store,
             &uniqnode::ingest::DocumentInput {
                 collection,
-                name: &name,
+                name,
                 source: &bytes,
                 media,
                 chunks: &chunks,
@@ -351,7 +424,7 @@ fn run_ingest(
                 extra_meta: &[],
             },
         )?;
-        let state = if outcome.ref_updated { "updated" } else { "no-op" };
+        let state = tally.count(outcome.ref_updated);
         println!(
             "{collection}/{name}: {state} chunks={} new_objects={} doc_rev={}",
             chunks.len(),
@@ -359,9 +432,75 @@ fn run_ingest(
             outcome.doc_rev_id
         );
     }
-    for path in &skipped {
-        println!("対象外(拡張子): {path}");
+    tally.report(&plan.skipped);
+    Ok(())
+}
+
+/// 要求行に載らない字(空白・制御文字)と、query の始まりと読まれる ? を含むか。serve は
+/// 道のパーセント符号を解かないので、こうした名前は serve に届く前に別の名前に変わる。
+fn unsendable_in_path(text: &str) -> bool {
+    text.chars().any(|c| c.is_whitespace() || c.is_control() || c == '?')
+}
+
+/// 転送する形の取り込み(`ingest … --serve-url`。INGEST の「CLI と API」節)。ストアを
+/// 開かず(ロックは serve が持っている)、選んだ文書を 1 件ずつ走っている serve の
+/// PUT /v1/collections/{c}/documents/{name} へ送る。選び方と文書名は直接開く形と同じ
+/// plan_ingest、種別の判定・PDF の抽出・チャンク分け・同一内容の判定は serve 側の
+/// put_document が持つ(同じ内容は同じ ID で、変わらない文書は no-op)。
+///
+/// serve が 2xx 以外を返したら、その理由を載せてそこで止まる(直接開く形が最初の誤りで
+/// 止まるのと同じ。先に送った文書は入ったまま残る)。
+fn run_ingest_via_serve(
+    dir: &str,
+    collection: &str,
+    root: &str,
+    serve_url: &str,
+) -> Result<(), StoreError> {
+    let client = uniqnode::mcp::ServeClient::new(serve_url, dir).map_err(StoreError::Invalid)?;
+    let plan = plan_ingest(root)?;
+    // 送れない名前は 1 件も送る前に全部を確かめる。名前を変えて入れることも、途中まで
+    // 入れてから断ることもしない(must/0022)。
+    if unsendable_in_path(collection) {
+        return Err(StoreError::Invalid(format!(
+            "コレクション名 {collection:?} は --serve-url では送れない(空白・制御文字・? を含む)"
+        )));
     }
+    let refused: Vec<&str> = plan
+        .targets
+        .iter()
+        .filter(|target| unsendable_in_path(&target.name))
+        .map(|target| target.name.as_str())
+        .collect();
+    if !refused.is_empty() {
+        return Err(StoreError::Invalid(format!(
+            "文書名に空白・制御文字・? を含むものは --serve-url では送れない(何も送って\
+             いない。名前を変えるか、serve を止めて直接開く形で取り込む): {refused:?}"
+        )));
+    }
+    let mut tally = IngestTally::default();
+    for target in &plan.targets {
+        let bytes = std::fs::read(&target.file)?;
+        let file_name = format!("{}.{}", target.name, target.extension);
+        let fields = client
+            .ingest_document(collection, &file_name, &bytes)
+            .map_err(|reason| StoreError::Invalid(format!("{}: {reason}", target.file.display())))?;
+        let ref_updated =
+            matches!(fields.get("ref_updated"), Some(uniqnode::c1::Value::Bool(true)));
+        let doc_rev = match fields.get("doc_rev") {
+            Some(uniqnode::c1::Value::Text(id)) => id.as_str(),
+            _ => "?",
+        };
+        let new_objects = match fields.get("new_objects") {
+            Some(uniqnode::c1::Value::Integer(count)) => count.to_string(),
+            _ => "?".to_string(),
+        };
+        let state = tally.count(ref_updated);
+        println!(
+            "{collection}/{}: {state} new_objects={new_objects} doc_rev={doc_rev}",
+            target.name
+        );
+    }
+    tally.report(&plan.skipped);
     Ok(())
 }
 
@@ -1240,17 +1379,36 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
         "ingest" => {
             let collection = rest.first().map(String::as_str).unwrap_or_else(|| usage());
             let root = rest.get(1).map(String::as_str).unwrap_or_else(|| usage());
-            let pdftotext = match rest.get(2).map(String::as_str) {
-                None => None,
-                Some("--pdftotext") => {
-                    Some(rest.get(3).map(String::as_str).unwrap_or_else(|| usage()))
+            let mut pdftotext = None;
+            let mut serve_url = None;
+            let mut at = 2;
+            while at < rest.len() {
+                let value = rest.get(at + 1).map(String::as_str).unwrap_or_else(|| usage());
+                match rest[at].as_str() {
+                    "--pdftotext" => pdftotext = Some(value),
+                    "--serve-url" => serve_url = Some(value),
+                    // 知らない引数は黙って捨てず usage で落とす。
+                    _ => usage(),
                 }
-                Some(_) => usage(),
-            };
-            if rest.len() > 4 {
-                usage();
+                at += 2;
             }
-            run_ingest(dir, collection, root, pdftotext)?;
+            match serve_url {
+                // 転送する形: ストアを開かず、走っている serve へ PUT する。
+                Some(url) => {
+                    // PDF を抽出するのは転送先の serve(serve が PATH から引く pdftotext)
+                    // で、ここで受けても効かせる先が無い。黙って捨てずに断る(must/0022 の
+                    // 同型。mcp の --serve-url と --embed の扱いと同じ)。
+                    if pdftotext.is_some() {
+                        eprintln!(
+                            "uniqnode: ingest: --serve-url と --pdftotext は併用しない\
+                             (PDF を抽出するのは転送先の serve で、serve が PATH から引く)"
+                        );
+                        std::process::exit(2);
+                    }
+                    run_ingest_via_serve(dir, collection, root, url)?;
+                }
+                None => run_ingest(dir, collection, root, pdftotext)?,
+            }
         }
         "fetch" => {
             let collection = rest.first().map(String::as_str).unwrap_or_else(|| usage());

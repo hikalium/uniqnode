@@ -295,6 +295,180 @@ fn cli_ingest_without_pdftotext_fails_with_install_instructions() {
     std::fs::remove_dir_all(&corpus).expect("cleanup");
 }
 
+// ---- 転送する形の取り込み(ingest … --serve-url。INGEST の「CLI と API」節の確認) ----
+
+/// ingest を実プロセスで走らせ、(成功したか, 標準出力, 標準エラー) を返す。
+fn run_cli_ingest(args: &[&str]) -> (bool, String, String) {
+    let output = Command::new(binary()).arg("ingest").args(args).output().expect("run ingest");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// 行 "<c>/<name>: ... doc_rev=<id>" から doc_rev の ID を取る。
+fn doc_rev_on_line(stdout: &str, prefix: &str) -> String {
+    stdout
+        .lines()
+        .find(|line| line.starts_with(prefix))
+        .and_then(|line| line.split("doc_rev=").nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("{prefix} の行が無い: {stdout}"))
+        .to_string()
+}
+
+/// --serve-url の取り込みが、ストアのロックを持って走っている serve へ文書を送り込むこと。
+/// 選び方・文書名・対象外の報告は直接開く形と同じで、doc_rev の ID も直接開く形で同じ
+/// 起点を別のストアに入れたときと一致する(同じ内容は同じ ID)。再実行は全件 no-op で
+/// new_objects=0、1 件だけ書き換えるとその 1 件だけが updated になる。
+///
+/// 壊して確かめた(should/0137): dispatch の Some(url) の腕で run_ingest_via_serve の代わりに
+/// run_ingest を呼ぶと、serve が持つロックでストアを開けず最初の assert!(ok) が赤くなる。
+/// plan_ingest の文書名を相対パスでなくファイル名だけ(relative.file_name())にすると
+/// "notes/sub/b: updated" の assert が赤くなる。tally.count を ref_updated によらず
+/// "updated" にすると、再実行の "notes/a: no-op" の assert が赤くなる。
+#[test]
+fn cli_ingest_via_serve_url_writes_through_the_running_serve_and_reingest_is_noop() {
+    let server = start_server("ingest-serve-url");
+    let serve_url = format!("http://{}", server.address);
+    let corpus = unique_dir("ingest-serve-url-corpus");
+    std::fs::create_dir_all(corpus.join("sub")).expect("mkdir");
+    std::fs::write(corpus.join("a.md"), "# 章\n\n本文 A。\n").expect("write");
+    std::fs::write(corpus.join("sub/b.txt"), "本文 B。\n").expect("write");
+    std::fs::write(corpus.join("c.rs"), "fn main() {}\n").expect("write");
+    let data_dir = server.dir.to_str().expect("utf-8");
+    let corpus_text = corpus.to_str().expect("utf-8");
+    let args = [data_dir, "notes", corpus_text, "--serve-url", serve_url.as_str()];
+
+    let (ok, first, stderr) = run_cli_ingest(&args);
+    assert!(ok, "{stderr}");
+    assert!(first.contains("notes/a: updated"), "{first}");
+    assert!(first.contains("notes/sub/b: updated"), "{first}");
+    assert!(first.contains("対象外(拡張子): c.rs"), "{first}");
+    assert!(first.contains("取り込み: 2 件(updated 2、no-op 0)、対象外 1 件"), "{first}");
+
+    // serve の ref 一覧に載る(serve が書いた)。
+    let refs = body_text(&simple(&server.address, "GET", "/v1/refs", b""));
+    assert!(refs.contains("collections/notes/a"), "{refs}");
+    assert!(refs.contains("collections/notes/sub/b"), "{refs}");
+
+    // 直接開く形で別のストアに入れた doc_rev と同じ ID になる。
+    let direct_store = unique_dir("ingest-serve-url-direct");
+    let (ok, direct, stderr) =
+        run_cli_ingest(&[direct_store.to_str().expect("utf-8"), "notes", corpus_text]);
+    assert!(ok, "{stderr}");
+    for prefix in ["notes/a:", "notes/sub/b:"] {
+        assert_eq!(doc_rev_on_line(&first, prefix), doc_rev_on_line(&direct, prefix), "{prefix}");
+    }
+    assert!(direct.contains("取り込み: 2 件(updated 2、no-op 0)、対象外 1 件"), "{direct}");
+
+    // 再実行は全件 no-op。
+    let (ok, second, stderr) = run_cli_ingest(&args);
+    assert!(ok, "{stderr}");
+    assert!(second.contains("notes/a: no-op new_objects=0"), "{second}");
+    assert!(second.contains("notes/sub/b: no-op new_objects=0"), "{second}");
+    assert!(second.contains("取り込み: 2 件(updated 0、no-op 2)、対象外 1 件"), "{second}");
+
+    // 1 件だけ書き換えると、その 1 件だけが新しい doc_rev になる。
+    std::fs::write(corpus.join("a.md"), "# 章\n\n本文 A を書き換えた。\n").expect("write");
+    let (ok, third, stderr) = run_cli_ingest(&args);
+    assert!(ok, "{stderr}");
+    assert!(third.contains("notes/a: updated"), "{third}");
+    assert!(third.contains("notes/sub/b: no-op"), "{third}");
+
+    std::fs::remove_dir_all(&direct_store).expect("cleanup");
+    std::fs::remove_dir_all(&corpus).expect("cleanup");
+}
+
+/// serve が 2xx 以外を返したら、黙って次へ進まず、ファイル名と serve の理由を言って
+/// 非 0 で止まること(must/0022)。先に送った文書は入ったまま残る。
+///
+/// 壊して確かめた(should/0137): ServeClient::ingest_document で written_document を通さず
+/// 応答の本文を状態を見ずに JSON として読むと、400 の本文 {"error":…} が成功として数えられ、
+/// 最初の assert!(!ok) が赤くなる。
+#[test]
+fn cli_ingest_via_serve_url_reports_the_serves_refusal_and_stops() {
+    let server = start_server("ingest-serve-url-refusal");
+    let serve_url = format!("http://{}", server.address);
+    let corpus = unique_dir("ingest-serve-url-refusal-corpus");
+    std::fs::create_dir_all(&corpus).expect("mkdir");
+    std::fs::write(corpus.join("a.md"), "# 章\n\n本文 A。\n").expect("write");
+    // UTF-8 でない Markdown は serve の put_document が 400 で断る。
+    std::fs::write(corpus.join("b.md"), b"\xff\xfe not utf-8\n").expect("write");
+    std::fs::write(corpus.join("c.md"), "# 章\n\n本文 C。\n").expect("write");
+    let data_dir = server.dir.to_str().expect("utf-8");
+    let corpus_text = corpus.to_str().expect("utf-8");
+
+    let (ok, stdout, stderr) =
+        run_cli_ingest(&[data_dir, "notes", corpus_text, "--serve-url", serve_url.as_str()]);
+    assert!(!ok, "serve が断った文書があるのに成功した: {stdout}");
+    assert!(stderr.contains("b.md"), "{stderr}");
+    assert!(stderr.contains("PUT /v1/collections/notes/documents/b.md が 400 を返した"), "{stderr}");
+    assert!(stderr.contains("ボディが UTF-8 でない"), "{stderr}");
+    // 名前順で先の a は入り、断られた b の後ろの c は送られない。
+    assert!(stdout.contains("notes/a: updated"), "{stdout}");
+    assert!(!stdout.contains("notes/c"), "{stdout}");
+    let refs = body_text(&simple(&server.address, "GET", "/v1/refs", b""));
+    assert!(refs.contains("collections/notes/a"), "{refs}");
+    assert!(!refs.contains("collections/notes/c"), "{refs}");
+
+    std::fs::remove_dir_all(&corpus).expect("cleanup");
+}
+
+/// --serve-url の形が送る前に断るもの: 効かせる先の無い --pdftotext(serve が抽出する)、
+/// 届かない serve(起こし方を添える)、道に載らない名前(1 件も送らない)。
+///
+/// 壊して確かめた(should/0137): 名前の事前検査(refused が空でなければ断る if)を消すと、
+/// a を送り終えた後に空白入りの名前が要求行を壊し、serve の 400「リクエストラインが不正」で
+/// 止まるので、"--serve-url では送れない" の assert が赤くなる。
+#[test]
+fn cli_ingest_via_serve_url_refuses_what_it_cannot_carry_before_sending() {
+    let corpus = unique_dir("ingest-serve-url-refuse-corpus");
+    std::fs::create_dir_all(&corpus).expect("mkdir");
+    std::fs::write(corpus.join("a.md"), "# 章\n\n本文 A。\n").expect("write");
+    let corpus_text = corpus.to_str().expect("utf-8");
+
+    // --pdftotext は併用しない(usage と同じ 2 で終わる)。
+    let output = Command::new(binary())
+        .args(["ingest", "/nonexistent-store", "notes", corpus_text])
+        .args(["--serve-url", "http://127.0.0.1:1", "--pdftotext", "pdftotext"])
+        .output()
+        .expect("run ingest");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--serve-url と --pdftotext は併用しない"), "{stderr}");
+
+    // 届かない serve: 理由と起こし方を言って失敗し、ストアは作らない。
+    let store = unique_dir("ingest-serve-url-unreachable");
+    let store_text = store.to_str().expect("utf-8");
+    let (ok, _, stderr) =
+        run_cli_ingest(&[store_text, "notes", corpus_text, "--serve-url", "http://127.0.0.1:1"]);
+    assert!(!ok);
+    assert!(stderr.contains("走っている serve に届かない"), "{stderr}");
+    assert!(stderr.contains(&format!("uniqnode serve {store_text} 127.0.0.1:1")), "{stderr}");
+    assert!(!store.exists(), "転送する形がストアを作った");
+
+    // 空白を含む名前は 1 件も送る前に断る(名前順で先の a も入らない)。
+    std::fs::write(corpus.join("b c.md"), "# 章\n\n本文。\n").expect("write");
+    let server = start_server("ingest-serve-url-refuse");
+    let serve_url = format!("http://{}", server.address);
+    let (ok, _, stderr) = run_cli_ingest(&[
+        server.dir.to_str().expect("utf-8"),
+        "notes",
+        corpus_text,
+        "--serve-url",
+        serve_url.as_str(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("--serve-url では送れない"), "{stderr}");
+    assert!(stderr.contains("\"b c\""), "{stderr}");
+    let refs = body_text(&simple(&server.address, "GET", "/v1/refs", b""));
+    assert!(!refs.contains("collections/notes/a"), "{refs}");
+
+    std::fs::remove_dir_all(&corpus).expect("cleanup");
+}
+
 // ---- 注釈の取り込み(INGEST の「注釈の取り込みと照合」節の確認) ----
 
 use uniqnode::ingest::{parse_annotation_index, parse_manual_approvals, AnnotationEntry};

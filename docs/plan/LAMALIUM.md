@@ -193,11 +193,13 @@ uniqnode 側の書く口と出所の meta は着地した(`--agent-writable <c>`
 
 ### L4 で要るもの
 
-- `uniqnode ingest … --serve-url <url>`: serve を止めずにディレクトリを取り込む転送形(今の
-  ingest はストアを直接開く)。vega の timer で lamalium の git 管理の文書(DESIGN.md・
-  docs/design・docs/plan・policy・memory)をコレクション `lamalium` に入れる(同じ内容は
-  同じ ID。変わった文書だけ新しい doc_rev になり、旧チャンクは gc が回収する)。文書は orion に
-  あるので、写しを vega へ運ぶ手段(git clone か rsync)は timer の設計で決める。
+serve を止めない転送形の取り込み `uniqnode ingest … --serve-url <url>` は着地した(現在形は
+[docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b) の「CLI と API」節)。残るもの:
+
+- vega の timer で lamalium の git 管理の文書(DESIGN.md・docs/design・docs/plan・policy・
+  memory)を `uniqnode ingest … --serve-url <url>` でコレクション `lamalium` に入れる(同じ
+  内容は同じ ID。変わった文書だけ新しい doc_rev になり、旧チャンクは gc が回収する)。文書は
+  orion にあるので、写しを vega へ運ぶ手段(git clone か rsync)は timer の設計で決める。
 - 評価: BENCH の「引けば直る」タスクの問いを EVAL の対に足し、Recall@k を固定する。
 
 ## lamalium 側の作業(向こうの docs/plan/UNIQNODE.md に置く内容の要約)

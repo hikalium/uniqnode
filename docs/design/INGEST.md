@@ -295,12 +295,31 @@ CLI `uniqnode correct <dir> <コレクション名> <誤った言明ID> <新し�
 
 ## CLI と API
 
-CLI は排他ロックのため serve 停止中のストア用であり、serve 中は HTTP API を使う(既存の
-sync サブコマンドと同じ扱い)。形の正典は node/src/main.rs の usage と node/src/api.rs。
+CLI はストアの排他ロックを取るので serve 停止中のストア用であり、serve 中は HTTP API を使う
+(既存の sync サブコマンドと同じ扱い)。例外は ingest の --serve-url で、ストアを開かずに
+走っている serve の HTTP API へ送る。形の正典は node/src/main.rs の usage と node/src/api.rs。
 
 - `uniqnode ingest <dir> <コレクション名> <パス> [--pdftotext <exe>]`: 文書の取り込み。
   ディレクトリは再帰(名前順)。対象の拡張子は .md / .markdown / .txt / .html / .htm / .pdf のみで、
-  それ以外は取り込まず、対象外の一覧を最後に印字する(黙って捨てない)。
+  それ以外は取り込まず、対象外の一覧を最後に印字する(黙って捨てない)。1 件ごとに
+  `<c>/<文書名>: updated|no-op chunks=N new_objects=N doc_rev=<id>` の行を出し、最後に
+  `取り込み: N 件(updated N、no-op N)、対象外 N 件` の 1 行で締める。
+- `uniqnode ingest <dir> <コレクション名> <パス> --serve-url <url>`: 転送する形の取り込み。
+  ストアを開かず(ロックは serve が持っている)、選んだ文書を 1 件ずつ走っている serve の
+  `PUT /v1/collections/{collection}/documents/{name}` へ送る(url は serve の主の口の根。
+  例 `http://127.0.0.1:7440`)。ファイルの選び方と文書名は上の形と同じ 1 箇所(main.rs の
+  plan_ingest)で決まり、{name} には文書名に元の拡張子を付け直して送る。種別の判定・PDF の
+  抽出・チャンク分け・同一内容の判定は serve 側の put_document が持つので、同じ内容は
+  上の形と同じ doc_rev の ID になり、変わらない文書は no-op である。行は上の形から chunks を
+  除いたもの(PUT の応答がチャンク数を持たない)で、締めの 1 行は同じ。serve が 2xx 以外を
+  返したら、ファイル名と serve の理由(応答の error、無ければ本文の頭)を言って非 0 で
+  止まる(上の形が最初の誤りで止まるのと同じ。先に送った文書は入ったまま)。届かなければ
+  serve の起こし方を添えて失敗する(MCP の転送する形と同じ ServeClient を使う)。
+  断るもの: --pdftotext との併用(PDF を抽出するのは serve で、serve が PATH から引く。
+  効かせる先が無い指定を黙って捨てない)と、空白・制御文字・`?` を含むコレクション名・文書名
+  (serve は道のパーセント符号を解かないので、要求行に載らないか query と読まれる)。名前は
+  1 件も送る前に全部を確かめる。PUT 1 件を待つ期限は 600 秒(千ページ級の PDF の抽出を
+  serve が終えるまで答えないため)。
 - `uniqnode fetch <dir> <コレクション名> <url> [--name <名>] [--pdftotext <exe>]`: URL からの
   取り込み(URL からの取り込みの節)。ストアを開くのは取ってからで、取れない URL では
   ストアを作らない。1 行目は ingest と同じ形に media と final_url を足したもの、HTML なら

@@ -306,7 +306,7 @@ POST /v1/feeds/lamalium/runs/<C>/commit {base, documents}
 
 - 今の ingest の doc_rev も previous を `s256:` 付きで持つので、同じ文書の過去の全版が公開中の
   版から辿れ、gc で回収されない(GC.md の「同じ ref パスへの上書き」で孤児が生まれるという
-  記述と食い違う)。feed とは独立の既存の問題として RAG.md に起票し、GC.md を直す。
+  記述と食い違う)。feed とは独立の既存の問題として RAG.md の項目 18 に起票した。
   2026-09-05 の dry-run で孤児が 1 件しか無かったことと整合する。
 
 ## やらないこと

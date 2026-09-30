@@ -8,7 +8,8 @@
 実装に入る。経緯と他の案は [docs/plan/LAMALIUM.md](#68571059-94ed-4aa2-8ae0-b2862d1de44e) の
 「L4 で要るもの」。
 
-版: 第 8 版(2026-10-01)。第 7 版(3152f68)への vega の Codex の再レビュー(高なし、低 2)と Claude の
+版: 第 9 版(2026-10-01)。第 8 版(e34d81d)への vega の Codex の再レビュー(高なし、低: 文法外への改名)
+と、crystal の Claude の API_AUTH 第 3 版へのレビューの中 5(viewer 経由の露出)を取り込んだ。第 7 版(3152f68)への vega の Codex の再レビュー(高なし、低 2)と Claude の
 レビュー(中 2: 前進を検査の道で呼ばない、低 7)を取り込んだ。第 6 版(5646c0f)への vega の Codex の再レビュー(高なし、中 2 つ: 4xx の保証の
 言い方、共有チャンクの出所の選び方)を取り込んだ。第 1 版(004c305)への Codex のレビュー(H1・H2・M1〜M3)と Claude の
 レビュー(1〜14)、第 2 版(708bcdc)への再レビュー(Codex H1a・H1b・M4、Claude N1〜N10)、
@@ -170,8 +171,10 @@ install と firewall:
   追跡ファイル(空白・`+`・`@`・非 ASCII を含むなど)は、送り手が送らずに範囲から外し、commit の
   本文の `skipped` に並べて報告する。vega は `skipped` を manifest に写し、GET と status で見せる。
   1 つのファイルの名前のせいで以後の run が全部止まる(PUT が 400 → 規律 1 で commit しない)
-  ことは起きない。外したファイルは一度も公開されていないので、外しても消去は起きない
-  (Claude N10)。
+  ことは起きない。文法外の名前自体は公開されない(Claude N10)。ただし、公開済みの文書を文法外の
+  名前へ改名すると、新名は skipped に入り、旧名は documents から消えるので、7 の差分の消去で旧名は
+  tombstone される(1 件の改名なら縮みの歯止めにも掛からない)。送り手はこの形を skipped の報告で
+  見せ、試験で skipped・deleted_names・公開後の一覧を確かめる(第 8 版への Codex の再レビューの低)。
 
 ## 管理下のコレクション(書き手は feed の transaction だけ。Codex H2・Claude 9)
 
@@ -483,7 +486,10 @@ POST /v1/feeds/lamalium/runs/<C>/commit {base, documents}
 
 | 段 | 内容 | 粒度 |
 |---|---|---|
-| S1・A1・A2 | [APPEND_FAILURE.md](#d973833f-4e2b-4fc8-8a49-42f6821b6a7a) の「書けない」状態と、[API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771) の主の口の境界(A1 の束縛とブラウザの門、A2 の uid の判定)。F2 の前提 | M・S・S |
+| S1・A1・A2 | [APPEND_FAILURE.md](#d973833f-4e2b-4fc8-8a49-42f6821b6a7a) の「書けない」状態と、[API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771) の主の口の境界(A1 の束縛とブラウザの門、A2 の uid の判定)。F2 の前提。加えて、viewer(0.0.0.0:7450)は
+網からの要求を主の口へ転送するので、F2 で lamalium と feeds/ が viewer 経由で網へ出るかは API_AUTH の
+3・A3(viewer の扱い、操作者の確認待ち)に依る。F2 を本番へ入れる(F4)前に、その扱いが決まって
+いることを確かめる(crystal の Claude 中 5) | M・S・S |
 | F1 | `DELETE /v1/collections/{c}/documents/{name}`(主の口。管理下なら 409) | S |
 | F2 | 見える ref の判定の関数と、それを通す全ての読む道(索引の走査・世代の束縛・読み出し・出典・読み口の screen・`degraded`)、rollback、「c が見えない」の健全性の集計、feed の 3 本(読む・置く・公開する)と edit・allow-shrink・retire、名前の文法、閉包の検査、管理下の判定(`Store::set_ref` の中)と feed 専用の入口、前進の関数(ストアを開く共通の道と要求の中)、status の欄と 503 の理由、空き容量を読む statvfs の FFI(依存を足さない)、SPEC(§4.3 の previous の形)と design(INGEST・GC・新しい FEED)と SYSTEMD.md の更新 | L |
 | F3 | serve の `--listen-feed`・`--feed-collection` と門・本文の上限、install の引数・nft の 2 規則・確認 | M |

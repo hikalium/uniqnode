@@ -8,9 +8,11 @@
 実装に入る。経緯と他の案は [docs/plan/LAMALIUM.md](#68571059-94ed-4aa2-8ae0-b2862d1de44e) の
 「L4 で要るもの」。
 
-版: 第 3 版(2026-10-01)。第 1 版(004c305)への Codex のレビュー(H1・H2・M1〜M3)と Claude の
-レビュー(1〜14)、第 2 版(708bcdc)への再レビュー(Codex H1a・H1b・M4、Claude N1〜N10)を
-取り込んだ。各節の末尾の括弧に、どの指摘への答えかを書く。
+版: 第 4 版(2026-10-01)。第 1 版(004c305)への Codex のレビュー(H1・H2・M1〜M3)と Claude の
+レビュー(1〜14)、第 2 版(708bcdc)への再レビュー(Codex H1a・H1b・M4、Claude N1〜N10)、
+第 3 版(6bb36c9)への再レビュー(Codex M1・L1、Claude A〜G と N7)を取り込んだ。ストア全体の
+「書けない」状態は [docs/plan/APPEND_FAILURE.md](#d973833f-4e2b-4fc8-8a49-42f6821b6a7a) に分け、
+この文書はそれを前提にする。各節の末尾の括弧に、どの指摘への答えかを書く。
 
 ## 裁定の条件(lamalium 側から受けたもの)
 
@@ -19,7 +21,11 @@
 - `DELETE /v1/collections/{c}/documents/{name}` を足す。
 - 1 回の送りは 1 つのコミットに固定し、文書の一覧(manifest)と、各文書の元のコミットを残す。
 - 送りが失敗したら、前に公開していた中身はそのまま残る(途中まで送った状態で、コレクションに
-  2 つのコミットが混ざらない)。
+  2 つのコミットが混ざらない)。vega 側の保証は次の 2 つに分けて書く(Codex L1):
+  - 混ざった表は、どの失敗でも誰にも見せない。
+  - 公開の書き込みを始める前に断った失敗(4xx)では、前の公開がそのまま見え続ける。書き込みを
+    始めた後の失敗では結果は不明で、前進か巻き戻しが済むまで c は一時的に見えなくなる(c を
+    名指した検索と読み出しは 503、c を名指さない検索からは落ちて `degraded` に理由が載る)。
 - 消去と改名を扱う。消去の規律は次の 3 つ:
   1. その回の PUT が 1 つでも失敗したら、古い名前を 1 つも消さない。
   2. 「前回送った名前の一覧」を更新するのは、その回の PUT と DELETE が全部成功した後だけ。
@@ -37,12 +43,12 @@
   検索にも索引の温めにも見えない。
 - set_ref は target のオブジェクト 1 つが在ることしか見ない。gc は封印済みの pack を単位に
   回収するので、doc_rev は残ってチャンクだけが消える、ということが起こりうる。
-- reflog と pack の追記(store.rs の `append_record`)は、書きかけや sync の失敗の後に巻き戻さない。
-  次に開いたときの再生は、最初の壊れたレコードから後ろを切り捨てる。したがって追記に失敗した
-  後に同じプロセスで追記を続けると、その後ろに書いて応答まで済ませたものが、次の起動で消える
-  (他のコレクションへの書き込みも含む)。sync_data が失敗したときは、完全なレコードが
-  ディスクに残って次の起動で有効になるかもしれず、残らないかもしれない(結果不明)
-  (Codex H1a・H1b・Claude N1)。
+- reflog と pack の追記(store.rs の `append_record`)は、今は書きかけや sync の失敗の後に巻き
+  戻さず、同じプロセスで追記を続けると応答済みの書き込みが次の起動で消える。これは
+  [APPEND_FAILURE.md](#d973833f-4e2b-4fc8-8a49-42f6821b6a7a) の S1 で直す: ストアの書き込みの
+  I/O の誤り(追記・MANIFEST・セグメントの封印・GC の rename)が 1 度でも出たら、開き直すまで
+  「書けない」状態に入る。sync が失敗した 1 本は、ディスクに残るかもしれず残らないかもしれない
+  (結果不明)。F2 は S1 の後に入る(Codex H1a・H1b・Claude N1・B)。
 
 したがって「ステージング用のコレクションに入れて差し替える」形は採らない。差し替えそのものが
 ref を 1 本ずつ書く作業になり、途中で落ちれば混ざる。その上、ステージングのコレクションは
@@ -51,13 +57,35 @@ ref を 1 本ずつ書く作業になり、途中で落ちれば混ざる。そ�
 採るのは「オブジェクトだけ先に置き、ref は公開の 1 回で、1 回のロックの中でまとめて張る。張る
 予定の表(manifest)を先に 1 本の ref で保存し、張る途中で止まったら最後まで張り切る(前へ
 進める)」形である。読み手の側の保証は、次の 1 つの規則で作る: 管理下のコレクション c は、
-メモリの ref の表に `feeds/<c>/pending` が在る間、検索にも読み出しにも見せない(索引に入れず、
-c を名指した検索と文書の読み出しは 503)。正常な公開では pending はロックの中で張られて同じ
+メモリの ref の表に `feeds/<c>/pending` が在る間、検索にも読み出しにも見せない。この規則は
+下の「見える ref の判定」の 1 つの関数に置き、全ての読む道がそれを通る。正常な公開では pending はロックの中で張られて同じ
 ロックの中で消えるので、誰にも見えない。途中で止まったときだけ pending が残り、c は「前の公開」
 でも「混ざった表」でもなく「見えない」になる。前へ進め終えれば pending が消えて見える。
 したがって、どの読み手も c について「前の公開」か「この公開」か「一時的に見えない」のどれかしか
 見ず、2 つのコミットが混ざった表は見ない。これはストアを開くどの入口(serve・mcp・CLI)でも
 同じで、ディスクに途中の状態が残ったまま別のプロセスが開いても成り立つ(Claude 3)。
+
+### 見える ref の判定(Codex M1・Claude F)
+
+「この `collections/` の ref は今見えるか」を 1 つの関数(例 `search::visible_document_ref(store,
+name, state)`)に置く。見えないのは次のどれかに当たるものである。
+
+- tombstone(今と同じ)。
+- 管理下のコレクション c の ref で、`feeds/<c>/pending` の target が null でない。
+- 管理下のコレクション c の ref で、署名者が自分でない(他の署名者のものは索引に入れない)。
+
+この関数を、次の全部が通る。
+
+- 索引の構築の走査(search.rs の `visit_indexable_chunks`)と、BM25 とベクトルが共用する世代の
+  束縛(`Generation::bindings_of`、search.rs の 345〜358 行付近)。束縛には、見える ref に加えて、
+  管理下の各 c の `feeds/<c>/pending` と `feeds/<c>/published` の target を含める。したがって
+  「pending だけが変わる失敗」でも、「retire で published が消え、他の署名者の文書が見えるように
+  なる」でも、`collections/` の ref が変わらないまま世代が変わり、温まった索引とベクトルが作り
+  直される。ストアの変更のたびに捨てる必要は無い(束縛が変わったときだけ)。
+- 文書の読み出しと全文(`full`)、`GET /v1/objects/{id}` と出典(citation)の、出所の
+  コレクションを引く道(読み口の `screen` を含む)。隠れている c に属するものは 503。
+- c を名指した検索は 503(本文に「collection c hidden: publish pending」と理由)。c を名指さない
+  検索は c を落として答え、応答の `degraded` に同じ理由を載せる(黙って落とさない。must/0022)。
 
 ## 口
 
@@ -122,7 +150,7 @@ install と firewall:
 ## 管理下のコレクション(書き手は feed の transaction だけ。Codex H2・Claude 9)
 
 管理下かどうかはストアの中身で決める: 自分の署名の ref `feeds/<c>/published` か
-`feeds/<c>/pending` が在れば、コレクション c は feed の管理下である(serve の引数でなくストアで
+`feeds/<c>/pending` の target が null でなければ、コレクション c は feed の管理下である(serve の引数でなくストアで
 決めるのは、serve を止めてストアを直接開く CLI にも同じ判定を効かせるため)。判定と拒否は
 `Store::set_ref` の中の 1 箇所に置く(`collections/<c>/` と `feeds/` の下を書こうとしたら見る)。
 feed の transaction だけが使う別の入口(例 `Store::set_ref_as_feed`)を用意し、それだけが管理下の
@@ -155,10 +183,18 @@ lamalium コレクションは今まだ作っていないので、この条件�
 1 つの条件)。vega の本番のストアは今ピアから同期していないが、同期を始めたときに、他の
 ノードが同じ名前のコレクションへ書いたものが混ざらないようにする。
 
+管理下かどうかは、ref が在るかではなく、自分の署名の `feeds/<c>/published` か
+`feeds/<c>/pending` の target が null でないかで決める。退役した c には tombstone が残るので、
+在るかで決めると退役が効かない(Claude D)。
+
 feed を退役させる(管理下から外す)ときは、主の口にだけ置く `POST /v1/feeds/{c}/retire
-{"manifest":"<公開中の manifest>"}` で `feeds/<c>/published` を tombstone する(pending が在れば
-409)。コレクションの ref はそのまま残り、以後は普通のコレクションとして主の口から書ける
-(Claude N4)。
+{"manifest":"<公開中の manifest>"}` で `feeds/<c>/allow_shrink`(在れば)と `feeds/<c>/published`
+を tombstone する(pending の target が null でなければ 409。先に下の rollback か前進で片付ける)。
+コレクションの ref はそのまま残り、以後は普通のコレクションとして主の口から書ける
+(Claude N4・D)。退役の手順は、retire を打った後に serve の引数から `--listen-feed` と
+`--feed-collection` を外して据え付け直すところまでを言う(書き口を残すと、送り手の次の run が
+また最初の公開として管理下に戻しうる。最初の公開は target の在る ref があれば 409 なので、
+退役した c では実際には断られる)。
 
 docs/mop/SYSTEMD.md の「git の木を定期に取り込む」(uniqnode-ingest-git@ の例)に、
 feed の管理下のコレクションには使えない(409 で断られる)ことを書き足す。
@@ -174,8 +210,8 @@ feed の管理下のコレクションには使えない(409 で断られる)こ
      "published":{"commit":"<commit>","manifest":"s256:…","at":"<時刻>","edit":false,
                   "documents":{"docs/design/X.md":"s256:<doc_rev>", …}} | null,
      "pending":null | {"commit":"…","manifest":"s256:…"},
-     "shrink_allowance":null | {"base":"s256:…","max_deleted":N},
-     "skipped":[…], "writes_disabled":null | "<理由>"}
+     "shrink_allowance":null | {"base":"s256:…","names":[…]},
+     "hidden":null | "<理由>", "skipped":[…], "writes_disabled":null | "<理由>"}
 ```
 
 送り手は run の最初にこれを読み、`published.manifest` を run の基準(base)として固定する。
@@ -227,7 +263,7 @@ Codex M1)。
 
 serve はストアのロックを 1 回取り、その中で次を順に行う。
 
-0. 前進: `feeds/<c>/pending` が在れば、先にそれを最後まで張る(下の「失敗の境界」)。
+0. 前進: `feeds/<c>/pending` の target が null でなければ、先にそれを最後まで張る(下の「失敗の境界」)。
 1. 再送の判定を先に行う(Codex M1・Claude 11): 公開中の manifest の commit がこの `commit` で、
    `documents` も同じなら、何もせず 200(落ちた後のやり直しで、公開が済んでいた場合。
    規律 3)。commit が同じで `documents` が違えば 409(手の edit が入った後など)。
@@ -244,12 +280,14 @@ serve はストアのロックを 1 回取り、その中で次を順に行う�
 4. 量の上限: documents は 10,000 件以下、manifest の直列化は 4 MiB 以下。超えれば 413(Claude 7)。
 5. 縮みの歯止め(Claude 10・N7): documents が空、または「新しい件数 < 0.75 × 公開中の件数、かつ
    減る件数 > 10」なら 422 で断る。ただし、有効な縮みの承認があり、その base がこの run の base と
-   同じで、消える名前の数がその max_deleted 以下なら通す。見るのは消える名前の数ではなく正味の
+   同じで、消える名前の集合が承認の names の部分集合なら通す(数ではなく名前で束ねるので、同じ
+   base の上の不具合の run が、同じ数の別の名前を消すことは通らない。Claude N7)。見るのは消える名前の数ではなく正味の
    減りなので、ディレクトリの改名(60 件が消えて 60 件が増える)は通る。30 件を落とす不具合は
    件数では止まらないが、manifest の差として応答の deleted_names に残る。422 の本文は公開中の
    件数・新しい件数・消える名前の一覧を持つ。
    操作者の承認は主の口にだけ置く `POST /v1/feeds/{c}/allow-shrink {"base":"<公開中の manifest>",
-   "max_deleted":N}` で、ref `feeds/<c>/allow_shrink` に記録する。承認を commit でなく base に
+   "names":[消してよい名前…]}` で、ref `feeds/<c>/allow_shrink` に記録する。names は 422 の
+   本文の一覧をそのまま写せばよい。承認を commit でなく base に
    束ねるのは、承認の後に lamalium が次のコミットへ進んでも、同じ base の上の run なら承認が
    効くようにするためである。承認は、それを使った公開が成功したとき(8 の中で)と、別の公開で
    base が進んだときに無効になる(8 が tombstone する)。送り手が承認を出すことは無い(送り手の
@@ -285,25 +323,19 @@ serve はストアのロックを 1 回取り、その中で次を順に行う�
   書きかけ・sync の失敗を含む): 結果は「不明」である。完全なレコードがディスクに残って次の
   起動で有効になるかもしれず、残らないかもしれない(Codex H1b)。
 
-書き込みの失敗への対処は、feed に限らずストア全体の規則として置く(Codex H1a・Claude N1)。
+書き込みの失敗への対処は、feed に限らずストア全体の規則として
+[APPEND_FAILURE.md](#d973833f-4e2b-4fc8-8a49-42f6821b6a7a) に置く(Codex H1a・Claude N1・B・C)。
+要点: ストアの書き込みの I/O の誤りが 1 度でも出たら、開き直すまで「書けない」状態に入り、以後の
+書き込み(admin/gc を含む)は 503 で断る。読み出しは続け、serve は終了しない。メモリの表は
+sync まで成功した分しか進まないので、ディスクとは結果不明の 1 本だけ違いうる。feed から見た
+帰結は次のとおり。
 
-1. ストアの追記(`append_record`)が誤りを返したら、同じプロセスでは二度と追記しない。
-   ストアは「書けない」状態に入り、以後の書き込みは全部 503(理由つき)で断る。読み出しは
-   続ける。やり直しはしない(壊れた末尾の後ろに書くと、次の起動でそれが消えるから)。
-2. 追記の前の長さを覚えておき、失敗したら set_len でそこまで切り詰めて sync するのを 1 度だけ
-   試みる(できれば次の起動の再生が楽になる。できなくても再生が切り詰める。どちらでも 1 の
-   「書けない」状態には入る)。
-3. メモリの表は、sync まで成功した追記の分しか進まない(今の apply_verified の順のまま)。
-   したがって書けない状態のメモリの表は「最後に成功した追記まで」で、ディスクの再生の結果とは
-   最大 1 レコードだけ違いうる(結果不明の 1 本)。
-4. 公開の途中(pending を張った後)で書けなくなった場合、メモリには pending が残るので、上の
-   「前提」の規則で c は見えなくなる。混ざった表は見えない。pending を張る追記そのものが失敗
-   した場合、メモリには pending が無く、コレクションの ref も 1 本も変わっていないので、前の
+1. 公開の途中(pending を張った後)で書けなくなった場合、メモリには pending が残るので、上の
+   「見える ref の判定」で c は見えなくなる。混ざった表は見えない。pending を張る追記そのものが
+   失敗した場合、メモリには pending が無く、コレクションの ref も 1 本も変わっていないので、前の
    公開が見え続ける(ディスクには pending が残ったかもしれず、そのときは次の起動で前進する)。
-5. 書けない状態から戻るのは、ストアを開き直したとき(serve の再起動)だけである。/v1/status と
-   `GET /v1/feeds/{c}` の `writes_disabled` に理由を載せ、serve の記録に 1 行残す。serve は
-   終了しない。検索と読み口は、他のコレクションについて答え続ける(Claude N2)。プロセスを
-   終わらせないので、ロックの poison も起きない(Claude N3)。
+2. 書けない状態の理由は、/v1/status と `GET /v1/feeds/{c}` の `writes_disabled`、feed の各口の
+   503 の本文に載せる(lamalium のツールがそのまま見せられるように。Claude G)。
 
 前進(pending の manifest に従って 7・8 を最後までやる)は 1 つの関数に置き、ストアを開く共通の
 道(serve・mcp・CLI が通る `Store::open` の直後の 1 箇所)で呼ぶ。加えて commit・edit・GET の
@@ -315,11 +347,28 @@ serve は起き、listener を開き、他のコレクションは普通に答�
 commit・edit・GET のたびに行う(Claude N2)。CLI は前進に失敗したら理由を言って終了コード 1 で
 終える。
 
-`/v1/status` には feed ごとの `published_at`(最後の公開の時刻)・`pending`・`writes_disabled` を
-載せる。送り手と監視は published_at の古さで「公開が止まっている」ことを見る(Claude 2・10)。
+前進が書き込み以外の理由で失敗し続ける場合(pending の manifest が読めない、不具合など)、c は
+開き直しても見えないままになる。そのための逃げ道を主の口にだけ置く(Claude A):
+`POST /v1/feeds/{c}/rollback {"pending":"<今の pending の manifest>","to":"published"|"empty"}`。
+
+- 前進を先に呼ばない(commit・edit・GET と違う)。`pending` が今の pending の target と違えば 409。
+- `to:"published"`: 公開中の manifest を読み、その documents の名前を manifest の doc_rev に張り
+  直し(今の target と同じなら書かない)、c の自分の署名の ref のうち manifest に無い名前を
+  tombstone し、最後に pending を tombstone する。公開中の manifest が読めなければ 409 で、
+  理由に「to:empty を使う」と書く。
+- `to:"empty"`: c の自分の署名の ref を全部 tombstone し、`feeds/<c>/published` を tombstone し、
+  最後に pending を tombstone する(次の run は最初の公開になる)。
+- 巻き戻しも 1 本ずつ書くので、途中で失敗すれば pending が残って c は見えないまま、もう一度
+  打てばよい(同じ結果になる)。書けない状態なら 503。
+
+「c が見えない」状態は health.rs の健全性の集計にも載せ、見えなくなった遷移で ALERT を 1 度、
+見えるようになった遷移で解消を 1 度記録する(should/0129)。
+
+`/v1/status` には feed ごとの `published_at`(最後の公開の時刻)・`pending`・`hidden`・
+`writes_disabled` を載せる。送り手と監視は published_at の古さで「公開が止まっている」ことを見る(Claude 2・10)。
 
 送り手から見ると、3 の応答が 200 なら公開済み、4xx なら公開されていない、503・5xx・接続が
-切れたなら「結果不明」である。結果不明のときは次の run で 1 からやり直す: 公開が済んでいれば
+切れたなら「結果不明」である。503 の本文は「書けない」か「c が見えない(pending)」かを言う。結果不明のときは次の run で 1 からやり直す: 公開が済んでいれば
 3 の 1 で 200 の no-op、済んでいなければ普通の run になる(規律 3)。503 の本文が書けない状態を
 言っていれば、操作者に上げる(vega の再起動が要る)。
 
@@ -379,17 +428,16 @@ POST /v1/feeds/lamalium/runs/<C>/commit {base, documents}
 
 | 段 | 内容 | 粒度 |
 |---|---|---|
+| S1・A1 | [APPEND_FAILURE.md](#d973833f-4e2b-4fc8-8a49-42f6821b6a7a) の「書けない」状態と、[API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771) の主の口の境界。F2 の前提 | M・S |
 | F1 | `DELETE /v1/collections/{c}/documents/{name}`(主の口。管理下なら 409) | S |
-| F2 | ストアの「書けない」状態(追記の失敗の後は二度と追記しない・切り詰めの試み・503)、pending の間は c を見せない規則(索引と読み出し)、feed の 3 本(読む・置く・公開する)と edit・allow-shrink・retire、名前の文法、閉包の検査、管理下の判定(`Store::set_ref` の中)と feed 専用の入口、前進の関数(ストアを開く共通の道と要求の中)、status の欄、空き容量を読む statvfs の FFI(依存を足さない)、SPEC(§4.3 の previous の形)と design(INGEST・GC・新しい FEED)と SYSTEMD.md の更新 | L |
+| F2 | 見える ref の判定の関数と、それを通す全ての読む道(索引の走査・世代の束縛・読み出し・出典・読み口の screen・`degraded`)、rollback、「c が見えない」の健全性の集計、feed の 3 本(読む・置く・公開する)と edit・allow-shrink・retire、名前の文法、閉包の検査、管理下の判定(`Store::set_ref` の中)と feed 専用の入口、前進の関数(ストアを開く共通の道と要求の中)、status の欄と 503 の理由、空き容量を読む statvfs の FFI(依存を足さない)、SPEC(§4.3 の previous の形)と design(INGEST・GC・新しい FEED)と SYSTEMD.md の更新 | L |
 | F3 | serve の `--listen-feed`・`--feed-collection` と門・本文の上限、install の引数・nft の 2 規則・確認 | M |
 | F4 | 本番の据え付け(操作者に sudo の 1 ブロック。今の本番の引数を全部残す)、wg1 の AllowedIPs の確認、crystal からの疎通と初回の run の確認 | S |
 
 F2 の完了条件(テストで固定する):
 
-- 追記の失敗を 3 通り注入する: 書く前の誤り、書きかけ(一部だけ書いて誤り)、書き終えた後の
-  sync の誤り。どれでも、ストアは書けない状態に入って以後の書き込みを 503 で断り、serve は
-  終了せず、他のコレクションの検索は答え続ける。開き直すと、応答が 200 だった書き込みは
-  1 つも消えていない。
+- 書けない状態そのものの試験は S1 の完了条件が持つ。F2 では、公開の途中で書けなくなったときの
+  feed の帰結を見る(次の項)。
 - 7 の各 ref の書き込み・8 の published の張り・pending の tombstone のそれぞれで上の失敗を
   注入すると、c は検索にも読み出しにも見えなくなり(混ざった表は見えない)、開き直すと前進して
   pending が null になり、コレクションの ref が manifest と一致する。pending を張る追記そのものが
@@ -408,5 +456,14 @@ F2 の完了条件(テストで固定する):
   公開は 409。tombstone だけが残っているときは通る。
 - 公開から外れた文書の doc_rev とチャンクが、次の gc で回収される(previous を辿らない)。
 - 縮みの歯止め: 正味の減りが条件を満たすと 422 で消える名前の一覧が返る。同じ base への
-  allow-shrink の後は、別のコミットの run でも max_deleted 以下なら通り、公開が成功すると承認は
-  消える。
+  allow-shrink の後は、別のコミットの run でも消える名前が承認の names の部分集合なら通り、
+  同じ数でも別の名前が消えるなら 422 のまま。公開が成功すると承認は消える。
+- 温まった BM25 とベクトルの索引で、`collections/` の ref を変えずに (1) pending を張る、(2) pending
+  を消す、(3) retire する、の各々の後の検索が、見える ref の判定どおりの結果を返す(世代が変わって
+  作り直される)。他の署名者の文書は管理下の間は出ず、retire の後に出る。
+- 隠れている c について、c を名指した検索・文書の読み出し・`GET /v1/objects/{id}` と出典・読み口の
+  それぞれが 503 と理由を返し、c を名指さない検索は c を落として `degraded` に理由を載せる。
+- 前進を失敗させ続ける(pending の manifest を読めなくする)と、開き直しても c は見えず、健全性の
+  ALERT が 1 度だけ記録される。rollback の to:published で前の公開が見え、to:empty で c が空になり、
+  どちらも解消が 1 度記録される。rollback の途中で失敗させても、もう一度打てば同じ結果になる。
+- retire は tombstone の残った c でも効き(判定は target が null でないか)、allow_shrink も消す。

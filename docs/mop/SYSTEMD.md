@@ -208,6 +208,68 @@ PrivateUsers= なしで効く)と、drop-in に足す行、確認の走らせ方
 root で走らせないと、sudo で走らせる形と tee の例を言って断る。ストアを別のプロセスが開いて
 いれば(user 単位の serve が典型)、止めて外す命令を添えて断り、黙って止めはしない。
 
+### 旧い名の unit から移る
+
+vega の主のストアは、テンプレートになる前(2026-09-07)に据えた旧い名の unit で動いている:
+`uniqnode-serve.service`・`uniqnode-viewer.service`・`uniqnode-backup.service` と
+`uniqnode-backup.timer`(2026-10-01 に `systemctl cat` と /etc/systemd/system/ の一覧で確かめた。
+graph_a・graph_b は既に `@` の名)。install は既定のインスタンスを据えるとき、旧い名が据え先に残って
+いれば何も置かずに断る。旧い unit と `uniqnode-serve@default.service` が同じ主の口(127.0.0.1:7440)と
+同じストアを取り合い、後から起きた方が束縛かストアのロックで exit 1 になって、どちらが動くかが起動の
+順で決まってしまうためである。黙って外しはしない(操作者のものを止めるのは操作者の判断。must/0022)。
+下の「テンプレートになる前の名の unit から移る」が同じ規則の一般形で、ここは vega の実物に当てた手順。
+
+移らないと困るのは、これからの変更がテンプレートにだけ入るからである。API_AUTH の A2 は
+`uniqnode-serve@.service` の `RestrictAddressFamilies=` に `AF_NETLINK` を足し、APPEND_FAILURE の S1 は
+`ExecStop=` を足す。旧い名のままバイナリだけを差し替えると、A2 では照会のソケットを作れず主の口の全ての
+接続が 403 になり、S1 では restart のたびに印に `Running` が残りうる。install の打ち直し(下の「更新」)も
+旧い名が残る限り断られる。したがってこの移行は、A2 と S1 を本番へ入れる前提である
+([docs/plan/API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771)・
+[docs/plan/APPEND_FAILURE.md](#d973833f-4e2b-4fc8-8a49-42f6821b6a7a) の段取り)。
+
+旧い unit が持っているもの(外すと消えるので、据え直す install の引数で全部作り直されることを確かめて
+から外す):
+
+- `uniqnode-serve.service.d/override.conf`: 本番の引数(ストアの道、`--embed`・`--rerank`、読み口
+  10.10.128.1:7441、`--agent-writable lamalium-notes`、`--agent-collections` の 7 つ、
+  `After=wg-quick@wg1.service`)。下の「user 単位から移る」の install の行が同じ値を持つ。
+- `uniqnode-serve.service.d/agent-door.nft`: 表 `inet uniqnode` で、読み口へ届いてよいのは
+  10.10.128.4 と 10.10.128.2(crystal。2026-09-29 に手で足した)。install の `--firewall-allow
+  10.10.128.4,10.10.128.2` が表 `inet uniqnode_default` として作り直す。同じ場所の
+  agent-door.nft.bak-20260929 は手で足す前の写しで、一緒に消える。
+- `uniqnode-viewer.service.d/override.conf`: viewer の 0.0.0.0:7450。install の `--viewer-listen` が持つ。
+- `uniqnode-backup.service.d/override.conf`: 写し先 /home/hikalium/uniqnode-backup(名の付かない道)。
+  install を打ち直すと既定が /home/hikalium/uniqnode-backup/default に移り、初回は全件の写しになる
+  (下の「2 つ目のストアを同じ機械で」)。増分を続けたければ、install の行に
+  `--backup-dir /home/hikalium/uniqnode-backup` を足す。
+
+外す命令は vega で打つ。sudo を使えるどの利用者がどこから貼っても同じに動く。止めて外す行は install の
+断りが添える命令と同じ字句(install.rs の `legacy_units_removal_command`。must/0023)で、その前に今の
+unit と drop-in の写しを /var/tmp に残す:
+
+```
+sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee /tmp/uniqnode-legacy-units.log
+set -euo pipefail
+/usr/bin/tar -C /etc/systemd/system -czf /var/tmp/uniqnode-legacy-units.tar.gz uniqnode-serve.service uniqnode-serve.service.d uniqnode-viewer.service uniqnode-viewer.service.d uniqnode-backup.service uniqnode-backup.service.d uniqnode-backup.timer
+systemctl disable --now uniqnode-serve.service uniqnode-viewer.service uniqnode-backup.timer ; rm -rf /etc/systemd/system/uniqnode-serve.service /etc/systemd/system/uniqnode-serve.service.d /etc/systemd/system/uniqnode-viewer.service /etc/systemd/system/uniqnode-viewer.service.d /etc/systemd/system/uniqnode-backup.service /etc/systemd/system/uniqnode-backup.service.d /etc/systemd/system/uniqnode-backup.timer /etc/systemd/system/uniqnode-backup.timer.d ; systemctl daemon-reload
+nft delete table inet uniqnode
+EOF
+```
+
+注意:
+
+- 外してから据え直すまでの間、主の口 7440・読み口 7441・viewer 7450 は止まり、毎日の backup の刻みも
+  無い(graph_a・graph_b は別の unit なので動き続ける)。lamalium の読み口への書き込みはこの間
+  失敗する。
+- 順は、この外す命令 → 下の「user 単位から移る」の install の命令、でなければならない。逆に打つと、
+  install は旧い名が残っているので何も置かずに断る(壊れはしないが、据わらない)。外した後は間を空けず
+  に install の命令を打つ。ビルドを先に済ませておけば、install の命令の中の cargo build はすぐ終わり、
+  止まる間が短くなる。
+- 済んだかは /tmp/uniqnode-legacy-units.log と、続く /tmp/uniqnode-install-system.log を読んで確かめる。
+  戻すときは、`@default` の 3 つを止めて外してから /var/tmp/uniqnode-legacy-units.tar.gz を
+  /etc/systemd/system に展開し、daemon-reload して旧い 3 つを enable --now する(同じ主の口を取り合う
+  ので、両方を同時に置かない)。
+
 ### user 単位から移る
 
 user 単位で動いているものを system 単位に載せ替える。ストアも写し先もバイナリも同じ場所の
@@ -679,7 +741,8 @@ sudo nft delete table inet uniqnode   # 読み口を firewall で限っていた
 drop-in の `UNIQNODE_DATA_DIR` が指したままなので、動かす必要はない。
 
 別の名のインスタンスを足すだけなら、古い名の unit とは取り合わない。install はその旨を
-1 行言って、そのまま進む。
+1 行言って、そのまま進む。vega の主のストアに当てた手順(残る drop-in と nft の中身、止まる間、
+install との順)は上の「旧い名の unit から移る」。
 
 ## git の木を定期に取り込む
 

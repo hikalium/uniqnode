@@ -2,7 +2,10 @@
 
 <a id="d973833f-4e2b-4fc8-8a49-42f6821b6a7a"></a>
 
-版: 第 16 版(2026-10-01)。第 15 版(3162e7f)への vega の Codex の再レビュー(高なし、中: ストアの障害でない
+版: 第 17 版(2026-10-01)。第 14 版(9d04834)への Claude のレビュー(高 1: 保留で開いた serve が sync していない
+レコードを複製の口でピアへ渡す、中 1: 開いた後の抜け道とシグナル、中 2: 既存の試験との食い違いと Drop、中 3: 命令ごとの
+開き方、中 4: GC の D のディレクトリの sync、中 5: 旧い名の unit からの移行を本番への反映の前提に、低 3〜8)を、
+第 16 版に照らし直して取り込んだ。第 16 版(2026-10-01)。第 15 版(3162e7f)への vega の Codex の再レビュー(高なし、中: ストアの障害でない
 CLI の誤りでの終わりも無事な終わり方を通す)を取り込んだ。第 15 版(2026-10-01)。第 14 版(9d04834)への vega の Codex の再レビュー(高なし、中: CLI の sync の
 差分なしの抜け道)を取り込んだ。第 14 版(2026-10-01)。第 13 版(2e312d3)への vega の Codex の再レビュー(高なし、中 1: 鍵が未確定の
 初期化の失敗は保留で開けない、中 2: 明示的な sync の入口で 503、低: 検めを通らない印の完了条件)を
@@ -117,14 +120,23 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      永続しているものとし、この前提を文書と誤りの文に書く。install も同じ規則に揃える: 今の
      install.rs(2171 行付近)の `create_dir_all` をやめ、足りない経路の要素を上から 1 つずつ `mkdir`
      する。その後、作ったかどうかに依らず、データのディレクトリから根までの全ての要素について、
-     その名前を持つディレクトリを下から順に sync する(install は root で走るので全て開ける。開けなければ
-     install の失敗にする)。前の install が `mkdir` の後・親の sync の前で中断していても、再実行で
+     その名前を持つディレクトリを下から順に sync する(system の install は root で走るので全て開ける。
+     user 単位の install は利用者の権限で走るので、読めない祖先があると開けない。そのときは飛ばさず、
+     その祖先の道と理由を言って install の失敗にする。serve の開く道の「親を開けなければ開くことの
+     失敗」と同じ規則で、据え付けた後に serve が同じ理由で起きない形を先に言う。第 14 版への Claude の
+     レビューの低 8)。前の install が `mkdir` の後・親の sync の前で中断していても、再実行で
      「既に在る」要素の名前まで永続させる。install は serve を起こす前にこれを済ませるので、serve が
      開く時点で親の名前まで永続している(第 6 版・第 7 版への Codex の再レビューの高)。親を開けない(読めない)なら sync できないので、開くことの失敗にする(第 5 版への
      Codex の再レビューの高 1。「読めない祖先は飛ばす」は撤回した: 読めなくても書けて辿れる
      ディレクトリの下には名前を作れるので、飛ばす根拠にならない)。
    順は、recover の削除・切り詰め → 上の中身と名前の sync → 書き込みの受け付け(FEED の起動時の
-   前進も含む)とする(Claude 低 7)。
+   前進も含む)とする(Claude 低 7)。方針 5 の印を含めた書ける道の全体の順は、データのディレクトリの
+   `mkdir`(無ければ。印の置き場で、ロックの名も正規化した道から作るので先に要る)→ ストアのロック →
+   印を読む → `Running` を書く → packs/・reflog/・tmp/ の `mkdir` → tmp/ の片付け → `node_key` の
+   読み込みか作成 → recover → 上の sync → 書き込みの受け付け、とする。今の `Store::open`(store.rs の
+   474〜488 行付近)は packs/・reflog/・tmp/ の `create_dir_all` をロックより前に、tmp/ の片付けを
+   ロックの直後に行うが、どちらもストアを変える操作なので `Running` の後へ移す(第 14 版への Claude の
+   レビューの低 6)。
    試験は、初めて作るストアで、ディレクトリと鍵を作った後・sync の前に落として起こし直す形、
    pack の write_all の後・sync の前に落として起こし直し、同じオブジェクトを再送する形(再送の 200 より
    前に sync が済んでいることを数える口で見る)、親が読めない(0333)ときに開くことが理由を言って
@@ -139,6 +151,7 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
    - `append_record` の、ファイルを開いた後の誤り(0 バイトで返った write の誤りも含める。
      ENOSPC は続くことが多く、区別しても得が無い)と、1a のディレクトリの sync。開くこと自体の誤りは、1 バイトも書いて
      いないので入れない(EMFILE のような一時的な誤りで書けなくならないように。Claude C)。
+   - GC の D の最後の packs/ のディレクトリの sync(下の 3 の D の項)。
    - `write_manifest`。包みは `atomic_write` ではなく `write_manifest` に掛ける(`atomic_write` は gc の
      参照表(gc.rs の 298 行付近)と backup の MANIFEST(backup.rs の 280 行付近)も書き、それらは
      ストアの持続的な書き込みではない。crystal の Claude 低)。
@@ -178,9 +191,15 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      状態の間も、起動し直した後も、MANIFEST に載っている古い pack は消さない(D は C-3 の成功の後に
      しか走らない)。
      `active_pack_number` を新 pack の次へ進めるのも C-3 の成功の後にする。
-   - GC の D(確定の後、ロックの外で古い pack と参照表を消す。gc.rs の 681〜699 行付近)も、この
-     判定の外に置く。消すのに失敗しても、その GC の実行が誤りで終わるだけでよい(FEED 第 4 版の
-     再確認の Claude N-3)。MANIFEST に無い古い pack は、ふつう次の起動の recover が残骸として消す。
+   - GC の D(確定の後、ロックの外で古い pack と参照表を消す。gc.rs の 693〜701 行付近)の削除
+     (unlink)は、この判定の外に置く。消すのに失敗しても、その GC の実行が誤りで終わるだけでよい(FEED 第 4 版の
+     再確認の Claude N-3)。ただし D の最後の packs/ のディレクトリの sync(gc.rs の 701 行付近)の
+     失敗は、書けない状態(kind は Io、op は DirSync)に入れる。D がその誤りを受け取ると、ディレクトリの
+     errseq に「報告済み」の印が付き、後から開いた fd の sync にはもう返らない。すると後の 1a の
+     packs/ の sync(新しいセグメントの名前の永続)が成功を返し、書き戻せなかったディレクトリの更新を
+     帳消しにしうる(欠陥 9 と同じ形。第 14 版への Claude のレビューの中 4)。D はロックの外で走るので、
+     `write_failure` を立てるときはロックを取り直し、印に `Io` を書く。第 16 版までの「D は全部この
+     判定の外」をこの項で改めた。MANIFEST に無い古い pack は、ふつう次の起動の recover が残骸として消す。
      ただし消し損ねたのが封印済みの最大番号の pack で、新 pack も作らなかった形では、次の起動で
      アクティブとして生き返る。失われるものは無く、ゴミが戻るだけで、次の GC が改めて扱う(Claude 低 5)。
    - GC の B(PackWriter の tmp/ への書き込み)は、この判定の外に置く。tmp の書き込みの失敗は
@@ -226,9 +245,15 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      形を検め、読めない・短い・CRC が合わない・状態が不明な印は `Io` と同じに扱う。「boot_id が
      違う」と言えるのは、検めを通った印の boot_id が今と違うときだけである(第 10 版への Codex の
      再レビューの中 1)。
-   - 書く入口の開く道(serve・MCP の Local・書く CLI)は、ストアのロックを取って印を読み、書ける道と
-     決めたら、ストアを変える最初の操作(recover の削除・切り詰め、`node_key` の作成、1a の開くとき
-     の sync)より前に `Running` を書く。書けなければ開くことの失敗にする。こうすると、その後の
+   - 書く入口の開く道(serve・MCP の Local・書く CLI。どの命令がこの道かは下の「命令ごとの開き方」)は、ストアのロックを取って印を読み、書ける道と
+     決めたら、ストアを変える最初の操作(packs/・reflog/・tmp/ の `mkdir`、tmp/ の片付け、recover の
+     削除・切り詰め、`node_key` の作成、1a の開くときの sync。順は 1a の末尾)より前に `Running` を書く。
+     書けなければ(短い `pwrite`・`fdatasync` の失敗・印を作れない)、開くことの失敗にはせず、書けない道
+     (保留、kind は Io、reason は「印を書けない」)へ切り替えて開き、読み出しは答える。第 16 版までの
+     「開くことの失敗」は、方針 6 の「読み出しは答え続ける」と食い違っていた(第 14 版への Claude の
+     レビューの低 4)。印は書きかけかもしれないので、次の開く道は読み直した印に従う(検めを通らなければ
+     保留が続き、release-hold が要る)。鍵が確定していないストアだけは、保留でも開けないので開くことの
+     失敗にする(1a の `node_key` の項)。こうすると、その後の
      recover や開くときの sync が失敗して起動が失敗しても、印は今のブートの `Running` のまま残り、
      同じブートの再試行は書けない道(保留)に入る。後の再試行の sync の成功で前の失敗を帳消しに
      しない(第 12 版への Codex の再レビューの高)。印がまだ無い(初めて開く)ときは、印を作って
@@ -252,7 +277,36 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      終わり(例: 今の CLI の sync は、相手に繋がらないときやハッシュが合わないときに main.rs から直接
      `process::exit(1)` する)も、終了コードを決めた後にこの関数を通してから終える。`Clean` へ書き換え
      るかは終了コードでなく `write_failure` の有無で決める。ストアを開いた後の CLI の `process::exit`
-     は、この関数を通る 1 つの終わり方に寄せる(第 15 版への Codex の再レビューの中)。MCP の Local は、実行ファイルが更新されると自分を
+     は、この関数を通る 1 つの終わり方に寄せる(第 15 版への Codex の再レビューの中)。
+     ストアを開いた後に抜ける道は CLI の sync だけではない(第 14 版への Claude のレビューの中 1)。
+     serve は今、ストアを開いてから束縛し(main.rs の 1908〜1949 行付近)、束縛の失敗は
+     `process::exit(1)` で抜ける。main.rs には誤りでの `process::exit` が 39 箇所あり、CLI の SIGINT
+     (Ctrl-C)と MCP の Local の SIGTERM も今は手続きなしで落ちる。これらがどれも `Running` を残すと、
+     ポートの塞がりや取り込みの中断のたびにホストの再起動が要る。そこで次の 3 つにする:
+     (a) 起動の時点で分かる断りは `Store::open` より前に済ませる。serve は束縛と、API_AUTH の A1・A2 の
+     起動時の断り(束縛先の字面、Linux 以外、許す集合に overflowuid)を先に行い、全部通ってから
+     ストアを開く。「listening on」の 1 行はストアを開き終えた後に出す(今の順の理由は、待つ側が
+     1 行を見た後で落ちられると騙されることなので、1 行の位置を保てば束縛を先にしてよい。束縛から
+     開き終わるまでに来た接続はカーネルの backlog で待つ)。
+     (b) ストアを開いた後の抜け道は、全部この関数を通る 1 つの終わり方に寄せ、`process::exit` を直接
+     呼ばない(`?` で main から返る道は下の Drop が受ける)。
+     (c) serve・書く CLI・MCP の Local は SIGTERM と SIGINT を受け、この関数を通して終える。依存を
+     足さない制約の下で、std と `extern "C"` の `pthread_sigmask`(スレッドを作る前に 2 つを塞ぐ)と、
+     専用のスレッドの `sigwait`(または signalfd)で受ける。受けたスレッドがストアのロックを取れた
+     時点で進行中の持続的な書き込みは無いので、閉じている状態へ移して `Clean` を書ける。終了コードは
+     128 とシグナルの番号の和とする。
+     Store の Drop は、`write_failure` が無く、持続的な書き込みの途中でなく(書き込みの入口の先頭で
+     立て、成功か `write_failure` の記録で降ろす旗を見る)、パニックの巻き戻しの中でもなければ、閉じて
+     いる状態へ移して `Clean` を書く(第 14 版への Claude のレビューの中 2)。CLI が `?` で main から
+     返る形と、試験がプロセスの中でストアを落として開き直す形(tests/gc_crash.rs の 167 行付近など)が、
+     これで無事な終わり方になる。書き込みの途中やパニックで落ちたストアは `Running` のまま残す
+     (書きかけの末尾を無事と言わない)。
+     shutdown の API は、`Clean` を書いて `fdatasync` が成功してから応答を返す。今の http.rs(167〜172
+     行付近)は応答を書いてから `process::exit(0)` するので、この関数は応答を作る前(handler の中)で
+     呼ぶ。`write_failure` があって書き換えなかったとき・`Clean` を書けなかったときは、応答の本文に
+     そう言う(`"marker":"clean"` か `"marker":"left"` と理由)。ExecStop はその本文を journal に残す。
+     ExecStop が返った時点で、印が `Clean` で永続しているか、残した理由が journal にあるかのどちらかに
+     なるようにするため(第 14 版への Claude のレビューの低 7)。MCP の Local は、実行ファイルが更新されると自分を
      `exec` で差し替え(mcp.rs の `exec_replacement`)、成功すれば終わりの処理へ戻らない。そこで
      `exec` の前にもこの関数を呼んで `Clean` を書き、ストアを閉じる。`exec` が失敗して旧イメージの
      まま続けるときは、開く道(ロックを取り直し、印を読み、書ける道なら `Running` を書く)をやり直し、
@@ -272,6 +326,19 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      recover を呼んで切り詰めと sync をするので、読むだけの走査を別の関数に分ける。こうして、書き
      込みや sync が失敗し続ける同じブートの中でも、serve は起きて status と既存のデータを答える。
      1a の「開くときの sync の失敗は、開くことの失敗」は書ける道だけに掛かる。
+   - 保留で開いた serve は、ピアが引く複製の口 `GET /v1/replication/signers` と
+     `GET /v1/replication/refs`(api.rs の 260・2137 行付近。中身は store.rs の `signers` と
+     `export_ref_records`、1344〜1354 行付近)に 503 と理由を返す(第 14 版への Claude のレビューの高 1)。
+     読むだけの走査は尻切れの手前までの完全なレコードを採用するが、中身を sync しない。Io の後に完全な
+     レコード R(seq n)が page cache にだけ残っていると、同じブートで起こし直した serve は保留で開き、
+     走査が R を採用して `signer_last_seq` が n になるので、export の `seq <= signer_last_seq` の絞りでは
+     止まらない。ピア(例えば graph_a の毎分の pull)が R を取り込んだ後にホストを再起動すると、R は
+     ディスクから消え、こちらは seq n を別のレコード R′ に使い直し、ピアは R′ を `AlreadyKnown` として
+     捨てるので、同じ署名者の seq が 2 系統に割れる。503 は、ストアを書ける道で開き直す(1a の開くとき
+     の sync が採用したレコードの中身を永続させる)まで続く。保留は同じプロセスの中では解けないので、
+     保留で開いた serve の間はずっと 503 である。実行中に書けない状態へ入った serve は、メモリの表が
+     sync まで成功した分しか進まないので、この口を閉じなくてよい(「外から見える形」の export の絞りで
+     足りる)。
    - 戻し方(Io と、無事に終わらなかったもの): 既定はホストの再起動だけである。カーネルのログに
      誤りが無いことは再開の根拠にならない(書き戻しの誤りは報告された後は見えなくなり、sync の段の
      ENOSPC も Io に入る。第 9 版への Codex の再レビューの高 2)。ホストを再起動できないときの代わりは、
@@ -285,11 +352,14 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
    - 代価: 同じブートの中で serve が SIGKILL・OOM・異常終了で落ちると、I/O の誤りが無くてもホストを
      再起動するまで書けない状態で起きる。systemd の stop と restart を無事な終わり方にするため、unit
      に `ExecStop=`(主の口へ `POST /v1/admin/shutdown` を送り、終わりを待つ)を足す。今の serve は
-     SIGTERM を扱わないので、これが無いと stop のたびに `Running` が残る。`TimeoutStopSec` を過ぎて
-     SIGKILL になった形は、書けない状態で起きる(安全な側)。
+     SIGTERM を扱わないので、これが無いと stop のたびに `Running` が残る。上の (c) で serve が SIGTERM を
+     受けるようになれば、ExecStop が主の口に届かないとき(API_AUTH の判定の枠が塞がっている、など)も
+     systemd の SIGTERM が無事な終わり方を通す。ExecStop は結果を journal に残す第一の道として置き続ける。
+     `TimeoutStopSec` を過ぎて SIGKILL になった形は、書けない状態で起きる(安全な側)。
    試験は、実際の unit での stop と start で書けるまま起きること、SIGKILL の後に同じ boot_id で書け
    ない状態で起きること、boot_id が違えば普通に開くこと(boot_id の読み口は debug ビルドで差し替え
-   られるようにする)、`Running` を書けないときに開くことが失敗すること、Io の後の shutdown で印が
+   られるようにする)、`Running` を書けないときに書けない道で開いて読み出しが答えること(鍵が確定して
+   いないストアでは開くことが失敗すること)、Io の後の shutdown で印が
    `Io` のまま残ること、NoSpace の後に serve を再起動すると書けること、検めを通らない印がホストの
    再起動(boot_id の差し替え)の後も保留のままで release-hold で戻ること、MCP の Local の `exec` に
    よる差し替えの後に書けるまま起きることと、`exec` の失敗の後に `Running` を書き直すまで書き込みが
@@ -309,6 +379,32 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
 6. serve は終了しない。検索と読み出しは答え続け、書き込みだけが断られる。終了して systemd の
    Restart=on-failure に開き直させる案は採らない: 空きが無いままなら再起動の輪になり、読み出しも
    止まる(FEED の Claude N2・N3)。
+
+## 命令ごとの開き方
+
+「書く CLI」がどれかを、名前でなく実際にストアを変えるかで決める(第 14 版への Claude のレビューの中 3)。
+今の main.rs は `open`(無ければ初期化)と `open_existing`(在るストアだけ)を分けている(667〜681
+行付近)が、この分け方は書くかどうかと一致しない: gc の CLI は `open_existing` で開いて書き(1645 行
+付近)、fsck・status・get・refs と backup の写し先の検め(backup.rs の 226 行付近の `verify_copy`。
+install の確認も同じ関数)は、`Store::open` の recover で削除・切り詰め・sync をする。S1 の後は次の
+表のとおりにする。
+
+| 命令 | 今の開き方 | S1 の後 |
+|---|---|---|
+| serve、mcp の Local(`--serve-url` なし) | `Store::open` | 印の手順(書ける道か保留) |
+| init・put・set-ref・pin・correct・ingest(道と URL)・ingest-annotations・fetch・sync・flood | `open` | 印の手順 |
+| ingest-git | `open`(`--serve-url` なら開かない) | 印の手順(`--serve-url` なら開かない) |
+| gc | `open_existing`(書く) | 印の手順(在るストアだけ) |
+| status・get・refs・fsck | `open_existing`(recover が削除・切り詰め・sync をする) | 読むだけの走査 |
+| embed | `open`(ストアは読むだけで、書くのは derived/ のベクトルの控え) | 読むだけの走査(在るストアだけ) |
+| backup の写し先の検め(`verify_copy`) | `open_existing`(写し先の尻切れを切り詰める) | 読むだけの走査 |
+| mcp の Forward、viewer、install | 開かない(install はロックを探るだけ) | 開かない |
+
+読むだけの走査は、方針 5 の書けない道と同じ関数で、ストアのロックは取る(serve と同時に走らない今の
+形を保つ)が、印を読み書きせず、`mkdir`・tmp/ の片付け・削除・切り詰め・sync を一切しない。保留の
+ストアにも答える。init と status は今 1 つの腕(main.rs の 1382 行付近)なので分ける。backup の
+`torn_tails_cut` は、ファイルが縮んだかではなく、走査の有効な長さとファイルの長さの差から出す(写し先の
+アクティブのセグメントは次回の backup が丸ごと写し直すので、切り詰めなくてよい)。
 
 ## 外から見える形
 
@@ -336,7 +432,8 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
 - CLI(`uniqnode ingest` などストアを直接開くもの)は、誤りを言って終了コード 1 で終える。
 - `export_ref_records` は、全ての署名者について `seq <= signer_last_seq[signer]` に絞る(応答して
   いない 1 本をピアへ流さない。複製で受けた他の署名者のレコードも、追記の成功の後にメモリへ適用する
-  ので同じことが起きる。Codex 低 6)。
+  ので同じことが起きる。Codex 低 6)。この絞りが効くのはメモリの表が sync の済んだ分だけのときで、
+  保留で開いた serve は複製の口そのものを 503 にする(方針 5。第 14 版への Claude のレビューの高 1)。
 
 ## 関連して直すもの
 
@@ -347,7 +444,7 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
 - 失敗の注入(外部の crate を足さない): gc.rs の `UNIQNODE_GC_CRASH_AFTER` と同じく、
   `cfg(debug_assertions)` のビルドだけが読む環境変数 `UNIQNODE_APPEND_FAULT=<種類>:<何回目>` を
   `append_durable` と包みが見る。release には入らない。実プロセスの serve を立てる node/tests の
-  api 系のテストから使える。種類は次の 9 つ:
+  api 系のテストから使える。種類は次の 10 個:
   - `before`: 1 バイトも書かずに誤り(errno は EIO)。
   - `torn:<n>`: n バイトだけ書いて誤り(errno は ENOSPC。切り詰めが成功するので kind は NoSpace)。
   - `sync`: 全部書いてから sync の位置で誤り(切り詰めは成功させる)。
@@ -359,6 +456,8 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
   - `nospace-sync`: sync の段で ENOSPC を返す(kind が Io になることを見る)。
   - `crash-before-dirsync`: 新しいセグメントの最初の追記の、ファイルの sync の後・親の sync の前で
     プロセスを abort する(開く道のディレクトリの sync を確かめる)。
+  - `gc-dirsync`: GC の D の最後の packs/ のディレクトリの sync で誤り(第 14 版への Claude の
+    レビューの中 4)。
   ストアの層のテストは、同じ注入をプロセスの中の `#[doc(hidden)]` のメソッドでも掛けられるように
   する(tests/gc.rs と同じ形)。
 
@@ -385,7 +484,9 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
 - `manifest` を封印に掛けると、メモリの `sealed_packs` が進まず、書けない状態に入り、開き直した
   ストアが一貫している。`gc_commit` の C-2 の後と C-3 に掛けても、開き直した後に失われる
   オブジェクトが無い(tests/gc_crash.rs と同じ検め方)。
-- GC の B の途中の tmp の書き込みの失敗と、D の削除の失敗は、書けない状態を立てない。
+- GC の B の途中の tmp の書き込みの失敗と、D の削除の失敗は、書けない状態を立てない。D の packs/ の
+  sync の失敗(`gc-dirsync`)は、kind が io・op が DirSync の書けない状態を立て、印が `Io` になる
+  (第 14 版への Claude のレビューの中 4)。
 - `manifest-dirsync` を封印と `gc_commit` の C-3 に掛けて開き直しても、応答済みの ref から辿れる
   オブジェクトが全部読める。
 - `torn` の ENOSPC は kind が no_space、`nospace-sync` と `sync` と `dirsync` は io になり、503 の本文と
@@ -412,11 +513,49 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
   無事に終わらなかったもの)は、同じ boot_id の間は Io のまま開き、ホストの再起動(boot_id が変わる)
   か、(umount・fsck・mount し直しの後の)release-hold の後に null に戻る。検めを通らない印は、ホストを
   再起動しても Io のまま開き、release-hold の後にだけ null に戻る(第 13 版への Codex の再レビューの低)。
+- 保留で開いた serve は `/v1/replication/signers` と `/v1/replication/refs` に 503 と理由を返す。
+  reflog に `sync-keep` を掛けて完全な 1 本を残した後、同じ boot_id で serve を起こし直すと保留で開き、
+  別のノードの `POST /v1/sync` でその serve を引いても何も取り込まれない。boot_id を差し替えて開き直すと
+  200 に戻る(第 14 版への Claude のレビューの高 1)。
+- 塞がったポートへの束縛と、A1・A2 の起動時の断りで serve が終わった後、同じ boot_id で開き直すと
+  書けるまま開く(ストアを開く前に断っている)。取り込みの途中の CLI に SIGINT を、serve と MCP の
+  Local に SIGTERM を送ると `Clean` を書いて終わり、同じ boot_id で書けるまま開く。ストアを開いた後の
+  誤りでの終わり(注入で起こす)も同じ(第 14 版への Claude のレビューの中 1)。
+- プロセスの中でストアを落として開き直すと書けるまま開き(Drop が `Clean` を書く)、持続的な書き込みの
+  途中で(注入で)パニックさせて落としたストアは、同じ boot_id で保留に開く。子プロセスを SIGKILL・abort
+  で落として開き直す既存の試験(tests/crash.rs の 19〜60 行付近の flood の 5 周、tests/gc_crash.rs の
+  各相の abort の後の開き直しと、180〜190 行付近の `a_second_gc_finishes_the_job`)は、落とした後の
+  開き直しの前に debug の口で boot_id を差し替える(ホストの再起動に当たる)。差し替えない形は、同じ
+  boot_id で保留に開くことを見る別の試験にする。boot_id の口は、プロセスの中で開く試験にも効くように、
+  debug ビルドだけが読む StoreConfig の欄か環境変数で与える(第 14 版への Claude のレビューの中 2)。
+- 保留のストアに fsck・status・get・refs と backup の写し先の検めを当てると、切り詰め(`set_len`)・
+  削除・sync・`mkdir` の呼び出しが 0 回で、印も変わらない。gc の CLI は印の手順を通る(第 14 版への
+  Claude のレビューの中 3)。
+- shutdown の応答を受け取った時点で、印が `Clean` で永続している(応答を書く前に `fdatasync` が済んだ
+  ことを数える口で見る)。`write_failure` があれば本文が `"marker":"left"` と理由を言う(第 14 版への
+  Claude のレビューの低 7)。
 
 ## 段取り
 
 | 段 | 中身 | 大きさ |
 |---|---|---|
-| S1 | `append_durable` と包みへの寄せ、新しいセグメントのディレクトリの sync、`WriteFailure` と `WritesDisabled`、fstat と切り詰めの試み、封印と `gc_commit` の順の入れ替え、`atomic_write` の tmp 名、周期的な書き手の飛ばし、export の絞り、注入、HTTP と MCP の 503、status と健全性の欄、テスト、SPEC §5(永続化)への 1 段落 | M |
+| S1 | `append_durable` と包みへの寄せ、新しいセグメントのディレクトリの sync、`WriteFailure` と `WritesDisabled`、fstat と切り詰めの試み、封印と `gc_commit` の順の入れ替え、GC の D の packs/ の sync の失敗を書けない状態へ、`atomic_write` の tmp 名、周期的な書き手の飛ばし、export の絞り、注入、HTTP と MCP の 503、status と健全性の欄、`open-marker`(固定長・CRC・boot_id)と開く道の 2 分岐、読むだけの走査の関数と「命令ごとの開き方」の表のとおりの付け替え、保留の serve の複製の口の 503、release-hold の CLI、無事な終わり方の関数と 1 つの終わり方への寄せ、Store の Drop、SIGTERM と SIGINT の受け取り(`extern "C"`)、serve の束縛と A1・A2 の起動時の断りを開くより前へ、unit の ExecStop(system と user の `uniqnode-serve@.service`)、install の経路の 1 つずつの `mkdir` と根までの sync、`node_key` の tmp(`create_new`・0600・sync・rename)、テスト、SPEC §5(永続化)への 1 段落 | M |
+
+S1 で一緒に直す文書(第 14 版への Claude のレビューの低 3): 配る unit のコメント「書き込み途中で
+裂かれていても fsck なしで回復する(node/tests/crash.rs)」(docs/mop/systemd/system/uniqnode-serve@.service
+の 37 行付近と user の 42 行付近。同じ boot_id の SIGKILL の後は保留で起きる、へ)、docs/mop/SYSTEMD.md
+(116 行付近の同じ根拠、「停止」の「SIGTERM を受け取る手続きを持たないので即座に落ちる」、「更新」の
+restart の説明、保留と release-hold の案内)、backup の `not_copied`(backup.rs の 285 行付近。
+`open-marker` は写さない既知の名として扱い、毎回「知らない名前」に出さない)。
 
 S1 はレビューで高の指摘が無いと確かめてから入る。FEED の F2 は S1 を前提にする。
+
+本番への反映の前提(第 14 版への Claude のレビューの中 5): vega の主のストアの serve は、今も旧い名の
+unit `uniqnode-serve.service`(と `uniqnode-viewer.service`・`uniqnode-backup.timer`)で動いている
+(2026-10-01 に `systemctl cat` と /etc/systemd/system/ の一覧で確かめた。graph_a・graph_b は既に
+`@` の名)。ExecStop は `@` のテンプレートにだけ入り、install は旧い名が据え先に残っていると何も置かずに
+断る(install.rs の 43〜50 行付近の LEGACY_UNITS)ので、更新の手順(install の打ち直し)が通らない。
+バイナリだけを差し替えると、ExecStop の無い unit で動き、SIGTERM の受け取りに漏れがあれば restart の
+たびに `Running` が残って保留で起きる。S1 を本番へ入れる前に、docs/mop/SYSTEMD.md の「旧い名の unit
+から移る」で `uniqnode-serve@default` ほかへ移す。操作者への sudo の依頼として、実行するホスト(vega)と
+貼れる命令を添えて渡す。

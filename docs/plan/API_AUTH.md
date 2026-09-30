@@ -2,7 +2,9 @@
 
 <a id="abde9b3c-75f8-453b-988e-bfb1e178c771"></a>
 
-版: 第 2 版(2026-10-01)。第 1 版(a9eba65)への Claude のレビュー(高 1〜3・中 4〜6・低 7〜9)を
+版: 第 3 版(2026-10-01)。第 2 版(e7c6b61)への Codex のレビュー 2 本(vega の Codex の 1〜12、crystal の
+Codex の H1・H2・M1)を取り込んだ。viewer の扱い(3 と A3)は操作者の確認待ちで、第 2 版のまま置く。
+第 1 版(a9eba65)への Claude のレビュー(高 1〜3・中 4〜6・低 7〜9)を
 取り込んだ。次は Codex のレビュー。
 出所は lamalium の健全性点検(2026-09-30)の項目 12。SPEC.md §10 は「認証は当面固定トークン」と
 言うが、コードにトークンは無い。表にも実装済みの口が載っていない。FEED の F2 は、主の口にだけ
@@ -11,18 +13,26 @@
 
 ## 今の事実(2026-10-01 のコードと vega)
 
+表の「本番の束縛」の列と下の利用者の段落は、2026-10-01 00:2x JST に vega で `ss -ltnp`・`getent passwd`・
+`id` を読んで観測したもの。他の列はコードの読みである(Codex 低 12)。
+
 | 待ち受け | 本番の束縛 | 認証 | 通すもの |
 |---|---|---|---|
 | 主の口(serve の `<listen>`) | 127.0.0.1:7440(graph_a・graph_b は 7444・7442) | 無い。送信元・Host・Origin・Content-Type も見ない(http.rs が見るヘッダは connection・content-length・transfer-encoding・expect だけ) | 全部(`/v1/admin/shutdown`・`/v1/admin/gc`・`PUT /v1/refs/…`・`POST /v1/sync`・`POST /v1/collections/{c}/fetch` を含む) |
 | 読み口(`--listen-agent`) | 10.10.128.1:7441・7445・7443(wg1) | 無い。送信元は記録に写すだけ | agent_door.rs の許可表: 読む口(chunk だけの objects と citation、読めるコレクションに絞った検索、`peers` は 400)、許したコレクションへの文書の PUT、許したグラフの読み書き。外は 403。守りは許可表・wg1 への束縛・install の firewall の 3 重 |
 | viewer(`--viewer-listen`) | 0.0.0.0:7450(本番の命令が渡す。wg1 の 10.10.128.1:7450 も含む) | 無い。firewall も無い | 読むだけの転送だが、許可表は無い: 全 ref の一覧(`GET /v1/refs`)、どんなオブジェクトでも(`GET /v1/objects/{id}`)、全コレクションの検索(`peers` も素通し) |
-| MCP | stdio | 起動した利用者 | 主の口への HTTP |
+| MCP | stdio | 起動した利用者 | `--serve-url` があれば主の口への HTTP、無ければストアを直接開く(main.rs の 1818 行付近) |
 
 vega には hikalium(uid 1000。serve・viewer・MCP を走らせる)の他に、別の利用者 lamalium
 (uid 1001)がいて常駐を走らせている。docker もある(host network のコンテナは 127.0.0.1 に届く)。
 
-`POST /v1/peer/query` だけは、中身の QUERY の署名を検証する(§7.1)。これは認証ではなく、
-散布された問いの出所の検証である。
+viewer の転送には method と道の許可表がある(viewer.rs の 75 行付近。shutdown・gc・fetch・sync・
+objects の POST・pins の POST は転送しない)。無いのはデータの範囲(コレクション)の絞りである(Codex 低 11)。
+
+`POST /v1/peer/query` は、HTTP の接続そのものは認証しないが、中身の QUERY の署名を検証し、その
+署名者が登録済みのピアで trust_level が正で share が許すことを確かめる(api.rs の 1297 行付近、
+distributed_search.rs の 185 行付近)。署名された要求者に対する認証と認可である。ピア口へ移しても
+この判定を保つ(Codex 中 10)。
 
 コードには在るが §10 の表に無い口: `POST /v1/admin/gc`、`GET /v1/objects/{id}/citation`、
 `GET /v1/objects/{id}/rendition`、`GET /v1/objects/{id}/rendition/{alias}`、`GET /v1/closure/{id}`、
@@ -44,28 +54,45 @@ vega には hikalium(uid 1000。serve・viewer・MCP を走らせる)の他に�
 
 トークンは入れない。信頼の境界を「誰の uid か」「どの Host・生成元か」「どの許可表か」で置く。
 
-### 1. 主の口: hikalium と root のプロセスだけ、ブラウザは通さない
+### 1. 主の口: 常駐の利用者と root のプロセスだけ、ブラウザは通さない
 
 - 束縛はループバックの IP リテラルだけ(`127.0.0.0/8` と `[::1]`)。`localhost` のような名前・
-  unspecified(`0.0.0.0`・`[::]`)・IPv4 射影(`[::ffff:127.0.0.1]`)は断る(Claude 低 7)。
-  serve 自身が起動時に断り、明示のフラグ `--listen-nonloopback` があるときだけ通して、起動の
-  たびに警告を記録する(Claude 中 5)。install は同じ判定を据え付けの前に早く当てる。
-- uid の制限: install は、読み口の firewall と同じ表 `inet uniqnode_<インスタンス>` の output の
-  chain に `oif lo tcp dport <主の口> meta skuid != { <常駐の利用者>, 0 } counter reject` を置く
-  (serve の ExecStartPre=+nft -f で起動のたびに入る。`--firewall-allow` が無くても、`--system`
-  なら常に入れる)。root を許すのは、root はストアのファイルを直接読めるので守る意味が無いから
-  である。vega では hikalium と root だけが主の口に届き、lamalium の uid と、root 以外で走る
-  コンテナは届かない(Claude 高 1 の直し方 (a))。UNIX ソケットへの移行(直し方 (b))は、
-  MCP・viewer・install の確認・テストの全部の相手先を替える大きな変更なので採らない。
-- ブラウザの遮断: http.rs に共通の門を置き、主の口と viewer の両方に効かせる(Claude 高 2)。
-  - `Host` が束縛先の字面(`127.0.0.1:<port>`・`[::1]:<port>`。viewer はその束縛先の字面)と
-    一致しなければ 421。DNS rebinding はここで止まる。自前のクライアント(http.rs)は
-    `Host: <address>` を送るので影響しない。
-  - `Origin` が付いているか、`Sec-Fetch-Site` が `same-origin` と `none` 以外なら、主の口は 403。
-    viewer は自分の生成元(`http://<束縛先>`)だけを許す。
-  - 本文を持つ POST・PUT(文書の PUT を除く)は `Content-Type: application/json` を要る。無ければ
-    415。これで form と `text/plain` の単純な要求が通らない。文書の PUT は本文が生のバイト列なので、
-    Origin の検査が守る。
+  unspecified(`0.0.0.0`・`[::]`)・IPv4 射影(`[::ffff:127.0.0.1]`)は断る(Claude 低 7)。serve 自身が
+  起動時に断る。例外のフラグは置かない: 認証の無い主の口を網へ出す道を作らない。網越しに要るもの
+  (ピアの要求)は 4 のピア口で受ける(crystal の Codex H1)。install は同じ判定を据え付けの前に
+  早く当てる(Claude 中 5)。
+- uid の制限は serve の中で行う(crystal の Codex H2、vega の Codex 1)。主の口が接続を受けたら、
+  相手のアドレスとポート(ループバック)と自分の束縛先を鍵に /proc/net/tcp(IPv6 なら /proc/net/tcp6)を
+  引き、相手のソケットの持ち主の uid を読む。許す uid の集合(既定は serve 自身の euid と 0)に無ければ、
+  要求を読まずに 403 を返して閉じる。引けなかったとき(/proc が無い、行が見つからない)も 403 にする。
+  - install・user 単位・手で起こした serve・テストの、どの起こし方でも同じ判定が効く。nft も root も
+    要らず、ufw と nft のどちらが入っているかにも依らない。第 2 版の nft の output の規則(A2)は捨てる。
+  - root を許すのは、root はストアのファイルを直接読めるので守る意味が無いからである。host network の
+    docker のコンテナは、中の uid がそのまま見える(root で走るものは届き、それ以外は届かない)。
+  - 許す uid を足す口として `--main-allow-uid <uid,...>` を置く(viewer を別の利用者で走らせる形など)。
+    これは既定の集合を置き換える。テストはこれで自分の uid を外し、実際の接続が 403 になることを見る。
+  - 対象は Linux だけである(/proc/net/tcp が要る)。他の OS では serve が起動時に理由を言って断る。
+  - 代価は接続ごとに /proc/net/tcp を 1 度読むこと(vega では 65 行)。HTTP の接続は要求ごとに張り直す
+    形なので、要求ごとに 1 度である。
+- ブラウザの遮断: http.rs に門を置き、主の口に効かせる(Claude 高 2)。viewer に効かせるかは 3(A3)と
+  一緒に決める(viewer に同じ門を当てると、0.0.0.0 に束縛した viewer を LAN のアドレスで開く正規の
+  要求まで 421 になる。crystal の Codex M1、vega の Codex 5)。
+  - 許す authority の一覧を束縛先と分けて持つ。主の口の既定は、束縛したループバックの字面
+    (`127.0.0.1:<port>` など)と `localhost:<port>` である。`Host` がこの一覧に無ければ 421。DNS
+    rebinding はここで止まる(攻撃者の名前は `localhost` になれない)。ポート 0 で束縛したときは、
+    実際に割り当てられたポートで照らす。
+  - `Origin` が付いているか、`Sec-Fetch-Site` が `same-origin` と `none` 以外なら 403。ブラウザは
+    GET と HEAD 以外の要求には `no-cors` でも `Origin` を付けるので、書き込みの CSRF はここで止まる。
+  - Content-Type を道ごとに決める(vega の Codex 中 6)。JSON を読む道は `application/json` を要る。
+    生のバイト列を読む道(`POST /v1/objects`、`PUT /v1/collections/{c}/documents/{name}`)は
+    `application/octet-stream` か、文書の種別を言う型を受ける。本文を持たずに動く道(shutdown、本文を
+    省いた gc)は Content-Type を問わない。どの道でも、ブラウザが単純な要求で送れる 3 つの型
+    (`text/plain`・`multipart/form-data`・`application/x-www-form-urlencoded`)は 415。Origin の検査が
+    主の守りで、これは重ねの守りである。
+  - node/tests の共通の手書きの HTTP 要求(common/mod.rs の 278 行付近)は `Host: x` で Content-Type を
+    送らない。停止の要求も同じで、断られると終了待ちのまま止まる。A1 はこの共通の口と手書きの要求を
+    直し、停止では応答の番号と待つ期限も見る(vega の Codex 中 9)。http.rs の JSON のクライアントは
+    既に Content-Type を送る(crystal の Codex の確認)。
 - 主の口に届くプロセスは全部、操作者とみなす。hikalium で走る Claude Code のセッションも含む。
   FEED の allow-shrink・edit・retire・rollback の「操作者の承認」は、この意味である(Claude 中 6
   の直し方 (b))。人の手に限りたくなったら(エージェントが操作者の確認なしに縮みを承認したら困る、
@@ -92,6 +119,16 @@ VIEWER.md の「ネットワークへ出すなら暗号化・認証済みチャ�
 食い違いは、§6.2 の適用範囲をピアのプロトコルに限ると明記し、VIEWER.md の文を「網へ出すなら
 許可表と送信元の制限の下に置く」に直す(Claude 低 8)。
 
+### 3a. 読み口: 出所を示せないチャンクを断る(vega の Codex 高 3)
+
+読み口の `screen`(agent_door.rs の 317 行付近)は、出所のコレクションが引けたときだけ許可表と
+照らし、引けないとき(`None`)でもチャンクなら通す。見えに無いチャンク(旧版など。api.rs の 1221
+行付近で出所が `None` になる)は、ID を知る相手なら許可の外のコレクションのものでも読める。旧版は
+previous から辿れるので gc の後も残る(RAG 項目 18)。読めるコレクションが絞られているとき
+(`--agent-collections` を指定したとき)は、出所を示せないチャンクを 403 にする。絞りが全部のときは
+今のままでよい(全部読めるので漏れは無い)。FEED の「見える ref の判定」(FEED.md)で隠れた c の
+チャンクも、同じ道で出所が引けなくなり 403 になる。
+
 ### 4. ピアの口を SPEC の上で主の口から切り離す(Claude 中 4)
 
 §6.3 の例(`10.0.0.2:7440`)、§7.1 と §7.3 の具体化、DISTRIBUTED_SEARCH.md の例は、ピアが
@@ -112,8 +149,8 @@ VIEWER.md の「ネットワークへ出すなら暗号化・認証済みチャ�
 §10 の冒頭の 1 文を、次のように差し替える:
 
 > 管理と利用のための HTTP API。認証は持たず、信頼の境界は待ち受けごとに置く。主の口は
-> ループバックにだけ束縛し、同じ機械の常駐の利用者と root のプロセスだけが届くよう firewall で
-> 絞り(それらのプロセスは操作者とみなす)、全ての口を通す。ブラウザからの要求は Host・Origin・
+> ループバックにだけ束縛し、接続の相手のソケットの uid が常駐の利用者か root であるものだけを
+> 受け(それらのプロセスは操作者とみなす)、全ての口を通す。ブラウザからの要求は Host・Origin・
 > Content-Type の検査で断る。網越しに届く口(読み口・viewer、設計中の書き口とピア口)は用途ごとの
 > 別の待ち受けで、各々の許可表の外を 403 で断る。詳細スキーマは実装マイルストーンで確定する。
 
@@ -140,23 +177,30 @@ VIEWER.md の「ネットワークへ出すなら暗号化・認証済みチャ�
 
 - serve と install が、`0.0.0.0:7440`・`[::]:7440`・`[::ffff:127.0.0.1]:7440`・`10.10.128.1:7440`・
   `localhost:7440` を理由を言って断り、`127.0.0.1:7440`・`127.0.0.2:7440`・`[::1]:7440` を通す
-  テストがある。`--listen-nonloopback` で通り、警告が記録される。
-- 主の口と viewer が、Host の違う要求に 421、Origin 付きの(viewer では自分以外の生成元の)要求に
-  403、Content-Type の無い JSON の POST に 415 を返すテストがある。http.rs のクライアント・MCP・
-  viewer の転送・install の確認は今までどおり通る。
-- install の nft の規則ファイルに主の口の uid の規則が載り、install の確認がそれを見る。
-- viewer が、読めない コレクションの検索に 403、chunk 以外の objects に 403、`peers` に 400 を返し、
-  `GET /v1/refs` が読めるコレクションの ref だけを返すテストがある。
-- SPEC §6.2・§6.3・§7・§10・§12 と VIEWER.md・DISTRIBUTED_SEARCH.md が上の形になっている。
+  テストがある。
+- `--main-allow-uid` で自分の uid を外した serve への実際の接続が 403 になり、既定の serve には通る
+  テストがある(別の uid からの接続を、root 無しで実際に断らせる形)。/proc/net/tcp と tcp6 の行の
+  読み方は、固定の行を与えるテストでも固める。
+- 主の口が、一覧に無い Host に 421、Origin 付きの要求に 403、単純な要求の 3 つの型に 415、JSON の道で
+  Content-Type の無い要求に 415 を返すテストがある。http.rs のクライアント・MCP・viewer の転送・install
+  の確認・node/tests の共通の口は通る。
+- 読み口で、読めるコレクションを絞ったとき、見えに無いチャンクの `GET /v1/objects/{id}` と出典が 403
+  になるテストがある。
+- SPEC §6.2・§6.3・§7・§10・§12 と DISTRIBUTED_SEARCH.md が上の形になっている。
 - FEED.md の「口」の節が、この境界を引いている。
+- viewer の完了条件は A3 と一緒に決める。
 
 ## 段取り
 
 | 段 | 中身 | 大きさ |
 |---|---|---|
-| A1 | serve と install の束縛の検査、http.rs のブラウザの門(Host・Origin・Content-Type)、SPEC と design の書き直し | M |
-| A2 | install の主の口の uid の規則(nft の output)と確認 | S |
+| A1 | serve と install の束縛の検査、http.rs のブラウザの門(Host・Origin・Content-Type)、node/tests の共通の口、SPEC と design の書き直し | M |
+| A2 | serve の中の uid の判定(/proc/net/tcp、`--main-allow-uid`) | S |
+| A4 | 読み口の、出所を示せないチャンクの拒否 | S |
 | A3 | viewer の許可表(agent_door.rs の判定の共用、`--viewer-collections`)。本番の値は操作者の答え 1 で決める | M |
 
-A1〜A3 はレビューで高の指摘が無いと確かめてから入る。FEED の F2 は A1 と A2 の後にする。
-本番への反映(A2・A3 の据え付け)は、操作者への sudo の依頼として渡す。
+A1・A2・A4 はレビューで高の指摘が無いと確かめてから入る。A3 は操作者の確認の後に設計を詰める。
+その際は vega の Codex の 2(`collection` を省いた検索は admit を素通りし、主の口は全部を検索する)、
+4(`--agent-collections` の「空は全部」を写すと既定で全公開になる)、7(viewer は rendition を使うが
+読み口の許可表には無い)、8(VIEWER.md の暗号化の要求との関係)を満たす形にする。FEED の F2 は A1 と
+A2 の後にする。本番への反映は serve の据え付け直しで、操作者への sudo の依頼として渡す。

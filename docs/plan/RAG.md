@@ -14,21 +14,25 @@
 実行順に並べたものである(番号は着手順ではなく起票順で、済んで削除された項目の番号は再利用
 しない)。順序の根拠は「1 台の今のノードで効くものを先に、2 台目を置くときに効くもの(8・15〜17・9・10)
 を後に」である(2026-09-05 の裁定。2 台目はいつか置くが未定)。1 台で効く残りは 11 の検索
-品質向上だけで、これは評価ハーネスで測って劣化が見えたときに動く。したがって先頭は 8 の
-evict だが、着手は 2 台目の計画が立ってからでよい。
+品質向上と、14 の残り(lamalium の文書を受ける書き口。[docs/plan/FEED.md](#fa8de6f9-59f8-4512-a815-9f41d305db15))
+である。11 は評価ハーネスで測って劣化が見えたときに動くので、先頭は 14 の残りである。8 の
+evict は、着手は 2 台目の計画が立ってからでよい。
 
 ## 14. lamalium につなぐ
 
 <a id="1c8c5b0e-2c0a-4a1e-9d3a-7f2c6e5b4a11"></a>
 
-uniqnode の一番の利用者は lamalium(別の機械 orion で動くマルチエージェント系。uniqnode は
-vega にあり、2 台は WireGuard の wg1 で疎通する)になる予定である。
-計画は [docs/plan/LAMALIUM.md](#68571059-94ed-4aa2-8ae0-b2862d1de44e)。uniqnode 側の作業は、
-wg1 のアドレスに束縛する読み口(`--listen-agent`。許可表の外は 403)と第 2 段の
-`--agent-writable`、search の `full` と `GET /v1/collections`、索引の温め、出所の meta、
-BENCH の問いによる評価で、lamalium 側の
-`uniqnode_search`・`uniqnode_get`・`uniqnode_status` ツールと組になる。方針はエージェントが
-自発的に見つけて呼ぶこと(push は測ってから)。着手順は同文書の段階 L0〜L4。1 台の uniqnode で
+uniqnode の一番の利用者は lamalium(別の機械で動くマルチエージェント系。2026-09-29 から orion
+10.10.128.4 から crystal 10.10.128.2 へ移している。uniqnode は vega にあり、各機械とは WireGuard の
+wg1 で疎通する)である。計画は [docs/plan/LAMALIUM.md](#68571059-94ed-4aa2-8ae0-b2862d1de44e)。
+
+読み口の側(L1〜L3 で uniqnode が持つもの)は着地している: wg1 のアドレスに束縛する読み口
+(`--listen-agent`。許可表の外は 403)と第 2 段の `--agent-writable`、search の `full` と
+`GET /v1/collections`、索引の温め、出所の meta。仕組みは design/ 側が正典である。
+
+残りは L4 の、crystal の timer が lamalium の文書を送ってくる専用の書き口で、設計は
+[docs/plan/FEED.md](#fa8de6f9-59f8-4512-a815-9f41d305db15)(2026-09-30 の裁定 C)にある。
+実装は、FEED.md の再レビューで重大な課題が残っていないと確かめてから入る。1 台の uniqnode で
 効き、2 台目の uniqnode を待たないので、8 より前に置く。
 
 ## 8. pack GC(機会層 evict の物理回収)

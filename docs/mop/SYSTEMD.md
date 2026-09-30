@@ -657,3 +657,58 @@ drop-in の `UNIQNODE_DATA_DIR` が指したままなので、動かす必要は
 
 別の名のインスタンスを足すだけなら、古い名の unit とは取り合わない。install はその旨を
 1 行言って、そのまま進む。
+
+## git の木を定期に取り込む
+
+手元の git の木の、ある ref に追跡されている文書を、走っている serve のコレクションへ
+毎時入れる。命令は `uniqnode ingest-git`(意味は
+[docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b) の「git の木からの取り込み」)で、
+unit は docs/mop/systemd/system/ の uniqnode-ingest-git@.service と uniqnode-ingest-git@.timer
+である。`uniqnode install` はこの 2 つを置かない(上の表の `*@.service` のうち、install が置くのは
+serve・viewer・backup の 3 つ)。system 単位だけを用意してあり、手で置く。
+
+インスタンス名は取り込み先のコレクション名である(`uniqnode-ingest-git@lamalium` がコレクション
+lamalium へ入れる)。ストアのインスタンス名ではない。既定は serve の主の口
+`http://127.0.0.1:7440` へ送り、木は `/srv/uniqnode-trees/<インスタンス名>`、ref は `main`、道は
+lamalium の木の一覧(DESIGN.md・docs/design・docs/plan・docs/mop・policy・project_policy・
+memory)。変えるものはすべて unit の先頭に並べた環境変数で、drop-in の `Environment=` で替える。
+
+この unit は木を取りに行かない。木を置き、最新にするのは別の段で、既定では何も無い。木が
+無い・ref が無い・道の 1 つがその ref に無いときは、何も送らずに理由を journal に残して
+failed になる(0 件で成功したことにはしない。must/0022)。木を最新にする段を足すなら、drop-in に
+ExecStartPre= を書く。例えば fetch で最新にする clone なら:
+
+```
+[Service]
+Environment=UNIQNODE_GIT_REF=origin/main
+ReadWritePaths=/srv/uniqnode-trees/lamalium
+ExecStartPre=/usr/bin/git -C ${UNIQNODE_GIT_TREE} fetch --quiet origin
+```
+
+(ProtectSystem=strict で木は読むだけになっているので、fetch が書く木を ReadWritePaths= で
+開ける。ExecStartPre= が失敗すれば取り込みは走らない。資格情報を何で渡すかは取り方の
+裁定による。) 木を他の機械から push で届ける形なら、ExecStartPre= は要らず、届く先の裸の木を
+UNIQNODE_GIT_TREE に指す。ingest-git は HTTP で serve へ送るので、木のある別の機械で走らせて
+この機械の serve へ送る形もとれる(その機械から届く口が要る)。
+
+木の所有者は unit の User= と同じにする。違うと git が「dubious ownership」で断り、その文が
+journal に載る。
+
+置き方(本番 vega。木が置かれてから打つ。unit の User= を本番の実行ユーザに、ExecStart= を
+本番のバイナリに替える drop-in を書き、1 回走らせて確かめてから timer を有効にする):
+
+```
+{ sudo install -m 0644 -t /etc/systemd/system docs/mop/systemd/system/uniqnode-ingest-git@.service docs/mop/systemd/system/uniqnode-ingest-git@.timer && sudo mkdir -p /etc/systemd/system/uniqnode-ingest-git@lamalium.service.d && printf '%s\n' '[Service]' 'User=hikalium' 'Group=hikalium' 'Environment=UNIQNODE_DATA_DIR=/work2/llm_playground_host_dir/uniqnode-store' 'ExecStart=' 'ExecStart=/home/hikalium/.local/bin/uniqnode ingest-git ${UNIQNODE_DATA_DIR} ${UNIQNODE_INGEST_COLLECTION} ${UNIQNODE_GIT_TREE} --ref ${UNIQNODE_GIT_REF} --paths ${UNIQNODE_GIT_PATHS} --serve-url ${UNIQNODE_SERVE_URL}' | sudo tee /etc/systemd/system/uniqnode-ingest-git@lamalium.service.d/override.conf && sudo systemctl daemon-reload && sudo systemctl start uniqnode-ingest-git@lamalium.service; sudo journalctl -u uniqnode-ingest-git@lamalium.service -n 40 --no-pager && sudo systemctl enable --now uniqnode-ingest-git@lamalium.timer && systemctl list-timers uniqnode-ingest-git@lamalium.timer --no-pager; } 2>&1 | ts '%Y-%m-%dT%H:%M:%S%z' | tee /tmp/uniqnode-ingest-git-lamalium.log
+```
+
+(リポジトリの根で打つ。`start` が失敗しても journal は出し、timer は有効にしない。) 確かめる
+のは journal の 3 種の行である: `木: … の main = <コミット>(書き出し N 件、…)`、1 件ごとの
+`lamalium/<文書名>: updated|no-op …`、締めの `取り込み: N 件(updated N、no-op N)、対象外 N 件`。
+2 回目以降は変わった文書だけが updated になる。
+
+git から消えた文書は uniqnode から消えない(取り込みは足すか書き換えるだけで、ref を
+tombstone しない)。消したいときは serve の主の口へ
+`PUT /v1/refs/collections/lamalium/<文書名>`(本文 `{"target":null}`)で ref を tombstone する。
+tombstone した文書と旧版のチャンクは gc が回収する([docs/design/GC.md](#9b1ceac3-f3cf-4595-87cb-6e40ce0900e5))。
+
+止めるのは timer である(`sudo systemctl disable --now uniqnode-ingest-git@lamalium.timer`)。

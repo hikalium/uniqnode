@@ -5,7 +5,9 @@
 uniqnode の一番の利用者は lamalium(階層型のマルチエージェント系。
 /work2/llm_playground_host_dir/lamalium)になる予定である。両者は別の機械で動く。lamalium は
 orion(10.10.128.4)、uniqnode は vega(10.10.128.1)にあり、2 台は WireGuard の wg1 で
-疎通する。この文書は、両者をつなぐ計画を、lamalium 側の現物を読み、lamalium 側の Claude
+疎通する(2026-09-29 から lamalium は orion から crystal(10.10.128.2)へ移しており、以下の orion と
+10.10.128.4 は移す前の記述である。読み口の許可の今の値は [docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) にある)。
+この文書は、両者をつなぐ計画を、lamalium 側の現物を読み、lamalium 側の Claude
 セッションと相互レビューして合意した設計として書いたものである。lamalium 側の変更は
 lamalium の docs/plan/UNIQNODE.md に置き(must/0013 は向こうも同じ。uniqnode には無い文書
 なのでリンクにしない)、ここでは uniqnode 側の作業と、両側にまたがる判断を書く。読み手は、
@@ -55,7 +57,7 @@ lamalium の docs/plan/UNIQNODE.md に置き(must/0013 は向こうも同じ。u
   user unit ではなく system unit(`User=hikalium`)にせよと言う。ホスト側 3 サービスは
   すべてその形で、rootless podman のために `XDG_RUNTIME_DIR` と linger を組み合わせた先例も
   ある(host/lamalium-device-daemon.service)。uniqnode の本番は vega の user unit で常駐して
-  おり、この規律と食い違う。
+  おり、この規律と食い違う(2026-09-06 に system unit へ移した。下の「uniqnode 側の作業」)。
 - 明示的な却下: docs/design/KNOWLEDGE.md §8 は「RFC の要約・埋め込み・ベクトル検索は
   やらない」と書き、根拠に「全文 grep + 逐語窓で十分」と「A12.4: ハーネスは内容を知らない」
   を挙げる。uniqnode をつなぐことは、前者には「RFC はそのまま、届かないものを担う」で

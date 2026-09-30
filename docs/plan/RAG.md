@@ -32,7 +32,9 @@ wg1 で疎通する)である。計画は [docs/plan/LAMALIUM.md](#68571059-94ed
 
 残りは L4 の、crystal の timer が lamalium の文書を送ってくる専用の書き口で、設計は
 [docs/plan/FEED.md](#fa8de6f9-59f8-4512-a815-9f41d305db15)(2026-09-30 の裁定 C)にある。
-実装は、FEED.md の再レビューで重大な課題が残っていないと確かめてから入る。1 台の uniqnode で
+実装は、FEED.md の再レビューで重大な課題が残っていないと確かめてから入る。FEED は
+[docs/plan/APPEND_FAILURE.md](#d973833f-4e2b-4fc8-8a49-42f6821b6a7a) の S1 と
+[docs/plan/API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771) の A1・A2 を前提にするので、その 2 つが先に入る。1 台の uniqnode で
 効き、2 台目の uniqnode を待たないので、8 より前に置く。
 
 ## 8. pack GC(機会層 evict の物理回収)

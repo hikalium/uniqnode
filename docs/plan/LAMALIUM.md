@@ -205,22 +205,13 @@ verification・sumi・roles・config は外す)、作業ディレクトリ・未
 文書だけ新しい doc_rev になり、旧チャンクは gc が回収する。ingest-git は HTTP で serve へ
 送るので、木のある別の機械で走らせて vega の serve へ送る形でも同じ命令が使える。残るもの:
 
-- 木の取り方(操作者の裁定待ち。lamalium の稼働は orion から crystal 10.10.128.2 へ移っている
-  最中で、問いは lamalium 側が別モデルのレビューを経て操作者へ上げる)。候補は (A) vega に
-  read-only の GitHub deploy key を置き、clone を unit の ExecStartPre= の `git fetch` で最新に
-  して `--ref origin/main` で読む、(B) crystal から vega へ ssh で push する、(C) crystal 側の
-  timer が ingest-git を走らせて vega の serve へ HTTP で送る(vega に木も鍵も置かない)。
-  lamalium 側の推奨は 2026-09-30 時点で C。C には lamalium コレクションだけに書ける別の口
-  (例 7446。読み口とは別で、server-proxy は転送しない)が要り、見積もりは M(serve に口と
-  許可表の組を複数持たせるのが S、install と nft を口ごとにするのが残り)。消去には
-  `DELETE /v1/collections/{c}/documents/{name}` を足す(S。改名は新しい名の PUT と旧名の
-  DELETE)。消すものは送る側が前回送った名の集合との差から出す(受ける側が「この一覧が
-  全部」と受けると、空の一覧で全部消える)。裁定が出るまでは何も有効にしない(unit も
-  timer も置いていない)。
-- git から消えた文書を消すこと。取り込みは ref を tombstone しないので、lamalium で消した・
-  改名した文書の旧名はコレクションに残る。要るなら、取り込んだ文書名の集合とコレクションの
-  ref の集合の差を tombstone する段を足す(コレクションの中身をその木の写しと言い切れる
-  ときだけ安全。いまは作らない)。
+- 木の運び方は 2026-09-30 に操作者が案 C に裁定した: crystal(10.10.128.2)の timer が、
+  lamalium コレクションだけに書ける専用の書き口(例 7446。読み口とは別で、server-proxy は
+  転送しない)へ HTTP で送る(vega に木も鍵も置かない。他の案は vega の deploy key と、
+  crystal からの ssh)。1 回の送りを 1 コミットに固定し、失敗しても前の公開が残り、消去と
+  改名も扱う vega 側の設計は [docs/plan/FEED.md](#fa8de6f9-59f8-4512-a815-9f41d305db15)。
+  送り手の設計は lamalium 側が書き、双方が別モデルのレビューを通ってから実装する。上の
+  ingest-git と unit の例は、木のある機械で直に取り込む道として残す(有効にはしていない)。
 - 本番の 1 行に `--agent-collections lamalium` を足す(読み口から読めるようにする)。
 - 評価: BENCH の「引けば直る」タスクの問いを EVAL の対に足し、Recall@k を固定する。
 

@@ -8,7 +8,7 @@
 実装に入る。経緯と他の案は [docs/plan/LAMALIUM.md](#68571059-94ed-4aa2-8ae0-b2862d1de44e) の
 「L4 で要るもの」。
 
-版: 第 5 版(2026-10-01、10-02 に再確認の低を 1 つ反映)。第 1 版(004c305)への Codex のレビュー(H1・H2・M1〜M3)と Claude の
+版: 第 5 版(2026-10-01。同日に再確認の低を 1 つ反映)。第 1 版(004c305)への Codex のレビュー(H1・H2・M1〜M3)と Claude の
 レビュー(1〜14)、第 2 版(708bcdc)への再レビュー(Codex H1a・H1b・M4、Claude N1〜N10)、
 第 3 版(6bb36c9)への再レビュー(Codex M1・L1、Claude A〜G と N7)、第 4 版(db7fae6)への再確認
 (Codex の rollback の高、Claude N-1〜N-5)を取り込んだ。ストア全体の

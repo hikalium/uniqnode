@@ -178,8 +178,9 @@ uniqnode 側の書く口と出所の meta は着地した(`--agent-writable <c>`
 [docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d) の「書く口」と
 [docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b) の PUT の項)。本番は
 `install --system … --agent-writable lamalium-notes`
-([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の 1 行の命令)で、まだ打って
-いない。残るもの:
+([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の 1 行の命令)で、打ち済みである
+(2026-10-01 に vega の `systemctl cat uniqnode-serve.service` で、drop-in の ExecStart に
+`--agent-writable lamalium-notes` が載って稼働していることを確かめた)。残るもの:
 
 - lamalium 側の書くツール(`uniqnode_remember {name, text}` のようなもの。capability
   `uniqnode:vega:rw` を持つ task にだけ載る)。`PUT /v1/collections/lamalium-notes/documents/<name>.md?meta.agent=<id>&meta.task=<id>`

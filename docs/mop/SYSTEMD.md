@@ -214,7 +214,7 @@ user 単位で動いているものを system 単位に載せ替える。スト�
 まま、unit の置き場と走らせ方だけが変わる。1 命令で通す(移行の間、serve と viewer は止まる):
 
 ```
-cargo build --release -p uniqnode && sudo target/release/uniqnode install /work2/llm_playground_host_dir/uniqnode-store --system --take-over-user-units --serve-options "--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank" --viewer-listen 0.0.0.0:7450 --listen-agent 10.10.128.1:7441 --agent-writable lamalium-notes --agent-collections articles --agent-collections papers --agent-collections seccamp --agent-collections specs --agent-collections trial --agent-collections web --agent-collections lamalium-notes --after wg-quick@wg1.service --firewall-allow 10.10.128.4 2>&1 | ts '%Y-%m-%dT%H:%M:%S%z' | tee /tmp/uniqnode-install-system.log
+cargo build --release -p uniqnode && sudo target/release/uniqnode install /work2/llm_playground_host_dir/uniqnode-store --system --take-over-user-units --serve-options "--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank" --viewer-listen 0.0.0.0:7450 --listen-agent 10.10.128.1:7441 --agent-writable lamalium-notes --agent-collections articles --agent-collections papers --agent-collections seccamp --agent-collections specs --agent-collections trial --agent-collections web --agent-collections lamalium-notes --after wg-quick@wg1.service --firewall-allow 10.10.128.4,10.10.128.2 2>&1 | ts '%Y-%m-%dT%H:%M:%S%z' | tee /tmp/uniqnode-install-system.log
 ```
 
 中で何をしているか(手で同じことをするなら、この順):
@@ -310,6 +310,21 @@ ufw と nft の両方が入っているが、ufw は inactive で規則は iptab
 持っており、INPUT の policy は accept なので、nft の道で「10.10.128.4 以外から 7441 は落とす」
 を自分の表に置く形になる(実測 2026-09-06)。読み口は wg1 のアドレスにしか束縛しないので、
 127.0.0.1:7441 は接続拒否のままである。
+
+vega の本番の許可は、install が書いたものから手で広げてある(lamalium を orion 10.10.128.4 から
+crystal 10.10.128.2 へ移すため)。次の 3 つの規則ファイルの集合に 10.10.128.2 を足した。元の
+ファイルは隣の `.bak-<日付>` に残っている。
+
+| 規則ファイル | 口 | 足した日 |
+|---|---|---|
+| /etc/systemd/system/uniqnode-serve.service.d/agent-door.nft | 7441(主のストアの読み口) | 2026-09-29 |
+| /etc/systemd/system/uniqnode-serve@graph_a.service.d/agent-door.nft | 7445(graph_a の読み口) | 2026-09-29 |
+| /etc/systemd/system/uniqnode-serve@graph_b.service.d/agent-door.nft | 7443(graph_b の読み口) | 2026-09-30 |
+
+どれも今の集合は `{ 10.10.128.4, 10.10.128.2, 10.10.128.1 }` である。install で据え付け直すと
+規則ファイルは `--firewall-allow` の値で書き直されるので、移行の間は 3 つとも
+`--firewall-allow 10.10.128.4,10.10.128.2` を渡す(上の「user 単位から移る」の命令はそうしてある)。
+移行が済んで orion を外すときは `--firewall-allow 10.10.128.2` にする。
 
 ### 手で同じことをするなら(専用ユーザーで置く形)
 

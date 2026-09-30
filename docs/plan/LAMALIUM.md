@@ -166,10 +166,8 @@ collection seccamp・document 2026-12-battering-ram・page 24〜33 の出典と�
 時限 60 秒・top_k 既定 5・上限 10 は実測で据え置き。向こうの記録は
 docs/analysis/20260906-uniqnode-demo.md、現在形は docs/design/UNIQNODE.md)。
 
-uniqnode 側に残るもの:
-
-1. 索引の温めは SearchIndex だけで(本番で 10 秒)、埋め込みのベクトルの読み込みは初回の
-   hybrid 検索が払う。実演では温まった状態で 2.8 秒だったので急がない。
+uniqnode 側に残るものは無い(serve の温めはベクトルの索引も作る。現在形は
+[docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580) の「索引の構築と世代」)。
 
 ### 第 2 段(書く。裁定 2026-09-06)
 

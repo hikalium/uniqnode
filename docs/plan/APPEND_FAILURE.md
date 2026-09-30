@@ -2,7 +2,8 @@
 
 <a id="d973833f-4e2b-4fc8-8a49-42f6821b6a7a"></a>
 
-版: 第 4 版(2026-10-01)。第 1 版(a9eba65)への Claude のレビュー(高 1・中 4・低 4)、FEED 第 3 版の
+版: 第 5 版(2026-10-01)。第 4 版(8d55129)への vega の Codex の再レビュー(高 1: データのディレクトリの
+親と祖先の sync、高 2: node_key の中身の sync)を取り込んだ。第 1 版(a9eba65)への Claude のレビュー(高 1・中 4・低 4)、FEED 第 3 版の
 再レビューの Claude B・C、FEED 第 4 版の再確認の Claude N-3・N-4、第 2 版(e7c6b61)への Codex の
 レビュー(高 1・2、中 3〜5、低 6・7)、第 3 版(c1067dc)への vega の Codex の再レビュー(高 2 の残り、中 5)と
 crystal の Codex の低 3 つを取り込んだ。次は Codex の再レビュー。
@@ -76,6 +77,17 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
    ファイルの sync の後・親の sync の前にプロセスが落ち、同じホストで起こし直して追記を続ける形でも、
    名前が永続しないまま応答することが無くなる(第 3 版への Codex の再レビューの高)。開くときの
    sync の失敗は、開くことの失敗として扱う(serve は起動に失敗して理由を言う)。
+   開くときに sync するものの全体は次のとおりで、「既に在る」ことを理由に省かない(第 4 版への
+   Codex の再レビューの高 1・2):
+   - `node_key` の中身(`sync_all`)。新しく作るときは、今の `std::fs::write` をやめ、tmp/ に書いて
+     `sync_all` してから rename し、データのディレクトリを sync する。途中で落ちても、短い鍵が
+     `node_key` の名前で残ることは無い(残るのは tmp/ の残骸で、次に開くとき消す)。鍵が失われると
+     同じノードとして署名を続けられないので、pack と同じ重さで守る。
+   - packs/・reflog/・データのディレクトリ自身・データのディレクトリの親。`create_dir_all` が
+     祖先を作った場合に備えて、さらに上の祖先も根まで順に sync する。ただし読めない祖先(開けない
+     もの。自分で作ったものなら読めるので、作っていない証拠になる)は飛ばす。
+   試験は、初めて作るストアで、ディレクトリと鍵を作った後・sync の前に落として起こし直す形と、
+   開くたびに上の全部が sync されることを数える形の 2 つを置く。
 2. ストアに `write_failure: Option<WriteFailure>` を持たせる。`WriteFailure` は `{reason: String,
    op: Write | Sync | DirSync | Manifest | GcCommit, errno, cleanup: Ok | Failed | NotTried,
    kind: NoSpace | Io, since: unix 秒}`。kind が NoSpace になるのは、op が Write で errno が ENOSPC か

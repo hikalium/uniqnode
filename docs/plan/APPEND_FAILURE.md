@@ -2,9 +2,10 @@
 
 <a id="d973833f-4e2b-4fc8-8a49-42f6821b6a7a"></a>
 
-版: 第 3 版(2026-10-01)。第 1 版(a9eba65)への Claude のレビュー(高 1・中 4・低 4)、FEED 第 3 版の
+版: 第 4 版(2026-10-01)。第 1 版(a9eba65)への Claude のレビュー(高 1・中 4・低 4)、FEED 第 3 版の
 再レビューの Claude B・C、FEED 第 4 版の再確認の Claude N-3・N-4、第 2 版(e7c6b61)への Codex の
-レビュー(高 1・2、中 3〜5、低 6・7)を取り込んだ。次は Codex の再レビュー。
+レビュー(高 1・2、中 3〜5、低 6・7)、第 3 版(c1067dc)への vega の Codex の再レビュー(高 2 の残り、中 5)と
+crystal の Codex の低 3 つを取り込んだ。次は Codex の再レビュー。
 出所は lamalium の健全性点検(2026-09-30)の項目 10。FEED 第 2 版の再レビューで、Codex(H1a・H1b)と
 Claude(N1)が独立に見つけた。[docs/plan/FEED.md](#fa8de6f9-59f8-4512-a815-9f41d305db15) の
 「失敗の境界」は、ストア全体の規則としてこの文書を前提にする。FEED より先に、単独で入れる。
@@ -66,10 +67,15 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
    (メモリの数え値は使わない。reflog には数え値が無い。Claude C)。pack では、読んだ長さが
    `active_pack_length` と違えば、書かずに書けない状態に入る(3 のずれの検算)。`write_all` か
    `sync_data` が誤りを返したら、`set_len(前の長さ)` と `sync_all` を 1 度だけ試み、結果に関わらず
-   元の誤りを返す。切り詰めは再起動の再生を軽くするための best-effort であり、正しさは 2 が持つ。
+   元の誤りを原因として 2 の状態に記録する(要求へ返すのは 2 の `WritesDisabled`)。切り詰めは再起動の再生を
+   軽くするための best-effort であり、正しさは 2 が持つ。
 1a. `append_record` が新しいファイルを作ったとき(開く前に在るかを見るか、開いた後の長さが 0 の
    とき)は、最初の追記の sync の後に親ディレクトリも sync し、その成功までを追記の成功とする
-   (Codex 高 2)。
+   (Codex 高 2)。加えて、ストアを開くときは、書き込みを受け付ける前に packs/・reflog/ とデータの
+   ディレクトリ自身を sync する(recover が採用したセグメントの名前を、最初の応答より前に永続させる)。
+   ファイルの sync の後・親の sync の前にプロセスが落ち、同じホストで起こし直して追記を続ける形でも、
+   名前が永続しないまま応答することが無くなる(第 3 版への Codex の再レビューの高)。開くときの
+   sync の失敗は、開くことの失敗として扱う(serve は起動に失敗して理由を言う)。
 2. ストアに `write_failure: Option<WriteFailure>` を持たせる。`WriteFailure` は `{reason: String,
    op: Write | Sync | DirSync | Manifest | GcCommit, errno, cleanup: Ok | Failed | NotTried,
    kind: NoSpace | Io, since: unix 秒}`。kind が NoSpace になるのは、op が Write で errno が ENOSPC か
@@ -82,6 +88,9 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      いないので入れない(EMFILE のような一時的な誤りで書けなくならないように。Claude C)。
    - `write_manifest`(`atomic_write`)。
    - `gc_commit` の C-1 より後の全ての誤り(rename・ディレクトリの sync・MANIFEST)。
+   書けない状態に入れたその要求自身にも、元の誤りではなく `WritesDisabled`(元の原因を reason と op と
+   errno に持つ)を返す。最初の失敗の応答から 503 と案内が届き、送り手と FEED の「書けない 503 なら
+   操作者に上げる」がその 1 回目から働く(第 3 版への Codex の再レビューの中 5)。
    以後、ストアの全ての書き込みの入口(`put_object`・`append_own_record`・`ingest_ref_record`・
    pack の封印・`write_manifest`・`gc_try_begin`・`gc_commit`)は、先頭で `write_failure` を見て、
    `StoreError::WritesDisabled` を返す。`POST /v1/admin/gc` は 503、`uniqnode gc` は終了コード 1 で
@@ -90,8 +99,11 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
    - `seal_active_pack` は、番号を足した `sealed_packs` の写しで MANIFEST を書き、成功してから
      メモリの `sealed_packs` と `active_pack_number` を進める。
    - `gc_commit` の C-3 も写しで MANIFEST を書き、成功してからメモリの `sealed_packs` を書き換える。
-     C-2 の後に C-3 が失敗したら、新 pack は packs/ に在るが MANIFEST に無い形で残り、2 により
-     書けない状態に入る(次の起動の recover が、MANIFEST に無い新 pack の扱いを今の規則で決める)。
+     C-2 の後に C-3 が失敗したら、2 により書けない状態に入る。MANIFEST が新 pack を含むかは結果不明
+     である(rename の前の失敗なら含まず、rename の後のディレクトリの sync の失敗なら含みうる。欠陥 8 と
+     4 と同じ扱い)。どちらでも次の起動の recover が、その時の MANIFEST を正として決める。書けない
+     状態の間も、起動し直した後も、MANIFEST に載っている古い pack は消さない(D は C-3 の成功の後に
+     しか走らない)。
      `active_pack_number` を新 pack の次へ進めるのも C-3 の成功の後にする。
    - GC の D(確定の後、ロックの外で古い pack と参照表を消す。gc.rs の 681〜699 行付近)も、この
      判定の外に置く。消すのに失敗しても、MANIFEST に無い古い pack は次の起動の recover が残骸として
@@ -152,7 +164,7 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
 - 失敗の注入(外部の crate を足さない): gc.rs の `UNIQNODE_GC_CRASH_AFTER` と同じく、
   `cfg(debug_assertions)` のビルドだけが読む環境変数 `UNIQNODE_APPEND_FAULT=<種類>:<何回目>` を
   `append_durable` と包みが見る。release には入らない。実プロセスの serve を立てる node/tests の
-  api 系のテストから使える。種類は次の 5 つ:
+  api 系のテストから使える。種類は次の 9 つ:
   - `before`: 1 バイトも書かずに誤り。
   - `torn:<n>`: n バイトだけ書いて誤り。
   - `sync`: 全部書いてから sync の位置で誤り(切り詰めは成功させる)。
@@ -162,6 +174,8 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
   - `manifest-dirsync`: rename の後のディレクトリの sync で誤り(MANIFEST は新しい中身になる)。
   - `dirsync`: 新しいセグメントを作った追記の、親ディレクトリの sync で誤り。
   - `nospace-sync`: sync の段で ENOSPC を返す(kind が Io になることを見る)。
+  - `crash-before-dirsync`: 新しいセグメントの最初の追記の、ファイルの sync の後・親の sync の前で
+    プロセスを abort する(開く道のディレクトリの sync を確かめる)。
   ストアの層のテストは、同じ注入をプロセスの中の `#[doc(hidden)]` のメソッドでも掛けられるように
   する(tests/gc.rs と同じ形)。
 
@@ -194,6 +208,10 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
 - `torn` の ENOSPC は kind が no_space、`nospace-sync` と `sync` と `dirsync` は io になり、503 の本文と
   MCP の誤りの文に案内が載る。`POST /v1/sync` も 503 を返す。
 - 複製の受け側(`ingest_ref_record`)に `sync-keep` を掛けると、`export_ref_records` はその 1 本を返さない。
+- 書けない状態に入れた最初の要求そのものが 503 と案内を返す。
+- 新しいセグメントの最初の追記の、ファイルの sync の後・親の sync の前でプロセスを止め(注入の
+  `crash-before-dirsync`)、起こし直して追記を続けると、
+  開く道が packs/・reflog/ を sync してから書き込みを受け付ける(sync の呼び出しを数える口で確かめる)。
 - 開き直すと `writes_disabled` は null に戻る。
 
 ## 段取り

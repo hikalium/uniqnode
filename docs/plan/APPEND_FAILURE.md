@@ -2,7 +2,8 @@
 
 <a id="d973833f-4e2b-4fc8-8a49-42f6821b6a7a"></a>
 
-版: 第 14 版(2026-10-01)。第 13 版(2e312d3)への vega の Codex の再レビュー(高なし、中 1: 鍵が未確定の
+版: 第 15 版(2026-10-01)。第 14 版(9d04834)への vega の Codex の再レビュー(高なし、中: CLI の sync の
+差分なしの抜け道)を取り込んだ。第 14 版(2026-10-01)。第 13 版(2e312d3)への vega の Codex の再レビュー(高なし、中 1: 鍵が未確定の
 初期化の失敗は保留で開けない、中 2: 明示的な sync の入口で 503、低: 検めを通らない印の完了条件)を
 取り込んだ。第 13 版(2026-10-01)。第 12 版(3641dc8)への vega の Codex の再レビュー(高: `Running` を
 recover・開くときの sync より前に書く、中: GC の A も書けない状態を見る、低: NoSpace の試験の期待値を
@@ -314,8 +315,11 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
   `POST /v1/sync` は今 sync.rs の 393 行付近でストアの誤りを一律 500 にしているので、
   `SyncError::Store(WritesDisabled)` を同じ変換へ寄せる(Codex 中 4)。ただし今の sync は、差分が無い
   か必要なオブジェクトが揃っていれば取り込みを呼ばずに 200 を返す(sync.rs の 104・365 行付近)ので、
-  変換だけでは 503 にならない。明示的な `POST /v1/sync` は入口で `writes_disabled()` を見て 503 を
-  返す。周期の同期は、同じ判定で黙って 1 回飛ばす(記録は遷移の 1 行だけ)として区別する(第 13 版への
+  変換だけでは 503 にならない。判定は、HTTP の `POST /v1/sync` と CLI の `uniqnode sync` が共に呼ぶ
+  `sync_from_peer` の先頭に置き、`writes_disabled()` なら差分を見る前に `SyncError::Store(WritesDisabled)`
+  を返す(HTTP は 503、CLI は理由を言って終了コード 1。今の CLI は HTTP の道を通らず main.rs から
+  `sync_from_peer` を直接呼ぶため、入口を 1 つにする。第 14 版への Codex の再レビューの中)。周期の同期は、
+  呼ぶ前に同じ判定を見て黙って 1 回飛ばす(記録は遷移の 1 行だけ)として区別する(第 13 版への
   Codex の再レビューの中 2)。
 - `/v1/status` に `writes_disabled`(null か上の形)を載せる。FEED の `GET /v1/feeds/{c}` も同じ形を
   写す。健全性の集計にも 1 項目足す(遷移で 1 度だけ記録。should/0129)。
@@ -379,7 +383,8 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
 - `manifest-dirsync` を封印と `gc_commit` の C-3 に掛けて開き直しても、応答済みの ref から辿れる
   オブジェクトが全部読める。
 - `torn` の ENOSPC は kind が no_space、`nospace-sync` と `sync` と `dirsync` は io になり、503 の本文と
-  MCP の誤りの文に案内が載る。`POST /v1/sync` も、差分が無いときを含めて 503 を返す。
+  MCP の誤りの文に案内が載る。`POST /v1/sync` も、差分が無いときを含めて 503 を返し、CLI の
+  `uniqnode sync` も差分が無いときを含めて理由を言って終了コード 1 で終える。
 - 複製の受け側(`ingest_ref_record`)に `sync-keep` を掛けると、`export_ref_records` はその 1 本を返さない。
 - 書けない状態に入れた最初の要求そのものが 503 と案内を返す。
 - kind が Io の状態で serve だけを起こし直すと、書けない状態で開く(`open-marker` が効く)。

@@ -19,6 +19,7 @@ pub mod health;
 pub mod html;
 pub mod http;
 pub mod ingest;
+pub mod ingest_git;
 pub mod install;
 pub mod json;
 pub mod log;

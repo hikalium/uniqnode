@@ -1,0 +1,62 @@
+# 手元の git の木を、走っている serve のコレクションへ取り込む一回きりの unit。置き場は
+# /etc/systemd/system/。起こすのは同名の uniqnode-ingest-git@%i.timer で、手で 1 回走らせる
+# なら `systemctl start uniqnode-ingest-git@<インスタンス>.service`。
+# 読み方と置き方は docs/mop/SYSTEMD.md(uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2)の
+# 「git の木を定期に取り込む」、命令の意味は docs/design/INGEST.md
+# (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b)の「git の木からの取り込み」。
+# テンプレート unit である。ここでの `@` の後はストアのインスタンス名ではなく、取り込み先の
+# コレクション名(既定)で、木 1 本につき 1 インスタンスを置く(uniqnode-ingest-git@lamalium)。
+# `uniqnode install` は置かない。手で置く(SYSTEMD.md の手順)。system 単位だけを用意する。
+
+[Unit]
+Description=uniqnode ingest-git (tracked files of a local git tree into a collection) [%i]
+# serve が居なければ転送できずに失敗する(起こし方を journal に言う)。Wants= にしないのは、
+# 取り込みのために serve を起こすことはしないため。
+After=network.target uniqnode-serve@default.service
+
+[Service]
+Type=oneshot
+# 運用者が変えるものはすべて環境変数にしてある。変えるときはこのファイルを編集せず
+# `systemctl edit uniqnode-ingest-git@<インスタンス>` の drop-in に Environment= を書く。
+#   UNIQNODE_DATA_DIR           転送先の serve のストア。開かない(ロックを取らない)。serve に
+#                               届かないときの案内に載るだけ。
+#   UNIQNODE_SERVE_URL          転送先の serve の主の口の根。
+#   UNIQNODE_INGEST_COLLECTION  取り込み先のコレクション(既定はインスタンス名)。
+#   UNIQNODE_GIT_TREE           手元の git の木(作業ツリーのある clone でも裸の木でもよい)。
+#                               この unit は木を取りに行かない。無ければ理由を言って失敗する。
+#                               木の所有者は User= と同じにする(違うと git が「dubious
+#                               ownership」で断る)。
+#   UNIQNODE_GIT_REF            読む ref。fetch で最新にする clone なら origin/main。
+#   UNIQNODE_GIT_PATHS          取り込む道(カンマ区切り、木の根からの相対パス)。既定は
+#                               lamalium の木の一覧。1 つでもその ref に無ければ何も送らずに
+#                               失敗する。
+Environment=UNIQNODE_DATA_DIR=%S/uniqnode/default
+Environment=UNIQNODE_SERVE_URL=http://127.0.0.1:7440
+Environment=UNIQNODE_INGEST_COLLECTION=%i
+Environment=UNIQNODE_GIT_TREE=/srv/uniqnode-trees/%i
+Environment=UNIQNODE_GIT_REF=main
+Environment=UNIQNODE_GIT_PATHS=DESIGN.md,docs/design,docs/plan,docs/mop,policy,project_policy,memory
+# 木を最新にする段は既定では無い。足すなら drop-in に ExecStartPre= を書く(例は SYSTEMD.md。
+# 木に書くので ReadWritePaths= も要る)。ExecStartPre= が失敗すれば取り込みは走らない。
+ExecStart=/usr/local/bin/uniqnode ingest-git ${UNIQNODE_DATA_DIR} ${UNIQNODE_INGEST_COLLECTION} ${UNIQNODE_GIT_TREE} --ref ${UNIQNODE_GIT_REF} --paths ${UNIQNODE_GIT_PATHS} --serve-url ${UNIQNODE_SERVE_URL}
+
+User=uniqnode
+Group=uniqnode
+
+# 一回きりなので Restart= は無い。木が無い・ref が無い・道が無い・serve に届かない・serve が
+# 断ったは、どれも理由を journal に残して failed になり、次の timer の刻みでまた走る。
+
+# 閉じ込め(serve の unit と同じ行)。木は読むだけなので、どこにあっても書けない。置き場は
+# PrivateTmp= の /tmp の下に作って消す。ProtectHome= を read-only にするのは、木を利用者の
+# ホームに置いた形でも読めるようにするため。
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native

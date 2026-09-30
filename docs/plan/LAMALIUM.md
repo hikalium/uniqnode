@@ -196,10 +196,28 @@ uniqnode 側の書く口と出所の meta は着地した(`--agent-writable <c>`
 serve を止めない転送形の取り込み `uniqnode ingest … --serve-url <url>` は着地した(現在形は
 [docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b) の「CLI と API」節)。残るもの:
 
-- vega の timer で lamalium の git 管理の文書(DESIGN.md・docs/design・docs/plan・policy・
-  memory)を `uniqnode ingest … --serve-url <url>` でコレクション `lamalium` に入れる(同じ
-  内容は同じ ID。変わった文書だけ新しい doc_rev になり、旧チャンクは gc が回収する)。文書は
-  orion にあるので、写しを vega へ運ぶ手段(git clone か rsync)は timer の設計で決める。
+git の木からの取り込み `uniqnode ingest-git <dir> lamalium <木> --paths … [--ref main] --serve-url <url>`
+と、それを毎時回す unit の例 uniqnode-ingest-git@.service / .timer も着地した(2026-09-30。
+命令は [docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b) の「git の木からの
+取り込み」、置き方は [docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「git の木を
+定期に取り込む」)。ref に追跡されている DESIGN.md・docs/design・docs/plan・docs/mop・policy・
+project_policy・memory の下だけを入れ(docs/analysis・fixtures・experiments・bench・
+verification・sumi・roles・config は外す)、作業ディレクトリ・未追跡(secrets/)・シンボリック
+リンクは入らない。木・ref・道が無ければ何も送らずに失敗する。同じ内容は同じ ID で、変わった
+文書だけ新しい doc_rev になり、旧チャンクは gc が回収する。ingest-git は HTTP で serve へ
+送るので、木のある別の機械で走らせて vega の serve へ送る形でも同じ命令が使える。残るもの:
+
+- 木の取り方(操作者の裁定待ち)。候補は (a) vega に read-only の GitHub deploy key を置き、
+  clone を unit の ExecStartPre= の `git fetch` で最新にして `--ref origin/main` で読む、
+  (b) orion から vega の裸の木へ push する、(c) orion 側の timer が ingest-git を走らせて vega の
+  serve へ HTTP で送る(vega に木を置かない。7440 は loopback なので届く口が要る)。推奨は (a)
+  (vega が自分の刻みで取りに行き、鍵は読むだけに限れ、orion 側に何も足さない)。裁定が出る
+  までは何も有効にしない(unit も timer も置いていない)。
+- git から消えた文書を消すこと。取り込みは ref を tombstone しないので、lamalium で消した・
+  改名した文書の旧名はコレクションに残る。要るなら、取り込んだ文書名の集合とコレクションの
+  ref の集合の差を tombstone する段を足す(コレクションの中身をその木の写しと言い切れる
+  ときだけ安全。いまは作らない)。
+- 本番の 1 行に `--agent-collections lamalium` を足す(読み口から読めるようにする)。
 - 評価: BENCH の「引けば直る」タスクの問いを EVAL の対に足し、Recall@k を固定する。
 
 ## lamalium 側の作業(向こうの docs/plan/UNIQNODE.md に置く内容の要約)

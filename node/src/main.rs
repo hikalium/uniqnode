@@ -146,6 +146,18 @@ fn usage_text() -> String {
                                       理由を言ってそこで止まる。PDF を抽出するのは serve\n\
                                       なので --pdftotext とは併用しない。空白・制御文字・?\n\
                                       を含む名前は送れず、1 件も送る前に断る\n\
+           ingest-git <dir> <collection> <tree> --paths <道,道,...> [--ref <ref>]\n\
+                      [--serve-url <url> | --pdftotext <exe>]\n\
+                                      手元の git の木 <tree> の ref(既定 main)に追跡されて\n\
+                                      いるファイルのうち --paths の下のもの(カンマ区切り、\n\
+                                      木の根からの相対パス)だけを一時の置き場へ書き出し、\n\
+                                      それを起点に ingest と同じ取り込みをする(文書名は木の\n\
+                                      根からの相対パス)。作業ディレクトリは読まないので、\n\
+                                      追跡していないファイルも書きかけも入らない。シンボ\n\
+                                      リックリンクとサブモジュールは書き出さず一覧で言う。\n\
+                                      git の外へは取りに行かない(fetch・clone しない)。木が\n\
+                                      無い・ref が無い・道の 1 つがその ref に無いときは何も\n\
+                                      送らずに断る。git から消えた文書は消さない\n\
            fetch <dir> <collection> <url> [--name <名>] [--pdftotext <exe>]\n\
                                       URL を取って取り込む(http/https のみ。取りに行くのは\n\
                                       curl で、版を doc_rev.meta.fetcher に残す。転送は 10 回\n\
@@ -502,6 +514,44 @@ fn run_ingest_via_serve(
     }
     tally.report(&plan.skipped);
     Ok(())
+}
+
+/// git の木からの取り込み(`ingest-git`。INGEST の「git の木からの取り込み」節)。ref に
+/// 追跡されている --paths の下のファイルを一時の置き場へ書き出し(node/src/ingest_git.rs)、
+/// そこを起点に ingest と同じ 2 つの形のどちらかで取り込む。選び方・文書名・べき等は ingest
+/// と同じ 1 箇所(plan_ingest)を通る。置き場は成功しても失敗しても消える。
+fn run_ingest_git(
+    dir: &str,
+    collection: &str,
+    tree: &str,
+    reference: &str,
+    paths: &[String],
+    serve_url: Option<&str>,
+    pdftotext: Option<&str>,
+) -> Result<(), StoreError> {
+    let staged = uniqnode::ingest_git::stage(
+        std::path::Path::new(tree),
+        reference,
+        paths,
+        &std::env::temp_dir(),
+    )
+    .map_err(StoreError::Invalid)?;
+    println!(
+        "木: {tree} の {reference} = {}(書き出し {} 件、書き出さなかったもの {} 件)",
+        staged.commit,
+        staged.written,
+        staged.left_out.len()
+    );
+    for item in &staged.left_out {
+        println!("書き出さない({item})");
+    }
+    let root = staged.dir.to_str().ok_or_else(|| {
+        StoreError::Invalid(format!("置き場の道が UTF-8 でない: {}", staged.dir.display()))
+    })?;
+    match serve_url {
+        Some(url) => run_ingest_via_serve(dir, collection, root, url),
+        None => run_ingest(dir, collection, root, pdftotext),
+    }
 }
 
 /// URL からの取り込みの CLI 本体(INGEST の「URL からの取り込み」節)。取る・見分ける・
@@ -1409,6 +1459,44 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 }
                 None => run_ingest(dir, collection, root, pdftotext)?,
             }
+        }
+        "ingest-git" => {
+            let collection = rest.first().map(String::as_str).unwrap_or_else(|| usage());
+            let tree = rest.get(1).map(String::as_str).unwrap_or_else(|| usage());
+            let mut reference = "main";
+            let mut paths: Vec<String> = Vec::new();
+            let mut pdftotext = None;
+            let mut serve_url = None;
+            let mut at = 2;
+            while at < rest.len() {
+                let value = rest.get(at + 1).map(String::as_str).unwrap_or_else(|| usage());
+                match rest[at].as_str() {
+                    "--ref" => reference = value,
+                    // 繰り返してよい(並びは足し合わせる)。
+                    "--paths" => paths.extend(
+                        uniqnode::ingest_git::parse_paths(value).map_err(StoreError::Invalid)?,
+                    ),
+                    "--pdftotext" => pdftotext = Some(value),
+                    "--serve-url" => serve_url = Some(value),
+                    _ => usage(),
+                }
+                at += 2;
+            }
+            if paths.is_empty() {
+                // 既定の道の一覧は持たない(どの木の何を入れるかは呼び手の決めること)。
+                eprintln!(
+                    "uniqnode: ingest-git: --paths で取り込む道を与える(例 --paths DESIGN.md,docs/design)"
+                );
+                std::process::exit(2);
+            }
+            if serve_url.is_some() && pdftotext.is_some() {
+                eprintln!(
+                    "uniqnode: ingest-git: --serve-url と --pdftotext は併用しない\
+                     (PDF を抽出するのは転送先の serve で、serve が PATH から引く)"
+                );
+                std::process::exit(2);
+            }
+            run_ingest_git(dir, collection, tree, reference, &paths, serve_url, pdftotext)?;
         }
         "fetch" => {
             let collection = rest.first().map(String::as_str).unwrap_or_else(|| usage());

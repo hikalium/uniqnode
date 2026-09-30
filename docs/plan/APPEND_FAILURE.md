@@ -2,7 +2,9 @@
 
 <a id="d973833f-4e2b-4fc8-8a49-42f6821b6a7a"></a>
 
-版: 第 13 版(2026-10-01)。第 12 版(3641dc8)への vega の Codex の再レビュー(高: `Running` を
+版: 第 14 版(2026-10-01)。第 13 版(2e312d3)への vega の Codex の再レビュー(高なし、中 1: 鍵が未確定の
+初期化の失敗は保留で開けない、中 2: 明示的な sync の入口で 503、低: 検めを通らない印の完了条件)を
+取り込んだ。第 13 版(2026-10-01)。第 12 版(3641dc8)への vega の Codex の再レビュー(高: `Running` を
 recover・開くときの sync より前に書く、中: GC の A も書けない状態を見る、低: NoSpace の試験の期待値を
 読み直した印で分ける)を取り込んだ。第 12 版(2026-10-01)。第 11 版(48099d2)への vega の Codex の再レビュー(高なし、中 1: 検めを通らない印は
 再起動でも戻らない、中 2: MCP の Local の exec による差し替え、低: NoSpace の印の更新の失敗の 3 通り)を
@@ -96,7 +98,12 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      `mode(0o600)` で作り、中身を書くのはその後にする(umask に依らず、秘密鍵が一瞬も他の利用者に
      読めない。第 5 版への Codex の再レビューの中)。途中で落ちても、短い鍵が
      `node_key` の名前で残ることは無い(残るのは tmp/ の残骸で、次に開くとき消す)。鍵が失われると
-     同じノードとして署名を続けられないので、pack と同じ重さで守る。
+     同じノードとして署名を続けられないので、pack と同じ重さで守る。鍵が確定していない(`node_key`
+     がまだ無い)ストアは、ノード ID を決められないので書けない道(保留)でも開けない。`Running` を
+     書いた後に鍵の作成が失敗したら、開くことは失敗し、同じブートの再試行も開くことを断る(保留で
+     起きる保証の外)。案内は、ストアを置いたファイルシステムを点検した後に release-hold で印を
+     `Clean` にして開き直す(鍵が無いので新しい鍵を作る。まだ何も応答していないので失うものは
+     無い)とする(第 13 版への Codex の再レビューの中 1)。
    - recover が採用した pack と reflog のファイルの中身(`sync_data`)。対象は、封印済みとして
      MANIFEST に載っている pack を除く全部(アクティブの pack と reflog の全セグメント)。write_all の
      後・sync の前にプロセスが落ちると、完全なレコードが page cache にだけ在る形で再開し、recover が
@@ -285,8 +292,10 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
    health・他の書き込みの要求を競わせて `Clean` の後に持続的な書き込みが走らないこと、release-hold が
    開いているストアでは断られることを見る。加えて、印の部分書き込み・sync の失敗・更新の途中の
    停止(注入)の後の開く道が、読み直した印に従うこと(検めを通る `NoSpace` なら書ける、`Running`
-   か検めを通らない印なら書き込みを許さない)、`Running` を書いた後の recover・`node_key` の作成・
-   開くときの sync のそれぞれの失敗(注入)の後に、同じ boot_id の再試行が書けない道で開くこと、CRC の合わない印が Io に扱われること、書けない
+   か検めを通らない印なら書き込みを許さない)、`Running` を書いた後の recover・
+   開くときの sync のそれぞれの失敗(注入)の後に、同じ boot_id の再試行が書けない道で開くこと、
+   `node_key` の作成の失敗(注入)の後は同じ boot_id の再試行が開くことを断り、release-hold の後に
+   開けること、CRC の合わない印が Io に扱われること、書けない
    道で開いたとき削除・切り詰め・sync の呼び出しが 0 回であること、書き込みと sync が失敗し続ける
    注入の下でも同じブートで status と既存のデータの読み出しが答えることを見る。
    空きを足しても自動では戻らない(プロセスの中では末尾の健全さを言えないため)。
@@ -303,7 +312,11 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
   api.rs の `store_error_response` の 1 箇所で、主の口・読み口の書く口(`--agent-writable`、グラフの
   書く口)・MCP(Local は api の関数を直接呼び、Forward は serve の 503 を受ける)が同じ変換を通る。
   `POST /v1/sync` は今 sync.rs の 393 行付近でストアの誤りを一律 500 にしているので、
-  `SyncError::Store(WritesDisabled)` を同じ変換へ寄せる(Codex 中 4)。
+  `SyncError::Store(WritesDisabled)` を同じ変換へ寄せる(Codex 中 4)。ただし今の sync は、差分が無い
+  か必要なオブジェクトが揃っていれば取り込みを呼ばずに 200 を返す(sync.rs の 104・365 行付近)ので、
+  変換だけでは 503 にならない。明示的な `POST /v1/sync` は入口で `writes_disabled()` を見て 503 を
+  返す。周期の同期は、同じ判定で黙って 1 回飛ばす(記録は遷移の 1 行だけ)として区別する(第 13 版への
+  Codex の再レビューの中 2)。
 - `/v1/status` に `writes_disabled`(null か上の形)を載せる。FEED の `GET /v1/feeds/{c}` も同じ形を
   写す。健全性の集計にも 1 項目足す(遷移で 1 度だけ記録。should/0129)。
 - serve の記録に、入ったときに 1 行残す(`uniqnode: store: writes disabled: …`)。
@@ -366,7 +379,7 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
 - `manifest-dirsync` を封印と `gc_commit` の C-3 に掛けて開き直しても、応答済みの ref から辿れる
   オブジェクトが全部読める。
 - `torn` の ENOSPC は kind が no_space、`nospace-sync` と `sync` と `dirsync` は io になり、503 の本文と
-  MCP の誤りの文に案内が載る。`POST /v1/sync` も 503 を返す。
+  MCP の誤りの文に案内が載る。`POST /v1/sync` も、差分が無いときを含めて 503 を返す。
 - 複製の受け側(`ingest_ref_record`)に `sync-keep` を掛けると、`export_ref_records` はその 1 本を返さない。
 - 書けない状態に入れた最初の要求そのものが 503 と案内を返す。
 - kind が Io の状態で serve だけを起こし直すと、書けない状態で開く(`open-marker` が効く)。
@@ -383,10 +396,11 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
   `crash-before-dirsync`)、同じ boot_id で起こし直すと書けない状態で開く。boot_id を差し替えて
   (ホストの再起動に当たる)起こし直して追記を続けると、開く道が packs/・reflog/ を sync してから
   書き込みを受け付ける(sync の呼び出しを数える口で確かめる)。
-- 開き直したときの `writes_disabled` は、kind で分かれる: 開き直しで読んだ印が検めを通る `NoSpace` なら null に戻る(印の更新の
-  `fdatasync` だけが失敗した形も含む。読んだ印が `Running` か検めを通らないものなら Io と同じ)。Io
-  だったもの(と前のプロセスが無事に終わらなかったもの)は、同じ boot_id の `open-marker` がある間は
-  Io のまま開き、ホストの再起動か(umount・fsck・mount し直しの後の)release-hold の後に null に戻る。
+- 開き直したときの `writes_disabled` は、読み直した印で分かれる: 検めを通る `NoSpace` なら null に
+  戻る(印の更新の `fdatasync` だけが失敗した形も含む)。検めを通る `Io` と `Running`(前のプロセスが
+  無事に終わらなかったもの)は、同じ boot_id の間は Io のまま開き、ホストの再起動(boot_id が変わる)
+  か、(umount・fsck・mount し直しの後の)release-hold の後に null に戻る。検めを通らない印は、ホストを
+  再起動しても Io のまま開き、release-hold の後にだけ null に戻る(第 13 版への Codex の再レビューの低)。
 
 ## 段取り
 

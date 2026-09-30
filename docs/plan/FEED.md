@@ -498,7 +498,9 @@ POST /v1/feeds/lamalium/runs/<C>/commit {base, documents}
 | S1・A1・A2・A4 | [APPEND_FAILURE.md](#d973833f-4e2b-4fc8-8a49-42f6821b6a7a) の「書けない」状態と、[API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771) の主の口の境界(A1 の束縛とブラウザの門、A2 の uid の判定)と、A4 の読み口の出所を示せないチャンクの拒否(上の出所の引き当ての 4 がこれに依る。APPEND_FAILURE 第 14 版への Claude のレビューの低 1)。F2 の前提。加えて、viewer(0.0.0.0:7450)は
 網からの要求を主の口へ転送するので、F2 で lamalium と feeds/ が viewer 経由で網へ出るかは API_AUTH の
 3・A3(viewer の扱い、操作者の確認待ち)に依る。F2 を本番へ入れる(F4)前に、その扱いが決まって
-いることを確かめる(crystal の Claude 中 5) | M・S・S・S |
+いることを確かめる(crystal の Claude 中 5)。決まった: 2026-10-01 の操作者の裁定「viewer (7450) はこのままで
+よい」で A3 は取り下げられ、F2 の後は lamalium と feeds/ の ref とそのコレクションも viewer 経由で LAN と wg1 から
+読める(API_AUTH 第 14 版の 3 の受け入れた危険) | M・S・S・S |
 | F1 | `DELETE /v1/collections/{c}/documents/{name}`(主の口。管理下なら 409) | S |
 | F2 | 見える ref の判定の関数と、それを通す全ての読む道(索引の走査・世代の束縛・読み出し・出典・読み口の screen・`degraded`)、rollback、「c が見えない」の健全性の集計、feed の 3 本(読む・置く・公開する)と edit・allow-shrink・retire、名前の文法、閉包の検査、管理下の判定(`Store::set_ref` の中)と feed 専用の入口、前進の関数(ストアを開く共通の道と要求の中)、status の欄と 503 の理由、空き容量を読む statvfs の FFI(依存を足さない)、SPEC(§4.3 の previous の形)と design(INGEST・GC・新しい FEED)と SYSTEMD.md の更新 | L |
 | F3 | serve の `--listen-feed`・`--feed-collection` と門・本文の上限、install の引数・nft の 2 規則・確認 | M |

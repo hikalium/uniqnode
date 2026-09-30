@@ -266,7 +266,12 @@ Claude のレビュー):
 - 最初に確かめ終えた退避を /var/backups/uniqnode-legacy-pinned(退避のディレクトリへの symlink)で固定し、
   戻す命令はこれだけを使う(最新の退避ではない)。`rm -rf` の途中で止まった後にこの命令を打ち直すと、残った
   一部だけの退避が新しく作られるが、固定は既に在るので上書きしない(第 18 版の APPEND_FAILURE への Codex の
-  レビューの中 7)。
+  レビューの中 7)。固定が既に在るときは、何かを外す前に、戻す命令が使える形かを検める: 解決先が在る
+  ディレクトリであること(`[ -L ]` はリンク切れでも真なので、`readlink -e` で解決する)、その units.tar.gz を
+  読めて uniqnode-serve.service が入っていること、その uniqnode が実行できるファイルであること。どれかが
+  欠ければ、今回の退避(確かめ済み)を残したまま何も外さずに止まる(第 19 版の APPEND_FAILURE への Codex と
+  Claude のレビューの Codex 中 6)。固定をどう直すか(壊れた固定を消して今回の退避を固定し直すか)は、
+  操作者が記録の 2 つの道を見て決める。
 - nft の表は在るときだけ消す。在るかは `nft list tables` の答えで決め、その一覧の取得が失敗したら(nft が
   無い、照会の誤り)止まる。第 18 版の `if nft list table …` は失敗も「表が無い」と扱い、完了の文と終了
   コード 0 を出していた(同じレビューの中 8)。外した後に nft や install が失敗して打ち直しても、前の退避を
@@ -307,7 +312,11 @@ else
   if ! { /usr/bin/cp -p "$binary" "$saved/uniqnode" && /usr/bin/cmp -s "$binary" "$saved/uniqnode"; }; then /usr/bin/rm -rf "$saved"; echo "$binary を退避へ写せない。退避を消し、外さずに止める"; exit 1; fi
   echo "退避: $saved (${present[*]} と $binary)"
   if [ -e "$pin" ] || [ -L "$pin" ]; then
-    echo "固定した退避は既に在る: $(/usr/bin/readlink "$pin")。今回の退避は固定しない"
+    if ! pinned=$(/usr/bin/readlink -e "$pin") || [ ! -d "$pinned" ]; then echo "固定 $pin が壊れている(解決先が無いか、ディレクトリでない)。何も外さずに止める。今回の退避 $saved は残す"; exit 1; fi
+    if ! pinned_listing=$(/usr/bin/tar -tzf "$pinned/units.tar.gz"); then echo "固定した退避 $pinned/units.tar.gz を読めない。何も外さずに止める。今回の退避 $saved は残す"; exit 1; fi
+    /usr/bin/grep -qxF uniqnode-serve.service <<<"$pinned_listing" || { echo "固定した退避 $pinned/units.tar.gz に uniqnode-serve.service が無い。何も外さずに止める。今回の退避 $saved は残す"; exit 1; }
+    [ -f "$pinned/uniqnode" ] && [ -x "$pinned/uniqnode" ] || { echo "固定した退避 $pinned/uniqnode が無いか実行できない。何も外さずに止める。今回の退避 $saved は残す"; exit 1; }
+    echo "固定した退避は既に在り、戻す命令が使える形である: $pin -> $pinned。今回の退避は固定しない"
   else
     /usr/bin/ln -sT "$saved" "$pin"
     echo "固定した退避: $pin -> $saved"
@@ -335,13 +344,17 @@ EOF
   まま共有のバイナリを差し替える(install.rs の 2087〜2096 行付近)。先に graph_* を据え直すと、旧い
   serve の次の起動が新しいバイナリを旧い unit で走らせる(API_AUTH の A2 なら AF_NETLINK が無く主の口が
   全部 403、APPEND_FAILURE の S1 なら ExecStop が無い)。install がこの形を断るようにする直しは、
-  API_AUTH の A1 か APPEND_FAILURE の S1 のうち先に入る方に含める。
+  API_AUTH の A1 か APPEND_FAILURE の S1a(S1 の最初の段)のうち先に入る方に含める。
 - 済んだかは、/tmp/uniqnode-legacy-units.log の最後が「旧い名の unit を外し終えた」と
   `exit status: 0` であることで確かめてから、install の命令へ進む(記録は追記なので、打ち直した分も
   時刻つきで残る)。続く /tmp/uniqnode-install-system.log も、最後の `exit status: 0` を確かめる。
 - 戻すときは、固定した退避(/var/backups/uniqnode-legacy-pinned。最新の退避ではない)を使う。退避に
   uniqnode-serve.service とバイナリが入っていることを、何かを変える前に確かめる(第 18 版の APPEND_FAILURE への
-  Codex のレビューの中 7、Claude のレビューの低 6)。`@default` の 3 つを止めて外し、共有のバイナリを退避の
+  Codex のレビューの中 7、Claude のレビューの低 6)。`@default` の 3 つを止めて外し(install がテンプレートを
+  据える前、例えばビルドで止まった形では `@default` の unit がまだ無い。`set -e` の下で存在しない unit の
+  `disable --now` が失敗して復元へ進めなくならないよう、テンプレートの在るものだけを止め、無いものは記録に
+  1 行残して飛ばす。その後、serve と viewer の `@default` が走っていないことと backup の終わりを確かめてから
+  復元する。第 19 版の APPEND_FAILURE への Codex と Claude のレビューの Codex 中 5)、共有のバイナリを退避の
   ものへ据え直し(同じレビューの中 4)、unit の退避を /etc/systemd/system に展開して daemon-reload し、旧い 3 つを
   enable --now する(同じ主の口を取り合うので、両方を同時に置かない)。バイナリは graph_a・graph_b の serve と
   共有なので、それらも次の起動から移行の前のバイナリで走る(移行の前と同じ形。走っている間は今のイメージの
@@ -356,7 +369,14 @@ echo "戻す退避: $saved"
 listing=$(/usr/bin/tar -tzf "$saved/units.tar.gz")
 /usr/bin/grep -qxF uniqnode-serve.service <<<"$listing" || { echo "$saved/units.tar.gz に uniqnode-serve.service が無い。何も変えずに止める"; exit 1; }
 [ -f "$saved/uniqnode" ] && [ -x "$saved/uniqnode" ] || { echo "$saved/uniqnode が無い。何も変えずに止める"; exit 1; }
-systemctl disable --now uniqnode-serve@default.service uniqnode-viewer@default.service uniqnode-backup@default.timer
+for u in uniqnode-serve@default.service uniqnode-viewer@default.service uniqnode-backup@default.timer; do
+  template=/etc/systemd/system/${u%%@*}@.${u##*.}
+  if [ -e "$template" ]; then systemctl disable --now "$u"; else echo "$template が無い(install がテンプレートを据える前に止まった)。$u は止めるものが無い"; fi
+done
+for u in uniqnode-serve@default.service uniqnode-viewer@default.service; do
+  state=$(systemctl is-active "$u" || true)
+  case "$state" in inactive|failed|unknown) ;; *) echo "$u がまだ止まっていない(状態: $state)。展開せずに止める"; exit 1 ;; esac
+done
 waited=0
 while :; do
   state=$(systemctl is-active uniqnode-backup@default.service || true)

@@ -2,7 +2,7 @@
 
 <a id="d973833f-4e2b-4fc8-8a49-42f6821b6a7a"></a>
 
-版: 第 19 版(2026-10-01)。第 18 版への Codex と Claude のレビュー(Codex 高 1・Claude 中 3: 書き込みの途中の旗を入れ子と早い戻りとパニックに耐える数え値と RAII の番へ、Codex 高 2・高 3・中 5・Claude 中 2・低 11: backup を、ロックの持ち主が答える永続化済みの境界までの写しと、写し先の tmp/ での段取り・検め・公開の後の削除へ組み直し、ロックの socket に accept の輪と照会の期限、印に開くたびの nonce、Codex 中 4: 2 度目のシグナルを受ける輪を終わり方から分ける、低 9: GC の競合の試験の 2 つの停止点と期待値、Claude 高 1: 開くことの失敗を手綱に記録する、中 5: install の断りの完了条件、低 10: 終わり方の 2 度呼び)を取り込んだ。第 18 版(2026-10-01)。第 17 版への Codex と Claude のレビュー(Codex 高 1: GC の D の packs/ の sync をストアのロックの中で行い、終わり方と排他にする、Codex 中 2〜4・低 6: 旧い名の unit を外す命令の backup の待ち・退避の対象・退避先の一意・パイプラインの失敗、Claude 中 1: 読むだけの走査の Drop は印を書かない、中 2: CLI のシグナルは共有の小さな手綱で閉じる、中 3: serve のログがデータのディレクトリの祖先を作る、中 4: 保留の写し元を backup が写さない、中 5: vega で共有するバイナリと旧い名の unit、低 5: シグナルで閉じたときの終了コード、低 6: 開く途中のシグナル、低 8: 外す命令の字句の試験)を取り込んだ。第 17 版(2026-10-01)。第 14 版(9d04834)への Claude のレビュー(高 1: 保留で開いた serve が sync していない
+版: 第 20 版(2026-10-01)。第 19 版への Codex と Claude のレビュー(Codex 高 1・Claude 高 2: backup の公開を、写し先の世代のディレクトリを完成させてから `current` の symlink を 1 回の rename で切り替える形へ、Codex 高 2・Claude 中 3: 写し先のロックを backup の全体で持つ、Claude 高 1: 開き終えるまでは境界を答えず `opening` と答え、写し先より短い reflog の境界は断る、Codex 中 3: 閉じる要求で新しい外側の書き込みの番を閉め、入れ子だけを通す、Codex 中 4・Claude 低 5: 同じ pid・nonce の `NoSpace` の印も認める、Codex 中 5・中 6: docs/mop/SYSTEMD.md の戻す命令の unit の不在と外す命令の固定の検め、Claude 中 4: S1 を S1a・S1b・S1c に分けて段ごとのゲート、低 6〜13: hard link の条件、stage の片付け、照会の相手の `SO_PEERCRED`、境界の別の `Mutex`、accept の起こし方、印の読み直し、開く途中の RAII、uid の試験の debug の口、低 14: 直す文書に SYSTEMD.md の表)を取り込んだ。第 19 版(2026-10-01)。第 18 版への Codex と Claude のレビュー(Codex 高 1・Claude 中 3: 書き込みの途中の旗を入れ子と早い戻りとパニックに耐える数え値と RAII の番へ、Codex 高 2・高 3・中 5・Claude 中 2・低 11: backup を、ロックの持ち主が答える永続化済みの境界までの写しと、写し先の tmp/ での段取り・検め・公開の後の削除へ組み直し、ロックの socket に accept の輪と照会の期限、印に開くたびの nonce、Codex 中 4: 2 度目のシグナルを受ける輪を終わり方から分ける、低 9: GC の競合の試験の 2 つの停止点と期待値、Claude 高 1: 開くことの失敗を手綱に記録する、中 5: install の断りの完了条件、低 10: 終わり方の 2 度呼び)を取り込んだ。第 18 版(2026-10-01)。第 17 版への Codex と Claude のレビュー(Codex 高 1: GC の D の packs/ の sync をストアのロックの中で行い、終わり方と排他にする、Codex 中 2〜4・低 6: 旧い名の unit を外す命令の backup の待ち・退避の対象・退避先の一意・パイプラインの失敗、Claude 中 1: 読むだけの走査の Drop は印を書かない、中 2: CLI のシグナルは共有の小さな手綱で閉じる、中 3: serve のログがデータのディレクトリの祖先を作る、中 4: 保留の写し元を backup が写さない、中 5: vega で共有するバイナリと旧い名の unit、低 5: シグナルで閉じたときの終了コード、低 6: 開く途中のシグナル、低 8: 外す命令の字句の試験)を取り込んだ。第 17 版(2026-10-01)。第 14 版(9d04834)への Claude のレビュー(高 1: 保留で開いた serve が sync していない
 レコードを複製の口でピアへ渡す、中 1: 開いた後の抜け道とシグナル、中 2: 既存の試験との食い違いと Drop、中 3: 命令ごとの
 開き方、中 4: GC の D のディレクトリの sync、中 5: 旧い名の unit からの移行を本番への反映の前提に、低 3〜8)を、
 第 16 版に照らし直して取り込んだ。第 16 版(2026-10-01)。第 15 版(3162e7f)への vega の Codex の再レビュー(高なし、中: ストアの障害でない
@@ -290,8 +290,13 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      `Arc` で共有する小さな構造体 `CloseHandle` で行う。中身は 1 つの `Mutex` の下の「開いている途中」の旗、
      持続的な書き込みの途中の数え値 `writers`(bool ではない)、「閉じている」の段(開いている・閉じる途中・
      閉じた)、`write_failure` の写し、開くことが失敗したか(`open_failed`)、書き込みの途中でパニックしたか
-     (`poisoned`)、この開き方が `Running` を書いたか(`wrote_running`)、開くたびの nonce、永続化済みの境界
-     (下の「backup の写し元の検め」)、印の fd と、それに付けた `Condvar` である。今の CLI の書き手は `Store` を
+     (`poisoned`)、この開き方が `Running` を書いたか(`wrote_running`)、開くたびの nonce、「閉じる要求」の旗、
+     印の fd と、それに付けた `Condvar` である。照会への答えの材料(開き方・`write_failure` の kind・pid・nonce・
+     永続化済みの境界。下の「backup の写し元の検め」)は、この `Mutex` ではなく、手綱の中の別の短い `Mutex`
+     (答えの写し)に置く(第 19 版への Claude のレビューの低 9。手綱の `Mutex` は印の `fdatasync` の間も持たれる
+     ので、答えがそれを待つと照会の期限に掛かる)。答えの写しを書き換えるのは、開き方・`write_failure`・境界を
+     変える側で、手綱の `Mutex` を持ったまま答えの写しの `Mutex` を短く取る(取る順は手綱 → 答えの写しだけで、
+     逆に取る道は無い)。答える側は答えの写しの `Mutex` だけを取る。今の CLI の書き手は `Store` を
      main のスレッドで値として持つ(main.rs の 1394 行付近の put など)ので、シグナルを受けるスレッドは
      `Store` にもストアのロックにも届かない。serve でも、`Mutex<Store>` は query や ingest が長く持ちうる。
      そこで、ストアの全ての持続的な書き込みの入口(方針 2 の一覧と、方針 3 の GC の D の sync)は、先頭で
@@ -307,11 +312,20 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      `Clean` を書き、外側の `append_record` がその後に走れた。数え値なら内側の終わりでは 0 にならない。
      GC の C は C-1 から C-3 の最後の MANIFEST まで 1 つの番で覆い、D の sync も 1 つの番で覆う。serve の
      `Mutex<Store>` の外で走る書き手(GC の D、周期の書き手)と重なっても、数え値がそれぞれを数える。
-     閉じる途中の段は `writers` が 0 のときにしか立たないので、外側の番を持つ間の内側の番は断られない。
+     閉じる要求で新しい外側の番を閉める(第 19 版への Codex のレビューの中 3): 第 19 版では閉じる途中の段が
+     `writers` が 0 のときにしか立たず、それまでは新しい外側の番も取れたので、書き込みが絶えず続くと待ち手が
+     0 を見る前に次の書き手が入り、SIGTERM や shutdown が終わる保証が無かった。そこで終わり方は、待ち始める前に
+     手綱の `Mutex` の中で「閉じる要求」の旗を立てる。旗が立った後は、番を取るときに、そのスレッドが既に番を
+     持っているか(スレッドごとの `thread_local!` の深さの数え値。番を取ると 1 増え、番の Drop で 1 減る)を見る:
+     深さが 0(外側の番)なら `WritesDisabled` と同じ扱いで断り、深さが 1 以上(持っている番の中の入れ子)なら
+     通す。store.rs の入れ子(`put_object → seal_active_pack → write_manifest`、GC の C の中の MANIFEST)は全部
+     同じスレッドの同期の呼び出しなので、この判定で入れ子を見分けられる。これで旗の後に `writers` は増えず、
+     持っている番が返れば必ず 0 になる。閉じる途中の段はその後に立つ。GC の D の sync が旗の後に番を断られた
+     形は、閉じている状態と同じく sync をせずに GC を終える。
      手綱の `Mutex` を持つのは旗と数え値の読み書きと印の `pwrite`・`fdatasync` の間だけで、書き込みそのものの
      間は持たない。
    - 無事な終わり方は、次の順で行う(第 9 版への Codex の再レビューの高 1): 手綱の `Mutex` を取り、
-     「開いている途中」が降り `writers` が 0 になるまで `Condvar` で待ち、閉じる途中の段へ移す(以後の
+     「閉じる要求」の旗を立て(上の項)、「開いている途中」が降り `writers` が 0 になるまで `Condvar` で待ち、閉じる途中の段へ移す(以後の
      全ての書き込みの入口と GC の確定は `WritesDisabled` と同じ扱いで断る)→ `wrote_running` が真で、
      `write_failure`・`open_failed`・`poisoned` のどれも無いことを確かめる → `Clean` を書く → 閉じた段へ
      移し、結果(`Clean` を書いたか、残したか)を手綱に記録する。`write_failure`・`open_failed`・`poisoned` の
@@ -322,6 +336,11 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      を立てる。第 18 版では手綱に「失敗した」の状態が無く、開く途中にシグナルが待っていると、終わり方は
      `wrote_running` が真で `write_failure` が無いのを見て `Clean` を書き、その `exit(0)` が main の `exit(1)`
      より先に走りえて、保留を迂回できた。`open_failed` は `write_failure` と同じく `Clean` を書かせない。
+     「開いている途中」の旗は RAII の番(`OpeningGuard`)で立てて降ろす(第 19 版への Claude のレビューの低 12):
+     開く道は旗を立てるときに番を作り、開き終えたら番の成功の印を付けて落とす(旗を降ろす)。成功の印の無い
+     まま番が落ちたら(誤りの `?` の早い戻り、開く途中のパニックの巻き戻し)、番の Drop が同じ `Mutex` の中で
+     `open_failed` を立ててから旗を降ろし、`Condvar` を鳴らす。第 19 版の手で降ろす形では、開く途中の
+     パニックで旗が立ったまま残り、終わり方が SIGKILL まで待った。
      2 度呼び(第 18 版への Claude のレビューの低 10): ExecStop の後の SIGTERM、Drop とシグナル、shutdown の
      2 本のように、終わり方は何度も呼ばれうる。最初の呼び手だけが上の手順を踏み、後の呼び手は閉じた段に
      なるまで `Condvar` で待って、記録された結果を受け取る(印を 2 度書かない)。プロセスを終える形の
@@ -508,28 +527,49 @@ backup の写し元の検め(第 17 版への Claude のレビューの中 4): b
 正常な写しまで壊していた(Codex 高 3、Claude 中 2)。所有者の照会も、accept しないロックの socket に繋ぐだけ
 だったので、未 accept の接続が backlog を埋めた(Codex 中 5)。S1 では次の 3 つに組み直す。
 
-(1) 永続化済みの境界を持ち主から受け取る。手綱は「永続化済みの境界」を持つ: 封印済みの pack と reflog の
-番号の一覧、アクティブの pack の番号と長さ、reflog の各セグメントの番号と長さ。`append_durable` は、sync
-(と新しいセグメントなら親の sync)が成功した後、書き込みの番を返す前に、手綱の `Mutex` の中でそのセグメントの
-長さを進める。封印と GC の C-3 は、MANIFEST の書き込み(rename の後のディレクトリの sync まで)が成功して
-メモリを進めた後に一覧を進める。したがって境界の内側のバイトは、全部 sync の成功を見た追記のもので、後の
-失敗の切り詰め(`set_len(書く前の長さ)`。書く前の長さは境界以上)も recover の切り詰めも届かない。
+(1) 永続化済みの境界を持ち主から受け取る。手綱の答えの写しは「永続化済みの境界」を持つ: 封印済みの pack と
+reflog の番号の一覧、アクティブの pack の番号と長さ、reflog の各セグメントの番号と長さ。`append_durable` は、sync
+(と新しいセグメントなら親の sync)が成功した後、書き込みの番を返す前に、答えの写しの `Mutex` の中でそのセグメントの
+長さを進める(境界だけを変えるこの更新は、手綱の `Mutex` を取らずに答えの写しの `Mutex` だけを短く取る)。封印と
+GC の C-3 は、MANIFEST の書き込み(rename の後のディレクトリの sync まで)が成功してメモリを進めた後に一覧を進める。
+したがって境界の内側のバイトは、全部 sync の成功を見た追記のもので、後の失敗の切り詰め(`set_len(書く前の長さ)`。
+書く前の長さは境界以上)も recover の切り詰めも届かない。
+境界は開き終えるまで持たない(第 19 版への Claude のレビューの高 1): ロックを取った時点の答えの写しは、開き方が
+`opening` で、境界は空ではなく「無い」。書ける道は、recover と 1a の開くときの sync が済んだ後(書き込みの受け付けの
+直前)に、recover の結果(MANIFEST の封印済みの一覧と、切り詰めと sync の済んだアクティブの pack と reflog の各
+セグメントの長さ)から境界を初めて作り、同じ `Mutex` の中で開き方を `write` にする。保留と読むだけの走査は境界を
+作らず、走査を終えてから開き方を `hold`・`readonly` にする。第 19 版では開き終える前の境界が決まっておらず、recover の
+最中に accept の輪が空の境界を答えうるので、backup が空のストアを公開して写し先の pack を全部消しえた。
 境界は、ロックの socket に accept の輪を置いて答える。ストアのロックを取ったプロセス(書ける道・保留・読むだけの
-走査のどれも)は、ロックの `UnixListener` を持つ小さなスレッドを 1 本置き、繋いできた接続を 1 本ずつ accept
-して、1 行の答え(形の版、pid、nonce、開き方: `write`・`hold`・`readonly`、`write_failure` の kind か none、
-上の境界)を書き込みの期限(1 秒)つきで書いて閉じる。答えを作るときは手綱の `Mutex` を短く取るだけで、
-ストアのロック(`Mutex<Store>`)は取らない。これで install の探りを含む全ての接続が accept されて閉じられ、
-backlog が溜まらない(Codex 中 5)。ロックを放すときは、listener を `shutdown` して accept を起こし、輪の
-スレッドが listener を閉じて終わるのを待つ(輪が fd の複製を持ったままロックが残る形を作らない)。
+走査のどれも)は、ロックを取った直後に、ロックの `UnixListener` を持つ小さなスレッドを 1 本置き、繋いできた接続を
+1 本ずつ accept する。accept した接続の `SO_PEERCRED` の uid が自分の euid か 0 のときだけ、1 行の答え(形の版、pid、
+nonce、開き方: `opening`・`write`・`hold`・`readonly`、`write_failure` の kind か none、`write` のときだけ上の境界)を
+書き込みの期限(1 秒)つきで書いて閉じ、それ以外の相手には何も書かずに閉じる(第 19 版への Claude のレビューの低 8。
+抽象名前空間の socket には権限が無いので、誰でも繋げる)。答えを作るときは答えの写しの `Mutex` を短く取るだけで、
+手綱の `Mutex` もストアのロック(`Mutex<Store>`)も取らない。これで install の探りを含む全ての接続が accept されて
+閉じられ、backlog が溜まらない(第 18 版への Codex のレビューの中 5)。
+輪の止め方は listener の `shutdown` に頼らない(第 19 版への Claude のレビューの低 10。AF_UNIX の listener への
+`shutdown` が、塞がった accept を起こすとは限らない): listener を非ブロックにし、輪は listener の fd と、起こし用の
+`UnixStream::pair()` の片方を `extern "C"` の `poll` で待つ(依存を足さない)。listener が読めるになったら `EAGAIN` まで
+accept を回す。ロックを放すときは、起こし用のもう片方へ 1 バイト書き、輪のスレッドが listener を閉じて終わるのを
+join で待ってから戻る(輪が fd の複製を持ったままロックが残る形を作らない)。
 照会する側(backup)は、非ブロックの connect と全体の期限(5 秒)を持つ: `EAGAIN`(backlog が満ちている)は
 100 ms おきに期限まで繋ぎ直し、`ECONNREFUSED` は持ち主が無いと判定し、繋がったら `SO_PEERCRED` の uid が
 自分の euid と同じことを確かめてから(違えば名を横取りされている。API_AUTH の「既知の限界」)、残りの時間を
-読みの期限にして 1 行を読む。期限を過ぎたら理由を言って 1 で終える(S1 より前のバイナリで走る serve は
-accept しないので、ここで断る。serve を S1 のバイナリで起こし直せば戻る)。
+読みの期限にして 1 行を読み、答えの pid が `SO_PEERCRED` の pid と同じことを確かめる(違えば理由を言って断る。
+第 19 版への Claude のレビューの低 8)。期限を過ぎたら理由を言って 1 で終える(S1c より前のバイナリで走る serve は
+accept しないので、ここで断る。serve を S1c のバイナリで起こし直せば戻る)。uid の食い違いの試験に root が
+要らないように、debug ビルドだけが読む環境変数で、照会する側が期待する uid と、輪が「自分の euid」とみなす uid を
+差し替えられるようにする(第 19 版への Claude のレビューの低 13)。
 
 (2) 何をどこまで写すかを決める。
-- 持ち主が `write` で答え、`write_failure` が無いか NoSpace で、答えの nonce と pid が写し元の `open-marker`
-  (検めを通る同じ boot_id の `Running`)のものと一致するとき: 答えの境界のとおり写す。封印済みの一覧の pack は
+- 持ち主が `opening` で答えたとき: 写さずに理由(持ち主が開いている途中で、境界がまだ無い)を言って 1 で終える
+  (第 19 版への Claude のレビューの高 1)。timer の次の刻みか、手で打ち直す。
+- 持ち主が `write` で答え、`write_failure` が無いか NoSpace で、答えの nonce と pid が写し元の `open-marker` の
+  ものと一致するとき: 印は検めを通る同じ boot_id のもので、状態は、`write_failure` が無ければ `Running`、NoSpace なら
+  `NoSpace` か `Running`(`NoSpace` の更新が失敗して `Running` が残った形。方針 5 の 3 通りのうち検めを通る 2 つ)を
+  認める(第 19 版への Codex のレビューの中 4、Claude のレビューの低 5。第 19 版は `Running` だけを求めたので、障害の
+  処理を正常に終えて印を `NoSpace` にした serve ほど写せなかった)。答えの境界のとおり写す。封印済みの一覧の pack は
   丸ごと(不変)、アクティブの pack と reflog の各セグメントは境界の長さまで(ファイルがそれより長くても、
   その先は読まない)。写し先の MANIFEST は、写し元の MANIFEST のバイト列ではなく、答えの封印済みの一覧から
   ストアと同じ直列化の関数で作る(照会と MANIFEST の読みの間に封印が進んでも食い違わない)。写す途中で GC の D が
@@ -544,20 +584,63 @@ accept しないので、ここで断る。serve を S1 のバイナリで起こ
   1 バイトでも違えば(書き手が開いて `Running` を書いた。書き手はストアを変える前に必ず印を書き、開くたびに
   nonce が替わるので、開いて閉じただけでも違う)、その回の写しを採らない。印が無いストアは、写し終えた後も
   印が無いことを求める。
+- 写し先より短い reflog は、どの形でも断る(第 19 版への Claude のレビューの高 1): 写し先の現在の世代((3))の
+  reflog の各セグメントについて、今回写す範囲(境界か fstat の長さ)に同じ番号のセグメントがあり、その長さが写し先の
+  ファイルの長さ以上であることを求める。欠けているか短ければ、写さずに理由を言って 1 で終える。reflog は縮まない
+  ので、短い範囲は別のストアか壊れた答えであり、それを公開すると応答済みのレコードを写し先から消す。
+- backup が印を読むのはストアのロックを持たずに行うので、書き手の 1 回の `pwrite` と重なって裂けた中身を読みうる
+  (第 19 版への Claude のレビューの低 11)。CRC が合わなければ 10 ms 後に 1 度だけ読み直し、2 度目も合わなければ
+  検めを通らない印として扱う。写し終えた後の読み直しも同じ規則で読み、検めを通ったバイト列を写し始めのものと
+  比べる(2 度とも CRC が合わなければ、変わったものとしてその回を採らない)。
 
-(3) 写し先の tmp/ で段取りし、検めてから公開し、古いものは公開の後に消す。backup は写し先の
-`tmp/stage-<nonce>/` に、ストアの形(MANIFEST・packs/・reflog/・設定のファイル)をそろえる: 今回写す
-セグメントと設定はそこへ写して `sync_all` し、写し先に同じ大きさで在る封印済みの pack はそこへ hard link で
-入れる(同じファイルシステムの中なので写さない)。その stage を読むだけの走査で開いて fsck し(今の `verify_copy`
-と同じ検め)、(2) の後の検めも済ませる。どれかで断ったら stage を消すだけで終え、写し先の packs/・reflog/・
-MANIFEST には一度も触れていない。通ったら公開する: stage の今回写したセグメントと設定を写し先の同じ名へ
-rename し、packs/・reflog/・写し先のディレクトリを sync する → stage の MANIFEST を写し先の MANIFEST へ
-rename してディレクトリを sync する → その後で、写し先にあって新しい MANIFEST の封印済みにもアクティブにも
-無い pack を 1 本ずつ名を言って消し、packs/ を sync する → stage を消す。公開の途中で落ちた写し先は、
-「前回の MANIFEST + 前回の pack が全部 + 今回の新しいセグメントの一部」で、前回の MANIFEST が指すものは
-消えていない。MANIFEST の後・古い pack を消す前に落ちた形は、今の recover(store.rs の 620〜647 行付近)が
-MANIFEST に無く最後でもない pack を残骸として扱い、次の backup も消す。backup.rs の冒頭の「残骸の削除は
-MANIFEST を据える前」と docs/mop/BACKUP.md の同じ規則は、この順へ改める(S1 で一緒に直す文書)。
+(3) 写し先を世代のディレクトリで持ち、完成した世代へ `current` を 1 回の rename で切り替え、古い世代は切り替えの
+後に消す(第 19 版への Codex のレビューの高 1、Claude のレビューの高 2)。
+第 19 版の形(stage のセグメントを写し先の packs/・reflog/ の同じ名へ 1 本ずつ rename してから MANIFEST を rename
+する)は捨てた。前回が「封印済み {1}、アクティブ 2」、今回が「封印済み {1,2}、アクティブ 3」のとき、pack 3 を rename
+した後・MANIFEST の前に落ちると、写し先を開いた recover(store.rs の 630〜641 行付近)は pack 2 を「MANIFEST に無く
+最後でもない」として消し、前回の ref が指すオブジェクトが失われた。rename の順を並べ替える案(旧アクティブを
+写し終え、途中の MANIFEST を挟み、残りの封印済み、新しい MANIFEST、アクティブ、reflog の順)も検めたが、1 回に封印が
+2 本以上進む形、GC の新 pack(中身が全部前の pack の重複に見えると recover が消す。store.rs の 680 行付近)、reflog の
+セグメントの規則のそれぞれについて、全ての停止点で recover が何を消すかを示し続けることになる。世代の形なら、
+recover が開く世代は常に検め済みの完全な 1 組で、公開の途中の姿を recover に見せる瞬間が無い。こちらを採る。
+写し先の形: `<写し先>/current` は `gens/<世代名>` への相対の symlink で、各世代 `<写し先>/gens/<世代名>/` はストアの
+形(MANIFEST・packs/・reflog/・設定のファイル)をそろえた完全な 1 組である。世代名は `g-<UTC の時刻>-<backup が
+/dev/urandom から読む 16 バイトの hex>` とし、写し元の nonce は使わない(第 19 版への Claude のレビューの中 3)。
+戻すとき・検めるときは `current` の指す世代を使う。戻すときは世代を hard link でなく写す(世代の封印済みの pack は
+他の世代と inode を共有しうるので、その場で開いて recover に書かせない)。
+手順:
+- 写し先のロック(第 19 版への Codex のレビューの高 2、Claude のレビューの中 3): backup は最初に、写し先の
+  ディレクトリ(`<写し先>` 自身)の `lock_address` の名で抽象名前空間の socket を束縛し、終わるまで持つ(ストアの
+  ロックと同じ関数と名付けなので、写し先を誰かがストアとして開いている間も断る)。束縛できなければ(`EADDRINUSE`)、
+  別の backup か写し先を開いたプロセスがいるので、何も触らずに理由を言って 1 で終える。これで、既存のファイルの
+  再利用の判定から公開と古い世代の削除までを、1 つの backup だけが行う。今の backup.rs(233 行付近)はコピーの
+  全体をロックせず、境界の古い backup A と新しい B が並んで走ると、B の公開の後に A が自分の一覧に無い pack を消して
+  B の写しを壊しえた(両方の stage の fsck が通っていても防げない)。このロックは照会に答えない(写し先の持ち主を
+  調べる道は束縛の成否だけで、繋いでくる者はいない)。
+- 片付け(第 19 版への Claude のレビューの低 7): ロックを取った後、`<写し先>/tmp/stage-*` と `tmp/current-*`、
+  `gens/` のうち `current` の指さない世代を消す(前の回が公開の前か、古い世代を消す前に落ちた残骸)。`current` が
+  在るのに写し先の直下に残る平らな形のストア(S1c より前の backup が作った MANIFEST・packs/・reflog/・設定)も、
+  切り替えの後に落ちた残骸として消す。
+- 段取り: 新しい世代を `<写し先>/tmp/stage-<backup の乱数>/` に作る。今回写すセグメントと設定はそこへ写して
+  `sync_all` する。封印済みの pack は、写し先の現在の世代(`current` の指す世代。世代がまだ無く平らな形のストアが
+  あればそれ)の MANIFEST に封印済みとして載っていて、ファイルの長さが写し元の同じ番号の封印済みの pack の長さと
+  同じときだけ、そこから hard link で入れる(第 19 版への Claude のレビューの低 6。前回アクティブだった pack や長さの
+  違うものは写す)。`link` が `EPERM`(`fs.protected_hardlinks` の下で、ファイルの持ち主が backup の利用者と違う)か
+  `EXDEV` を返したら写す。MANIFEST は答えの封印済みの一覧から作る((2) のとおり)。stage の packs/・reflog/・stage
+  自身を sync する。
+- 検め: stage を読むだけの走査で開いて fsck し(今の `verify_copy` と同じ検め)、(2) の後の検め(持ち主の無い形の
+  印の読み直し)も済ませる。どれかで断ったら stage を消すだけで終える。`current` にも現在の世代にも一度も触れて
+  いない。
+- 公開: stage を `gens/<世代名>` へ rename して `gens/` と `tmp/` を sync する → 新しい symlink を
+  `<写し先>/tmp/current-<乱数>` に作り、`<写し先>/current` へ rename し(symlink の置き換えは 1 回の rename で原子的
+  である)、`<写し先>` と `tmp/` を sync する。この rename が唯一の公開の点である。
+- 後始末: `current` の指さない世代(前回の世代)と、平らな形の残骸を消し、`gens/` と `<写し先>` を sync する。
+落ちたときの形: 公開の rename の前なら `current` は前回の世代を指し、前回の世代のファイルには何も書いていない
+(hard link は中身を変えず、前回の世代のアクティブの pack は写すだけで link しない)。rename の後なら `current` は検め
+済みの今回の世代を指す。どちらでも `current` の指す世代は完全な 1 組で、そこを写して開いた recover が消すものは、
+その世代が写し元のストアで持っていたのと同じ残骸だけである。残った stage と世代は、次の回の片付けが消す。
+backup.rs の冒頭の「残骸の削除は MANIFEST を据える前」と docs/mop/BACKUP.md の同じ規則・戻し方・写し先の形は、
+この形へ改める(S1c で一緒に直す文書)。install の確認(`verify_copy`)も `current` の指す世代を検める。
 
 ## 外から見える形
 
@@ -711,26 +794,56 @@ MANIFEST を据える前」と docs/mop/BACKUP.md の同じ規則は、この順
   `Invalid` で早く戻った後の shutdown は待たずに `Clean` を書く。書き込みの番を持ったまま(注入で)パニック
   させた serve に SIGTERM を送ると、待ち続けずに印を残して 1 で終わる(第 18 版への Codex のレビューの高 1、
   Claude のレビューの中 3)。
+- 閉じる要求の後の流入: 複数のスレッドから書き込み(put)を絶えず送り続けている serve に shutdown と SIGTERM を
+  送ると、期限の内(例 5 秒)に `Clean` を書いて終わり、旗の後に取ろうとした外側の番は 503 で断られ、既に持って
+  いる番の中の入れ子(封印の `write_manifest`)は断られない(第 19 版への Codex のレビューの中 3)。
+- 開く途中のパニック: 開く道の中で(注入で)パニックさせると、`OpeningGuard` の Drop が `open_failed` を立てて
+  旗を降ろし、待っていた終わり方が SIGKILL を待たずに印を残して 1 で終わる(第 19 版への Claude のレビューの低 12)。
 - 終わり方の 2 度呼び: shutdown の直後に SIGTERM を送る形と、シグナルの閉じ方の最中に Drop が走る形で、印の
   `pwrite` が 1 回だけで、終了コードが 1 つに決まる。`write_failure` があるとき、どちらの順でも終了コードは 1
   (第 18 版への Claude のレビューの低 10)。
 - 親の無い道を渡した serve が理由を言って終わり、データのディレクトリも `logs/` も作られない(第 17 版への
   Claude のレビューの中 3)。
 - backup が、写し元の印が `Io`・検めを通らない・持ち主の無い同じ boot_id の `Running` のとき、持ち主が
-  `hold` で答えるとき、答えの nonce が印と食い違うときに、理由を言って終了コード 1 で終え、写し先の
-  ファイル(packs/・reflog/・MANIFEST・設定)のバイト列と一覧が前と同じである。serve が動いている(その serve が
-  書いた `Running`)ときと `Clean` のときは写す(第 17 版への Claude のレビューの中 4)。
+  `hold` か `opening` で答えるとき、答えの nonce が印と食い違うとき、写す範囲の reflog が写し先の現在の世代より
+  短いときに、理由を言って終了コード 1 で終え、写し先(`current` の指す先と、その世代のファイルのバイト列と
+  一覧)が前と同じである。serve が動いている(その serve が書いた `Running`)ときと `Clean` のときは写す(第 17 版への
+  Claude のレビューの中 4)。`opening` は、serve の recover の最中(注入で止める)に backup を走らせて確かめ、答えに
+  境界が無いことも見る(第 19 版への Claude のレビューの高 1)。
+- 持ち主が `write` で `write_failure` が NoSpace のとき、印が同じ pid・nonce の `NoSpace`(印の更新が成功した形)でも
+  `Running`(印の更新の失敗を注入して残した形)でも写し、別の nonce の `NoSpace` なら断る(第 19 版への Codex の
+  レビューの中 4、Claude のレビューの低 5)。
+- backup の印の読みと書き手の `pwrite` を重ねる(debug の口で、読みの 1 度目にだけ裂けた中身を返させる)と、1 度の
+  読み直しで検めを通り、2 度とも裂けていれば検めを通らない印として扱う(第 19 版への Claude のレビューの低 11)。
 - serve がレコードを書き終えて sync の手前で止まる(注入)間に backup を走らせると、写しはそのレコードを含まず
   (答えの境界の手前まで)、その後に sync の失敗を注入して切り詰めさせても、写しと写し元の再生が同じ seq で
   割れない(第 18 版への Codex のレビューの高 2)。
 - 持ち主の無いストアで、backup の写しの途中(注入で止める)に書く CLI が開いて閉じると、backup は印の変化を
   見てその回を採らず、写し先は前と同じである。
-- stage の検めの後・公開の前(注入で止める)に断らせると、写し先は前と同じ。公開の途中(セグメントの rename の
-  後、MANIFEST の前)と、MANIFEST の後・古い pack の削除の前で abort させても、写し先は開けて fsck が通り、
-  前回か今回の MANIFEST が指すオブジェクトが全部読める(第 18 版への Codex のレビューの高 3、Claude の中 2)。
+- stage の検めの後・公開の前(注入で止める)に断らせると、写し先は前と同じ。公開の各段(stage の `gens/` への
+  rename の後、`current` の rename の後・古い世代の削除の前、古い世代の削除の途中)で abort させても、`current` の
+  指す世代を写して開くと fsck が通り、前回か今回の答えの ref から辿れるオブジェクトが全部読める。前回が
+  「封印済み {1}、アクティブ 2」で、今回 1 回の間に封印が 2 本以上進んだ形(「封印済み {1,2,3}、アクティブ 4」)と、
+  写し元で GC が走って新 pack ができた形の両方で試し、前回のアクティブだった pack 2 の中身が、どの停止点の後も
+  読めることを見る(第 19 版への Codex のレビューの高 1、Claude のレビューの高 2)。次の回の backup が、残った
+  stage と世代を片付けてから写す(第 19 版への Claude のレビューの低 7)。
+- 写し先の排他: 境界の違う 2 つの backup を同じ写し先へ並べて走らせる(1 つ目を段取りの途中で止める注入)と、
+  2 つ目は写し先のロックを取れずに何も触らず理由を言って 1 で終え、1 つ目の公開の後の `current` の世代が完全で
+  ある。写し先をストアとして開いたプロセスがいる間も backup は断る(第 19 版への Codex のレビューの高 2、Claude の
+  レビューの中 3)。
+- hard link: 写し先の現在の世代の MANIFEST で封印済みで長さが同じ pack は link で入り(inode が同じ)、前回の
+  アクティブの pack と長さの違う pack は写される。`link` の `EPERM` を注入すると写す形に倒れて backup が通る
+  (第 19 版への Claude のレビューの低 6)。S1c より前の平らな形の写し先に初めて走らせると、世代の形へ移り、
+  切り替えの後に平らな形の残骸が消える。
 - ロックの socket に 1,000 本繋いで閉じる(読まない)接続を送った後も、backup の照会と install のロックの探りが
   期限の内に答えを得る。accept しない相手(注入で輪を止める)への照会は 5 秒の期限で理由を言って終わる。
-  `SO_PEERCRED` の uid が違う相手には断る(第 18 版への Codex のレビューの中 5、Claude のレビューの低 11)。
+  debug の口で照会する側の期待する uid を差し替えると、`SO_PEERCRED` の uid が違う相手として断り、輪の側の
+  「自分の euid」を差し替えると、輪は答えを書かずに閉じる。答えの pid が `SO_PEERCRED` の pid と違う形(debug の
+  口で答えの pid を偽らせる)も断る(第 18 版への Codex のレビューの中 5、Claude のレビューの低 11、第 19 版への
+  Claude のレビューの低 8・低 13)。
+- ロックを放すと、輪のスレッドが期限の内(例 1 秒)に終わって join が返り、同じ名をすぐ束縛し直せる(輪が
+  accept で塞がっている間に放す形を含む。第 19 版への Claude のレビューの低 10)。印の `fdatasync` の間(注入で
+  遅らせる)に照会しても、答えは期限の内に返る(第 19 版への Claude のレビューの低 9)。
 - shutdown の応答を受け取った時点で、印が `Clean` で永続している(応答を書く前に `fdatasync` が済んだ
   ことを数える口で見る)。`write_failure` があれば本文が `"marker":"left"` と理由を言う(第 14 版への
   Claude のレビューの低 7)。
@@ -739,13 +852,17 @@ MANIFEST を据える前」と docs/mop/BACKUP.md の同じ規則は、この順
   打つと、理由(旧い名の unit が残っていて、共有のバイナリを差し替えると旧い serve の次の起動が新しい
   バイナリを旧い unit で走らせる)と docs/mop/SYSTEMD.md の「旧い名の unit から移る」を言って断り、据え先の
   バイナリのバイト列と mtime が前と同じである。旧い名が無ければ据わる。この試験は、この直しを含む段
-  (API_AUTH の A1 か S1 のうち先に入る方)の完了条件にする。
+  (API_AUTH の A1 か S1a のうち先に入る方)の完了条件にする。
 
 ## 段取り
 
 | 段 | 中身 | 大きさ |
 |---|---|---|
-| S1 | `append_durable` と包みへの寄せ、新しいセグメントのディレクトリの sync、`WriteFailure` と `WritesDisabled`、fstat と切り詰めの試み、封印と `gc_commit` の順の入れ替え、GC の D の packs/ の sync の失敗を書けない状態へ、`atomic_write` の tmp 名、周期的な書き手の飛ばし、export の絞り、注入、HTTP と MCP の 503、status と健全性の欄、`open-marker`(固定長・CRC・boot_id)と開く道の 2 分岐、読むだけの走査の関数と「命令ごとの開き方」の表のとおりの付け替え、保留の serve の複製の口の 503、release-hold の CLI、無事な終わり方の関数と 1 つの終わり方への寄せ、`CloseHandle`(閉じる手綱。書き込みの番の数え値と RAII、`open_failed`・`poisoned`、終わり方の 2 度呼びと `finish` の `Once`)、Store の Drop(`wrote_running` のときだけ)、SIGTERM と SIGINT の受け取り(`extern "C"`。受ける輪と閉じる役の分離)と終了コード、GC の D の sync をストアのロックの中へ、ログを開く前のデータのディレクトリの検めと log.rs の `create_dir_all` の撤去、印の nonce、ロックの socket の accept の輪と永続化済みの境界の答え、backup の境界までの写しと写し先の tmp/ の stage・検め・公開の後の削除、serve の束縛と A1・A2 の起動時の断りを開くより前へ、unit の ExecStop(system と user の `uniqnode-serve@.service`)、install の経路の 1 つずつの `mkdir` と根までの sync、`node_key` の tmp(`create_new`・0600・sync・rename)、テスト、SPEC §5(永続化)への 1 段落 | M |
+| S1a | `append_durable` と包みへの寄せ、新しいセグメントのディレクトリの sync、`WriteFailure` と `WritesDisabled`、fstat と切り詰めの試み、封印と `gc_commit` の順の入れ替え、GC の D の packs/ の sync の失敗を書けない状態へ、`atomic_write` の tmp 名、周期的な書き手の飛ばし、export の絞り、注入、HTTP と MCP の 503(`POST /v1/sync` の入口の判定、query と rendition の扱いを含む)、status と健全性の欄、ログを開く前のデータのディレクトリの検めと log.rs の `create_dir_all` の撤去、install の経路の 1 つずつの `mkdir` と根までの sync、`node_key` の tmp(`create_new`・0600・sync・rename)、1a の開くときの sync、install の断り(旧い名の unit が残る間の共有のバイナリの差し替え。API_AUTH の A1 より先に入るなら)、テスト、SPEC §5(永続化)への 1 段落 | M |
+| S1b | `open-marker`(固定長・CRC・boot_id・nonce)と開く道の 2 分岐、読むだけの走査の関数と「命令ごとの開き方」の表のとおりの付け替え、保留の serve の複製の口の 503、release-hold の CLI、無事な終わり方の関数と 1 つの終わり方への寄せ、`CloseHandle`(閉じる手綱。書き込みの番の数え値と RAII、閉じる要求で外側の番を閉める、`OpeningGuard`、`open_failed`・`poisoned`、終わり方の 2 度呼びと `finish` の `Once`)、Store の Drop(`wrote_running` のときだけ)、SIGTERM と SIGINT の受け取り(`extern "C"`。受ける輪と閉じる役の分離)と終了コード、GC の D の sync をストアのロックの中へ、serve の束縛と A1・A2 の起動時の断りを開くより前へ、unit の ExecStop(system と user の `uniqnode-serve@.service`)、backup の `not_copied` の `open-marker`、テスト | L |
+| S1c | ロックの socket の accept の輪(`poll` と起こし用の対、`SO_PEERCRED` の uid の絞り)と答えの写しの `Mutex`、`opening` と開き終えた後の永続化済みの境界、backup の照会(期限、uid と pid の検め)と境界までの写し、写し先より短い reflog の断り、写し先のロック、世代のディレクトリと `current` の切り替え・hard link の条件・片付け、印の読み直し、テスト | M |
+
+段ごとのゲート(第 19 版への Claude のレビューの中 4。第 19 版は S1 を 1 段の M としていたが、中身は L〜XL だった): 各段は、上の完了条件のうち自分の中身に当たる項目の試験と `cargo test` の全体が緑で、その段の差分へのレビューで高の指摘が無いと確かめてから main に入れる。S1a のゲートは、印にも終わり方にも backup にも依らない項目である: 注入の各種で失敗した要求が 5xx・以後が 503・読み出しが続くこと、応答済みの書き込みが開き直した後に消えないこと、`sync-keep` と export の絞り、pack の `torn` の後の読み出し、封印と `gc_commit` への `manifest`・`manifest-dirsync`、GC の B・D の失敗の扱い、kind の分けと 503 の本文と `POST /v1/sync`、複製の受け側、最初の要求の 503、install の経路の sync(中断からの再実行を含む)、query と rendition、親の無い道、install の断り。印を要る項目(「kind が Io の状態で serve だけを起こし直す」「`crash-before-dirsync` の後に同じ boot_id で開く」「開き直したときの `writes_disabled` は、読み直した印で分かれる」など)は S1b のゲートに入る。S1b のゲートは印・保留・複製の口・終わり方・シグナル・書き込みの番・閉じる要求・開く途中・2 度呼び・shutdown の応答・GC の D の競合・読むだけの走査の項目。S1c のゲートは backup の項目(写し元の検め、境界、NoSpace の印、印の読み直し、公開の各段の停止点、写し先の排他、hard link、ロックの socket の照会と輪の止め方)である。S1a だけの間は、書けない状態がプロセスの中でしか続かない(serve の再起動で書き込みが戻る。欠陥 9 の形は S1b まで残る)ので、本番への反映は S1a〜S1c が揃ってから 1 回で行う。
 
 S1 で一緒に直す文書(第 14 版への Claude のレビューの低 3): 配る unit のコメント「書き込み途中で
 裂かれていても fsck なしで回復する(node/tests/crash.rs)」(docs/mop/systemd/system/uniqnode-serve@.service
@@ -754,9 +871,14 @@ S1 で一緒に直す文書(第 14 版への Claude のレビューの低 3): �
 restart の説明、保留と release-hold の案内)、backup の `not_copied`(backup.rs の 285 行付近。
 `open-marker` は写さない既知の名として扱い、毎回「知らない名前」に出さない)、backup.rs の冒頭の
 コメントと docs/mop/BACKUP.md の「残骸の削除は MANIFEST を据える前」「ロックを取らない」(backup の写し元の検めの
-(1)〜(3) の順と、持ち主への照会へ。第 18 版への Codex と Claude のレビュー)。
+(1)〜(3) の順と、持ち主への照会へ。第 18 版への Codex と Claude のレビュー)、docs/mop/BACKUP.md の写し先の形と
+戻し方(`current` の指す世代を写して戻す。第 19 版への Codex と Claude のレビュー)、docs/mop/SYSTEMD.md の「構成」の
+表の backup の行(30 行付近の「取らない(写し先のロックだけを検証の間)」を、写し元のロックは取らずに持ち主へ
+照会し、写し先のロックは backup の全体で持つ、へ。第 19 版への Claude のレビューの低 14)と、その下の「ロックを
+取らないので serve が走っていても止まっていても同じ写しが取れる」。S1a・S1b・S1c のどの段の文書かは、各々の
+中身に従う(unit と SYSTEMD.md の停止・更新・保留の案内は S1b、backup の文書は S1c)。
 
-S1 はレビューで高の指摘が無いと確かめてから入る。FEED の F2 は S1 を前提にする。
+S1(S1a〜S1c の総称)は、段ごとに上のゲートを通してから入る。FEED の F2 は S1 の全体を前提にする。
 
 本番への反映の前提(第 14 版への Claude のレビューの中 5): vega の主のストアの serve は、今も旧い名の
 unit `uniqnode-serve.service`(と `uniqnode-viewer.service`・`uniqnode-backup.timer`)で動いている
@@ -777,5 +899,5 @@ graph_a・graph_b の `uniqnode-serve@graph_*.service` は、同じ /home/hikali
 無く主の口が全部 403)。vega では、どのインスタンスの install も `@default` への移行の後に打つ。加えて、
 install は据え先に旧い名の unit が残っている間は、インスタンスに依らず共有のバイナリの差し替えを断る
 (理由と docs/mop/SYSTEMD.md の「旧い名の unit から移る」を言う)ように直す。これは API_AUTH の A1 と
-この S1 のうち先に入る方に含め、完了条件の「install の断り」の試験で閉じる(第 18 版への Claude のレビューの
+この S1a のうち先に入る方に含め、完了条件の「install の断り」の試験で閉じる(第 18 版への Claude のレビューの
 中 5)。

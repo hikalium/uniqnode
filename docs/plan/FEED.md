@@ -8,9 +8,10 @@
 実装に入る。経緯と他の案は [docs/plan/LAMALIUM.md](#68571059-94ed-4aa2-8ae0-b2862d1de44e) の
 「L4 で要るもの」。
 
-版: 第 4 版(2026-10-01)。第 1 版(004c305)への Codex のレビュー(H1・H2・M1〜M3)と Claude の
+版: 第 5 版(2026-10-01)。第 1 版(004c305)への Codex のレビュー(H1・H2・M1〜M3)と Claude の
 レビュー(1〜14)、第 2 版(708bcdc)への再レビュー(Codex H1a・H1b・M4、Claude N1〜N10)、
-第 3 版(6bb36c9)への再レビュー(Codex M1・L1、Claude A〜G と N7)を取り込んだ。ストア全体の
+第 3 版(6bb36c9)への再レビュー(Codex M1・L1、Claude A〜G と N7)、第 4 版(db7fae6)への再確認
+(Codex の rollback の高、Claude N-1〜N-5)を取り込んだ。ストア全体の
 「書けない」状態は [docs/plan/APPEND_FAILURE.md](#d973833f-4e2b-4fc8-8a49-42f6821b6a7a) に分け、
 この文書はそれを前提にする。各節の末尾の括弧に、どの指摘への答えかを書く。
 
@@ -83,7 +84,9 @@ name, state)`)に置く。見えないのは次のどれかに当たるもので
   なる」でも、`collections/` の ref が変わらないまま世代が変わり、温まった索引とベクトルが作り
   直される。ストアの変更のたびに捨てる必要は無い(束縛が変わったときだけ)。
 - 文書の読み出しと全文(`full`)、`GET /v1/objects/{id}` と出典(citation)の、出所の
-  コレクションを引く道(読み口の `screen` を含む)。隠れている c に属するものは 503。
+  コレクションを引く道(読み口の `screen` を含む)。出所の引き当ては見える ref だけから行う。
+  同じチャンクが見えるコレクションの文書からも引かれていれば、そちらを出所として答える。見える
+  出所が 1 つも無く、隠れている c の ref にだけ属するときに 503(Claude N-5)。
 - c を名指した検索は 503(本文に「collection c hidden: publish pending」と理由)。c を名指さない
   検索は c を落として答え、応答の `degraded` に同じ理由を載せる(黙って落とさない。must/0022)。
 
@@ -298,11 +301,14 @@ serve はストアのロックを 1 回取り、その中で次を順に行う�
    ref `feeds/<c>/pending` を張る。ここから先が下の「失敗の境界」の書き込みの段である。previous を `s256:` の
    無い形にするのは 2 の doc_rev と同じ理由で、公開中の manifest から過去の manifest とその
    doc_rev が gc に辿られないようにするため(Claude 8)。
-7. 名前ごとに `collections/<c>/<name>` を張る(今の target と同じなら書かない)。base にあって
-   documents に無い名前は tombstone する(消去。改名は新しい名の張りと古い名の tombstone
-   として、ここで同時に起きる)。
-8. `feeds/<c>/published` を manifest に張り、`feeds/<c>/allow_shrink` が在れば tombstone し、
-   最後に `feeds/<c>/pending` を tombstone する。ここで初めて「前回送った名前の一覧」が新しくなり
+7. 名前ごとに `collections/<c>/<name>` を manifest の doc_rev に張る。c の自分の署名の ref のうち
+   manifest の documents に無い名前は tombstone する(消去。改名は新しい名の張りと古い名の
+   tombstone として、ここで同時に起きる)。どちらも今の target と同じなら書かない(tombstone 済みの
+   名前をもう一度 tombstone しない)。消す相手を「base にあって documents に無い名前」ではなく
+   「c に今在る名前のうち manifest に無いもの」で決めるので、7 の途中で止まった公開の後に別の
+   manifest(下の rollback)へ前進しても、途中で張られた新しい名前が残らない(Claude N-2)。
+8. `feeds/<c>/published` を manifest に張り(今の target と同じなら書かない)、
+   `feeds/<c>/allow_shrink` が在れば tombstone し、最後に `feeds/<c>/pending` を tombstone する。ここで初めて「前回送った名前の一覧」が新しくなり
    (規律 2)、c が再び見える。
 9. ロックを放してから索引の温めに合図する。
 
@@ -337,7 +343,8 @@ sync まで成功した分しか進まないので、ディスクとは結果不
 2. 書けない状態の理由は、/v1/status と `GET /v1/feeds/{c}` の `writes_disabled`、feed の各口の
    503 の本文に載せる(lamalium のツールがそのまま見せられるように。Claude G)。
 
-前進(pending の manifest に従って 7・8 を最後までやる)は 1 つの関数に置き、ストアを開く共通の
+前進(pending の manifest に従って 7・8 を最後までやる。pending が rollback で差し替えられて
+いれば、その巻き戻し先へ張る)は 1 つの関数に置き、ストアを開く共通の
 道(serve・mcp・CLI が通る `Store::open` の直後の 1 箇所)で呼ぶ。加えて commit・edit・GET の
 先頭(ロックの中)でも呼ぶ。7 は「今の target と同じなら書かない」ので、何度呼んでも同じ
 結果になる。前進が失敗したとき(書き込みの失敗なら上の規則で書けない状態に入る。manifest が
@@ -351,15 +358,28 @@ commit・edit・GET のたびに行う(Claude N2)。CLI は前進に失敗した
 開き直しても見えないままになる。そのための逃げ道を主の口にだけ置く(Claude A):
 `POST /v1/feeds/{c}/rollback {"pending":"<今の pending の manifest>","to":"published"|"empty"}`。
 
-- 前進を先に呼ばない(commit・edit・GET と違う)。`pending` が今の pending の target と違えば 409。
-- `to:"published"`: 公開中の manifest を読み、その documents の名前を manifest の doc_rev に張り
-  直し(今の target と同じなら書かない)、c の自分の署名の ref のうち manifest に無い名前を
-  tombstone し、最後に pending を tombstone する。公開中の manifest が読めなければ 409 で、
-  理由に「to:empty を使う」と書く。
-- `to:"empty"`: c の自分の署名の ref を全部 tombstone し、`feeds/<c>/published` を tombstone し、
-  最後に pending を tombstone する(次の run は最初の公開になる)。
-- 巻き戻しも 1 本ずつ書くので、途中で失敗すれば pending が残って c は見えないまま、もう一度
-  打てばよい(同じ結果になる)。書けない状態なら 503。
+巻き戻しは、pending を「巻き戻し先の manifest」に 1 本の ref の書き込みで差し替えることで行う。
+差し替えた後は、ふつうの前進(7・8)がその manifest へ張り切る。巻き戻しの意図が最初の 1 本で
+ディスクに残るので、途中で止まっても、起動時の前進を含むどの入口も同じ巻き戻し先へ収束する
+(元の pending を張り直して公開してしまうことは無い。Codex の高)。
+
+1. ロックを取る。前進を先に呼ばない(commit・edit・GET と違う)。`pending` が今の pending の target
+   と違えば 409。書けない状態なら 503。
+2. 巻き戻し先の manifest を決める。
+   - `to:"published"`: 公開中の manifest(`feeds/<c>/published` の target)そのもの。published の
+     target が null(最初の公開が途中で止まった)なら 409 で、理由に「to:empty を使う」と書く
+     (Claude N-2)。その manifest が読めないときも同じ 409。
+   - `to:"empty"`: 新しい manifest `{"v":1,"kind":"feed_manifest","collection":c,"commit":null,
+     "edit":true,"rollback":true,"previous":<公開中の manifest の 16 進か無し>,
+     "documents":{}}` を置く。前進が終わると、これが公開中の manifest になる。c は管理下のまま
+     空になり、次の run は空の base に対するふつうの run になる(消える名前が無いので縮みの歯止めは
+     掛からない)。commit を null にするのは、送り手が「公開中の commit が自分の run のもので edit が
+     true なら完了」(Claude N5)と読んで、次のコミットまで空のままにしないためである。管理下から外したいときは、その後に retire を打つ(Claude N-1)。
+3. `feeds/<c>/pending` を 2 の manifest に張る(差し替え)。ここが巻き戻しの確定点である。
+4. 7・8 と同じ前進の関数を呼ぶ。8 で allow_shrink も tombstone される。
+5. 応答は commit の 3 と同じ形に `"rollback":"published"|"empty"` を足す。3 の前に失敗すれば結果は
+   元の pending のまま(起動時の前進で元の公開が完了しうる)で、3 の後に失敗すれば巻き戻し先へ
+   収束する。どちらかは GET の `published` と `pending` で分かる。
 
 「c が見えない」状態は health.rs の健全性の集計にも載せ、見えなくなった遷移で ALERT を 1 度、
 見えるようになった遷移で解消を 1 度記録する(should/0129)。
@@ -465,5 +485,13 @@ F2 の完了条件(テストで固定する):
   それぞれが 503 と理由を返し、c を名指さない検索は c を落として `degraded` に理由を載せる。
 - 前進を失敗させ続ける(pending の manifest を読めなくする)と、開き直しても c は見えず、健全性の
   ALERT が 1 度だけ記録される。rollback の to:published で前の公開が見え、to:empty で c が空になり、
-  どちらも解消が 1 度記録される。rollback の途中で失敗させても、もう一度打てば同じ結果になる。
+  どちらも解消が 1 度記録される。
+- rollback の各境界(pending の差し替えの前と後、7 の各 ref、published、pending の tombstone)で
+  プロセスを止めて開き直すと、差し替えの前なら元の pending へ、後なら指定した巻き戻し先へ収束する。
+  最初の公開が途中で止まったときの to:published は 409、to:empty の後の c は管理下のまま空で、次の
+  run が通る。rollback を 2 度打っても、reflog のレコードは 2 度目に増えない。
+- 公開の 7 の途中で止め、rollback の to:published で前進すると、途中で張られた新しい名前も
+  tombstone される。
+- 見えるコレクションの文書と、隠れている c の文書が同じチャンクを持つとき、そのチャンクの
+  `GET /v1/objects/{id}` と出典は見える方を出所として 200 を返す。
 - retire は tombstone の残った c でも効き(判定は target が null でないか)、allow_shrink も消す。

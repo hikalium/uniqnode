@@ -77,6 +77,9 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      C-2 の後に C-3 が失敗したら、新 pack は packs/ に在るが MANIFEST に無い形で残り、2 により
      書けない状態に入る(次の起動の recover が、MANIFEST に無い新 pack の扱いを今の規則で決める)。
      `active_pack_number` を新 pack の次へ進めるのも C-3 の成功の後にする。
+   - GC の D(確定の後、ロックの外で古い pack と参照表を消す。gc.rs の 681〜699 行付近)も、この
+     判定の外に置く。消すのに失敗しても、MANIFEST に無い古い pack は次の起動の recover が残骸として
+     消すので、その GC の実行が誤りで終わるだけでよい(FEED 第 4 版の再確認の Claude N-3)。
    - GC の B(PackWriter の tmp/ への書き込み)は、この判定の外に置く。tmp の書き込みの失敗は
      どこからも参照されず、GC が誤りで終わって tmp を消すだけで済む(今の gc.rs の 572 行付近の
      扱い)。ロックも取らない。ただし B の後の `gc_commit` の先頭で `write_failure` を見る(B の間に
@@ -154,7 +157,7 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
 - `manifest` を封印に掛けると、メモリの `sealed_packs` が進まず、書けない状態に入り、開き直した
   ストアが一貫している。`gc_commit` の C-2 の後と C-3 に掛けても、開き直した後に失われる
   オブジェクトが無い(tests/gc_crash.rs と同じ検め方)。
-- GC の B の途中の tmp の書き込みの失敗は、書けない状態を立てない。
+- GC の B の途中の tmp の書き込みの失敗と、D の削除の失敗は、書けない状態を立てない。
 - 開き直すと `writes_disabled` は null に戻る。
 
 ## 段取り

@@ -2,7 +2,7 @@
 
 <a id="abde9b3c-75f8-453b-988e-bfb1e178c771"></a>
 
-版: 第 11 版(2026-10-01)。第 10 版(b4f026c)への Claude のレビュー(中 1: 起動時の断りをストアを開く前に、中 5: 旧い名の
+版: 第 12 版(2026-10-01)。第 11 版への Codex と Claude のレビュー(Codex 中 5: fetch の curl が curlrc と proxy の環境を継ぐ、Claude 中 5: vega で共有するバイナリと旧い名の unit、低 4: 転送の段をまたぐ予算と自分の LAN のアドレス、低 9: 読み捨ての枠の数)を取り込んだ。第 11 版(2026-10-01)。第 10 版(b4f026c)への Claude のレビュー(中 1: 起動時の断りをストアを開く前に、中 5: 旧い名の
 unit からの移行を A2 の本番への反映の前提に、中 6: 判定の枠を 403 の読み捨てから切り離す、低 5: fetch の転送先、低 9: ストアの
 ロックの横取り)を取り込んだ。第 10 版(2026-10-01)。第 9 版(98e4b0c)への vega の Codex の再レビュー(中: overflowuid)を取り込んだ。第 8 版(601ae81)への vega の Codex の再レビュー(中: unit の
 RestrictAddressFamilies に AF_NETLINK が無い、低: 節の見出し)を取り込んだ。第 7 版(b398d42)への vega の Codex の再レビュー(中: install の起動の確認、
@@ -99,7 +99,7 @@ distributed_search.rs の 185 行付近)。署名された要求者に対する�
     なりうる。守るのは「要求は実行されず、期限の内に閉じ、判定の枠が戻る」ことで、403 が届くのは
     小さな通常の要求についてである(crystal の Claude 低、第 7 版への Codex の再レビューの低)。
     この読み捨ては判定の枠の外で行う(第 10 版への Claude のレビューの中 6)。判定の枠は、照会の答えで
-    許すか断るかが決まった時点で返す。断る接続は、上限つきの別の枠(例 8)を待たずに取れたときだけ
+    許すか断るかが決まった時点で返す。断る接続は、上限つきの別の枠(8)を待たずに取れたときだけ
     読み捨てと 403 を行い、取れなければ 403 を書かずにその場で閉じる。第 10 版までの形では、403 の
     読み捨てが最大 100 ms と 1 秒のあいだ判定の枠を持ち続けるので、同じ機械の別の uid が毎秒 15 本
     ほど繋ぐだけで 16 の枠が全部塞がり、操作者の MCP・CLI も ExecStop の shutdown も判定に入れなく
@@ -249,6 +249,20 @@ serve と同じ uid で主の口に繋ぐので、A2 の uid の判定もブラ�
 リンクローカル(`169.254.0.0/16`・`fe80::/10`)・unspecified・IPv4 射影のそれらなら理由を言って断る。
 確かめたアドレスを curl の `--resolve <host>:<port>:<addr>` で固定して繋がせ、確かめてから繋ぐまでの
 間の名前の差し替え(DNS rebinding)で別の先へ行かないようにする。最初の URL にも同じ判定を当てる。
+curl の設定の継承を断つ(第 11 版への Codex のレビューの中 5): 今の起動(fetch.rs の 173 行付近)は環境と
+既定の curlrc を継ぐので、引数から `--location` を除いても curlrc の `location` で転送を辿りうる。また
+proxy を通すと名前解決は proxy がするので、`--resolve` で接続先を固定できない。そこで curl の先頭の引数を
+`-q`(curlrc を読まない。先頭に置かないと効かない)にし、`--noproxy '*'` を渡し、子の環境から
+`http_proxy`・`https_proxy`・`HTTPS_PROXY`・`all_proxy`・`ALL_PROXY`・`no_proxy`・`NO_PROXY` を消す
+(`HTTP_PROXY` の大文字は curl が読まないが、同じく消す)。
+段をまたぐ予算(第 11 版への Claude のレビューの低 4): 1 段ずつ curl を起こすと、段ごとの `--max-time` と
+`--max-filesize` が転送の数だけ掛け算になる。取得の全体の期限と全体の受け取りの上限を最初に決め、各段には
+残りの時間(期限までの秒)と残りのバイト数を渡し、使い切ったら理由を言って断る。
+残る穴(第 11 版への Claude のレビューの低 4): この判定はループバックとリンクローカルだけを断るので、
+serve の機械自身の LAN・wg1 のアドレス(例えば vega の viewer の 10.10.128.1:7450)への転送は通る。viewer は
+許可表の無い全読みの転送なので、外のページがそこへ転送すれば、主の口と同じ中身が文書としてコレクションに
+入る。これは viewer の許可表(A3)の課題として扱い、A3 を詰めるときに、fetch が自分の機械のアドレス
+(束縛している待ち受けのアドレスと、自分のインタフェースのアドレス)を断るかを一緒に決める。
 
 採らない案 B(主の口に固定トークン): uniqnode の利用者の 0600 のファイルに置けば別の uid と
 ブラウザからは守れるが、同じことは uid の制限とブラウザの門で、MCP・CLI・viewer・install の
@@ -325,6 +339,10 @@ serve と同じ uid で主の口に繋ぐので、A2 の uid の判定もブラ�
 - fetch が、ループバックとリンクローカルへの転送(`http://127.0.0.1:<port>/…`、`http://[::1]/…`、
   `169.254.169.254`、ループバックへ解決する名前)と、それらを直に指す最初の URL を理由を言って断り、
   外への普通の転送は辿る(第 10 版への Claude のレビューの低 5)。
+- fetch が、`location` と `proxy` を書いた curlrc を置いた HOME と、`http_proxy`・`https_proxy`・
+  `ALL_PROXY` を立てた環境の下でも、ループバックへの転送を断り、proxy を通らずに `--resolve` で固定した
+  先へ繋ぐ(第 11 版への Codex のレビューの中 5)。転送を重ねても、全体の期限と受け取りの上限を超えない
+  (第 11 版への Claude のレビューの低 4)。
 - root で走る system の install の起動の確認が、root の直接の接続は断る serve に対して通る。
 - `--main-allow-uid` に overflowuid を入れた serve が理由を言って起動を断り、写せない uid の接続が 403 になる。
 - 実際の unit の制限の下(install で据え付けた serve)で、許す uid の接続が通り、許さない uid は断られ、
@@ -342,10 +360,10 @@ serve と同じ uid で主の口に繋ぐので、A2 の uid の判定もブラ�
 
 | 段 | 中身 | 大きさ |
 |---|---|---|
-| A1 | serve と install の束縛の検査、http.rs のブラウザの門(Host・Origin・Content-Type)、node/tests の共通の口、SPEC と design の書き直し | M |
+| A1 | serve と install の束縛の検査、http.rs のブラウザの門(Host・Origin・Content-Type)、node/tests の共通の口、SPEC と design の書き直し。APPEND_FAILURE の S1 より先に入るなら、install が旧い名の unit の残る間は共有のバイナリの差し替えを断る直しも含める(下の「A2 の本番への反映の前提」) | M |
 | A2 | serve の中の uid の判定(sock_diag の 1 件の照会、`--main-allow-uid`) | S |
 | A4 | 読み口の、出所を示せないチャンクの拒否 | S |
-| A5 | fetch の転送を自分で辿り、ループバックとリンクローカルを断る(5) | S |
+| A5 | fetch の転送を自分で辿り、ループバックとリンクローカルを断る。curl の `-q`・`--noproxy '*'`・proxy の環境の消去、段をまたぐ予算(5) | S |
 | A3 | viewer の許可表(agent_door.rs の判定の共用、`--viewer-collections`)。本番の値は操作者の答え 1 で決める | M |
 
 A1・A2・A4・A5 はレビューで高の指摘が無いと確かめてから入る。A3 は操作者の確認の後に設計を詰める。
@@ -363,3 +381,13 @@ A2 の本番への反映の前提(第 10 版への Claude のレビューの中 
 止まる)。A2 を本番へ入れる前に、docs/mop/SYSTEMD.md の「旧い名の unit から移る」で
 `uniqnode-serve@default` ほかへ移す。APPEND_FAILURE の S1 も同じ移行を前提にするので、1 回の移行で
 両方の前提を満たす。
+
+vega のバイナリの共有(第 11 版への Claude のレビューの中 5): 旧い `uniqnode-serve.service` と graph_a・
+graph_b の serve は同じ /home/hikalium/.local/bin/uniqnode を走らせる(2026-10-01 に /etc/systemd/system/ の
+drop-in の ExecStart= で確かめた)。install は既定でないインスタンスを据えるとき、旧い名を「取り合わない」
+として残したまま進み(install.rs の 2087〜2096 行付近)、共有のバイナリを差し替える。A2 のバイナリで
+graph_* を据え直すと、旧い serve の次の起動(restart・再起動)が AF_NETLINK の無い unit でそれを走らせ、
+主の口の全ての接続が 403 になる。vega では、どのインスタンスの install も `@default` への移行の後に打つ
+(docs/mop/SYSTEMD.md の「旧い名の unit から移る」の注意)。加えて、install は据え先に旧い名の unit が
+残っている間は、インスタンスに依らず共有のバイナリの差し替えを断るように直す(A1 か S1 のうち先に入る
+方に含める)。

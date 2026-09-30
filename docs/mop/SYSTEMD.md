@@ -239,20 +239,55 @@ graph_a・graph_b は既に `@` の名)。install は既定のインスタンス
   agent-door.nft.bak-20260929 は手で足す前の写しで、一緒に消える。
 - `uniqnode-viewer.service.d/override.conf`: viewer の 0.0.0.0:7450。install の `--viewer-listen` が持つ。
 - `uniqnode-backup.service.d/override.conf`: 写し先 /home/hikalium/uniqnode-backup(名の付かない道)。
-  install を打ち直すと既定が /home/hikalium/uniqnode-backup/default に移り、初回は全件の写しになる
-  (下の「2 つ目のストアを同じ機械で」)。増分を続けたければ、install の行に
-  `--backup-dir /home/hikalium/uniqnode-backup` を足す。
+  install の写し先の既定は /home/hikalium/uniqnode-backup/default で、そのままでは初回が全件の写しに
+  なる(下の「2 つ目のストアを同じ機械で」)。増分を続けるため、下の「user 単位から移る」の install の行は
+  `--backup-dir /home/hikalium/uniqnode-backup` を持つ。
 
 外す命令は vega で打つ。sudo を使えるどの利用者がどこから貼っても同じに動く。止めて外す行は install の
-断りが添える命令と同じ字句(install.rs の `legacy_units_removal_command`。must/0023)で、その前に今の
-unit と drop-in の写しを /var/tmp に残す:
+断りが添える命令と同じ字句(install.rs の `legacy_units_removal_command`。must/0023。node/tests/repo_hygiene.rs
+がこの文書に同じ字句があることを確かめる)で、その前に次を行う(第 17 版の APPEND_FAILURE への Codex と
+Claude のレビュー):
+
+- 旧い timer を止め、走っている旧い `uniqnode-backup.service` の終わりを待つ。timer を止めても実行中の
+  service は止まらず、install が起こす新しい backup と同じ写し先へ並んで書きうる(backup はコピー全体を
+  ロックせず、pack の削除と MANIFEST の更新もする)。30 分たっても終わらなければ、何も外さずに止まる
+  (timer は止まったままなので、後でこの命令を打ち直すか、`systemctl start uniqnode-backup.timer` で戻す)。
+- 外す行が消す 8 つの名のうち、在るものを全部、毎回別の名の退避(/var/tmp/uniqnode-legacy-units-<時刻>.tar.gz)
+  へ写し、`tar -tzf` で全部が入っていることを確かめてから外す。退避の道は記録に 1 行残す。
+- nft の表は在るときだけ消す。外した後に nft や install が失敗して打ち直しても、前の退避を上書きせず、
+  旧い unit が既に無ければ退避と外しを飛ばして先へ進む。
+- 外側のパイプラインにも `pipefail` を掛け、最後に終了コードを記録へ足す。内側の `set -euo pipefail` は
+  外側の `sudo … | ts | tee` には効かず、tee が成功すれば失敗が隠れるため。
 
 ```
-sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee /tmp/uniqnode-legacy-units.log
+set -o pipefail; sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee -a /tmp/uniqnode-legacy-units.log; echo "exit status: $?" | /usr/bin/tee -a /tmp/uniqnode-legacy-units.log
 set -euo pipefail
-/usr/bin/tar -C /etc/systemd/system -czf /var/tmp/uniqnode-legacy-units.tar.gz uniqnode-serve.service uniqnode-serve.service.d uniqnode-viewer.service uniqnode-viewer.service.d uniqnode-backup.service uniqnode-backup.service.d uniqnode-backup.timer
-systemctl disable --now uniqnode-serve.service uniqnode-viewer.service uniqnode-backup.timer ; rm -rf /etc/systemd/system/uniqnode-serve.service /etc/systemd/system/uniqnode-serve.service.d /etc/systemd/system/uniqnode-viewer.service /etc/systemd/system/uniqnode-viewer.service.d /etc/systemd/system/uniqnode-backup.service /etc/systemd/system/uniqnode-backup.service.d /etc/systemd/system/uniqnode-backup.timer /etc/systemd/system/uniqnode-backup.timer.d ; systemctl daemon-reload
-nft delete table inet uniqnode
+cd /etc/systemd/system
+targets=(uniqnode-serve.service uniqnode-serve.service.d uniqnode-viewer.service uniqnode-viewer.service.d uniqnode-backup.service uniqnode-backup.service.d uniqnode-backup.timer uniqnode-backup.timer.d)
+present=()
+for t in "${targets[@]}"; do if [ -e "$t" ]; then present+=("$t"); fi; done
+if [ "${#present[@]}" -eq 0 ]; then
+  echo "旧い名の unit は既に無い。退避と外しを飛ばす"
+else
+  systemctl stop uniqnode-backup.timer || true
+  waited=0
+  while :; do
+    state=$(systemctl is-active uniqnode-backup.service || true)
+    case "$state" in inactive|failed) break ;; esac
+    if [ "$waited" -ge 1800 ]; then echo "旧い backup が 30 分たっても終わらない(状態: $state)。何も外さずに止める"; exit 1; fi
+    echo "旧い backup の終わりを待つ(状態: $state)"
+    sleep 10; waited=$((waited + 10))
+  done
+  archive=/var/tmp/uniqnode-legacy-units-$(/usr/bin/date +%Y%m%dT%H%M%S%z).tar.gz
+  if [ -e "$archive" ]; then echo "$archive が既に在る。上書きしない"; exit 1; fi
+  /usr/bin/tar -czf "$archive" "${present[@]}"
+  listing=$(/usr/bin/tar -tzf "$archive")
+  for t in "${present[@]}"; do printf '%s\n' "$listing" | grep -qx -e "$t" -e "$t/" || { echo "$archive に $t が無い。外さずに止める"; exit 1; }; done
+  echo "退避: $archive (${present[*]})"
+  systemctl disable --now uniqnode-serve.service uniqnode-viewer.service uniqnode-backup.timer ; rm -rf /etc/systemd/system/uniqnode-serve.service /etc/systemd/system/uniqnode-serve.service.d /etc/systemd/system/uniqnode-viewer.service /etc/systemd/system/uniqnode-viewer.service.d /etc/systemd/system/uniqnode-backup.service /etc/systemd/system/uniqnode-backup.service.d /etc/systemd/system/uniqnode-backup.timer /etc/systemd/system/uniqnode-backup.timer.d ; systemctl daemon-reload
+fi
+if nft list table inet uniqnode >/dev/null 2>&1; then nft delete table inet uniqnode; fi
+echo "旧い名の unit を外し終えた"
 EOF
 ```
 
@@ -265,10 +300,45 @@ EOF
   install は旧い名が残っているので何も置かずに断る(壊れはしないが、据わらない)。外した後は間を空けず
   に install の命令を打つ。ビルドを先に済ませておけば、install の命令の中の cargo build はすぐ終わり、
   止まる間が短くなる。
-- 済んだかは /tmp/uniqnode-legacy-units.log と、続く /tmp/uniqnode-install-system.log を読んで確かめる。
-  戻すときは、`@default` の 3 つを止めて外してから /var/tmp/uniqnode-legacy-units.tar.gz を
-  /etc/systemd/system に展開し、daemon-reload して旧い 3 つを enable --now する(同じ主の口を取り合う
-  ので、両方を同時に置かない)。
+- vega では、graph_a・graph_b を含むどのインスタンスの install も、この移行の後に打つ(第 17 版の
+  APPEND_FAILURE への Claude のレビューの中 5)。旧い `uniqnode-serve.service` と graph_a・graph_b の serve は
+  同じ /home/hikalium/.local/bin/uniqnode を走らせ、install は既定でないインスタンスでは旧い名を残した
+  まま共有のバイナリを差し替える(install.rs の 2087〜2096 行付近)。先に graph_* を据え直すと、旧い
+  serve の次の起動が新しいバイナリを旧い unit で走らせる(API_AUTH の A2 なら AF_NETLINK が無く主の口が
+  全部 403、APPEND_FAILURE の S1 なら ExecStop が無い)。install がこの形を断るようにする直しは、
+  API_AUTH の A1 か APPEND_FAILURE の S1 のうち先に入る方に含める。
+- 済んだかは、/tmp/uniqnode-legacy-units.log の最後が「旧い名の unit を外し終えた」と
+  `exit status: 0` であることで確かめてから、install の命令へ進む(記録は追記なので、打ち直した分も
+  時刻つきで残る)。続く /tmp/uniqnode-install-system.log も、最後の `exit status: 0` を確かめる。
+- 戻すときは、`@default` の 3 つを止めて外してから、最後に作った退避を /etc/systemd/system に展開し、
+  daemon-reload して旧い 3 つを enable --now する(同じ主の口を取り合うので、両方を同時に置かない)。
+  vega で打つ命令:
+
+```
+set -o pipefail; sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee -a /tmp/uniqnode-legacy-rollback.log; echo "exit status: $?" | /usr/bin/tee -a /tmp/uniqnode-legacy-rollback.log
+set -euo pipefail
+archive=$(ls -1t /var/tmp/uniqnode-legacy-units-*.tar.gz | head -n 1)
+echo "戻す退避: $archive"
+/usr/bin/tar -tzf "$archive" >/dev/null
+systemctl disable --now uniqnode-serve@default.service uniqnode-viewer@default.service uniqnode-backup@default.timer
+waited=0
+while :; do
+  state=$(systemctl is-active uniqnode-backup@default.service || true)
+  case "$state" in inactive|failed) break ;; esac
+  if [ "$waited" -ge 1800 ]; then echo "backup@default が 30 分たっても終わらない(状態: $state)。展開せずに止める"; exit 1; fi
+  echo "backup@default の終わりを待つ(状態: $state)"
+  sleep 10; waited=$((waited + 10))
+done
+if nft list table inet uniqnode_default >/dev/null 2>&1; then nft delete table inet uniqnode_default; fi
+/usr/bin/tar -C /etc/systemd/system -xzf "$archive"
+systemctl daemon-reload
+systemctl enable --now uniqnode-serve.service uniqnode-viewer.service uniqnode-backup.timer
+echo "旧い名の unit に戻し終えた"
+EOF
+```
+
+  `@default` の unit の現物(テンプレート)と drop-in は残るが、enable していないので動かない。据え直す
+  ときは上の外す命令から打ち直す。
 
 ### user 単位から移る
 
@@ -276,10 +346,10 @@ user 単位で動いているものを system 単位に載せ替える。スト�
 まま、unit の置き場と走らせ方だけが変わる。1 命令で通す(移行の間、serve と viewer は止まる):
 
 ```
-sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee /tmp/uniqnode-install-system.log
+set -o pipefail; sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee /tmp/uniqnode-install-system.log; echo "exit status: $?" | /usr/bin/tee -a /tmp/uniqnode-install-system.log
 set -euo pipefail
 sudo -u hikalium -H /home/hikalium/.cargo/bin/cargo build --release --manifest-path /work2/llm_playground_host_dir/uniqnode/Cargo.toml -p uniqnode
-/work2/llm_playground_host_dir/uniqnode/target/release/uniqnode install /work2/llm_playground_host_dir/uniqnode-store --system --user hikalium --take-over-user-units --serve-options "--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank" --viewer-listen 0.0.0.0:7450 --listen-agent 10.10.128.1:7441 --agent-writable lamalium-notes --agent-collections articles --agent-collections papers --agent-collections seccamp --agent-collections specs --agent-collections trial --agent-collections web --agent-collections lamalium-notes --after wg-quick@wg1.service --firewall-allow 10.10.128.4,10.10.128.2
+/work2/llm_playground_host_dir/uniqnode/target/release/uniqnode install /work2/llm_playground_host_dir/uniqnode-store --system --user hikalium --take-over-user-units --serve-options "--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank" --viewer-listen 0.0.0.0:7450 --backup-dir /home/hikalium/uniqnode-backup --listen-agent 10.10.128.1:7441 --agent-writable lamalium-notes --agent-collections articles --agent-collections papers --agent-collections seccamp --agent-collections specs --agent-collections trial --agent-collections web --agent-collections lamalium-notes --after wg-quick@wg1.service --firewall-allow 10.10.128.4,10.10.128.2
 EOF
 ```
 

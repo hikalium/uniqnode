@@ -393,3 +393,26 @@ fn locks_are_called_rokku_not_jou() {
     }
     assert!(failures.is_empty(), "terminology:\n{}", failures.join("\n"));
 }
+
+/// docs/mop/SYSTEMD.md の「旧い名の unit から移る」が操作者に貼らせる外す行は、install の断りが
+/// 添える命令(`legacy_units_removal_command`)と同じ字句である(must/0023)。片方だけを直すと、
+/// 文書の命令と install の文言が食い違う。
+#[test]
+fn systemd_doc_carries_the_legacy_units_removal_command() {
+    use uniqnode::install::{legacy_units_removal_command, Account, Scope, LEGACY_UNITS, SYSTEM_UNIT_DIR};
+    let scope = Scope::System(Account {
+        name: "hikalium".to_string(),
+        uid: 1000,
+        gid: 1000,
+        group: "hikalium".to_string(),
+        home: PathBuf::from("/home/hikalium"),
+    });
+    let command = legacy_units_removal_command(&scope, Path::new(SYSTEM_UNIT_DIR), &LEGACY_UNITS);
+    let path = repo_root().join("docs/mop/SYSTEMD.md");
+    let text = std::fs::read_to_string(&path).expect("read SYSTEMD.md");
+    assert!(
+        text.lines().any(|line| line.trim() == command),
+        "{} に install の外す命令と同じ字句の行が無い:\n{command}",
+        display(&path)
+    );
+}

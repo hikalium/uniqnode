@@ -22,6 +22,8 @@ passed a python editing script through `<<EOF`; the heredoc closed early and the
 rollback block ran as root (`sudo bash -s`, visible in the sudo journal). It stopped only
 because its first line found no archive under /var/tmp and `set -euo pipefail` ended it; the
 units, `/etc/systemd/system` and the firewall were checked unchanged afterwards. The next such
-block would not be so lucky: the removal block disables production units.
+block would not be so lucky: the removal block disables production units. Operator ruling
+2026-09-30T23:40:15Z (relayed by the lamalium hub): adopt as MUST, keep the text of b22ce57, and
+state the rule in every session's instructions to subagents.
 
 Enforcement: convention, plus the standing instructions given to subagents.

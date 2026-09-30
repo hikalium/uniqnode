@@ -2,7 +2,8 @@
 
 <a id="abde9b3c-75f8-453b-988e-bfb1e178c771"></a>
 
-版: 第 8 版(2026-10-01)。第 7 版(b398d42)への vega の Codex の再レビュー(中: install の起動の確認、
+版: 第 9 版(2026-10-01)。第 8 版(601ae81)への vega の Codex の再レビュー(中: unit の
+RestrictAddressFamilies に AF_NETLINK が無い、低: 節の見出し)を取り込んだ。第 7 版(b398d42)への vega の Codex の再レビュー(中: install の起動の確認、
 低 2)を取り込んだ。第 6 版(e34d81d)への vega の Codex の再レビュー(中: 同じソケットの重複、
 低: 枠の受け渡し)と、crystal の Claude の第 3 版へのレビュー(中 2・4・5・6、低)を取り込んだ。第 5 版(3152f68)への Claude のレビュー(中 3: 行数の上限が網越しの DoS に
 なる → sock_diag の 1 件の照会へ、低 1〜3)と vega の Codex の再レビュー(低: 枠の超過の応答と資源の
@@ -60,7 +61,7 @@ distributed_search.rs の 185 行付近)。署名された要求者に対する�
 
 トークンは入れない。信頼の境界を「誰の uid か」「どの Host・生成元か」「どの許可表か」で置く。
 
-### 1. 主の口: 常駐の利用者と root のプロセスだけ、ブラウザは通さない
+### 1. 主の口: 許す uid の集合に入るプロセスだけ、ブラウザは通さない
 
 - 束縛はループバックの IP リテラルだけ(`127.0.0.0/8` と `[::1]`)。`localhost` のような名前・
   unspecified(`0.0.0.0`・`[::]`)・IPv4 射影(`[::ffff:127.0.0.1]`)は断る(Claude 低 7)。serve 自身が
@@ -109,6 +110,9 @@ distributed_search.rs の 185 行付近)。署名された要求者に対する�
   - system の install は root で走り、今は起動の確認(install.rs の 1348 行付近)で主の口へ直接 GET
     する。root は既定で許されないので、確認は常駐の利用者へ権限を落とした子プロセス(uid・gid・
     補助グループを常駐の利用者のものにしてから繋ぐ)から行う(第 7 版への Codex の再レビューの中)。テストはこれで自分の uid を外し、実際の接続が 403 になることを見る。
+  - 配る unit(system と user の uniqnode-serve@.service)の `RestrictAddressFamilies=AF_UNIX AF_INET
+    AF_INET6` に `AF_NETLINK` を足す。無いと照会のソケットを作れず、据え付けた serve が正規の接続まで
+    403 にする(第 8 版への Codex の再レビューの中)。A2 はこの unit の変更を含む。
   - 対象は Linux だけである(sock_diag が要る)。他の OS では serve が起動時に理由を言って断る。
   - uid は接続ごとに 1 度判定し、HTTP のヘッダ(下の門)は要求ごとに見る。serve は keep-alive を
     受けるので、同じ接続の 2 つ目以降の要求は uid の判定を繰り返さない(Codex 中 4)。
@@ -263,6 +267,8 @@ previous から辿れるので gc の後も残る(RAG 項目 18)。読めるコ�
 - 小さな通常の要求で断られた相手が 403 の応答を受け取る(ECONNRESET にならない)。大きな本文や遅い
   相手の要求は、実行されず、期限の内に閉じられ、判定の枠が戻る。
 - root で走る system の install の起動の確認が、root の直接の接続は断る serve に対して通る。
+- 実際の unit の制限の下(install で据え付けた serve)で、許す uid の接続が通り、許さない uid は断られ、
+  install の起動の確認が通る。
 - 主の口が、一覧に無い Host に 421、Origin 付きの要求に 403、単純な要求の 3 つの型に 415、JSON の道で
   Content-Type の無い要求に 415 を返すテストがある。http.rs のクライアント・MCP・viewer の転送・install
   の確認・node/tests の共通の口は通る。

@@ -2,7 +2,8 @@
 
 <a id="d973833f-4e2b-4fc8-8a49-42f6821b6a7a"></a>
 
-版: 第 8 版(2026-10-01)。第 7 版(b398d42)への vega の Codex の再レビュー(高 1: install の再実行、
+版: 第 9 版(2026-10-01)。第 8 版(601ae81)への vega の Codex の再レビュー(高 1・2: 印の置き方を
+「先に置き、無事な終わり方でだけ外す」へ、中: query の開始後の失敗と非同期)を取り込んだ。第 7 版(b398d42)への vega の Codex の再レビュー(高 1: install の再実行、
 高 2: 印を残せない経路、中: query の保存、低: 完了条件の食い違い)を取り込んだ。第 6 版(e34d81d)への vega の Codex の再レビュー(高: install が作る親)と、
 crystal の Claude の第 3 版へのレビュー(中 1: 再起動で Io の状態が消える、中 2: query のキャッシュ、低)を
 取り込んだ。第 5 版(3152f68)への vega の Codex の再レビュー(高 2: 祖先の sync の例外、
@@ -144,7 +145,12 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
    答えの本文を渡せない(`QueryAnswer::Object` は取得元だけを持ち、応答は常に `stored: true` を言う)。
    そこで書けない間は、手元に無いオブジェクトを取りに行く query を `WritesDisabled` の 503 で断る。
    手元に在るものを答える query と検索は続ける(crystal の Claude 中 2、第 7 版への Codex の再レビューの
-   中。保存したと偽らない)。`POST /v1/admin/gc` は 503、`uniqnode gc` は終了コード 1 で
+   中。保存したと偽らない)。query の途中で書けない状態になった形(取得中に別の要求が立てた、
+   query 自身の保存が最初の失敗だった)も扱う: 今の peer worker(query.rs の 472 行付近)は保存の誤りを
+   `Err(())` に潰してピアの沈黙として扱い、HTTP は 200 を返す。これを改め、query の終わりの状態に
+   `WriteFailure` を持たせ、保存に失敗したら再試行をやめて待つ側へ知らせる。`wait:true` は 503 と
+   案内を返し、`wait:false` は後の状態の取得(api.rs の 2127 行付近)が失敗の理由と案内を返す(第 8 版
+   への Codex の再レビューの中)。`POST /v1/admin/gc` は 503、`uniqnode gc` は終了コード 1 で
    断る。読み出しは続ける。
 3. 順を「ディスクが先、メモリが後」にそろえる:
    - `seal_active_pack` は、番号を足した `sealed_packs` の写しで MANIFEST を書き、成功してから
@@ -187,27 +193,35 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
    Io の状態は serve の再起動をまたいで持ち越す(crystal の Claude 中 1)。配備のし直し・systemd の
    再起動・OOM のような、ホストを再起動しない serve の起こし直しで書き込みが戻ると、書けなかった
    レコードが page cache に残ったまま後ろに追記を重ね、次のホストの再起動で再生がそこで止まって、
-   後ろの応答済みのレコードが切り捨てられうる。そこで kind が Io の状態に入るとき、tmpfs の上の
-   印(system の serve は `/run/uniqnode/`、user の serve は `$XDG_RUNTIME_DIR/uniqnode/` に、ストアの
-   正規化したパスから決めた名前で置く。中身は `/proc/sys/kernel/random/boot_id` と WriteFailure)を
-   書く。開くときに同じ boot_id の印があれば、書けない状態で開く(読み出しは答える)。ホストを
-   再起動すれば tmpfs ごと消えて戻る。ファイルシステムの点検の後にホストを再起動せずに戻すときは、
-   操作者が印を消す(消し方を案内の文に載せる)。NoSpace は印を書かない(空きを作って serve を再起動
-   するのが戻し方だから)。
-   印の置き場は据え付けが用意する(第 7 版への Codex の再レビューの高 2)。system の unit は
-   `RuntimeDirectory=uniqnode` と `RuntimeDirectoryPreserve=yes` を持つ(停止と再起動では消えず、
-   ホストの再起動で tmpfs ごと消える。`ProtectSystem=strict` の下でも RuntimeDirectory は書ける)。
-   user の unit と手で起こした serve は `$XDG_RUNTIME_DIR/uniqnode/` を自分で作る。CLI・MCP の Local の
-   開く道も同じ場所を見る(書く入口は全部、印があれば書けない状態で開く)。
-   印は、I/O の誤りを見たら、切り詰めを試みるより前に最初に書く。書けなかったとき、および誤りを
-   見てから印を書き終えるまでの間にプロセスが殺されたときは、印が残らない。この残りの穴は次の
-   3 つで狭め、受け入れる: (1) serve は自分では終了しない(方針 6)ので、印の無い再起動は操作者か
-   外からの kill が起こしたときだけである。(2) 印を書けなかったことは status の `writes_disabled` に
-   `marker: failed` として載せ、案内の文は「serve を再起動する前に、ホストの再起動かファイル
-   システムの点検をする」と言う。(3) 開くときの中身の sync(1a)が、まだ誰にも報告されていない書き
-   戻しの誤りを拾えば、その場で開くことに失敗する。試験は、実際の unit での stop と start で印が
-   残ること、印の置き場に書けないときに `marker: failed` が見えること、注入で印を書く前に abort
-   したときの振る舞い(印が無く、上の (2) の案内が前の status とログに残っていること)を見る。
+   後ろの応答済みのレコードが切り捨てられうる。
+   第 8 版の「誤りを見た後に tmpfs へ印を書く」形は捨てた: 誤りを見てから印を書くまでに殺される
+   形、印を書けない形、user の `$XDG_RUNTIME_DIR` がログアウトで消える形のどれでも印が残らない
+   (第 8 版への Codex の再レビューの高 1・2)。代わりに、危険な書き込みより前に印を置き、無事な
+   終わり方でだけ外す:
+   - 書く入口の開く道(serve・MCP の Local・書く CLI)は、ストアのロックを取った後、書き込みを
+     受け付ける前に、データのディレクトリに `open-marker` を書いて sync する。中身は
+     `/proc/sys/kernel/random/boot_id` と pid と開いた時刻。書けなければ開くことの失敗にする
+     (書き込みを始めない)。置き場がデータのディレクトリなので、system・user・手で起こした形・
+     CLI のどれでも同じ場所で、`ReadWritePaths` も今のままでよく、ログアウトでも消えない。
+   - 無事な終わり方(shutdown の API、CLI の正常な終わり、MCP の Local の終わり)で、書けない状態に
+     入っていなければ `open-marker` を消し、データのディレクトリを sync する。書けない状態(Io でも
+     NoSpace でも)なら消さない。消すのに失敗したら残る(安全な側に倒れる)。
+   - 開くときに `open-marker` が在り、中の boot_id が今の boot_id と同じなら、前のプロセスは同じ
+     ブートの中で無事に終わらなかった(殺された・落ちた・書けない状態で終わった)。このときは
+     書けない状態(kind は Io、reason は「前のプロセスが無事に終わらなかった」)で開き、読み出しは
+     答える。boot_id が違えば(ホストを再起動した後なら)page cache は消えているので、recover に
+     任せて普通に開き、印を書き直す。
+   - 戻し方: ホストの再起動か、操作者が `journalctl -k` で I/O の誤りが無いことを確かめた後の
+     `uniqnode store release-hold --data-dir <dir>`(印を消す。serve が開いている間は断る)。案内の文に
+     この 2 つを載せる。
+   - 代価: 同じブートの中で serve が SIGKILL・OOM・異常終了で落ちると、I/O の誤りが無くても書けない
+     状態で起きる。systemd の stop と restart を無事な終わり方にするため、unit に
+     `ExecStop=`(主の口へ `POST /v1/admin/shutdown` を送り、終わりを待つ)を足す。今の serve は
+     SIGTERM を扱わないので、これが無いと stop のたびに印が残る。`TimeoutStopSec` を過ぎて SIGKILL
+     になった形は、印が残って書けない状態で起きる(安全な側)。
+   試験は、実際の unit での stop と start で書けるまま起きること、SIGKILL の後に同じ boot_id で
+   書けない状態で起きること、印の boot_id が違えば普通に開くこと、印を書けないときに開くことが
+   失敗すること、Io の後の shutdown で印が残ること、release-hold で書けるようになることを見る。
    空きを足しても自動では戻らない(プロセスの中では末尾の健全さを言えないため)。
 6. serve は終了しない。検索と読み出しは答え続け、書き込みだけが断られる。終了して systemd の
    Restart=on-failure に開き直させる案は採らない: 空きが無いままなら再起動の輪になり、読み出しも
@@ -288,10 +302,12 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
   MCP の誤りの文に案内が載る。`POST /v1/sync` も 503 を返す。
 - 複製の受け側(`ingest_ref_record`)に `sync-keep` を掛けると、`export_ref_records` はその 1 本を返さない。
 - 書けない状態に入れた最初の要求そのものが 503 と案内を返す。
-- kind が Io の状態で serve だけを起こし直すと、書けない状態で開く(印が効く)。印を消すと書ける。
+- kind が Io の状態で serve だけを起こし直すと、書けない状態で開く(`open-marker` が効く)。
+  release-hold の後は書ける。
 - install が足りない経路を作って据え付けるとき、作った各要素の親が serve の起動より前に sync される。
 - 書けない状態で、手元に無いオブジェクトを取りに行く `POST /v1/query` は 503 と案内を返し、
-  `stored: true` を言わない。手元に在るものの query は答える。
+  `stored: true` を言わない。手元に在るものの query は答える。取得の途中で書けない状態になったとき、
+  `wait:true` は 503、`wait:false` は状態の取得が理由と案内を返す。
 - 前の install を `mkdir` の後・親の sync の前で中断させてから install を再実行すると、データの
   ディレクトリから根までの全ての名前が serve の起動より前に sync される。
 - 書けない状態で、未生成の rendition の GET が写しを返し(保存はしない)、rendition の道の書き込みの
@@ -300,8 +316,8 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
   `crash-before-dirsync`)、起こし直して追記を続けると、
   開く道が packs/・reflog/ を sync してから書き込みを受け付ける(sync の呼び出しを数える口で確かめる)。
 - 開き直したときの `writes_disabled` は、kind で分かれる: NoSpace だったものは null に戻る。Io
-  だったものは、同じ boot_id の印がある間は Io のまま開き、ホストの再起動か操作者が印を消した後に
-  null に戻る。
+  だったもの(と前のプロセスが無事に終わらなかったもの)は、同じ boot_id の `open-marker` がある間は
+  Io のまま開き、ホストの再起動か release-hold の後に null に戻る。
 
 ## 段取り
 

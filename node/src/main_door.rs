@@ -64,6 +64,9 @@ fn test_hook(name: &str) -> Option<String> {
 
 /// 起動時の自己試験の期限(自分への接続と、それを accept するまで)。
 pub const SELF_TEST_TIMEOUT: Duration = Duration::from_secs(2);
+/// 自己試験で、自分の接続の端が分かる前に accept して持っておく接続の上限。越えた分は
+/// その場で閉じる(listening on の前に繋いでくる他人の接続で、記憶と fd を際限なく使わない)。
+pub const SELF_TEST_PENDING_LIMIT: usize = 256;
 
 /// overflowuid の置き場(写せない uid がこの値で表示される)。
 pub const OVERFLOW_UID_PATH: &str = "/proc/sys/kernel/overflowuid";
@@ -370,6 +373,10 @@ fn connect_to_self(
     // 自分の接続の端が分かる前に accept した接続(自分のものが混ざりうる)。
     let mut pending: Vec<(TcpStream, SocketAddr)> = Vec::new();
     let result = loop {
+        // 期限は毎周に見る(他人の接続が途切れず届き続けても、WouldBlock を待たずに終わる)。
+        if std::time::Instant::now() >= deadline {
+            break Err(format!("自分の接続を {SELF_TEST_TIMEOUT:?} の内に accept できない"));
+        }
         if client.is_none() {
             match receiver.try_recv() {
                 Ok(Ok(stream)) => match stream.local_addr() {
@@ -396,12 +403,11 @@ fn connect_to_self(
                     break Ok((own, stream));
                 }
                 Some(_) => drop(stream),
+                // 上限を越えた分はその場で閉じる(自分の接続がそれだったなら期限切れの 3 になる)。
+                None if pending.len() >= SELF_TEST_PENDING_LIMIT => drop(stream),
                 None => pending.push((stream, peer)),
             },
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if std::time::Instant::now() >= deadline {
-                    break Err(format!("自分の接続を {SELF_TEST_TIMEOUT:?} の内に accept できない"));
-                }
                 std::thread::sleep(Duration::from_millis(1));
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -486,6 +492,14 @@ pub fn screen_content_type(request: &Request) -> Option<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 自己試験の失敗の終了コード: 設定の誤りは 2(起こし直さない)、それ以外は 3(起こし直す)。
+    #[test]
+    fn a_transient_self_test_failure_exits_3_and_a_config_one_2() {
+        let error = |config| SelfTestError { config, reason: String::new() };
+        assert_eq!(error(false).exit_code(), 3);
+        assert_eq!(error(true).exit_code(), 2);
+    }
 
     #[test]
     fn only_loopback_ip_literals_are_accepted() {
@@ -610,16 +624,42 @@ mod tests {
         let source = include_str!("api.rs");
         // 本文を読まない POST(型を問わない)。
         const NO_BODY: [(&str, &str); 1] = [("POST", "/v1/admin/shutdown")];
-        // 入れ子の腕: (method, api.rs の字面, 親の接頭辞, 代表の道)。代表の道の決まりを、全体の道の
+        // 入れ子の腕: (親の接頭辞, method, api.rs の字面, 代表の道)。代表の道の決まりを、全体の道の
         // 腕と同じ規則(POST・PUT は Any でない、他は Any)で見る。
         const NESTED: [(&str, &str, &str, &str); 5] = [
-            ("GET", "", "/v1/graphs/", "/v1/graphs/g/nodes/n"),
-            ("PUT", "", "/v1/graphs/", "/v1/graphs/g/nodes/n"),
-            ("DELETE", "", "/v1/graphs/", "/v1/graphs/g/nodes/n"),
-            ("GET", "history", "/v1/graphs/", "/v1/graphs/g/nodes/n/history"),
-            ("GET", "neighbors", "/v1/graphs/", "/v1/graphs/g/nodes/n/neighbors"),
+            ("/v1/graphs/", "GET", "", "/v1/graphs/g/nodes/n"),
+            ("/v1/graphs/", "PUT", "", "/v1/graphs/g/nodes/n"),
+            ("/v1/graphs/", "DELETE", "", "/v1/graphs/g/nodes/n"),
+            ("/v1/graphs/", "GET", "history", "/v1/graphs/g/nodes/n/history"),
+            ("/v1/graphs/", "GET", "neighbors", "/v1/graphs/g/nodes/n/neighbors"),
         ];
-        let mut nested_seen: Vec<(&str, &str)> = Vec::new();
+        // 親の接頭辞から入れ子の腕のある関数までの呼び出しの鎖。親の対応は、api.rs で
+        // `strip_prefix(親)` の枝が鎖の先頭を呼び、各関数が次を呼び、腕が鎖の末尾の関数の中に
+        // あることで確かめる(表の親を書き違えると赤になる)。
+        const CHAINS: [(&str, &[&str]); 1] = [("/v1/graphs/", &["handle_graph", "handle_graph_node"])];
+        let fn_body = |name: &str| -> &str {
+            let start = source.find(&format!("\nfn {name}(")).unwrap_or_else(|| panic!("fn {name} が無い"));
+            let body = &source[start + 1..];
+            let end = ["\nfn ", "\npub fn "].iter().filter_map(|next| body.find(next)).min();
+            &body[..end.unwrap_or(body.len())]
+        };
+        let enclosing_fn = |at: usize| -> &str {
+            let start = source[..at].rfind("\nfn ").expect("腕を囲む関数") + "\nfn ".len();
+            let rest = &source[start..];
+            &rest[..rest.find('(').expect("関数名の終わり")]
+        };
+        for (parent, chain) in CHAINS {
+            let branch_at = source
+                .find(&format!("strip_prefix(\"{parent}\")"))
+                .unwrap_or_else(|| panic!("strip_prefix({parent}) が無い"));
+            let branch = &source[branch_at..];
+            let branch = &branch[..branch.find("\n    }").expect("枝の終わり")];
+            assert!(branch.contains(&format!("{}(", chain[0])), "{parent} の枝が {} を呼ばない", chain[0]);
+            for pair in chain.windows(2) {
+                assert!(fn_body(pair[0]).contains(&format!("{}(", pair[1])), "{} が {} を呼ばない", pair[0], pair[1]);
+            }
+        }
+        let mut nested_seen: Vec<(&str, &str, &str)> = Vec::new();
         let mut arms = Vec::new();
         for method in ["GET", "POST", "PUT", "DELETE"] {
             let opener = format!("(\"{method}\", ");
@@ -637,14 +677,23 @@ mod tests {
                     // 入れ子の腕(`("PUT", "")` など)は、下の NESTED の表に無ければ赤にする。
                     token if token.starts_with('"') && token.ends_with('"') && token.len() >= 2 => {
                         let literal = &token[1..token.len() - 1];
-                        let known = NESTED.iter().find(|(m, l, _, _)| *m == method && *l == literal);
-                        let Some((_, _, parent, sample)) = known else {
+                        // 腕を囲む関数から、鎖を逆にたどって親の接頭辞を決める。
+                        let function = enclosing_fn(at);
+                        let Some((parent, _)) =
+                            CHAINS.iter().find(|(_, chain)| chain.last() == Some(&function))
+                        else {
+                            panic!("api.rs の入れ子の腕 ({method}, {token}) を囲む {function} が CHAINS に無い");
+                        };
+                        let known = NESTED
+                            .iter()
+                            .find(|(p, m, l, _)| p == parent && *m == method && *l == literal);
+                        let Some((_, _, _, sample)) = known else {
                             panic!(
-                                "api.rs の入れ子の腕 ({method}, {token}) の本文の決まりが NESTED の表に無い"
+                                "api.rs の入れ子の腕 ({parent}, {method}, {token}) の本文の決まりが NESTED の表に無い"
                             );
                         };
                         assert!(sample.starts_with(parent), "{sample} は {parent} の下でない");
-                        nested_seen.push((method, literal));
+                        nested_seen.push((parent, method, literal));
                         sample.to_string()
                     }
                     other => panic!("api.rs の腕 ({method}, {other}) の道を読めない(表に足す)"),
@@ -652,10 +701,10 @@ mod tests {
                 arms.push((method, path));
             }
         }
-        for (method, literal, _, _) in NESTED {
+        for (parent, method, literal, _) in NESTED {
             assert!(
-                nested_seen.contains(&(method, literal)),
-                "NESTED の ({method}, {literal:?}) は api.rs にもう無い(表から消す)"
+                nested_seen.contains(&(parent, method, literal)),
+                "NESTED の ({parent}, {method}, {literal:?}) は api.rs にもう無い(表から消す)"
             );
         }
         assert!(arms.len() >= 15, "api.rs の道の腕を拾えていない: {arms:?}");

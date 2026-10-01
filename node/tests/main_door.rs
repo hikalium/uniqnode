@@ -211,14 +211,10 @@ fn gauge(address: &str) -> Gauge {
     gauge_by(address, Instant::now() + GAUGE_TIMEOUT)
 }
 
-/// deadline までの残りを、接続・書き・読みの期限にして読む。期限が切れたら失敗する(試験の
+/// 絶対の期限 deadline の内に読む(接続と各回の書き・読みの前に残りを測り直す)。期限が切れたら失敗する(試験の
 /// Server は Drop で子を止めて刈り取る)。
 fn gauge_by(address: &str, deadline: Instant) -> Gauge {
-    let left = deadline
-        .checked_duration_since(Instant::now())
-        .filter(|left| !left.is_zero())
-        .unwrap_or_else(|| panic!("{address} の /v1/status を読む期限が切れた"));
-    let status = simple_within(address, "GET", "/v1/status", b"", left);
+    let status = simple_within(address, "GET", "/v1/status", b"", deadline);
     assert_eq!(status.status, 200, "{}", body_text(&status));
     let text = body_text(&status);
     let field = |key: &str| json_integer_field(&text, key).unwrap_or_else(|| panic!("{key} が無い: {text}"));
@@ -531,10 +527,10 @@ fn slow_refused_peers_do_not_shut_out_an_allowed_connection() {
         drop(stream);
     }
     let seen = wait_for_gauge(&agent, "判定中 0", Duration::from_secs(10), |g| g.checking == 0);
-    assert_eq!(refused + closed, total, "どの接続も 403 か空で閉じられる");
-    assert!(refused >= uniqnode::http::REFUSAL_SLOTS, "403 は {refused} 本");
+    // 枠を埋めた 8 本だけが 403 で、残りはすべて枠の外で閉じられる(順に当てるので決まった数)。
+    assert_eq!(refused, uniqnode::http::REFUSAL_SLOTS, "403 は断りの枠の数だけ");
+    assert_eq!(closed, total - uniqnode::http::REFUSAL_SLOTS, "残りは 403 も書かずに閉じられる");
     assert_eq!(seen.refused_unlogged as usize, closed, "枠の外の断りは 403 もログも書かずに数える");
-    assert!(closed > 0, "断りの枠が埋まった後の断りが無い");
     // 断りの枠が埋まったままでも、許す相手は通る。
     std::fs::remove_file(&flag).expect("remove the peer uid file");
     let started = Instant::now();
@@ -570,12 +566,10 @@ fn authenticated_connections_are_capped_and_the_slot_returns_on_close() {
     // 閉じた 1 本の枠は、serve がその切断を読んだ時点で戻る(条件待ち。should/0104)。
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let mut stream = TcpStream::connect(&server.address).expect("connect");
-        stream.write_all(head.as_bytes()).expect("head");
-        stream.set_read_timeout(Some(Duration::from_secs(2))).expect("timeout");
-        let mut first = [0u8; 12];
-        if stream.read_exact(&mut first).is_ok() {
-            assert_eq!(&first, b"HTTP/1.1 200");
+        // 1 回の試しは 2 秒か全体の期限の早い方まで。枠の外なら応答の無いまま閉じられて Err になる。
+        let attempt = deadline.min(Instant::now() + Duration::from_secs(2));
+        if let Ok(response) = try_simple_within(&server.address, "GET", "/healthz", b"", attempt) {
+            assert_eq!(response.status, 200);
             break;
         }
         assert!(Instant::now() < deadline, "閉じた接続の枠が戻らない");
@@ -621,6 +615,8 @@ fn a_thousand_connections_stay_within_the_slots() {
         idle.connections_peak
     );
     assert!(idle.connections_peak > 1, "接続中の最大 {}(誰も通っていない)", idle.connections_peak);
+    // 枠が戻った後は、主の口そのものが応える(gauge は 200 を確かめる)。
+    gauge(&server.address);
 }
 
 /// TIME_WAIT を大量に作った状態でも判定の時間は表の大きさに依らない(照会は 1 件の指定で、

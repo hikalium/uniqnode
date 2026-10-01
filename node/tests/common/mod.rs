@@ -249,28 +249,37 @@ pub struct HttpResponse {
     pub content_security_policy: String,
 }
 
-pub fn read_response(reader: &mut BufReader<TcpStream>) -> HttpResponse {
+pub fn read_response<R: BufRead>(reader: &mut R) -> HttpResponse {
+    try_read_response(reader).unwrap_or_else(|e| panic!("応答を読めない: {e}"))
+}
+
+/// read_response と同じだが、読めない(切断・期限切れ・形の崩れ)を Err で返す。
+pub fn try_read_response<R: BufRead>(reader: &mut R) -> std::io::Result<HttpResponse> {
+    let malformed = |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, what.to_string());
     let mut status_line = String::new();
-    reader.read_line(&mut status_line).expect("status line");
+    if reader.read_line(&mut status_line)? == 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "応答の前に閉じられた"));
+    }
     let status: u16 = status_line
         .split(' ')
         .nth(1)
-        .expect("status code")
-        .parse()
-        .expect("numeric status");
+        .and_then(|code| code.parse().ok())
+        .ok_or_else(|| malformed(&format!("状態行を読めない: {status_line:?}")))?;
     let mut content_length = 0usize;
     let mut content_type = String::new();
     let mut content_security_policy = String::new();
     loop {
         let mut line = String::new();
-        reader.read_line(&mut line).expect("header line");
+        if reader.read_line(&mut line)? == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "ヘッダの途中で閉じられた"));
+        }
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
             break;
         }
         if let Some((name, value)) = trimmed.split_once(':') {
             if name.trim().eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse().expect("content length");
+                content_length = value.trim().parse().map_err(|_| malformed("Content-Length を読めない"))?;
             }
             if name.trim().eq_ignore_ascii_case("content-type") {
                 content_type = value.trim().to_string();
@@ -281,8 +290,8 @@ pub fn read_response(reader: &mut BufReader<TcpStream>) -> HttpResponse {
         }
     }
     let mut body = vec![0u8; content_length];
-    reader.read_exact(&mut body).expect("body");
-    HttpResponse { status, body, content_type, content_security_policy }
+    reader.read_exact(&mut body)?;
+    Ok(HttpResponse { status, body, content_type, content_security_policy })
 }
 
 pub fn simple(address: &str, method: &str, path: &str, body: &[u8]) -> HttpResponse {
@@ -316,20 +325,63 @@ pub fn with_headers(
     exchange(stream, address, method, path, headers, body)
 }
 
-/// simple と同じだが、接続・書き・読みのそれぞれに within の期限を置く。期限が切れたら
-/// 理由を言って失敗する(呼び手の Server は Drop で子を止めて刈り取る)。
-pub fn simple_within(address: &str, method: &str, path: &str, body: &[u8], within: std::time::Duration) -> HttpResponse {
+/// simple と同じだが、全体を絶対の期限 deadline の内に収める。期限が切れたら理由を言って
+/// 失敗する(呼び手の Server は Drop で子を止めて刈り取る)。
+pub fn simple_within(address: &str, method: &str, path: &str, body: &[u8], deadline: std::time::Instant) -> HttpResponse {
+    try_simple_within(address, method, path, body, deadline)
+        .unwrap_or_else(|e| panic!("{address} への {method} {path} が期限の内に終わらない: {e}"))
+}
+
+/// simple_within と同じだが、繋げない・応答の無いまま閉じられた・期限切れを Err で返す。
+/// 接続・各回の書き・各回の読みの前に、期限までの残りを測り直してその I/O の期限にする。
+pub fn try_simple_within(
+    address: &str,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    deadline: std::time::Instant,
+) -> std::io::Result<HttpResponse> {
     use std::net::ToSocketAddrs;
     let target = address
-        .to_socket_addrs()
-        .expect("address")
+        .to_socket_addrs()?
         .next()
-        .expect("address");
-    let stream = TcpStream::connect_timeout(&target, within)
-        .unwrap_or_else(|e| panic!("{address} へ {within:?} の内に繋げない: {e}"));
-    stream.set_read_timeout(Some(within)).expect("read timeout");
-    stream.set_write_timeout(Some(within)).expect("write timeout");
-    exchange(stream, address, method, path, &[], body)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "アドレスが無い"))?;
+    let stream = TcpStream::connect_timeout(&target, remaining(deadline)?)?;
+    let mut stream = BufReader::new(DeadlineStream { stream, deadline });
+    write_request(stream.get_mut(), address, method, path, &[], body)?;
+    try_read_response(&mut stream)
+}
+
+/// 期限までの残り。過ぎていれば TimedOut。
+fn remaining(deadline: std::time::Instant) -> std::io::Result<std::time::Duration> {
+    deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|left| !left.is_zero())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "期限が切れた"))
+}
+
+/// 読み書きのたびに、絶対の期限までの残りをその回の期限に置く TcpStream。
+struct DeadlineStream {
+    stream: TcpStream,
+    deadline: std::time::Instant,
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.set_read_timeout(Some(remaining(self.deadline)?))?;
+        self.stream.read(buffer)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.stream.set_write_timeout(Some(remaining(self.deadline)?))?;
+        self.stream.write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
 }
 
 fn exchange(
@@ -340,6 +392,20 @@ fn exchange(
     headers: &[(&str, &str)],
     body: &[u8],
 ) -> HttpResponse {
+    write_request(&mut stream, address, method, path, headers, body).expect("write request");
+    let mut reader = BufReader::new(stream);
+    read_response(&mut reader)
+}
+
+/// curl の形の要求(Connection: close)を書く。
+fn write_request<W: Write>(
+    stream: &mut W,
+    address: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> std::io::Result<()> {
     let mut head = format!(
         "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
@@ -352,10 +418,8 @@ fn exchange(
         head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("\r\n");
-    stream.write_all(head.as_bytes()).expect("write head");
-    stream.write_all(body).expect("write body");
-    let mut reader = BufReader::new(stream);
-    read_response(&mut reader)
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)
 }
 
 pub fn body_text(response: &HttpResponse) -> String {

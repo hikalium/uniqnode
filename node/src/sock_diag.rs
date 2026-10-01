@@ -155,8 +155,55 @@ pub const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
 /// 繋いだなら、ソケットは AF_INET6 の側にある)。IPv6 の接続は AF_INET6 だけに問う。
 /// 見つからない(ENOENT)は答え 0 件で、照会そのものの失敗は Err。全体を 1 つの絶対の期限
 /// (今から QUERY_TIMEOUT)の内に収める。
+///
+/// 照会は別のスレッドで行い、呼び手は絶対の期限まで答えを待つ。同期の sendto はカーネルの中
+/// (sock_diag の mutex など)で待ちうる、ソケットの期限はそこへ届かないため。期限を過ぎたら
+/// Err を返し、遅れて出た答えは捨てる。戻らない照会のスレッドが溜まらないように、走っている
+/// 照会の数を判定の枠の数(http::CHECK_SLOTS)までに抑え、越えたら照会せずに Err を返す。
 pub fn lookup(expected: Endpoints) -> Result<Vec<Answer>, String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+    struct Release;
+    impl Drop for Release {
+        fn drop(&mut self) {
+            IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
     let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
+    if IN_FLIGHT.fetch_add(1, Ordering::AcqRel) >= crate::http::CHECK_SLOTS {
+        drop(Release);
+        return Err(format!(
+            "走っている sock_diag の照会が上限({})に達している(期限を過ぎても戻らない照会がある)",
+            crate::http::CHECK_SLOTS
+        ));
+    }
+    let release = Release;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("sock-diag-query".to_string())
+        .spawn(move || {
+            let result = lookup_blocking(expected, deadline);
+            // 数を戻してから答えを渡す(呼び手が答えを受けて枠を返し、次の接続が照会するときには
+            // もう数えられていない。逆順だと枠が満ちているときに偽の上限超えが起きうる)。
+            drop(release);
+            // 呼び手が期限で去っていれば、送りは失敗して答えは捨てられる。
+            let _ = sender.send(result);
+        })
+        .map_err(|e| format!("sock_diag の照会のスレッドを作れない: {e}"))?;
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    match receiver.recv_timeout(left) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(format!("sock_diag の照会が期限({QUERY_TIMEOUT:?})の内に終わらない"))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("sock_diag の照会のスレッドが答えずに終わった".to_string())
+        }
+    }
+}
+
+/// lookup の本体(照会のスレッドで走る)。
+fn lookup_blocking(expected: Endpoints, deadline: std::time::Instant) -> Result<Vec<Answer>, String> {
     let expected = expected.normalized();
     let mut answers = Vec::new();
     match (expected.local.ip(), expected.remote.ip()) {
@@ -564,6 +611,8 @@ mod platform {
             }
             break (received as usize, sender);
         };
+        // 受けが成功しても、期限を過ぎていれば答えを使わない。
+        remaining(deadline, "受けの後")?;
         if sender.family != AF_NETLINK as u16 || sender.pid != 0 {
             return Err(format!(
                 "sock_diag の答えの送り手がカーネルでない(族 {}、nl_pid {})",

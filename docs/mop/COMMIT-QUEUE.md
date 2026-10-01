@@ -120,7 +120,8 @@ node/ の下のファイルは、Markdown でも説明の文書に当たらな�
    (`git merge-base --is-ancestor origin/main <先頭>` が 0 で終わる)。
 5. CQ へ 1 通で送る。中身は次のとおりである。
    - リポジトリ、ブランチ、先頭の commit id(40 桁)、基点(`origin/main` のどの commit から
-     切ったか)、目的、依存する変更、統合の意思。
+     切ったか)、目的、依存する変更、統合の意思。以前に統合された commit が残るブランチから送るときは、
+     範囲の起点(新しく取り込んでほしい最初の commit の親)も書く。
    - 検査の結果: どの機械で、どの SHA で回し、どのテストが落ちたか。手順 4 の vega の結果なら、
      vega が返した HEAD と HEAD^ の SHA も写す。
    - レビュー: どのモデルで、どの SHA に通したか。軽微で明確な変更として通していないなら、その旨。
@@ -138,11 +139,17 @@ node/ の下のファイルは、Markdown でも説明の文書に当たらな�
    依頼は、送り手の答えが届いたらそれを反映して、この手順から再開する。同じメッセージ(メッセージの ID
    が同じもの、ID が無ければ同じ本文)が 2 度届いたら、2 度目は積まず、1 度目の結果(済んでいなければ、
    処理中であること)を返す。差し戻した変更は、直した新しい先頭の SHA で頼み直してもらう。
-2. 取り込む範囲は、`git log --reverse --format=%H --cherry-pick --right-only --no-merges origin/main...<先頭>`
-   が出す commit である。送り手は push 済みの commit を書き換えないので、以前に CQ が cherry-pick した
-   commit が元の id のままブランチに残る。`--cherry-pick` は、main に同じ変更がある commit を範囲から
-   除く。範囲に merge commit が無いことを、`git log --merges origin/main..<先頭>` が空であることで
-   確かめる。あれば差し戻す。
+2. 取り込む範囲は、`git log --reverse --format=%H --no-merges <起点>..<先頭>` が出す commit である。
+   起点は、送り手が書いた範囲の起点か、無ければ基点である。送り手は push 済みの commit を書き換え
+   ないので、以前に CQ が cherry-pick した commit が元の id のままブランチに残ることがある。
+   前後の行が違うと patch-id も違うので、`--cherry-pick` では除けない。そこで CQ は、範囲の各 commit
+   が既に統合済みでないことを、次の 2 つで確かめる。
+   - CQ が送り手へ知らせた id の組(元の SHA と main の SHA)に、その commit が無いこと。
+   - `git log origin/main --grep "cherry picked from commit <その SHA>"` が空であること。CQ は
+     cherry-pick に `-x` を付けるので、main の commit のメッセージに元の SHA が残る。
+   統合済みの commit が範囲に入っていたら、範囲の起点を書き直して送り直すよう差し戻す。判断が
+   つかないときも差し戻す。範囲に merge commit が無いことを、`git log --merges <起点>..<先頭>` が
+   空であることで確かめる。あれば差し戻す。
 3. 範囲の各 commit を「合格の条件」の節の方法で調べ、説明の文書だけの変更かどうかを決める。
 4. 説明の文書だけの変更でないとき:
    - `origin/main` が先頭の祖先でなければ、統合せずに差し戻し、新しい `origin/main` から切った
@@ -152,9 +159,10 @@ node/ の下のファイルは、Markdown でも説明の文書に当たらな�
    - 統合する木は、送られた先頭そのものである。CQ は cherry-pick も rebase もせず、送られた先頭へ
      main を fast-forward する。vega で検査した木と main に入る木が同じになる。
 5. 説明の文書だけの変更のときは、`origin/main` が先頭の祖先ならそのまま進める。祖先でなければ、
-   CQ の手元の写しで、`origin/main` の上へ範囲の commit を古い順に cherry-pick する。送り手の
-   ブランチも main も書き換えないので、must/0011 の禁じる、push 済みの commit の書き換えには
-   当たらない。衝突したら、直さずに差し戻す。
+   CQ の手元の写しで、`origin/main` の上へ範囲の commit を古い順に `git cherry-pick -x` で
+   積む。送り手のブランチも main も書き換えないので、must/0011 の禁じる、push 済みの commit の
+   書き換えには当たらない。衝突したとき、または当てた結果が空になったとき(既に入っている変更を
+   当てた印である)は、直さずに差し戻す。
 6. 統合する木で `cargo test --no-fail-fast` を回し、合格の条件で判定する。
 7. 合格なら main を fast-forward で push する。push までに main が動いたら、手順 2 から
    やり直す。統合の知らせには、リポジトリ、送られた先頭の SHA、main へ入った各 commit の SHA と

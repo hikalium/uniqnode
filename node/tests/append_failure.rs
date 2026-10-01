@@ -679,6 +679,16 @@ impl OpenSyncFixture {
     /// 改行で書き出されるので、遅れて書かれることはあっても先に書かれることは無い)。
     /// 返り値は (終了コード, 記録の行, 標準エラー)。
     fn run_logged(&self, arguments: &[&str], stdin: &[u8]) -> (Option<i32>, Vec<String>, String) {
+        self.run_logged_with(arguments, &[], stdin)
+    }
+
+    /// run_logged に環境変数を足す形。
+    fn run_logged_with(
+        &self,
+        arguments: &[&str],
+        envs: &[(&str, &str)],
+        stdin: &[u8],
+    ) -> (Option<i32>, Vec<String>, String) {
         use std::io::Write;
         use std::process::{Command, Stdio};
         let _ = std::fs::remove_file(&self.log);
@@ -690,6 +700,7 @@ impl OpenSyncFixture {
         let mut child = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
             .args(arguments)
             .env(uniqnode::store::SYNC_LOG_ENV, &self.log)
+            .envs(envs.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::piped())
@@ -836,6 +847,75 @@ fn a_record_written_but_not_synced_is_recovered_synced_and_then_resent() {
     let mut expected = fixture.names_synced_on_every_open();
     expected.push(format!("file {}", pack.display()));
     assert_synced_before_ack(&lines, &expected, &id, "crash-before-sync の後");
+}
+
+/// packs/ と reflog/ の全部のファイルの中身(道 → バイト列)。
+#[cfg(debug_assertions)]
+fn segment_contents(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut contents = std::collections::BTreeMap::new();
+    for directory in ["packs", "reflog"] {
+        for entry in std::fs::read_dir(dir.join(directory)).expect("read_dir") {
+            let path = entry.expect("entry").path();
+            let bytes = std::fs::read(&path).expect("read segment");
+            contents.insert(path, bytes);
+        }
+    }
+    contents
+}
+
+/// 開くときの sync の 1 つずつ(node_key・追記中の pack・reflog・packs/・reflog/・データの
+/// ディレクトリ・その親)を失敗させる(open-sync:<n>)と、開くことが失敗する(APPEND_FAILURE の
+/// 方針 1a: 開くときの sync の失敗は開くことの失敗)。命令は理由を言って 1 で終わり、応答を
+/// 出さず、pack と reflog は 1 バイトも変わらない。sync の記録は成功した sync の後にだけ書かれる
+/// ので、記録は失敗させた sync の手前で止まり、失敗させた名前もその後の名前も載らない。
+/// 注入を外して開き直すと、同じ put を受け付ける。
+#[test]
+#[cfg(debug_assertions)]
+fn a_failed_sync_on_open_fails_the_open_and_writes_nothing() {
+    let fixture = OpenSyncFixture::new("open-sync-fails");
+    let dir_text = fixture.dir_text();
+    let (status, _, stderr) = fixture.run(&["init", dir_text], &[], b"");
+    assert_eq!(status, Some(0), "init: {stderr}");
+    let first = b"{\"first\":\"object\"}";
+    let (status, _, stderr) = fixture.run(&["put", dir_text], &[], first);
+    assert_eq!(status, Some(0), "put: {stderr}");
+    let first_id = uniqnode::c1::id_for_bytes(first);
+    let (status, _, stderr) = fixture.run(&["set-ref", dir_text, "notes/a", &first_id], &[], b"");
+    assert_eq!(status, Some(0), "set-ref: {stderr}");
+
+    // 注入なしの開き直し(既に在るものの put は何も書かない)で、開くときの sync の全部と順を読む。
+    let (status, lines, stderr) = fixture.run_logged(&["put", dir_text], first);
+    assert_eq!(status, Some(0), "既に在るものの put: {stderr}");
+    let ack = lines
+        .iter()
+        .position(|line| line.starts_with(&first_id))
+        .unwrap_or_else(|| panic!("応答が記録に無い: {lines:#?}"));
+    let open_syncs = lines[..ack].to_vec();
+    // node_key・pack・reflog の中身と、packs/・reflog/・データのディレクトリ・その親。
+    assert_eq!(open_syncs.len(), 7, "{open_syncs:#?}");
+    let before = segment_contents(&fixture.dir);
+
+    let body = b"{\"refused\":\"while the open fails\"}";
+    for n in 1..=open_syncs.len() {
+        let spec = format!("open-sync:{n}");
+        let (status, lines, stderr) = fixture.run_logged_with(
+            &["put", dir_text],
+            &[(uniqnode::fault::APPEND_FAULT_ENV, &spec)],
+            body,
+        );
+        assert_eq!(status, Some(1), "{spec}: 開くことが失敗する: {stderr}");
+        assert!(stderr.contains("開くときの sync"), "{spec}: 理由を言う: {stderr}");
+        assert_eq!(
+            lines,
+            open_syncs[..n - 1].to_vec(),
+            "{spec}: 記録は成功した sync だけで、失敗させた sync の手前で止まり、応答は無い"
+        );
+        assert_eq!(segment_contents(&fixture.dir), before, "{spec}: 何も書かない");
+    }
+
+    let (status, stdout, stderr) = fixture.run(&["put", dir_text], &[], body);
+    assert_eq!(status, Some(0), "注入を外した開き直し: {stderr}");
+    assert!(stdout.contains(&uniqnode::c1::id_for_bytes(body)), "{stdout}");
 }
 
 /// node_key を作る途中(tmp/ に書いて sync した後・rename の前)で落としても、短い鍵や空の鍵が

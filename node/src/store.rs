@@ -525,9 +525,10 @@ pub const SYNC_LOG_ENV: &str = "UNIQNODE_SYNC_LOG";
 pub(crate) const ENOSPC: i32 = 28;
 pub(crate) const EDQUOT: i32 = 122;
 
-/// sync を 1 回記録する(debug ビルドで SYNC_LOG_ENV があるときだけ)。記録に失敗しても
-/// 本来の sync の結果は変えない。
-pub(crate) fn note_sync(what: &str, path: &Path) {
+/// 成功した sync を 1 回記録する(debug ビルドで SYNC_LOG_ENV があるときだけ)。sync が Ok を
+/// 返した後にだけ呼ぶ(記録の行は「その sync が成功した」ことの証で、試験はそれを応答と
+/// 照らす)。記録に失敗しても本来の sync の結果は変えない。
+fn note_sync(what: &str, path: &Path) {
     #[cfg(debug_assertions)]
     {
         if let Some(log) = std::env::var_os(SYNC_LOG_ENV) {
@@ -544,10 +545,25 @@ pub(crate) fn note_sync(what: &str, path: &Path) {
     }
 }
 
-/// ディレクトリを開いて sync する(記録つき)。
+/// ディレクトリを開いて sync する(成功したら記録する)。
 pub(crate) fn sync_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()?;
     note_sync("dir", path);
-    std::fs::File::open(path)?.sync_all()
+    Ok(())
+}
+
+/// ファイルの中身とメタデータを sync する(`sync_all`。成功したら記録する)。
+pub(crate) fn sync_file_all(file: &std::fs::File, path: &Path) -> std::io::Result<()> {
+    file.sync_all()?;
+    note_sync("file", path);
+    Ok(())
+}
+
+/// ファイルの中身を sync する(`sync_data`。成功したら記録する)。
+pub(crate) fn sync_file_data(file: &std::fs::File, path: &Path) -> std::io::Result<()> {
+    file.sync_data()?;
+    note_sync("file", path);
+    Ok(())
 }
 
 /// atomic_write の段。注入の口(write_manifest)が段ごとに誤りを差し込む。
@@ -575,8 +591,7 @@ fn atomic_write_steps(
     let written = (|| {
         let mut file = std::fs::File::create(&tmp_path)?;
         file.write_all(content)?;
-        note_sync("file", &tmp_path);
-        file.sync_all()
+        sync_file_all(&file, &tmp_path)
     })();
     if let Err(error) = written {
         let _ = std::fs::remove_file(&tmp_path);
@@ -785,35 +800,46 @@ impl Store {
     /// 最初の応答より前に永続させる。「既に在る」ことを理由に省かない。対象は node_key の中身、
     /// MANIFEST に封印済みとして載っている pack を除く全部の pack と reflog の中身、packs/・
     /// reflog/・データのディレクトリ自身・その親。失敗は開くことの失敗である。
-    fn sync_on_open(&self) -> Result<()> {
-        let dir = &self.config.data_dir;
+    fn sync_on_open(&mut self) -> Result<()> {
+        let dir = self.config.data_dir.clone();
         let key_path = dir.join(NODE_KEY_NAME);
-        note_sync("file", &key_path);
-        std::fs::File::open(&key_path)
-            .and_then(|file| file.sync_all())
+        self.open_sync_fault()
+            .and_then(|_| std::fs::File::open(&key_path))
+            .and_then(|file| sync_file_all(&file, &key_path))
             .map_err(|error| open_sync_error("鍵", &key_path, error))?;
-        for number in PACK.numbers(dir)? {
+        for number in PACK.numbers(&dir)? {
             if self.sealed_packs.contains(&number) {
                 continue;
             }
-            let path = pack_path(dir, number);
-            note_sync("file", &path);
-            std::fs::File::open(&path)
-                .and_then(|file| file.sync_data())
+            let path = pack_path(&dir, number);
+            self.open_sync_fault()
+                .and_then(|_| std::fs::File::open(&path))
+                .and_then(|file| sync_file_data(&file, &path))
                 .map_err(|error| open_sync_error("pack", &path, error))?;
         }
-        for number in REFLOG.numbers(dir)? {
-            let path = reflog_path(dir, number);
-            note_sync("file", &path);
-            std::fs::File::open(&path)
-                .and_then(|file| file.sync_data())
+        for number in REFLOG.numbers(&dir)? {
+            let path = reflog_path(&dir, number);
+            self.open_sync_fault()
+                .and_then(|_| std::fs::File::open(&path))
+                .and_then(|file| sync_file_data(&file, &path))
                 .map_err(|error| open_sync_error("reflog", &path, error))?;
         }
-        let parent = data_dir_parent(dir)?;
+        let parent = data_dir_parent(&dir)?;
         for directory in [dir.join(PACK.directory), dir.join(REFLOG.directory), dir.clone(), parent]
         {
-            sync_dir(&directory)
+            self.open_sync_fault()
+                .and_then(|_| sync_dir(&directory))
                 .map_err(|error| open_sync_error("ディレクトリ", &directory, error))?;
+        }
+        Ok(())
+    }
+
+    /// 開くときの sync の 1 回ごとの注入の口(debug ビルドだけ。open-sync)。当たればその
+    /// sync を行わずに誤りを返す。
+    fn open_sync_fault(&mut self) -> std::io::Result<()> {
+        #[cfg(debug_assertions)]
+        if let Some(fault) = self.fault.as_mut() {
+            return fault.on_open_sync();
         }
         Ok(())
     }
@@ -930,11 +956,10 @@ impl Store {
         let (op, outcome) = match written {
             Err(error) => (WriteOp::Write, Err(error)),
             Ok(()) => {
-                note_sync("file", &path);
                 #[cfg(debug_assertions)]
-                let synced = crate::fault::sync_stage(fired, &file);
+                let synced = crate::fault::sync_stage(fired, &file, &path);
                 #[cfg(not(debug_assertions))]
-                let synced = file.sync_data();
+                let synced = sync_file_data(&file, &path);
                 (WriteOp::Sync, synced)
             }
         };
@@ -1042,8 +1067,7 @@ impl Store {
                     .mode(0o600)
                     .open(&tmp_path)?;
                 file.write_all(&seed)?;
-                note_sync("file", &tmp_path);
-                file.sync_all()?;
+                sync_file_all(&file, &tmp_path)?;
             }
             before_rename();
             std::fs::rename(&tmp_path, &key_path)?;

@@ -9,10 +9,11 @@
 //! 中の試験は `Store::inject_fault` で同じ字句を掛ける。何回目は 1 から数え、その種類が掛かり
 //! うる操作だけを数える(追記の種類は追記ごと、`dirsync` と `crash-before-dirsync` は新しい
 //! ファイルを作った追記ごと、`manifest` と `manifest-dirsync` は MANIFEST の書き込みごと、
-//! `gc-dirsync` は GC の D の sync ごと、`crash-in-node-key` は node_key の作成ごと)。`@pack` と `@reflog` は追記の種類をその種類の
+//! `gc-dirsync` は GC の D の sync ごと、`crash-in-node-key` は node_key の作成ごと、
+//! `open-sync` は開くときの sync の 1 つごと)。`@pack` と `@reflog` は追記の種類をその種類の
 //! セグメントに絞る。1 度当たったらそれきりである(当たった時点でストアは書けない状態に入る)。
 
-use crate::store::{sync_dir, AtomicStep, ENOSPC};
+use crate::store::{sync_dir, sync_file_data, AtomicStep, ENOSPC};
 use std::io::Write;
 use std::path::Path;
 
@@ -20,7 +21,7 @@ const EIO: i32 = 5;
 
 pub const APPEND_FAULT_ENV: &str = "UNIQNODE_APPEND_FAULT";
 
-/// 注入の種類(APPEND_FAILURE の 10 個と、開くときの sync の試験が使う 2 つの abort)。
+/// 注入の種類(APPEND_FAILURE の 10 個と、開くときの sync の試験が使う 2 つの abort と 1 つの誤り)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FaultKind {
     /// 1 バイトも書かずに誤り(EIO)。
@@ -48,6 +49,9 @@ pub(crate) enum FaultKind {
     CrashBeforeSync,
     /// node_key を作る途中(tmp/ に書いて sync した後・rename の前)で abort する。
     CrashInNodeKey,
+    /// 開くときの sync(node_key・追記中の pack と reflog・packs/・reflog/・データの
+    /// ディレクトリ・その親を 1 つずつ)の 1 つを、行わずに誤り(EIO)にする。
+    OpenSync,
 }
 
 impl FaultKind {
@@ -90,7 +94,8 @@ impl Fault {
             format!(
                 "{APPEND_FAULT_ENV}={spec:?} が読めない({why})。形は <種類>[@pack|@reflog]:<何回目> で、\
                  種類は before・torn:<n>・sync・sync-keep・manifest・manifest-dirsync・dirsync・\
-                 nospace-sync・crash-before-dirsync・gc-dirsync・crash-before-sync・crash-in-node-key"
+                 nospace-sync・crash-before-dirsync・gc-dirsync・crash-before-sync・crash-in-node-key・\
+                 open-sync"
             )
         };
         let (kind_text, segment, nth_text) = match spec.split_once('@') {
@@ -126,6 +131,7 @@ impl Fault {
             "gc-dirsync" => FaultKind::GcDirsync,
             "crash-before-sync" => FaultKind::CrashBeforeSync,
             "crash-in-node-key" => FaultKind::CrashInNodeKey,
+            "open-sync" => FaultKind::OpenSync,
             other => match other.strip_prefix("torn:") {
                 Some(n) => FaultKind::Torn(n.parse().map_err(|_| bad("torn:<n> の n が数でない"))?),
                 None => return Err(bad("知らない種類")),
@@ -178,6 +184,14 @@ impl Fault {
         None
     }
 
+    /// 開くときの sync 1 回。open-sync が当たれば、その sync の代わりに返す誤り。
+    pub(crate) fn on_open_sync(&mut self) -> std::io::Result<()> {
+        if self.kind == FaultKind::OpenSync && self.count().is_some() {
+            return Err(injected(EIO));
+        }
+        Ok(())
+    }
+
     /// node_key の作成 1 回。crash-in-node-key が当たればここで abort する。
     pub(crate) fn on_node_key(&mut self) {
         if self.kind == FaultKind::CrashInNodeKey && self.count().is_some() {
@@ -216,12 +230,16 @@ pub(crate) fn write_stage(
     }
 }
 
-/// 追記の sync の段。当たっていなければ本来の sync_data をする。
-pub(crate) fn sync_stage(fired: Option<FaultKind>, file: &std::fs::File) -> std::io::Result<()> {
+/// 追記の sync の段。当たっていなければ本来の sync_data をする(成功したら記録する)。
+pub(crate) fn sync_stage(
+    fired: Option<FaultKind>,
+    file: &std::fs::File,
+    path: &Path,
+) -> std::io::Result<()> {
     match fired {
         Some(FaultKind::Sync | FaultKind::SyncKeep) => Err(injected(EIO)),
         Some(FaultKind::NospaceSync) => Err(injected(ENOSPC)),
-        _ => file.sync_data(),
+        _ => sync_file_data(file, path),
     }
 }
 
@@ -271,6 +289,7 @@ mod tests {
         assert_eq!(fault.segment, None);
         assert_eq!(Fault::parse("sync-keep@reflog:1").unwrap().segment, Some("reflog"));
         assert_eq!(Fault::parse("gc-dirsync:1").unwrap().kind, FaultKind::GcDirsync);
+        assert_eq!(Fault::parse("open-sync:3").unwrap().kind, FaultKind::OpenSync);
         for bad in ["", "sync", "sync:0", "sync:x", "nope:1", "sync@foo:1", "manifest@pack:1"] {
             assert!(Fault::parse(bad).is_err(), "{bad}");
         }

@@ -2536,12 +2536,16 @@ pub fn sync_path_to_root(dir: &Path) -> Result<(), String> {
 /// install を途中で止めるテスト用の口(debug ビルドだけが読む)。中断からの再実行と、
 /// systemctl に触れずに経路の sync を確かめる試験が使う。
 pub const INSTALL_ABORT_ENV: &str = "UNIQNODE_INSTALL_ABORT_AFTER";
+/// INSTALL_ABORT_ENV の値: データのディレクトリの経路を mkdir した後、sync の前で止める。
+pub const INSTALL_ABORT_AFTER_MKDIR: &str = "mkdir";
+/// INSTALL_ABORT_ENV の値: ストアと写し先の経路の sync の後、daemon-reload の前で止める。
+pub const INSTALL_ABORT_AFTER_SYNCED: &str = "synced";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InstallAbort {
-    /// データのディレクトリの経路を mkdir した後、sync の前(値 `mkdir`)。
+    /// データのディレクトリの経路を mkdir した後、sync の前(値 INSTALL_ABORT_AFTER_MKDIR)。
     AfterMkdir,
-    /// ストアと写し先の経路の sync の後、daemon-reload の前(値 `synced`)。
+    /// ストアと写し先の経路の sync の後、daemon-reload の前(値 INSTALL_ABORT_AFTER_SYNCED)。
     AfterSync,
 }
 
@@ -2549,17 +2553,20 @@ fn install_abort_point(point: InstallAbort) -> Result<(), String> {
     #[cfg(debug_assertions)]
     {
         let wanted = match std::env::var(INSTALL_ABORT_ENV).ok().as_deref() {
-            Some("mkdir") => Some(InstallAbort::AfterMkdir),
-            Some("synced") => Some(InstallAbort::AfterSync),
+            Some(INSTALL_ABORT_AFTER_MKDIR) => Some(InstallAbort::AfterMkdir),
+            Some(INSTALL_ABORT_AFTER_SYNCED) => Some(InstallAbort::AfterSync),
             Some(other) => {
-                return Err(format!("{INSTALL_ABORT_ENV}={other:?} が読めない(mkdir か synced)"))
+                return Err(format!(
+                    "{INSTALL_ABORT_ENV}={other:?} が読めない\
+                     ({INSTALL_ABORT_AFTER_MKDIR} か {INSTALL_ABORT_AFTER_SYNCED})"
+                ))
             }
             None => None,
         };
         if wanted == Some(point) {
             let name = match point {
-                InstallAbort::AfterMkdir => "mkdir",
-                InstallAbort::AfterSync => "synced",
+                InstallAbort::AfterMkdir => INSTALL_ABORT_AFTER_MKDIR,
+                InstallAbort::AfterSync => INSTALL_ABORT_AFTER_SYNCED,
             };
             return Err(format!("{INSTALL_ABORT_ENV}={name} により、ここで止める(テスト用)"));
         }

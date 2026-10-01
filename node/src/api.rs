@@ -1974,6 +1974,12 @@ fn handle_rendition_catalog(context: &ApiContext, chunk_id: &str) -> Response {
     )
 }
 
+/// 写しを作った記録の行の頭(handle_rendition が書き、試験が serve.log から探す)。
+pub const RENDITION_LOG_PREFIX: &str = "uniqnode: rendition: ";
+/// 写しを作った記録の行が、書けない状態なので保存しなかった(RenditionOrigin::Unstored)ことを
+/// 言う字句。
+pub const RENDITION_LOG_UNSTORED: &str = "書けない状態なので保存していない(Unstored)";
+
 /// GET /v1/objects/{chunk_id}/rendition/{alias}。無ければ作って足して返す。
 ///
 /// ロックの規律(node/src/embed.rs・node/src/sync.rs と同じ): 生成は poppler との往復で実測
@@ -2070,14 +2076,12 @@ fn handle_rendition(context: &ApiContext, chunk_id: &str, alias: &str) -> Respon
             // 保存したか、書けない状態なので保存せずに返したか(Unstored)も同じ行で言う:
             // Unstored は次の要求でも作り直すので、同じ写しの行が繰り返し出る理由がここで読める。
             let origin = match &rendition.origin {
-                crate::rendition::RenditionOrigin::Unstored => {
-                    "書けない状態なので保存していない(Unstored)".to_string()
-                }
+                crate::rendition::RenditionOrigin::Unstored => RENDITION_LOG_UNSTORED.to_string(),
                 crate::rendition::RenditionOrigin::Generated => "保存した(Generated)".to_string(),
                 other => format!("{other:?}"),
             };
             crate::log_line!(
-                "uniqnode: rendition: {chunk_id} の {alias} を {elapsed_ms} ミリ秒で作った\
+                "{RENDITION_LOG_PREFIX}{chunk_id} の {alias} を {elapsed_ms} ミリ秒で作った\
                  ({} バイト、{}、{origin})",
                 rendition.bytes.len(),
                 rendition.recipe

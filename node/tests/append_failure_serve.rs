@@ -344,7 +344,10 @@ fn a_rendition_is_returned_without_storing_while_writes_are_disabled() {
     let log_path = uniqnode::log::default_path(&server.dir, uniqnode::log::SERVE_ROLE);
     let logged = std::fs::read_to_string(&log_path).expect("read serve log");
     assert!(
-        logged.lines().any(|line| line.contains("uniqnode: rendition: ") && line.contains("Unstored")),
+        logged.lines().any(|line| {
+            line.contains(uniqnode::api::RENDITION_LOG_PREFIX)
+                && line.contains(uniqnode::api::RENDITION_LOG_UNSTORED)
+        }),
         "写しの行が Unstored を言わない: {logged}"
     );
 }

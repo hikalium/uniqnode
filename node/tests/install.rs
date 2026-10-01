@@ -13,6 +13,10 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(debug_assertions)]
+use uniqnode::install::{INSTALL_ABORT_AFTER_MKDIR, INSTALL_ABORT_AFTER_SYNCED, INSTALL_ABORT_ENV};
+#[cfg(debug_assertions)]
+use uniqnode::store::SYNC_LOG_ENV;
 
 fn work_dir(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -1282,7 +1286,7 @@ fn the_units_from_before_the_template_refuse_every_instance_and_keep_the_binary(
     let run = |words: &[String]| {
         uniqnode_with_env(
             &words.iter().map(String::as_str).collect::<Vec<_>>(),
-            &[("UNIQNODE_INSTALL_ABORT_AFTER", "synced")],
+            &[(INSTALL_ABORT_ENV, INSTALL_ABORT_AFTER_SYNCED)],
         )
     };
 
@@ -1317,7 +1321,7 @@ fn the_units_from_before_the_template_refuse_every_instance_and_keep_the_binary(
     let outcome = run(&arguments("graph", 7490, "store-graph"));
     assert_eq!(outcome.status, 1, "{}\n{}", outcome.stdout, outcome.stderr);
     assert!(
-        outcome.stderr.contains("UNIQNODE_INSTALL_ABORT_AFTER=synced"),
+        outcome.stderr.contains(&format!("{INSTALL_ABORT_ENV}={INSTALL_ABORT_AFTER_SYNCED}")),
         "止める口より前で断られた: {}",
         outcome.stderr
     );
@@ -1360,10 +1364,14 @@ fn install_syncs_the_store_path_to_the_root_even_after_an_interrupted_run() {
     // 1 回目: 経路を作った後、sync の前で止める。
     let interrupted = uniqnode_with_env(
         &words,
-        &[("UNIQNODE_INSTALL_ABORT_AFTER", "mkdir"), ("UNIQNODE_SYNC_LOG", &log_text)],
+        &[(INSTALL_ABORT_ENV, INSTALL_ABORT_AFTER_MKDIR), (SYNC_LOG_ENV, &log_text)],
     );
     assert_eq!(interrupted.status, 1, "{}\n{}", interrupted.stdout, interrupted.stderr);
-    assert!(interrupted.stderr.contains("UNIQNODE_INSTALL_ABORT_AFTER=mkdir"), "{}", interrupted.stderr);
+    assert!(
+        interrupted.stderr.contains(&format!("{INSTALL_ABORT_ENV}={INSTALL_ABORT_AFTER_MKDIR}")),
+        "{}",
+        interrupted.stderr
+    );
     assert!(store.is_dir(), "経路の要素を作っていない");
     let synced_before = std::fs::read_to_string(&sync_log).unwrap_or_default();
     assert!(
@@ -1374,10 +1382,14 @@ fn install_syncs_the_store_path_to_the_root_even_after_an_interrupted_run() {
     // 2 回目: 全部が既に在る。それでも根までの全ての要素を下から順に sync する。
     let rerun = uniqnode_with_env(
         &words,
-        &[("UNIQNODE_INSTALL_ABORT_AFTER", "synced"), ("UNIQNODE_SYNC_LOG", &log_text)],
+        &[(INSTALL_ABORT_ENV, INSTALL_ABORT_AFTER_SYNCED), (SYNC_LOG_ENV, &log_text)],
     );
     assert_eq!(rerun.status, 1, "{}\n{}", rerun.stdout, rerun.stderr);
-    assert!(rerun.stderr.contains("UNIQNODE_INSTALL_ABORT_AFTER=synced"), "{}", rerun.stderr);
+    assert!(
+        rerun.stderr.contains(&format!("{INSTALL_ABORT_ENV}={INSTALL_ABORT_AFTER_SYNCED}")),
+        "{}",
+        rerun.stderr
+    );
     let synced = std::fs::read_to_string(&sync_log).expect("sync の記録");
     let expected: Vec<String> =
         store.ancestors().map(|element| format!("dir {}", element.display())).collect();
@@ -1432,7 +1444,7 @@ fn install_fails_with_the_path_when_an_ancestor_cannot_be_opened() {
             work.join("units").to_str().expect("utf-8"),
             "--no-start",
         ],
-        &[("UNIQNODE_INSTALL_ABORT_AFTER", "synced")],
+        &[(INSTALL_ABORT_ENV, INSTALL_ABORT_AFTER_SYNCED)],
     );
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     assert_eq!(outcome.status, 1, "{}\n{}", outcome.stdout, outcome.stderr);
@@ -1441,6 +1453,6 @@ fn install_fails_with_the_path_when_an_ancestor_cannot_be_opened() {
         "開けない要素の道を言っていない: {}",
         outcome.stderr
     );
-    assert!(!outcome.stderr.contains("UNIQNODE_INSTALL_ABORT_AFTER"), "{}", outcome.stderr);
+    assert!(!outcome.stderr.contains(INSTALL_ABORT_ENV), "{}", outcome.stderr);
     std::fs::remove_dir_all(&work).expect("cleanup");
 }

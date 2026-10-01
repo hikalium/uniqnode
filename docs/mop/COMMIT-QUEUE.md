@@ -61,9 +61,11 @@ vega の検査の依頼は、同じホストの Claude Code のセッション�
    メッセージを確かめて中継する。Claude のセッションが動いていないときや、知らせが届かなかったときは、
    メッセージはファイルの中で待つ。Codex は中継を待っていることを自分の報告で操作者へ伝え、Claude の
    セッションが動き出したら知らせ直す。
-5. CQ と vega のセッションから返ってきたものは、全文を同じファイルへ書き戻す。統合の結果(送られた
-   SHA と main へ入った SHA の組)、差し戻し(赤の理由と出力の要点)、問い合わせ、vega の検査の結果
-   (下の HEAD と HEAD^ の SHA と落ちたテスト)のどれも、元のメッセージの ID に対応づけて書く。
+5. CQ と vega のセッションは、中継した turn が終わった後でも、答えをそのホストの Claude のセッションへ
+   返す。その Claude のセッションが、全文を同じファイルへ書き戻す。統合の結果(送られた SHA と main へ
+   入った SHA の組)、差し戻し(赤の理由と出力の要点)、問い合わせ、vega の検査の結果(下の HEAD と
+   HEAD^ の SHA と落ちたテスト)のどれも、元のメッセージの ID に対応づけて書く。書いたら、Codex へ
+   turn/steer で知らせる(lamalium の docs/mop/STEER-CODEX-THREAD.md)。
    Codex が問い合わせに答えるときは、新しいメッセージの ID で 1 から同じ経路で送り、答える問い合わせの
    元のメッセージの ID を書き添える。
 
@@ -136,8 +138,11 @@ node/ の下のファイルは、Markdown でも説明の文書に当たらな�
    依頼は、送り手の答えが届いたらそれを反映して、この手順から再開する。同じメッセージ(メッセージの ID
    が同じもの、ID が無ければ同じ本文)が 2 度届いたら、2 度目は積まず、1 度目の結果(済んでいなければ、
    処理中であること)を返す。差し戻した変更は、直した新しい先頭の SHA で頼み直してもらう。
-2. 取り込む範囲(`origin/main..<先頭>`)に merge commit が無いことを
-   `git log --merges origin/main..<先頭>` が空であることで確かめる。あれば差し戻す。
+2. 取り込む範囲は、`git log --reverse --format=%H --cherry-pick --right-only --no-merges origin/main...<先頭>`
+   が出す commit である。送り手は push 済みの commit を書き換えないので、以前に CQ が cherry-pick した
+   commit が元の id のままブランチに残る。`--cherry-pick` は、main に同じ変更がある commit を範囲から
+   除く。範囲に merge commit が無いことを、`git log --merges origin/main..<先頭>` が空であることで
+   確かめる。あれば差し戻す。
 3. 範囲の各 commit を「合格の条件」の節の方法で調べ、説明の文書だけの変更かどうかを決める。
 4. 説明の文書だけの変更でないとき:
    - `origin/main` が先頭の祖先でなければ、統合せずに差し戻し、新しい `origin/main` から切った
@@ -147,7 +152,7 @@ node/ の下のファイルは、Markdown でも説明の文書に当たらな�
    - 統合する木は、送られた先頭そのものである。CQ は cherry-pick も rebase もせず、送られた先頭へ
      main を fast-forward する。vega で検査した木と main に入る木が同じになる。
 5. 説明の文書だけの変更のときは、`origin/main` が先頭の祖先ならそのまま進める。祖先でなければ、
-   CQ の手元の写しで、`origin/main` の上へ送り手の commit を古い順に cherry-pick する。送り手の
+   CQ の手元の写しで、`origin/main` の上へ範囲の commit を古い順に cherry-pick する。送り手の
    ブランチも main も書き換えないので、must/0011 の禁じる、push 済みの commit の書き換えには
    当たらない。衝突したら、直さずに差し戻す。
 6. 統合する木で `cargo test --no-fail-fast` を回し、合格の条件で判定する。

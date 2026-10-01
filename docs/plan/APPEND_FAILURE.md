@@ -47,8 +47,8 @@ Claude(N1)が独立に見つけた。[docs/plan/FEED.md](#fa8de6f9-59f8-4512-a81
 - 代価:
   - 大きさ: S1a M、S1b L、S1c M(S1c の範囲は操作者の裁定待ち。B なら backup が印を読むだけの小さな段に
     縮み、C なら無くなる)、S1d L(戻す前の検め。第 28 版で S1b から分けた。本番への反映の前に入る)。設計の版を 31 重ねたとおり、中身は細かく、実装とレビューに日数がかかる。
-    S1a と S1b はまだ実装していない(2026-10-01 に node/src を grep で確かめた。`open-marker` も `hold-status` も
-    無い)。S1d の `--stage stopped` は S1b の印と hold-status の判定の上に作るので、S1d は S1b の後に始まる(「段取り」)。
+    S1a は実装した(「段取り」の「S1a の実装の記録」。レビュー待ちで、main にはまだ入れていない)。S1b はまだ
+    実装していない(2026-10-01 に node/src を grep で確かめた。`open-marker` も `hold-status` も無い)。S1d の `--stage stopped` は S1b の印と hold-status の判定の上に作るので、S1d は S1b の後に始まる(「段取り」)。
     S1d は、S1b を入れた後に S1b より前のバイナリへ戻すまれな非常の道だけを守り、平常の日の保存と検索には
     関わらない。それでも今の段取りでは本番への反映のゲートに入っている。S1d は S1c とその裁定・API_AUTH の A4 と
     並べて進められるので、S1 の本番への反映と、S1 を前提にする FEED の F2(lamalium の文書の毎時の取り込み。日々の
@@ -1383,6 +1383,35 @@ restart の説明、保留と release-hold の案内、「更新」に S1b 以�
 
 S1(S1a〜S1c の総称)は、段ごとに上のゲートを通してから入る。FEED の F2 は S1 の全体を前提にする。
 
+S1a の実装の記録(2026-10-01。版は上げず、状態だけを書き足した): S1a は実装した。コミットは main の 93d905c の
+上の 2a82736・1b4b8e8・e4c98ac・39e12f4・9e1ac72 と、それへの Codex と Claude のレビューの直しを積んだもの
+(枝 s1a-append-durable)である。直しの再レビューを通してから main に入れる。本番への反映は上のとおり
+S1a〜S1c と S1d が揃ってから 1 回で、S1a だけでは据えない。実装で決めたこと(本文の方針に書いていなかった細部):
+
+- 失敗の注入の字句は `UNIQNODE_APPEND_FAULT=<種類>[@pack|@reflog]:<何回目>` である。`torn:<n>` はそれ自体が
+  種類の字句で(例 `torn:5@pack:2`、`torn:5:1`)、何回目は 1 から数え、その種類が掛かりうる操作だけを数える
+  (追記の種類は追記ごと、`dirsync` と `crash-before-dirsync` は新しいファイルを作った追記ごと、`manifest` と
+  `manifest-dirsync` は MANIFEST の書き込みごと、`gc-dirsync` は GC の D の sync ごと)。`@pack`・`@reflog` は
+  追記の種類にだけ付く。開くときの sync の試験のために、abort する種類を 2 つ足した: `crash-before-sync`
+  (追記を全部 write した後・ファイルの sync の前)と `crash-in-node-key`(node_key を tmp/ に書いて sync した
+  後・rename の前。node_key の作成ごとに数える)。
+- 注入は debug ビルドにだけ在る。release のビルドには、環境変数を読む口だけでなく、注入の型・`Store::inject_fault`・
+  abort の枝も無い(node/src/fault.rs は `cfg(debug_assertions)`。sync の記録 `UNIQNODE_SYNC_LOG` と sync の本体は
+  本番も使うので node/src/store.rs に置く)。注入に頼る試験は `cargo test --release` では走らない。
+- install を途中で止める口は `UNIQNODE_INSTALL_ABORT_AFTER=mkdir|synced`(データのディレクトリの経路を mkdir
+  した後・sync の前か、経路の sync の後・daemon-reload の前)。これも debug ビルドだけが読む。
+- 書けない間は、dry-run の gc も断る(`gc_try_begin` が書き込みの入口なので、dry-run もそこを通る)。
+- 書けない間は、既に在るオブジェクトの put も断る(「既に在る」と答えると、書けたと読める応答になるため)。
+- 書き込みの入口は、引数の検査より先に書けない状態を言う(`set_ref`・`set_pin`・`set_attest` と、空の pack なら
+  何もしない `seal_active_pack_for_gc` の先頭で `check_writable`)。不正な引数や存在しない対象を指す要求も、
+  書けない間は 400 でなく 503 と案内を受け取る。
+- GC の D の packs/ の sync は、S1a でストアのロックの中に置いた(方針 3 の D の項。失敗の記録がロックの中で
+  済む)。表の S1b の「GC の D の sync をストアのロックの中へ」は S1a で済んでいる。
+- install の経路の根までの sync は、ストアの経路に加えて写し先(backup)の経路も対象にする。
+- ログを開く前のデータのディレクトリの検め(無ければ `mkdir`、親が無ければ 1 で終わる)は、既定の
+  `<dir>/logs` にログを置くときだけ行う。`--log` で外へ置くときと `--no-log` のときは、ログがデータの
+  ディレクトリに触れないので、検めは `Store::open` に任せる。
+
 本番への反映の前提(第 14 版への Claude のレビューの中 5): vega の主のストアの serve は、今も旧い名の
 unit `uniqnode-serve.service`(と `uniqnode-viewer.service`・`uniqnode-backup.timer`)で動いている
 (2026-10-01 に `systemctl cat` と /etc/systemd/system/ の一覧で確かめた。graph_a・graph_b は既に
@@ -1398,15 +1427,12 @@ unit `uniqnode-serve.service`(と `uniqnode-viewer.service`・`uniqnode-backup.t
 
 vega のバイナリの共有(第 17 版への Claude のレビューの中 5): 旧い名の `uniqnode-serve.service` と、
 graph_a・graph_b の `uniqnode-serve@graph_*.service` は、同じ /home/hikalium/.local/bin/uniqnode を走らせる
-(2026-10-01 に /etc/systemd/system/ の drop-in の ExecStart= で確かめた)。install は既定でないインスタンス
-を据えるときは旧い名を「取り合わない」として残したまま進み(install.rs の 2087〜2096 行付近)、共有の
-バイナリを差し替える。したがって graph_* の据え直しを先に打つと、旧い serve の次の起動(restart・
-再起動)が S1 のバイナリを ExecStop の無い unit で走らせる(API_AUTH の A2 のバイナリなら AF_NETLINK が
-無く主の口が全部 403)。vega では、どのインスタンスの install も `@default` への移行の後に打つ。加えて、
-install は据え先に旧い名の unit が残っている間は、インスタンスに依らず共有のバイナリの差し替えを断る
-(理由と docs/mop/SYSTEMD.md の「旧い名の unit から移る」を言う)ように直す。これは API_AUTH の A1 と
-この S1a のうち先に入る方に含め、完了条件の「install の断り」の試験で閉じる(第 18 版への Claude のレビューの
-中 5)。
+(2026-10-01 に /etc/systemd/system/ の drop-in の ExecStart= で確かめた)。共有のバイナリを差し替えると、
+旧い serve の次の起動(restart・再起動)が S1 のバイナリを ExecStop の無い unit で走らせる(API_AUTH の A2 の
+バイナリなら AF_NETLINK が無く主の口が全部 403)。そのため install は据え先に旧い名の unit が残っている間は、
+インスタンスに依らず何も置かずに断り、共有のバイナリも差し替えない(理由と docs/mop/SYSTEMD.md の「旧い名の
+unit から移る」を言う。S1a で入った。今の挙動は docs/mop/SYSTEMD.md の「テンプレートになる前の名の unit から
+移る」)。vega では、どのインスタンスの install も `@default` への移行の後に打つ。
 
 S1b より前のバイナリへ戻す(第 20 版への Codex と Claude のレビューの Codex 高 1): S1b より前のバイナリの
 `Store::open` は `open-marker` を見ずに recover して書く。保留のストア(同じ boot_id の `Running` と `Io`、検めを

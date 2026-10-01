@@ -396,6 +396,12 @@ DEGRADED --( 回復不能予測: 観測される総空き容量 < 不足分 )-->
 - 警報は遷移で発火する(should/0129 に従う): 同じ状態の再評価は発火させない。
 - T_prop と T_heal はネットワーク全体の設定値であり、全DBノードの設定に同値を書く(SHOULD)。
   多少の食い違いはローカル判定の揺れにとどまり、安全性を壊さない。
+- ストアが書けない状態(§5.3)の間、周期は伝播交換・修復・降格を始めない(どれも書き込みを
+  伴う)。生存確認と、pin ごとの判断と遷移の記録は続ける。書けない状態に入ったことは、遷移
+  イベント(`GET /v1/health/events`)に root が `store`、state が `writes_disabled`、reason が
+  種別(`no_space` か `io`)の 1 件として、入った後の最初の周期で 1 度だけ記録する。root の
+  `store` は pin の root ではなく、ストアそのものを指す。この 1 件は戻らない(戻るのはストアを
+  開き直したとき、すなわち serve の再起動で、イベントの列もそこで空になる)。
 
 ## 9. 検索層(非規範)
 
@@ -464,7 +470,7 @@ netlink ソケットの作成が EAFNOSUPPORT・EPERM・EACCES で断られた u
 | `GET /v1/graphs/{g}/edges` / `PUT`・`DELETE /v1/graphs/{g}/edges/{型}/{from}/{to}` | 辺の一覧 / 型付きの辺の作成と tombstone |
 | `GET /v1/refs/...` / `PUT /v1/refs/...` | ref の解決と更新(自DBノードの名前空間のみ書ける) |
 | `POST /v1/pins` / `GET /v1/pins` | pin の設定(発行者は同時に保持表明する)/ 一覧と保持者 |
-| `GET /v1/health/events` | 健全性の遷移イベント(遷移でのみ記録。should/0129) |
+| `GET /v1/health/events` | 健全性の遷移イベント(遷移でのみ記録。should/0129。ストアが書けない状態に入った 1 件は root が `store`、state が `writes_disabled`。§8.4) |
 | `POST /v1/query` | クエリ(ローカル、または scope 指定でネットワークへ) |
 | `POST /v1/peer/query` | ピアからの署名付き QUERY(kind:search)を受けて署名付き ANSWER を返す(§7.1) |
 | `GET /v1/queries/{id}` | クエリハンドル(回答の単調増加集合と、応答済み/沈黙ピアの一覧) |

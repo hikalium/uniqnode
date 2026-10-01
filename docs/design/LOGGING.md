@@ -117,7 +117,7 @@ serve・mcp・viewer が持つ(常駐する命令だけがログをファイル�
 の `open_default` と `fallback_path` にあり、serve・mcp・viewer は main.rs の `start_logging`
 1 つを通してそれを呼ぶ(should/0135)。
 
-- ログはデータのディレクトリもその祖先も作らない(docs/plan/APPEND_FAILURE.md の方針 1a。
+- ログはデータのディレクトリもその祖先も作らない([docs/plan/APPEND_FAILURE.md](#d973833f-4e2b-4fc8-8a49-42f6821b6a7a) の方針 1a。
   ログが先にデータのディレクトリを作ると、ストアの「親が無ければ断る」が効かなくなる)。
   既定の道では `logs/` の 1 段だけを `mkdir` する。ストアを開く serve と mcp(ストアを直接
   開く形)は、既定の道を使うとき、ログを開く前にデータのディレクトリを検めて `mkdir` し、

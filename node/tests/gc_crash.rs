@@ -7,6 +7,10 @@
 //!
 //! MANIFEST の無いストアには「残骸」の規則を使わないこと(セルフレビューの場合分け)もここで
 //! 固定する。
+//!
+//! abort の口は debug ビルドにしか無いので、それに頼る試験と補助の関数は
+//! #[cfg(debug_assertions)] で、`cargo test --release` では走らない。MANIFEST の無いストアの
+//! 試験は口に頼らないので、release でも走る。
 
 mod common;
 
@@ -74,6 +78,7 @@ fn pack_files(dir: &Path) -> Vec<String> {
     entries_of(&dir.join("packs"))
 }
 
+#[cfg(debug_assertions)]
 fn manifest_packs(dir: &Path) -> Vec<u64> {
     let store = Store::open(small_config(dir)).expect("open");
     store.sealed_pack_numbers().to_vec()
@@ -81,6 +86,7 @@ fn manifest_packs(dir: &Path) -> Vec<u64> {
 
 /// 相の直後に abort する gc を走らせる。返り値は (終了コード, 標準エラー)。abort なので終了
 /// コードは無い(シグナル)はず。
+#[cfg(debug_assertions)]
 fn gc_crashing_after(dir: &Path, phase: &str) -> (Option<i32>, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
         .args(["gc", dir.to_str().expect("utf-8"), "--threshold", "0"])
@@ -93,6 +99,7 @@ fn gc_crashing_after(dir: &Path, phase: &str) -> (Option<i32>, String) {
     )
 }
 
+#[cfg(debug_assertions)]
 fn gc(dir: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_uniqnode"))
         .args(["gc", dir.to_str().expect("utf-8"), "--threshold", "0"])
@@ -102,6 +109,7 @@ fn gc(dir: &Path) -> std::process::Output {
 
 /// 開き直して、生きているものが全件読めて fsck が緑であることを言い、孤児がいくつ残って
 /// いるかを返す。
+#[cfg(debug_assertions)]
 fn recover_and_check(dir: &Path, filled: &Filled, context: &str) -> usize {
     let store = Store::open(small_config(dir)).expect("crash からの回復");
     for (id, body) in &filled.live {
@@ -136,6 +144,7 @@ fn recover_and_check(dir: &Path, filled: &Filled, context: &str) -> usize {
 
 /// 落とした後の回復に続けて、もう一度(落とさずに)回収すると孤児が全部消え、生きているものは
 /// 全件読める。どの点で落ちても、次の回収が仕事を終える。
+#[cfg(debug_assertions)]
 fn a_second_gc_finishes_the_job(dir: &Path, filled: &Filled, context: &str) {
     let output = gc(dir);
     assert!(
@@ -154,6 +163,7 @@ fn a_second_gc_finishes_the_job(dir: &Path, filled: &Filled, context: &str) {
 /// 各相の直後に落としても、開き直した回復は fsck が緑で、生きているものは全件読める。孤児は
 /// C-3(MANIFEST の差し替え)の前なら全部残り(次回の対象)、後なら全部消えている。
 #[test]
+#[cfg(debug_assertions)]
 fn a_crash_after_any_phase_recovers_green_with_every_live_object_readable() {
     for phase in [
         uniqnode::gc::CRASH_AFTER_S,
@@ -196,6 +206,7 @@ fn a_crash_after_any_phase_recovers_green_with_every_live_object_readable() {
 
 /// S の後: アクティブが封印され MANIFEST に載っている。回復後のアクティブは新しい番号。
 #[test]
+#[cfg(debug_assertions)]
 fn a_crash_after_seal_leaves_the_active_pack_sealed_in_the_manifest() {
     let dir = temp_dir("seal-detail");
     let filled = {
@@ -226,6 +237,7 @@ fn a_crash_after_seal_leaves_the_active_pack_sealed_in_the_manifest() {
 
 /// B の途中: tmp/ に書きかけの新 pack がある。開くと tmp/ が空になり、旧 pack は無傷。
 #[test]
+#[cfg(debug_assertions)]
 fn a_crash_during_copy_leaves_a_partial_pack_in_tmp_that_open_removes() {
     let dir = temp_dir("copy-detail");
     let filled = {
@@ -260,6 +272,7 @@ fn a_crash_during_copy_leaves_a_partial_pack_in_tmp_that_open_removes() {
 /// 開くとき削除され(残すと以後の追記がその後ろに続き、重複の分が二度と回収されない)、ログに
 /// 名が出る。旧 pack は無傷。
 #[test]
+#[cfg(debug_assertions)]
 fn a_crash_between_rename_and_manifest_leaves_a_duplicate_pack_that_open_removes() {
     let dir = temp_dir("rename-detail");
     let filled = {
@@ -301,6 +314,7 @@ fn a_crash_between_rename_and_manifest_leaves_a_duplicate_pack_that_open_removes
 /// C-3 の後、D の前: MANIFEST は新しく、旧 pack がディスクに残っている。開くとき「回収済みの
 /// 残骸」として削除され、ログに名が出る。
 #[test]
+#[cfg(debug_assertions)]
 fn a_crash_after_the_manifest_leaves_old_packs_that_open_removes_as_leftovers() {
     let dir = temp_dir("manifest-detail");
     let filled = {
@@ -348,6 +362,7 @@ fn a_crash_after_the_manifest_leaves_old_packs_that_open_removes_as_leftovers() 
 /// 据えた直後に落ちても、追記した分は「MANIFEST に無く最後でもない pack」に見えず、回復が消さ
 /// ない。順序が逆(据えてから封印)だと、追記した pack が残骸に見えて消え、書いたものを失う。
 #[test]
+#[cfg(debug_assertions)]
 fn a_crash_after_rename_with_writes_since_seal_keeps_the_writes() {
     let dir = temp_dir("rename-with-writes");
     let filled = {

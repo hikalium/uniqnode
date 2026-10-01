@@ -101,7 +101,8 @@ commit したら、指示を待たずにそのまま `git push` する(エージ
 据え付けや移行の手順が古い版を前提に組まれてしまう(2026-09-29 の利用者の指示)。
 ただし、セッションが push するのは自分のブランチであり、main へ統合するのは Commit Queue の役の
 セッションの 1 エージェントだけである。緑のブランチの commit id と統合の意思を Commit Queue へ送り、
-Commit Queue が PR を通さずに main へ線形に積む(2026-10-01 の利用者の指示。手順は CLAUDE.md)。
+Commit Queue が PR を通さずに main へ線形に積む(2026-10-01 の利用者の指示。合格の条件と手順は
+[docs/mop/COMMIT-QUEUE.md](#1df91ea3-07a5-422f-9c9d-83c9f9a7b8ae))。
 
 https で push して 403(Permission to hikalium/uniqnode.git denied)が返るのは、たいてい
 グローバルの `gh auth git-credential` が答えていて、その PAT にこのリポジトリへの書き込みが

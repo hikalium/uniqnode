@@ -61,23 +61,14 @@ claude.ai の lamalium のプロジェクトを通して操作者に届ける項
 
 ## main へ統合するのは Commit Queue の役のセッションだけである(2026-10-01)
 
-uniqnode・lamalium・sumi の main へ統合するのは、Commit Queue(CQ)の役を持つ 1 つの
-セッションの 1 エージェントだけである。ほかのセッション(ホストの Claude と Codex、プロジェクトの
-スレッド、サブエージェント)は main へ push しない。自分の変更をコミットして `cargo test` を緑にし、
-自分のブランチを push して、リポジトリ、ブランチ、commit id、目的と統合の意思を CQ へ送る。
-CQ はその変更を最新の `origin/main` の先頭へ rebase し、`cargo test` が緑のときだけ main を
-fast-forward して push する。マージコミットは作らない。push までに main が動いたら、rebase と
-テストをやり直す。着地したら main へ入った commit id を送り手へ知らせる。rebase の衝突やテストの
-赤で取り込めないときは、変更を直さず、失敗した検査と出力の要点を添えて送り手へ差し戻す。
+uniqnode・lamalium・sumi の main へ統合するのは、Commit Queue(CQ)の役を持つ 1 つのセッションの
+1 エージェントだけである。ほかのセッション(ホストの Claude と Codex、プロジェクトのスレッド、
+サブエージェント)は main へ push しない。自分のブランチを push し、commit id と統合の意思を CQ へ
+送る。CQ は検査が合格なら main へ fast-forward で入れて commit id を送り手へ知らせ、取り込めない
+ときは失敗した検査と出力の要点を添えて差し戻す。宛先、合格の条件(クラウドの CQ の手元で落ちる
+テストの表を含む)、送り手と CQ の手順は
+[docs/mop/COMMIT-QUEUE.md](#1df91ea3-07a5-422f-9c9d-83c9f9a7b8ae) にある。
 
-CQ はクラウドで動き、vega に届かない。vega の上でしか通らないテスト(127.0.0.1:8083 の埋め込み
-サーバや 127.0.0.1:8084 のリランカーが要るもの、vega の pdftoppm 22.02 を前提にするもの、据え付けで
-systemd と nft を使うもの、IPv6 を使うもの、root で走ると権限の拒否が起きないもの)は、CQ の手元では
-`origin/main` でも落ちる(2026-10-01 に a8e287d で 13 件)。
-そこで CQ は `cargo test --no-fail-fast` を `origin/main` と rebase した木の両方で回し、rebase した木で
-落ちて `origin/main` で通るテストだけを赤とする。CQ の手元で落ちるテストに触れる変更は、送り手が
-vega で `cargo test` を回して、その結果を CQ への知らせに書く。CQ の宛先と手順は lamalium の
-docs/mop/WORKTREE.md の Integrate and deploy 節にある。
-
-理由: 利用者の指示(2026-10-01 13:16Z「本セッションのみが実際のmainへの統合作業を実施する」)。
-どのセッションも main へ直接 push してよいとした 2026-09-30 の裁定を置き換える。
+理由: 利用者の指示(2026-10-01 13:16Z「各マシンセッションはmainへの統合作業を実施せず、
+このセッションの1エージェントのみがCommit Queueとしての役割を果たす」)。どのセッションも main へ
+直接 push してよいとした 2026-09-30 の裁定を置き換える。

@@ -142,23 +142,29 @@ node/ の下のファイルは、Markdown でも説明の文書に当たらな�
    依頼は、送り手の答えが届いたらそれを反映して、この手順から再開する。同じメッセージ(メッセージの ID
    が同じもの、ID が無ければ同じ本文)が 2 度届いたら、2 度目は積まず、1 度目の結果(済んでいなければ、
    処理中であること)を返す。差し戻した変更は、直した新しい先頭の SHA で頼み直してもらう。
-2. 取り込む範囲は、`git log --reverse --format=%H --no-merges <起点>..<先頭>` が出す commit である。
-   起点は、送り手が書いた範囲の起点か、無ければ基点である。ただし `origin/main` が先頭の祖先で、
-   main を先頭へ fast-forward するときは、main へ入る全ての commit を調べるため、起点を
-   `origin/main` とする。`git merge-base --is-ancestor <起点> <先頭>` が 0 で終わらなければ、範囲が
-   決まらないので差し戻す。送り手は push 済みの commit を書き換え
-   ないので、以前に CQ が cherry-pick した commit が元の id のままブランチに残ることがある。
-   前後の行が違うと patch-id も違うので、`--cherry-pick` では除けない。そこで CQ は、範囲の各 commit
-   が既に統合済みでないことを、次の 2 つで確かめる。
-   - CQ が送り手へ知らせた id の組(元の SHA と main の SHA)に、その commit が無いこと。CQ は
-     この組を、知らせとは別に、プロジェクトの記憶の CQ の項にも残す。CQ が替わっても、送り手が
-     受け取った知らせと記憶の項から引ける。`-x` を付ける前の統合は main のメッセージから引けない
-     ので、この組だけが頼りになる。
-   - `git log origin/main --grep "cherry picked from commit <その SHA>"` が空であること。CQ は
+2. 取り込む範囲を決める。
+   - `origin/main` が先頭の祖先なら(main を先頭へ fast-forward する道)、範囲は
+     `origin/main..<先頭>` の全体である。送り手が起点を書いていても使わない。main へ入る commit を
+     全て分類し、検査の対象にするためである。
+   - そうでなければ(cherry-pick の道)、起点は送り手が書いた範囲の起点か、無ければ基点で、範囲は
+     `<起点>..<先頭>` である。基点、起点、先頭の順に祖先であること
+     (`git merge-base --is-ancestor <基点> <起点>` と `git merge-base --is-ancestor <起点> <先頭>` が
+     どちらも 0 で終わる)を確かめる。さらに、起点で省いた `<基点>..<起点>` の各 commit が統合済み
+     であることを、下の判定で確かめる。どれかが満たされなければ差し戻す。
+   - 範囲は `git log --reverse --format=%H --no-merges <範囲>` で並べる。空なら差し戻す。範囲に
+     merge commit が無いこと(`git log --merges <範囲>` が空)も確かめ、あれば差し戻す。
+
+   commit が統合済みかどうかは、次のどれかで判定する。送り手は push 済みの commit を書き換えない
+   ので、統合済みの commit が元の id のままブランチに残ることがある。前後の行が違うと patch-id も
+   違うので、`--cherry-pick` は判定に使わない。
+   - `git merge-base --is-ancestor <その SHA> origin/main` が 0 で終わる(同じ SHA のまま入った)。
+   - `git log origin/main --grep "cherry picked from commit <その SHA>"` が何かを出す。CQ は
      cherry-pick に `-x` を付けるので、main の commit のメッセージに元の SHA が残る。
-   統合済みの commit が範囲に入っていたら、範囲の起点を書き直して送り直すよう差し戻す。判断が
-   つかないときも差し戻す。範囲に merge commit が無いことを、`git log --merges <起点>..<先頭>` が
-   空であることで確かめる。あれば差し戻す。
+   - CQ の id の組の記録に、その SHA がある。記録は、プロジェクトの記憶の CQ の項にある、送られた
+     SHA と main の SHA の組の表である。CQ は統合のたびに組を足す。`-x` を付ける前の
+     cherry-pick(2026-10-01 の 5 組)も、この表にだけある。
+   cherry-pick の道の範囲の commit が統合済みと判定されたら、範囲の起点を書き直して送り直すよう
+   差し戻す。表がそろっていると確かめられず、統合済みかどうか判断がつかないときも差し戻す。
 3. 範囲の各 commit を「合格の条件」の節の方法で調べ、説明の文書だけの変更かどうかを決める。
 4. 説明の文書だけの変更でないとき:
    - `origin/main` が先頭の祖先でなければ、統合せずに差し戻し、新しい `origin/main` から切った

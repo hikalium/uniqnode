@@ -103,13 +103,15 @@ commit したら、指示を待たずにそのまま `git push` する(エージ
 
 https で push して 403(Permission to hikalium/uniqnode.git denied)が返るのは、たいてい
 グローバルの `gh auth git-credential` が答えていて、その PAT にこのリポジトリへの書き込みが
-無いときである。グローバルの gh の設定は他のリポジトリに波及するので直さず、この checkout の
-`.git/config` にだけ効く credential helper を足す。1 行目の空値がグローバルの helper を
-打ち消し、2 行目が Contents: Read and write を持つ fine-grained PAT を置いたファイル(権限 600)を読む:
+無いときである。グローバルの gh の設定は他のリポジトリに波及するので直さず、このリポジトリの
+`.git/config` にだけ効く credential helper を足す(`--local` の設定は、同じリポジトリの全ての
+worktree が共有する)。1 行目の空値がグローバルの helper を打ち消し、2 行目が Contents: Read
+and write を持つ fine-grained PAT を置いたファイル(権限 600)を読む。2 行目の
+`/path/to/uniqnode-pat` は、そのファイルの絶対パスに置き換える(二重引用符は残す):
 
 ```
 git config --local --add credential.https://github.com.helper ''
-git config --local --add credential.https://github.com.helper '!f() { echo username=x-access-token; echo "password=$(cat <PAT のファイル>)"; }; f'
+git config --local --add credential.https://github.com.helper '!f() { echo username=x-access-token; echo "password=$(cat "/path/to/uniqnode-pat")"; }; f'
 ```
 
 どちらも `--add` で足す。`--add` 無しの `git config --local <名前> <値>` は既存の 1 件を

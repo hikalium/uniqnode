@@ -445,7 +445,7 @@ pub fn run(store: &Mutex<Store>, options: GcOptions) -> Result<GcReport> {
     let started = Instant::now();
     let (dir, max_record_bytes, sealed_after_seal, cursor, sealed_in_seal_phase) = {
         let mut guard = lock(store);
-        if !guard.gc_try_begin() {
+        if !guard.gc_try_begin()? {
             return Err(StoreError::Invalid(GC_ALREADY_RUNNING.into()));
         }
         let sealed = if options.dry_run {
@@ -499,6 +499,9 @@ pub fn run(store: &Mutex<Store>, options: GcOptions) -> Result<GcReport> {
     let started = Instant::now();
     let (roots_at_analysis, locations, live, cursor_after_analysis, packs) = {
         let mut guard = lock(store);
+        // ロックを取り直した直後に書けない状態を見る(切り詰めに失敗した尻切れが残っていると、
+        // references_since が先に Corruption で落ちて理由を取り違える。APPEND_FAILURE の方針 2)。
+        guard.check_writable()?;
         let roots = roots(&guard);
         let (tail, cursor_after) = guard.references_since(cursor)?;
         merge_references(&mut references, tail);
@@ -644,6 +647,8 @@ fn compact(
     let started = Instant::now();
     let (commit, revived, copied_ids) = {
         let mut guard = lock(store);
+        // A と同じく、ロックを取り直した直後に書けない状態を見る。
+        guard.check_writable()?;
         // A 以後に増えた根(全署名者の ref・pin・attest から組む根の表の差分。新しい根は必ず
         // 新しい reflog レコードとして現れ、根の表はそれを全部適用した後の姿なので、
         // signer_last_seq の差分から reflog を読み直すのと同じ集合に至る)。
@@ -690,7 +695,8 @@ fn compact(
     phases.commit = started.elapsed();
 
     // D: ロックの外。旧 pack と、その参照表を消す。MANIFEST に無いので、ここで落ちても回復が
-    // 残骸として消す。
+    // 残骸として消す。消すのに失敗しても、この回の GC が誤りで終わるだけで、書けない状態には
+    // しない(APPEND_FAILURE の方針 3)。
     let started = Instant::now();
     for number in targets {
         std::fs::remove_file(store::PACK.path(dir, *number))?;
@@ -699,7 +705,9 @@ fn compact(
             std::fs::remove_file(&table)?;
         }
     }
-    std::fs::File::open(dir.join(store::PACK.directory))?.sync_all()?;
+    // 最後の packs/ の sync はロックの中で行い、失敗したら同じロックの中で書けない状態を
+    // 立てる(Store::gc_sync_packs_dir)。
+    lock(store).gc_sync_packs_dir()?;
     // 新 pack の参照表は、写したオブジェクトの参照が手元(P で解析済み)にあるので、pack を
     // 読み直さずに置く。次回の P がこれを流用する。
     let new_pack_bytes = match commit.new_pack {

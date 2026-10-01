@@ -24,6 +24,9 @@ pub enum StoreError {
     Corruption(String),
     /// 呼び出し側の誤り(存在しない対象への ref、名前空間違反など)。
     Invalid(String),
+    /// 持続的な書き込みの I/O が 1 度失敗したので、このプロセスではもう書かない
+    /// (APPEND_FAILURE の方針 2)。書けない状態に入れた要求自身もこれを受け取る。
+    WritesDisabled(WriteFailure),
 }
 
 impl std::fmt::Display for StoreError {
@@ -32,7 +35,112 @@ impl std::fmt::Display for StoreError {
             StoreError::Io(e) => write!(f, "io: {e}"),
             StoreError::Corruption(m) => write!(f, "corruption: {m}"),
             StoreError::Invalid(m) => write!(f, "invalid: {m}"),
+            StoreError::WritesDisabled(failure) => write!(f, "{}", failure.message()),
         }
+    }
+}
+
+/// 書けない状態に入れた操作の段(APPEND_FAILURE の方針 2)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteOp {
+    /// 追記の write(と、開いた後の fstat)。
+    Write,
+    /// 追記の sync。
+    Sync,
+    /// 新しいセグメントの親ディレクトリの sync と、GC の D の packs/ の sync。
+    DirSync,
+    /// MANIFEST の書き込み(封印)。
+    Manifest,
+    /// GC の確定(C-1 より後の rename・ディレクトリの sync・MANIFEST)。
+    GcCommit,
+    /// 書く前のファイル長がメモリの数え値と違った(方針 3 のずれの検算)。
+    LengthMismatch,
+}
+
+impl WriteOp {
+    pub fn name(&self) -> &'static str {
+        match self {
+            WriteOp::Write => "write",
+            WriteOp::Sync => "sync",
+            WriteOp::DirSync => "dir_sync",
+            WriteOp::Manifest => "manifest",
+            WriteOp::GcCommit => "gc_commit",
+            WriteOp::LengthMismatch => "length_mismatch",
+        }
+    }
+}
+
+/// 失敗した追記の切り詰め(best-effort)の結果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cleanup {
+    Ok,
+    Failed,
+    NotTried,
+}
+
+impl Cleanup {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Cleanup::Ok => "ok",
+            Cleanup::Failed => "failed",
+            Cleanup::NotTried => "not_tried",
+        }
+    }
+}
+
+/// 戻し方を分ける種類(方針 5)。NoSpace は、write の段の ENOSPC か EDQUOT で、切り詰めと
+/// その sync が成功したときだけ。他は全部 Io。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureKind {
+    NoSpace,
+    Io,
+}
+
+impl FailureKind {
+    pub fn name(&self) -> &'static str {
+        match self {
+            FailureKind::NoSpace => "no_space",
+            FailureKind::Io => "io",
+        }
+    }
+}
+
+/// 書けない状態の中身。最初の失敗の原因を持つ。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WriteFailure {
+    pub reason: String,
+    pub op: WriteOp,
+    pub errno: Option<i32>,
+    pub cleanup: Cleanup,
+    pub kind: FailureKind,
+    /// 入った時刻(unix 秒)。
+    pub since: i64,
+}
+
+impl WriteFailure {
+    /// 戻し方の案内(方針 5)。
+    pub fn guidance(&self) -> &'static str {
+        match self.kind {
+            FailureKind::NoSpace => {
+                "ストアを置いたファイルシステムに空きを作ってから serve を再起動する\
+                 (空きを足しても自動では戻らない)"
+            }
+            FailureKind::Io => {
+                "ホストを再起動する(できなければ、ストアを置いたファイルシステムを umount して \
+                 fsck し、mount し直してから起こす)。serve の再起動だけでは、page cache に残った\
+                 書けなかった末尾の後ろに書くことになりうる"
+            }
+        }
+    }
+
+    /// 誤りの文(HTTP の 503 の `error`、CLI の誤り、MCP の誤りの文が同じこれを言う)。
+    pub fn message(&self) -> String {
+        format!(
+            "writes disabled ({}): {}; {}",
+            self.kind.name(),
+            self.reason,
+            self.guidance()
+        )
     }
 }
 
@@ -136,6 +244,11 @@ pub struct Store {
     gc_touched: Option<std::collections::BTreeSet<String>>,
     /// 回収が走っている(S から D の終わりまで)。同じストアに 2 つの回収を重ねない。
     gc_running: bool,
+    /// 書けない状態(APPEND_FAILURE の方針 2)。Some なら全ての書き込みの入口が断る。戻るのは
+    /// ストアを開き直したときだけである。
+    write_failure: Option<WriteFailure>,
+    /// 失敗の注入(テスト用の口。node/src/fault.rs)。
+    fault: Option<crate::fault::Fault>,
     /// 同一データディレクトリの二重オープン防止(プロセス終了で自動解放される
     /// Linux 抽象名前空間ソケットをロックとして使う)。
     _lock: std::os::unix::net::UnixListener,
@@ -204,16 +317,14 @@ fn reflog_path(dir: &Path, number: u64) -> PathBuf {
     REFLOG.path(dir, number)
 }
 
-/// 追記レコード: [u32 len][u32 crc32][payload]、いずれもリトルエンディアン。
-fn append_record(path: &Path, payload: &[u8]) -> Result<()> {
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+/// 追記レコード: [u32 len][u32 crc32][payload]、いずれもリトルエンディアン。書くのは
+/// Store::append_durable だけである(APPEND_FAILURE の「書き込みの口を寄せる」)。
+fn encode_record(payload: &[u8]) -> Vec<u8> {
     let mut record = Vec::with_capacity(8 + payload.len());
     record.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     record.extend_from_slice(&crc32(payload).to_le_bytes());
     record.extend_from_slice(payload);
-    file.write_all(&record)?;
-    file.sync_data()?;
-    Ok(())
+    record
 }
 
 struct RecordScan {
@@ -394,19 +505,55 @@ pub(crate) fn parse_manifest(bytes: &[u8]) -> Result<(Vec<u64>, Vec<u64>)> {
     Ok((numbers("sealed_packs")?, numbers("sealed_reflogs")?))
 }
 
+/// tmp/ の中の、呼び出しごとに一意な名前(`<頭>-<pid>-<単調増加の数>`)。同じプロセスの
+/// 2 つのスレッド(GC の参照表の書き込みと MANIFEST など)が同じ tmp を取り合わない
+/// (APPEND_FAILURE の欠陥 6)。
+pub(crate) fn unique_tmp_path(dir: &Path, head: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    dir.join("tmp").join(format!("{head}-{}-{number}", std::process::id()))
+}
+
+/// atomic_write の段。注入の口(write_manifest)が段ごとに誤りを差し込む。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtomicStep {
+    BeforeRename,
+    BeforeDirSync,
+}
+
 /// `dir/tmp/` に書いて fsync し、rename で target に据える(SPEC §5.2 の MANIFEST の規律)。
 pub(crate) fn atomic_write(dir: &Path, target: &Path, content: &[u8]) -> Result<()> {
-    let tmp_dir = dir.join("tmp");
-    let tmp_path = tmp_dir.join(format!("write-{}", std::process::id()));
-    {
+    atomic_write_steps(dir, target, content, &mut |_| Ok(()))
+        .map_err(|(_, error)| StoreError::Io(error))
+}
+
+/// atomic_write の本体。誤りはどの段で起きたかの短い言葉と組で返す。`hook` は各段の前に
+/// 呼ばれ、誤りを返せばその段の誤りとして扱う。
+fn atomic_write_steps(
+    dir: &Path,
+    target: &Path,
+    content: &[u8],
+    hook: &mut dyn FnMut(AtomicStep) -> std::io::Result<()>,
+) -> std::result::Result<(), (&'static str, std::io::Error)> {
+    let tmp_path = unique_tmp_path(dir, "write");
+    let written = (|| {
         let mut file = std::fs::File::create(&tmp_path)?;
         file.write_all(content)?;
-        file.sync_all()?;
+        crate::fault::note_sync("file", &tmp_path);
+        file.sync_all()
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(("tmp への書き込み", error));
     }
-    std::fs::rename(&tmp_path, target)?;
+    if let Err(error) = hook(AtomicStep::BeforeRename).and_then(|_| std::fs::rename(&tmp_path, target)) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(("rename", error));
+    }
     // rename を含むディレクトリエントリの永続化。
-    std::fs::File::open(target.parent().expect("親ディレクトリがある"))?.sync_all()?;
-    Ok(())
+    hook(AtomicStep::BeforeDirSync)
+        .and_then(|_| crate::fault::sync_dir(target.parent().expect("親ディレクトリがある")))
+        .map_err(|error| ("rename の後のディレクトリの sync", error))
 }
 
 /// ストアのロックの名前。データディレクトリの正規化した道の SHA-256 から名付けた抽象名前空間の
@@ -457,6 +604,68 @@ pub fn require_store_dir(dir: &Path) -> Result<()> {
     )))
 }
 
+/// データのディレクトリの親(相対の 1 要素なら今のディレクトリ)。
+fn data_dir_parent(dir: &Path) -> Result<PathBuf> {
+    match dir.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Ok(PathBuf::from(".")),
+        Some(parent) => Ok(parent.to_path_buf()),
+        None => Err(StoreError::Invalid(format!(
+            "{} はデータのディレクトリにできない(親が無い)",
+            dir.display()
+        ))),
+    }
+}
+
+/// ストアを開く命令が、ログを開くより前に呼ぶ: データのディレクトリが無ければ `mkdir` で
+/// 作る(親が無ければ作らずに断る)。祖先は作らない: データのディレクトリの親と、根から
+/// そこまでの経路は、既に在って永続しているものとする(APPEND_FAILURE の方針 1a)。
+/// Store::open も最初にこれを通る。
+pub fn prepare_data_dir(dir: &Path) -> Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    if dir.exists() {
+        return Err(StoreError::Invalid(format!(
+            "{} はディレクトリでない",
+            dir.display()
+        )));
+    }
+    let parent = data_dir_parent(dir)?;
+    if !parent.is_dir() {
+        return Err(StoreError::Invalid(format!(
+            "{} の親 {} が無い(データのディレクトリの親と、根からそこまでの経路は、既に在って\
+             永続しているものとし、作らない。先に作ってから打ち直す)",
+            dir.display(),
+            parent.display()
+        )));
+    }
+    match std::fs::create_dir(dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+        Err(error) => Err(StoreError::Io(std::io::Error::new(
+            error.kind(),
+            format!("{} を作れない: {error}", dir.display()),
+        ))),
+    }
+}
+
+/// ディレクトリが無ければ 1 つだけ作る(祖先は作らない)。
+fn mkdir_if_missing(path: &Path) -> Result<()> {
+    match std::fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// 開くときの sync の誤りに道を添える(開くことの失敗として理由を言う)。
+fn open_sync_error(what: &str, path: &Path, error: std::io::Error) -> StoreError {
+    StoreError::Io(std::io::Error::new(
+        error.kind(),
+        format!("開くときの sync: {what} {} を sync できない: {error}", path.display()),
+    ))
+}
+
 impl Store {
     pub fn node_id_hex(&self) -> &str {
         &self.node_id_hex
@@ -473,13 +682,19 @@ impl Store {
 
     pub fn open(config: StoreConfig) -> Result<Store> {
         let dir = config.data_dir.clone();
-        std::fs::create_dir_all(dir.join(PACK.directory))?;
-        std::fs::create_dir_all(dir.join(REFLOG.directory))?;
-        std::fs::create_dir_all(dir.join("tmp"))?;
+        let fault = crate::fault::Fault::from_env().map_err(StoreError::Invalid)?;
+        // 順は APPEND_FAILURE の方針 1a の末尾: データのディレクトリの mkdir(ロックの名は
+        // 正規化した道から作るので先に要る)→ ロック → packs/・reflog/・tmp/ の mkdir →
+        // tmp/ の片付け → node_key → recover → 開くときの sync → 書き込みの受け付け。
+        // 祖先は作らない(prepare_data_dir)。
+        prepare_data_dir(&dir)?;
         let lock = Self::acquire_lock(&dir)?;
+        mkdir_if_missing(&dir.join(PACK.directory))?;
+        mkdir_if_missing(&dir.join(REFLOG.directory))?;
+        mkdir_if_missing(&dir.join("tmp"))?;
         // tmp/ は作業場で、据えられなかった書きかけ(atomic_write の途中、gc の新 pack、
-        // backup の写しかけ)しか残らない。持ち主はロックを取ったこのプロセスだけなので、
-        // 開くときに空にする。
+        // backup の写しかけ、node_key の作りかけ)しか残らない。持ち主はロックを取ったこの
+        // プロセスだけなので、開くときに空にする。
         for entry in std::fs::read_dir(dir.join("tmp"))? {
             let path = entry?.path();
             if path.is_file() {
@@ -510,10 +725,215 @@ impl Store {
             object_generation: 0,
             gc_touched: None,
             gc_running: false,
+            write_failure: None,
+            fault,
             _lock: lock,
         };
         store.recover()?;
+        store.sync_on_open()?;
         Ok(store)
+    }
+
+    /// 開くときの sync(APPEND_FAILURE の方針 1a)。recover が採用したセグメントの中身と名前を、
+    /// 最初の応答より前に永続させる。「既に在る」ことを理由に省かない。対象は node_key の中身、
+    /// MANIFEST に封印済みとして載っている pack を除く全部の pack と reflog の中身、packs/・
+    /// reflog/・データのディレクトリ自身・その親。失敗は開くことの失敗である。
+    fn sync_on_open(&self) -> Result<()> {
+        let dir = &self.config.data_dir;
+        let key_path = dir.join(NODE_KEY_NAME);
+        crate::fault::note_sync("file", &key_path);
+        std::fs::File::open(&key_path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| open_sync_error("鍵", &key_path, error))?;
+        for number in PACK.numbers(dir)? {
+            if self.sealed_packs.contains(&number) {
+                continue;
+            }
+            let path = pack_path(dir, number);
+            crate::fault::note_sync("file", &path);
+            std::fs::File::open(&path)
+                .and_then(|file| file.sync_data())
+                .map_err(|error| open_sync_error("pack", &path, error))?;
+        }
+        for number in REFLOG.numbers(dir)? {
+            let path = reflog_path(dir, number);
+            crate::fault::note_sync("file", &path);
+            std::fs::File::open(&path)
+                .and_then(|file| file.sync_data())
+                .map_err(|error| open_sync_error("reflog", &path, error))?;
+        }
+        let parent = data_dir_parent(dir)?;
+        for directory in [dir.join(PACK.directory), dir.join(REFLOG.directory), dir.clone(), parent]
+        {
+            crate::fault::sync_dir(&directory)
+                .map_err(|error| open_sync_error("ディレクトリ", &directory, error))?;
+        }
+        Ok(())
+    }
+
+    // ---- 書けない状態(APPEND_FAILURE の方針 2) ----
+
+    /// 書けない状態の中身。None なら書ける。
+    pub fn writes_disabled(&self) -> Option<&WriteFailure> {
+        self.write_failure.as_ref()
+    }
+
+    /// 書き込みの入口の先頭で呼ぶ。書けない状態なら WritesDisabled。
+    pub fn check_writable(&self) -> Result<()> {
+        match &self.write_failure {
+            Some(failure) => Err(StoreError::WritesDisabled(failure.clone())),
+            None => Ok(()),
+        }
+    }
+
+    /// 失敗の注入を掛ける(テスト用の口。字句は node/src/fault.rs)。前に掛けたものは捨てる。
+    #[doc(hidden)]
+    pub fn inject_fault(&mut self, spec: &str) -> Result<()> {
+        self.fault = Some(crate::fault::Fault::parse(spec).map_err(StoreError::Invalid)?);
+        Ok(())
+    }
+
+    /// 書けない状態に入れ、その要求へ返す誤りを作る。既に入っていれば最初の原因を保つ。
+    fn enter_writes_disabled(
+        &mut self,
+        op: WriteOp,
+        context: &str,
+        error: &std::io::Error,
+        cleanup: Cleanup,
+    ) -> StoreError {
+        if let Some(failure) = &self.write_failure {
+            return StoreError::WritesDisabled(failure.clone());
+        }
+        let errno = error.raw_os_error();
+        let kind = match (op, errno, cleanup) {
+            (WriteOp::Write, Some(crate::fault::ENOSPC | crate::fault::EDQUOT), Cleanup::Ok) => {
+                FailureKind::NoSpace
+            }
+            _ => FailureKind::Io,
+        };
+        let failure = WriteFailure {
+            reason: format!("{context}: {error}"),
+            op,
+            errno,
+            cleanup,
+            kind,
+            since: unix_now(),
+        };
+        crate::log_line!(
+            "uniqnode: store: writes disabled: op {} cleanup {} errno {}: {}",
+            op.name(),
+            cleanup.name(),
+            errno.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+            failure.message()
+        );
+        self.write_failure = Some(failure.clone());
+        StoreError::WritesDisabled(failure)
+    }
+
+    /// 追記の唯一の口(APPEND_FAILURE の方針 1・1a)。書く前のファイル長を開いたハンドルの
+    /// fstat で読み、pack ならメモリの数え値と照らす。write か sync が誤りを返したら、前の長さ
+    /// への切り詰めとその sync を 1 度だけ試み、結果に関わらず書けない状態に入れる。新しい
+    /// ファイルを作った追記は、親ディレクトリの sync までを成功とする。開くこと自体の誤りは
+    /// 1 バイトも書いていないので、書けない状態に入れない。
+    fn append_durable(&mut self, segment: SegmentKind, number: u64, payload: &[u8]) -> Result<()> {
+        self.check_writable()?;
+        let path = segment.path(&self.config.data_dir, number);
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        let before = match file.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                let context = format!("{} の fstat", path.display());
+                return Err(self.enter_writes_disabled(
+                    WriteOp::Write,
+                    &context,
+                    &error,
+                    Cleanup::NotTried,
+                ));
+            }
+        };
+        if segment == PACK && before != self.active_pack_length {
+            // errno の無い誤り(io::Error::other は raw_os_error が None)。kind は Io になる。
+            let error = std::io::Error::other(format!(
+                "ファイルの長さ {before} がメモリの数え値 {} と違う",
+                self.active_pack_length
+            ));
+            let context = format!("{} の書く前の検算", path.display());
+            return Err(self.enter_writes_disabled(
+                WriteOp::LengthMismatch,
+                &context,
+                &error,
+                Cleanup::NotTried,
+            ));
+        }
+        let new_file = before == 0;
+        let fired =
+            self.fault.as_mut().and_then(|fault| fault.on_append(segment.directory, new_file));
+        let record = encode_record(payload);
+
+        // write の段。
+        use crate::fault::FaultKind;
+        let written = match fired {
+            Some(FaultKind::Before) => Err(crate::fault::injected(crate::fault::EIO)),
+            Some(FaultKind::Torn(n)) => file
+                .write_all(&record[..n.min(record.len())])
+                .and(Err(crate::fault::injected(crate::fault::ENOSPC))),
+            _ => file.write_all(&record),
+        };
+        // sync の段。
+        let (op, outcome) = match written {
+            Err(error) => (WriteOp::Write, Err(error)),
+            Ok(()) => {
+                crate::fault::note_sync("file", &path);
+                let synced = match fired {
+                    Some(FaultKind::Sync | FaultKind::SyncKeep) => {
+                        Err(crate::fault::injected(crate::fault::EIO))
+                    }
+                    Some(FaultKind::NospaceSync) => {
+                        Err(crate::fault::injected(crate::fault::ENOSPC))
+                    }
+                    _ => file.sync_data(),
+                };
+                (WriteOp::Sync, synced)
+            }
+        };
+        if let Err(error) = outcome {
+            // 切り詰めは再起動の再生を軽くするための best-effort で、正しさは書けない状態が持つ。
+            let cleanup = if fired == Some(FaultKind::SyncKeep) {
+                Cleanup::Failed
+            } else {
+                match file.set_len(before).and_then(|_| file.sync_all()) {
+                    Ok(()) => Cleanup::Ok,
+                    Err(_) => Cleanup::Failed,
+                }
+            };
+            let context = format!("{} への追記", path.display());
+            return Err(self.enter_writes_disabled(op, &context, &error, cleanup));
+        }
+        drop(file);
+        if new_file {
+            if fired == Some(FaultKind::CrashBeforeDirsync) {
+                eprintln!(
+                    "uniqnode: store: {}=crash-before-dirsync なので abort する(テスト用の口)",
+                    crate::fault::APPEND_FAULT_ENV
+                );
+                std::process::abort();
+            }
+            let parent = path.parent().expect("セグメントには親がある").to_path_buf();
+            let synced = match fired {
+                Some(FaultKind::Dirsync) => Err(crate::fault::injected(crate::fault::EIO)),
+                _ => crate::fault::sync_dir(&parent),
+            };
+            if let Err(error) = synced {
+                let context = format!("新しいセグメント {} の親の sync", path.display());
+                return Err(self.enter_writes_disabled(
+                    WriteOp::DirSync,
+                    &context,
+                    &error,
+                    Cleanup::NotTried,
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// 既に在るストアだけを開く。ストアでない場所(空のディレクトリ・存在しない道)には、
@@ -568,12 +988,25 @@ impl Store {
             seed.copy_from_slice(&bytes);
             Ok(seed)
         } else {
+            // tmp/ に 0600 で作ってから中身を書き(umask に依らず、秘密鍵が一瞬も他の利用者に
+            // 読めない)、sync して rename し、データのディレクトリを sync する。途中で落ちても
+            // 短い鍵が node_key の名で残ることは無い(残るのは tmp/ の残骸で、次に開くとき消す。
+            // APPEND_FAILURE の方針 1a)。
             let seed = ed25519::generate_secret_seed()?;
-            std::fs::write(&key_path, seed)?;
-            let mut permissions = std::fs::metadata(&key_path)?.permissions();
-            use std::os::unix::fs::PermissionsExt;
-            permissions.set_mode(0o600);
-            std::fs::set_permissions(&key_path, permissions)?;
+            let tmp_path = unique_tmp_path(dir, "node_key");
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&tmp_path)?;
+                file.write_all(&seed)?;
+                crate::fault::note_sync("file", &tmp_path);
+                file.sync_all()?;
+            }
+            std::fs::rename(&tmp_path, &key_path)?;
+            crate::fault::sync_dir(dir)?;
             Ok(seed)
         }
     }
@@ -586,7 +1019,34 @@ impl Store {
         parse_manifest(&std::fs::read(&manifest_path)?)
     }
 
-    fn write_manifest(&self) -> Result<()> {
+    /// MANIFEST を `sealed_packs` の中身で書く。メモリの表は変えない: 呼び手は成功してから
+    /// 進める(ディスクが先、メモリが後。APPEND_FAILURE の方針 3)。誤りはどの段でも書けない
+    /// 状態に入れ、`op` を原因の段として残す(封印は Manifest、GC の確定は GcCommit)。
+    fn write_manifest(&mut self, sealed_packs: &[u64], op: WriteOp) -> Result<()> {
+        self.check_writable()?;
+        let content = self.manifest_content(sealed_packs);
+        let fired = self.fault.as_mut().and_then(|fault| fault.on_manifest());
+        let dir = self.config.data_dir.clone();
+        let written = atomic_write_steps(&dir, &dir.join(MANIFEST_NAME), &content, &mut |step| {
+            use crate::fault::FaultKind;
+            match (step, fired) {
+                (AtomicStep::BeforeRename, Some(FaultKind::Manifest))
+                | (AtomicStep::BeforeDirSync, Some(FaultKind::ManifestDirsync)) => {
+                    Err(crate::fault::injected(crate::fault::EIO))
+                }
+                _ => Ok(()),
+            }
+        });
+        match written {
+            Ok(()) => Ok(()),
+            Err((step, error)) => {
+                let context = format!("MANIFEST の{step}");
+                Err(self.enter_writes_disabled(op, &context, &error, Cleanup::NotTried))
+            }
+        }
+    }
+
+    fn manifest_content(&self, sealed_packs: &[u64]) -> Vec<u8> {
         let mut map = BTreeMap::new();
         map.insert("v".to_string(), c1::Value::Integer(1));
         map.insert(
@@ -596,7 +1056,7 @@ impl Store {
         map.insert(
             "sealed_packs".to_string(),
             c1::Value::Array(
-                self.sealed_packs.iter().map(|n| c1::Value::Integer(*n as i64)).collect(),
+                sealed_packs.iter().map(|n| c1::Value::Integer(*n as i64)).collect(),
             ),
         );
         map.insert(
@@ -605,8 +1065,7 @@ impl Store {
                 self.sealed_reflogs.iter().map(|n| c1::Value::Integer(*n as i64)).collect(),
             ),
         );
-        let content = c1::to_canonical_bytes(&c1::Value::Object(map));
-        atomic_write(&self.config.data_dir, &self.config.data_dir.join(MANIFEST_NAME), &content)
+        c1::to_canonical_bytes(&c1::Value::Object(map))
     }
 
     /// 起動時回復。封印済みセグメントは完全でなければならず(破損は Corruption)、
@@ -872,11 +1331,11 @@ impl Store {
     /// 他DBノード由来の署名済み ref レコードを取り込む(レプリケーションの受け側)。
     /// 永続化(reflog 追記)してからメモリに適用する。既知の seq は冪等にスキップする。
     pub fn ingest_ref_record(&mut self, payload: &[u8]) -> Result<bool> {
+        self.check_writable()?;
         match self.verify_ref_record(payload)? {
             Verified::AlreadyKnown => Ok(false),
             Verified::New(verified) => {
-                let log_path = reflog_path(&self.config.data_dir, self.active_reflog_number);
-                append_record(&log_path, payload)?;
+                self.append_durable(REFLOG, self.active_reflog_number, payload)?;
                 self.apply_verified(verified);
                 Ok(true)
             }
@@ -887,6 +1346,7 @@ impl Store {
 
     /// オブジェクト投入(べき等)。返り値は (ID, 新規に保存されたか)。
     pub fn put_object(&mut self, bytes: &[u8]) -> Result<(String, bool)> {
+        self.check_writable()?;
         if bytes.len() as u64 > self.config.max_record_bytes as u64 {
             return Err(StoreError::Invalid(format!(
                 "オブジェクトが大きすぎる({} bytes)",
@@ -912,9 +1372,8 @@ impl Store {
         if self.active_pack_length >= self.config.pack_seal_bytes {
             self.seal_active_pack()?;
         }
-        let path = pack_path(&self.config.data_dir, self.active_pack_number);
         let offset_before = self.active_pack_length;
-        append_record(&path, bytes)?;
+        self.append_durable(PACK, self.active_pack_number, bytes)?;
         self.active_pack_length += 8 + bytes.len() as u64;
         self.object_index.insert(
             id.clone(),
@@ -929,9 +1388,14 @@ impl Store {
         Ok((id, true))
     }
 
+    /// 封印。番号を足した写しで MANIFEST を書き、成功してからメモリの表を進める
+    /// (APPEND_FAILURE の方針 3)。
     fn seal_active_pack(&mut self) -> Result<()> {
-        self.sealed_packs.push(self.active_pack_number);
-        self.write_manifest()?;
+        self.check_writable()?;
+        let mut sealed = self.sealed_packs.clone();
+        sealed.push(self.active_pack_number);
+        self.write_manifest(&sealed, WriteOp::Manifest)?;
+        self.sealed_packs = sealed;
         self.active_pack_number += 1;
         self.active_pack_length = 0;
         Ok(())
@@ -951,13 +1415,36 @@ impl Store {
     }
 
     /// 回収の始まり(S)で呼ぶ。既に走っていれば false(2 つ目は始めない: 1 つ目が対象を消した
-    /// 後の pack を読みに行くことになる)。
-    pub fn gc_try_begin(&mut self) -> bool {
+    /// 後の pack を読みに行くことになる)。書けない状態なら WritesDisabled(dry-run も同じ入口を
+    /// 通るので断られる)。
+    pub fn gc_try_begin(&mut self) -> Result<bool> {
+        self.check_writable()?;
         if self.gc_running {
-            return false;
+            return Ok(false);
         }
         self.gc_running = true;
-        true
+        Ok(true)
+    }
+
+    /// GC の D の最後の packs/ のディレクトリの sync。失敗は書けない状態(kind は Io、op は
+    /// DirSync)に入れる: D がその誤りを受け取るとディレクトリの errseq に「報告済み」の印が
+    /// 付き、後の新しいセグメントの名前の sync が成功を返して、書き戻せなかった更新を帳消しに
+    /// しうる(APPEND_FAILURE の方針 3 の D の項)。呼び手はストアのロックの中で呼ぶ(失敗の
+    /// 記録がロックの中で済む)。
+    pub(crate) fn gc_sync_packs_dir(&mut self) -> Result<()> {
+        let packs = self.config.data_dir.join(PACK.directory);
+        let fired = self.fault.as_mut().and_then(|fault| fault.on_gc_dirsync());
+        let synced = match fired {
+            Some(_) => Err(crate::fault::injected(crate::fault::EIO)),
+            None => crate::fault::sync_dir(&packs),
+        };
+        match synced {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let context = format!("GC の D の {} の sync", packs.display());
+                Err(self.enter_writes_disabled(WriteOp::DirSync, &context, &error, Cleanup::NotTried))
+            }
+        }
     }
 
     /// 回収の終わり(成功でも失敗でも)で呼ぶ。
@@ -1045,6 +1532,8 @@ impl Store {
         targets: &[u64],
         new_pack: Option<(&Path, &[CopiedObject])>,
     ) -> Result<GcCommit> {
+        // B の間に別の要求が書けない状態を立てたかもしれない。
+        self.check_writable()?;
         for target in targets {
             if !self.sealed_packs.contains(target) {
                 return Err(StoreError::Invalid(format!(
@@ -1060,20 +1549,40 @@ impl Store {
             Some((tmp_path, _)) => {
                 let number = self.active_pack_number;
                 let target = pack_path(&self.config.data_dir, number);
-                std::fs::rename(tmp_path, &target)?;
-                std::fs::File::open(target.parent().expect("packs/ がある"))?.sync_all()?;
+                // C-1 より後の誤りは全部書けない状態に入れる(APPEND_FAILURE の方針 2)。
+                if let Err(error) = std::fs::rename(tmp_path, &target) {
+                    let context = format!("GC の新 pack の {} への rename", target.display());
+                    return Err(self.enter_writes_disabled(
+                        WriteOp::GcCommit,
+                        &context,
+                        &error,
+                        Cleanup::NotTried,
+                    ));
+                }
+                let packs = target.parent().expect("packs/ がある").to_path_buf();
+                if let Err(error) = crate::fault::sync_dir(&packs) {
+                    let context = format!("GC の新 pack の rename の後の {} の sync", packs.display());
+                    return Err(self.enter_writes_disabled(
+                        WriteOp::GcCommit,
+                        &context,
+                        &error,
+                        Cleanup::NotTried,
+                    ));
+                }
                 crate::gc::crash_point(crate::gc::CRASH_AFTER_C2);
                 Some(number)
             }
             None => None,
         };
-        // C-3
-        self.sealed_packs.retain(|number| !targets.contains(number));
+        // C-3: 写しで MANIFEST を書き、成功してからメモリの表を書き換える(方針 3)。
+        let mut sealed: Vec<u64> =
+            self.sealed_packs.iter().copied().filter(|number| !targets.contains(number)).collect();
         if let Some(number) = new_number {
-            self.sealed_packs.push(number);
-            self.sealed_packs.sort_unstable();
+            sealed.push(number);
+            sealed.sort_unstable();
         }
-        self.write_manifest()?;
+        self.write_manifest(&sealed, WriteOp::GcCommit)?;
+        self.sealed_packs = sealed;
         crate::gc::crash_point(crate::gc::CRASH_AFTER_C3);
         // C-4
         let copied: BTreeMap<&str, (u64, u32)> = new_pack
@@ -1179,6 +1688,7 @@ impl Store {
     /// 自分の署名でレコードを1件発行する(seq/at/signer/sig を埋め、取り込み側と同じ
     /// 検証を通してから永続化・適用する。判定の一本化 = should/0135)。
     fn append_own_record(&mut self, mut map: BTreeMap<String, c1::Value>) -> Result<u64> {
+        self.check_writable()?;
         let seq = self.signer_last_seq.get(&self.node_id_hex).copied().unwrap_or(0) + 1;
         map.insert("seq".to_string(), c1::Value::Integer(seq as i64));
         map.insert("at".to_string(), c1::Value::Integer(unix_now()));
@@ -1194,8 +1704,7 @@ impl Store {
                 return Err(StoreError::Corruption("自レコードの seq が既知になっている".into()))
             }
         };
-        let log_path = reflog_path(&self.config.data_dir, self.active_reflog_number);
-        append_record(&log_path, &payload)?;
+        self.append_durable(REFLOG, self.active_reflog_number, &payload)?;
         self.apply_verified(verified);
         Ok(seq)
     }
@@ -1351,7 +1860,11 @@ impl Store {
 
     /// signer の since より後の署名済み ref レコード(生ペイロード)を seq 順で返す。
     /// reflog への追記は署名者ごとに seq 昇順なので、走査順がそのまま seq 順になる。
+    /// メモリに適用済みの seq(signer_last_seq)より後は返さない: sync が失敗して切り詰めにも
+    /// 失敗した 1 本は、ディスクにあっても応答していないので、ピアへ流さない(APPEND_FAILURE
+    /// の「外から見える形」)。
     pub fn export_ref_records(&self, signer: &str, since: u64) -> Result<Vec<Vec<u8>>> {
+        let applied = self.signer_last_seq.get(signer).copied().unwrap_or(0);
         let dir = &self.config.data_dir;
         let mut numbers = Vec::new();
         for entry in std::fs::read_dir(dir.join("reflog"))? {
@@ -1391,7 +1904,7 @@ impl Store {
                         Some(c1::Value::Text(t)) => t.as_str(),
                         _ => continue,
                     };
-                    if record_signer == signer && seq > since {
+                    if record_signer == signer && seq > since && seq <= applied {
                         out.push(payload);
                     }
                 }
@@ -1561,6 +2074,35 @@ mod tests {
         let mut config = StoreConfig::new(dir);
         config.pack_seal_bytes = 64; // テストでは小さく封印させる
         config
+    }
+
+    /// atomic_write の tmp 名は呼び出しごとに違う(同じプロセスの 2 つの書き手が取り合わない)。
+    /// 並べて書いても、どちらの中身も据わる。
+    #[test]
+    fn atomic_write_uses_a_unique_tmp_name_per_call() {
+        let dir = temp_dir("unique-tmp");
+        std::fs::create_dir_all(dir.join("tmp")).expect("mkdir");
+        let first = unique_tmp_path(&dir, "write");
+        let second = unique_tmp_path(&dir, "write");
+        assert_ne!(first, second);
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    for round in 0..50 {
+                        let target = dir.join(format!("target-{i}"));
+                        let content = format!("{i}-{round}");
+                        atomic_write(&dir, &target, content.as_bytes()).expect("atomic_write");
+                        assert_eq!(std::fs::read_to_string(&target).expect("read"), content);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("join");
+        }
+        assert_eq!(std::fs::read_dir(dir.join("tmp")).expect("read_dir").count(), 0);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]

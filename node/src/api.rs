@@ -60,11 +60,31 @@ pub(crate) fn error_response(status: u16, message: &str) -> Response {
     )
 }
 
-fn store_error_response(error: StoreError) -> Response {
+/// 書けない状態の JSON の形(503 の本文の `writes_disabled` と /v1/status の欄が同じこれを
+/// 言う。APPEND_FAILURE の「外から見える形」)。
+pub(crate) fn writes_disabled_value(failure: &crate::store::WriteFailure) -> c1::Value {
+    let mut map = BTreeMap::new();
+    map.insert("reason".to_string(), c1::Value::Text(failure.reason.clone()));
+    map.insert("op".to_string(), c1::Value::Text(failure.op.name().to_string()));
+    map.insert("kind".to_string(), c1::Value::Text(failure.kind.name().to_string()));
+    map.insert("since".to_string(), c1::Value::Integer(failure.since));
+    c1::Value::Object(map)
+}
+
+/// ストアの誤りを HTTP の応答へ変える唯一の口。書けない状態は 503 で、案内を `error` の
+/// 文字列そのものに入れる(MCP の Forward は `error` だけを写すので、そこで落ちない)。
+pub(crate) fn store_error_response(error: StoreError) -> Response {
     match error {
         StoreError::Invalid(m) => error_response(400, &m),
         StoreError::Io(e) => error_response(500, &format!("io: {e}")),
         StoreError::Corruption(m) => error_response(500, &format!("corruption: {m}")),
+        StoreError::WritesDisabled(failure) => Response::json(
+            503,
+            json_object(vec![
+                ("error", c1::Value::Text(failure.message())),
+                ("writes_disabled", writes_disabled_value(&failure)),
+            ]),
+        ),
     }
 }
 
@@ -129,6 +149,13 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
                         "free_bytes",
                         match store.free_bytes() {
                             Some(f) => c1::Value::Integer(f as i64),
+                            None => c1::Value::Null,
+                        },
+                    ),
+                    (
+                        "writes_disabled",
+                        match store.writes_disabled() {
+                            Some(failure) => writes_disabled_value(failure),
                             None => c1::Value::Null,
                         },
                     ),

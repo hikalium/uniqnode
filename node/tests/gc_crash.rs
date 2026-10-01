@@ -238,7 +238,9 @@ fn a_crash_during_copy_leaves_a_partial_pack_in_tmp_that_open_removes() {
     assert!(
         leftovers
             .iter()
-            .any(|name| name.starts_with("gc-") && name.ends_with(".pack")),
+            .any(|name| {
+                name.starts_with(uniqnode::store::GC_TMP_PREFIX) && name.ends_with(".pack")
+            }),
         "B の途中で落ちたので tmp/ に書きかけの新 pack がある: {leftovers:?}"
     );
     assert_eq!(

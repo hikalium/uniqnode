@@ -57,7 +57,10 @@ fn uniqnode_with_path(arguments: &[&str], path: &str) -> CommandOutcome {
 }
 
 /// 環境変数を足して走らせる(途中で止めるテスト用の口と sync の記録。node/src/install.rs の
-/// INSTALL_ABORT_ENV と node/src/fault.rs の SYNC_LOG_ENV)。
+/// INSTALL_ABORT_ENV と node/src/store.rs の SYNC_LOG_ENV)。どちらも debug ビルドだけが読むので、
+/// これを使う試験は #[cfg(debug_assertions)] で、`cargo test --release` では走らない(走れば
+/// 止める口が効かず、本物の user manager の daemon-reload に届く)。
+#[cfg(debug_assertions)]
 fn uniqnode_with_env(arguments: &[&str], envs: &[(&str, &str)]) -> CommandOutcome {
     let mut command = Command::new(env!("CARGO_BIN_EXE_uniqnode"));
     command.args(arguments);
@@ -1244,6 +1247,7 @@ fn the_default_copy_directory_is_split_per_instance() {
 /// should/0137: legacy_units_present の判定を空の Vec に固定すると、1 つ目の assert が赤に
 /// なる(実験した)。
 #[test]
+#[cfg(debug_assertions)]
 fn the_units_from_before_the_template_refuse_every_instance_and_keep_the_binary() {
     let work = work_dir("legacy-units");
     let unit_dir = work.join("units");
@@ -1328,6 +1332,7 @@ fn the_units_from_before_the_template_refuse_every_instance_and_keep_the_binary(
 /// install を打ち直すと、「既に在る」要素の名前まで sync する(APPEND_FAILURE の方針 1a)。
 /// systemctl には触れない(テスト用の口で daemon-reload の前に止める)。
 #[test]
+#[cfg(debug_assertions)]
 fn install_syncs_the_store_path_to_the_root_even_after_an_interrupted_run() {
     let work = work_dir("path-sync");
     let store = work.join("a").join("b").join("store");
@@ -1392,6 +1397,7 @@ fn install_syncs_the_store_path_to_the_root_even_after_an_interrupted_run() {
 
 /// 根までの経路に開けない要素があれば、飛ばさずにその道と理由を言って install の失敗にする。
 #[test]
+#[cfg(debug_assertions)]
 fn install_fails_with_the_path_when_an_ancestor_cannot_be_opened() {
     use std::os::unix::fs::PermissionsExt;
     let work = work_dir("path-unreadable");

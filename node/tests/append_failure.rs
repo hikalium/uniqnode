@@ -3,15 +3,32 @@
 //! 権限で起こす。どの形でも、失敗した要求は WritesDisabled を受け取り、以後の書き込みの入口は
 //! 全部断り、読み出しは正しい中身を返し、開き直したストアは応答済みの書き込みを 1 つも
 //! 欠かない。serve と CLI を通す形は node/tests/append_failure_serve.rs。
+//!
+//! 注入(Store::inject_fault と UNIQNODE_APPEND_FAULT)と sync の記録(UNIQNODE_SYNC_LOG)は
+//! debug ビルドにしか無いので、それに頼る試験は #[cfg(debug_assertions)] で、
+//! `cargo test --release` では走らない。権限で起こす試験は root では権限が効かないので、
+//! root なら理由を出して戻る。
 
 mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use uniqnode::store::{Cleanup, FailureKind, Store, StoreConfig, StoreError, WriteOp};
+#[cfg(debug_assertions)]
+use uniqnode::store::Cleanup;
+use uniqnode::store::{FailureKind, Store, StoreConfig, StoreError, WriteOp};
 
 fn temp_dir(name: &str) -> PathBuf {
     common::unique_dir(&format!("append-failure-{name}"))
+}
+
+/// 権限で失敗を起こす試験は root で走らない前提(root には 0555 や 0333 が効かない)。root なら
+/// 理由を出して戻る(node/tests/install.rs の not_root と同じ)。
+fn not_root() -> bool {
+    let euid = uniqnode::install::effective_uid().expect("euid");
+    if euid == 0 {
+        println!("root で走っているので、権限で失敗を起こすテストは走らせない");
+    }
+    euid != 0
 }
 
 /// 小さい封印閾値で開く(数件の投入で封印が起きる)。
@@ -29,6 +46,7 @@ fn writes_disabled(result: Result<impl std::fmt::Debug, StoreError>, context: &s
 }
 
 /// 書けない状態で、全部の書き込みの入口が WritesDisabled で断ることを言う。
+#[cfg(debug_assertions)]
 fn assert_every_write_refused(store: &mut Store, existing: &str, context: &str) {
     writes_disabled(store.put_object(b"after-the-failure"), &format!("{context}: put_object"));
     writes_disabled(store.put_object(existing.as_bytes()), &format!("{context}: 既に在るものの put_object"));
@@ -39,11 +57,13 @@ fn assert_every_write_refused(store: &mut Store, existing: &str, context: &str) 
 }
 
 /// 応答済みの (ID, 本体, ref の道)。
+#[cfg(debug_assertions)]
 struct Acknowledged {
     objects: Vec<(String, Vec<u8>)>,
     refs: Vec<(String, String)>,
 }
 
+#[cfg(debug_assertions)]
 fn write_acknowledged(store: &mut Store, count: usize) -> Acknowledged {
     let mut objects = Vec::new();
     let mut refs = Vec::new();
@@ -58,6 +78,7 @@ fn write_acknowledged(store: &mut Store, count: usize) -> Acknowledged {
     Acknowledged { objects, refs }
 }
 
+#[cfg(debug_assertions)]
 fn assert_acknowledged_readable(store: &Store, acknowledged: &Acknowledged, context: &str) {
     for (id, body) in &acknowledged.objects {
         assert_eq!(
@@ -80,6 +101,7 @@ fn file_length(path: &Path) -> u64 {
     std::fs::metadata(path).expect("metadata").len()
 }
 
+#[cfg(debug_assertions)]
 fn active_reflog(dir: &Path) -> PathBuf {
     let mut names: Vec<PathBuf> = std::fs::read_dir(dir.join("reflog"))
         .expect("read_dir")
@@ -97,6 +119,7 @@ fn active_pack(dir: &Path, store: &Store) -> PathBuf {
 /// WritesDisabled(kind と op は種類どおり)、以後の書き込みは全部断られ、読み出しは答え、
 /// 切り詰めでファイルの長さは前に戻り、開き直すと応答済みのものが全部あって失敗した 1 本は無い。
 #[test]
+#[cfg(debug_assertions)]
 fn each_append_fault_disables_writes_keeps_reads_and_loses_nothing_acknowledged() {
     let cases = [
         ("before", FailureKind::Io, WriteOp::Write),
@@ -178,6 +201,7 @@ fn each_append_fault_disables_writes_keeps_reads_and_loses_nothing_acknowledged(
 /// 間の export はその 1 本を返さない。開き直すと残った 1 本が適用され、応答済みのものは
 /// 欠けず、次の自分のレコードの seq は重ならない。
 #[test]
+#[cfg(debug_assertions)]
 fn sync_keep_withholds_the_unacknowledged_record_until_reopen() {
     let dir = temp_dir("sync-keep");
     let (acknowledged, node_id) = {
@@ -209,6 +233,7 @@ fn sync_keep_withholds_the_unacknowledged_record_until_reopen() {
 
 /// 複製の受け側(ingest_ref_record)に sync-keep を掛けても、export はその 1 本を返さない。
 #[test]
+#[cfg(debug_assertions)]
 fn the_replication_receiver_does_not_export_a_record_it_failed_to_sync() {
     let source_dir = temp_dir("receiver-source");
     let target_dir = temp_dir("receiver-target");
@@ -236,6 +261,7 @@ fn the_replication_receiver_does_not_export_a_record_it_failed_to_sync() {
 /// pack の torn の後、同じプロセスで既存のオブジェクトが正しい中身で読める(offset のずれた
 /// 索引項目が生まれない)。
 #[test]
+#[cfg(debug_assertions)]
 fn reads_stay_correct_after_a_torn_pack_append() {
     let dir = temp_dir("torn-reads");
     let mut store = Store::open(StoreConfig::new(&dir)).expect("open");
@@ -258,6 +284,7 @@ fn reads_stay_correct_after_a_torn_pack_append() {
 
 /// 新しいセグメントの親の sync の失敗(dirsync)は io、op は dir_sync。
 #[test]
+#[cfg(debug_assertions)]
 fn a_new_segment_directory_sync_failure_is_io() {
     let dir = temp_dir("dirsync");
     let mut store = Store::open(StoreConfig::new(&dir)).expect("open");
@@ -295,6 +322,7 @@ fn a_pack_length_mismatch_refuses_to_append() {
 
 /// 封印を起こすまで投入する。返り値は応答済みのオブジェクト。封印の直前(次の put が封印を
 /// 起こす)で止める。
+#[cfg(debug_assertions)]
 fn fill_until_next_put_seals(store: &mut Store) -> Vec<(String, Vec<u8>)> {
     let mut stored = Vec::new();
     let mut i = 0;
@@ -311,6 +339,7 @@ fn fill_until_next_put_seals(store: &mut Store) -> Vec<(String, Vec<u8>)> {
 /// 進まず、書けない状態(op は manifest)に入り、開き直したストアは一貫していて応答済みの
 /// ものが全部読める。
 #[test]
+#[cfg(debug_assertions)]
 fn a_manifest_failure_on_seal_keeps_memory_behind_disk_and_reopens_consistent() {
     for kind_text in ["manifest", "manifest-dirsync"] {
         let dir = temp_dir(&format!("seal-{kind_text}"));
@@ -386,6 +415,7 @@ fn run_gc(store: &Mutex<Store>) -> Result<uniqnode::gc::GcReport, StoreError> {
 /// 回収は書けない状態(op は gc_commit)で終わり、開き直した後に生きているオブジェクトが
 /// 全部読めて fsck が緑である。
 #[test]
+#[cfg(debug_assertions)]
 fn a_manifest_failure_in_gc_commit_loses_no_live_object() {
     for kind_text in ["manifest", "manifest-dirsync"] {
         let dir = temp_dir(&format!("gc-commit-{kind_text}"));
@@ -444,7 +474,9 @@ fn a_gc_tmp_write_failure_does_not_disable_writes() {
     let dir = temp_dir("gc-b");
     let mut store = Store::open(small_config(&dir)).expect("open");
     fill_with_garbage(&mut store);
-    let blocker = dir.join("tmp").join(format!("gc-{}.pack", std::process::id()));
+    let blocker = dir
+        .join("tmp")
+        .join(format!("{}{}.pack", uniqnode::store::GC_TMP_PREFIX, std::process::id()));
     std::fs::create_dir(&blocker).expect("mkdir blocker");
     let store = Mutex::new(store);
     match run_gc(&store) {
@@ -460,10 +492,12 @@ fn a_gc_tmp_write_failure_does_not_disable_writes() {
 }
 
 /// GC の D の削除の失敗(packs/ を 0555 にして unlink を断らせる)は書けない状態を立てない。
-/// D の packs/ の sync の失敗(gc-dirsync)は、kind が io・op が dir_sync の書けない状態を立てる。
 #[test]
-fn gc_d_unlink_failure_is_harmless_but_its_directory_sync_failure_disables_writes() {
+fn a_gc_d_unlink_failure_does_not_disable_writes() {
     use std::os::unix::fs::PermissionsExt;
+    if !not_root() {
+        return;
+    }
     let dir = temp_dir("gc-d-unlink");
     let mut store = Store::open(small_config(&dir)).expect("open");
     let live = store_with_one_garbage_pack(&mut store);
@@ -484,7 +518,13 @@ fn gc_d_unlink_failure_is_harmless_but_its_directory_sync_failure_disables_write
     }
     drop(store);
     let _ = std::fs::remove_dir_all(&dir);
+}
 
+/// GC の D の packs/ の sync の失敗(gc-dirsync)は、kind が io・op が dir_sync の書けない状態を
+/// 立てる。
+#[test]
+#[cfg(debug_assertions)]
+fn a_gc_d_directory_sync_failure_disables_writes() {
     let dir = temp_dir("gc-d-dirsync");
     let mut store = Store::open(small_config(&dir)).expect("open");
     let live = store_with_one_garbage_pack(&mut store);
@@ -505,6 +545,7 @@ fn gc_d_unlink_failure_is_harmless_but_its_directory_sync_failure_disables_write
 
 /// 書けない状態の間、回収は dry-run も含めて断られる(gc_try_begin が書き込みの入口)。
 #[test]
+#[cfg(debug_assertions)]
 fn gc_is_refused_while_writes_are_disabled() {
     let dir = temp_dir("gc-refused");
     let mut store = Store::open(small_config(&dir)).expect("open");
@@ -520,6 +561,28 @@ fn gc_is_refused_while_writes_are_disabled() {
         ),
         "dry-run",
     );
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 書けない状態は引数の検査より先に言う: 不正な ref の道・存在しない target・存在しない root の
+/// pin と held の表明・空の追記中 pack の封印も、Invalid や Ok(None) でなく WritesDisabled を
+/// 受け取る(HTTP では 400 でなく 503 と復旧の案内になる)。
+#[test]
+#[cfg(debug_assertions)]
+fn writes_disabled_comes_before_argument_checks_and_the_empty_pack_shortcut() {
+    let dir = temp_dir("disabled-first");
+    let mut store = Store::open(StoreConfig::new(&dir)).expect("open");
+    store.inject_fault("before@reflog:1").expect("inject");
+    writes_disabled(store.set_ref("notes/first", None), "最初の失敗");
+    assert_eq!(store.write_cursor().offset, 0, "追記中の pack は空のまま");
+    let missing = uniqnode::c1::id_for_bytes(b"never stored");
+    writes_disabled(store.set_ref("", None), "空の ref の道");
+    writes_disabled(store.set_ref("/absolute", None), "/ で始まる ref の道");
+    writes_disabled(store.set_ref("notes/missing", Some(&missing)), "存在しない target");
+    writes_disabled(store.set_pin(&missing, 1), "存在しない root の pin");
+    writes_disabled(store.set_attest(&missing, true), "存在しない root の held");
+    writes_disabled(store.seal_active_pack_for_gc(), "空の pack の封印");
     drop(store);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -544,6 +607,9 @@ fn opening_a_store_whose_parent_is_missing_creates_nothing() {
 #[test]
 fn opening_fails_when_the_parent_cannot_be_synced() {
     use std::os::unix::fs::PermissionsExt;
+    if !not_root() {
+        return;
+    }
     let parent = temp_dir("unreadable-parent");
     std::fs::create_dir(&parent).expect("mkdir parent");
     std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o333)).expect("chmod");
@@ -562,6 +628,7 @@ fn opening_fails_when_the_parent_cannot_be_synced() {
 }
 
 /// CLI を環境変数つきで走らせ、標準入力を渡す。返り値は (終了コード(シグナルなら None), 標準出力)。
+#[cfg(debug_assertions)]
 fn uniqnode_with(arguments: &[&str], envs: &[(&str, &str)], stdin: &[u8]) -> (Option<i32>, String, String) {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -580,61 +647,238 @@ fn uniqnode_with(arguments: &[&str], envs: &[(&str, &str)], stdin: &[u8]) -> (Op
     )
 }
 
-fn sync_lines(log: &Path) -> Vec<String> {
-    std::fs::read_to_string(log).unwrap_or_default().lines().map(str::to_string).collect()
+/// 開くときの sync の試験の場所: 親(base)の下のストア(base/store)と、sync の記録(base/sync.log)。
+#[cfg(debug_assertions)]
+struct OpenSyncFixture {
+    base: PathBuf,
+    dir: PathBuf,
+    log: PathBuf,
+}
+
+#[cfg(debug_assertions)]
+impl OpenSyncFixture {
+    fn new(name: &str) -> OpenSyncFixture {
+        let base = temp_dir(name);
+        std::fs::create_dir(&base).expect("mkdir base");
+        let dir = base.join("store");
+        let log = base.join("sync.log");
+        OpenSyncFixture { base, dir, log }
+    }
+
+    fn dir_text(&self) -> &str {
+        self.dir.to_str().expect("utf-8")
+    }
+
+    /// 記録を取らずに CLI を走らせる(据え物を作る段)。
+    fn run(&self, arguments: &[&str], envs: &[(&str, &str)], stdin: &[u8]) -> (Option<i32>, String, String) {
+        uniqnode_with(arguments, envs, stdin)
+    }
+
+    /// 記録を空にしてから CLI を走らせ、sync の記録と標準出力(応答)を同じ記録のファイルへ
+    /// O_APPEND で書かせる。行の順が、sync と応答の起きた順である(応答の行は println の
+    /// 改行で書き出されるので、遅れて書かれることはあっても先に書かれることは無い)。
+    /// 返り値は (終了コード, 記録の行, 標準エラー)。
+    fn run_logged(&self, arguments: &[&str], stdin: &[u8]) -> (Option<i32>, Vec<String>, String) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let _ = std::fs::remove_file(&self.log);
+        let stdout = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log)
+            .expect("open log for stdout");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
+            .args(arguments)
+            .env(uniqnode::store::SYNC_LOG_ENV, &self.log)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn uniqnode");
+        child.stdin.take().expect("stdin").write_all(stdin).expect("write stdin");
+        let output = child.wait_with_output().expect("wait");
+        let lines =
+            std::fs::read_to_string(&self.log).expect("read log").lines().map(str::to_string).collect();
+        (output.status.code(), lines, String::from_utf8_lossy(&output.stderr).to_string())
+    }
+
+    /// 開くたびに sync する名前(node_key の中身と、packs/・reflog/・データのディレクトリ・その親)。
+    fn names_synced_on_every_open(&self) -> Vec<String> {
+        vec![
+            format!("file {}", self.dir.join("node_key").display()),
+            format!("dir {}", self.dir.join("packs").display()),
+            format!("dir {}", self.dir.join("reflog").display()),
+            format!("dir {}", self.dir.display()),
+            format!("dir {}", self.base.display()),
+        ]
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for OpenSyncFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+/// `expected` の各行が記録にあり、その最初の位置が応答の行(`ack` で始まる最初の行)より前で
+/// あることを言う。
+#[cfg(debug_assertions)]
+fn assert_synced_before_ack(lines: &[String], expected: &[String], ack: &str, context: &str) {
+    let ack_position = lines
+        .iter()
+        .position(|line| line.starts_with(ack))
+        .unwrap_or_else(|| panic!("{context}: 応答 {ack} が記録に無い: {lines:#?}"));
+    for wanted in expected {
+        let position = lines
+            .iter()
+            .position(|line| line == wanted)
+            .unwrap_or_else(|| panic!("{context}: {wanted} が sync されていない: {lines:#?}"));
+        assert!(
+            position < ack_position,
+            "{context}: {wanted} の sync({position} 行目)が応答({ack_position} 行目)より後: {lines:#?}"
+        );
+    }
 }
 
 /// 開くたびに、node_key・追記中の pack・reflog の全部の中身と、packs/・reflog/・データの
-/// ディレクトリ・その親の名前を sync する(「既に在る」ことを理由に省かない)。新しい pack の
-/// 最初の追記の、ファイルの sync の後・親の sync の前で落とした(crash-before-dirsync)ストアを
-/// 開き直し、同じオブジェクトを再送すると、再送の応答より前に、残った pack の中身と packs/ が
-/// sync されている。
+/// ディレクトリ・その親の名前を、応答より前に sync する(「既に在る」ことを理由に省かない)。
+/// reflog を持つストアを開き直す put は reflog に書かないので、reflog の中身の sync の行は
+/// 開くときの sync からしか来ない。新しい pack の最初の追記の、ファイルの sync の後・親の
+/// sync の前で落とした(crash-before-dirsync)ストアを開き直して再送しても同じである。
 #[test]
-fn every_open_syncs_contents_and_names_before_accepting_writes() {
-    let base = temp_dir("open-sync");
-    std::fs::create_dir(&base).expect("mkdir base");
-    let dir = base.join("store");
-    let dir_text = dir.to_str().expect("utf-8");
-    let log = base.join("sync.log");
-    let log_text = log.to_str().expect("utf-8");
-    let expected_names = |lines: &[String], context: &str| {
-        for expected in [
-            format!("file {}", dir.join("node_key").display()),
-            format!("dir {}", dir.join("packs").display()),
-            format!("dir {}", dir.join("reflog").display()),
-            format!("dir {}", dir.display()),
-            format!("dir {}", base.display()),
-        ] {
-            assert!(lines.contains(&expected), "{context}: {expected} が sync されていない: {lines:#?}");
-        }
-    };
-
-    let (status, _, stderr) = uniqnode_with(&["init", dir_text], &[("UNIQNODE_SYNC_LOG", log_text)], b"");
+#[cfg(debug_assertions)]
+fn every_open_syncs_contents_and_names_before_the_acknowledgement() {
+    let fixture = OpenSyncFixture::new("open-sync");
+    let dir_text = fixture.dir_text();
+    let (status, lines, stderr) = fixture.run_logged(&["init", dir_text], b"");
     assert_eq!(status, Some(0), "init: {stderr}");
-    expected_names(&sync_lines(&log), "init");
+    assert_synced_before_ack(&lines, &fixture.names_synced_on_every_open(), "node_id: ", "init");
 
+    // reflog を持つストアにする(set-ref を 2 回)。
+    let first = b"{\"first\":\"object\"}";
+    let (status, stdout, stderr) = fixture.run(&["put", dir_text], &[], first);
+    assert_eq!(status, Some(0), "put: {stderr}");
+    let first_id = uniqnode::c1::id_for_bytes(first);
+    assert!(stdout.contains(&first_id), "{stdout}");
+    for path in ["notes/a", "notes/b"] {
+        let (status, _, stderr) = fixture.run(&["set-ref", dir_text, path, &first_id], &[], b"");
+        assert_eq!(status, Some(0), "set-ref: {stderr}");
+    }
+    let reflogs: Vec<PathBuf> = std::fs::read_dir(fixture.dir.join("reflog"))
+        .expect("read_dir reflog")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    assert!(!reflogs.is_empty(), "reflog がある");
+    let pack = fixture.dir.join("packs").join("pack-000001.pack");
+
+    let second = b"{\"second\":\"object\"}";
+    let (status, lines, stderr) = fixture.run_logged(&["put", dir_text], second);
+    assert_eq!(status, Some(0), "reflog を持つストアへの put: {stderr}");
+    let mut expected = fixture.names_synced_on_every_open();
+    expected.push(format!("file {}", pack.display()));
+    expected.extend(reflogs.iter().map(|path| format!("file {}", path.display())));
+    assert_synced_before_ack(&lines, &expected, &uniqnode::c1::id_for_bytes(second), "reflog を持つストア");
+
+    // crash-before-dirsync: ファイルの sync の後・packs/ の sync の前で落とした新しい pack。
+    let fresh = OpenSyncFixture::new("open-sync-dirsync");
+    let fresh_text = fresh.dir_text();
+    let (status, _, stderr) = fresh.run(&["init", fresh_text], &[], b"");
+    assert_eq!(status, Some(0), "init: {stderr}");
     let body = b"{\"crash\":\"before the directory sync\"}";
-    let (status, _, stderr) = uniqnode_with(
-        &["put", dir_text],
-        &[("UNIQNODE_APPEND_FAULT", "crash-before-dirsync@pack:1")],
+    let (status, _, stderr) = fresh.run(
+        &["put", fresh_text],
+        &[(uniqnode::fault::APPEND_FAULT_ENV, "crash-before-dirsync@pack:1")],
         body,
     );
     assert_eq!(status, None, "abort で落ちる: {stderr}");
-    let pack = dir.join("packs").join("pack-000001.pack");
-    assert!(pack.exists(), "ファイルの sync までは済んでいる");
-
-    std::fs::remove_file(&log).expect("rm log");
-    let (status, stdout, stderr) =
-        uniqnode_with(&["put", dir_text], &[("UNIQNODE_SYNC_LOG", log_text)], body);
+    let fresh_pack = fresh.dir.join("packs").join("pack-000001.pack");
+    assert!(fresh_pack.exists(), "ファイルの sync までは済んでいる");
+    let (status, lines, stderr) = fresh.run_logged(&["put", fresh_text], body);
     assert_eq!(status, Some(0), "再送: {stderr}");
-    assert!(stdout.contains(&uniqnode::c1::id_for_bytes(body)), "{stdout}");
-    let lines = sync_lines(&log);
-    expected_names(&lines, "開き直し");
-    assert!(
-        lines.contains(&format!("file {}", pack.display())),
-        "recover が採用した pack の中身を sync する: {lines:#?}"
+    let mut expected = fresh.names_synced_on_every_open();
+    expected.push(format!("file {}", fresh_pack.display()));
+    assert_synced_before_ack(&lines, &expected, &uniqnode::c1::id_for_bytes(body), "crash-before-dirsync の後");
+}
+
+/// 追記を全部 write した後・ファイルの sync の前で落とした(crash-before-sync)ストアでは、
+/// 完全な 1 本が page cache にだけある。開き直すと recover がその 1 本を採用し、開くときの
+/// sync がその pack の中身を永続させてから、同じものの再送に「既に在る」と応答する。
+#[test]
+#[cfg(debug_assertions)]
+fn a_record_written_but_not_synced_is_recovered_synced_and_then_resent() {
+    let fixture = OpenSyncFixture::new("open-sync-before-sync");
+    let dir_text = fixture.dir_text();
+    let (status, _, stderr) = fixture.run(&["init", dir_text], &[], b"");
+    assert_eq!(status, Some(0), "init: {stderr}");
+    let body = b"{\"crash\":\"after write before sync\"}";
+    let (status, _, stderr) = fixture.run(
+        &["put", dir_text],
+        &[(uniqnode::fault::APPEND_FAULT_ENV, "crash-before-sync@pack:1")],
+        body,
     );
-    let _ = std::fs::remove_dir_all(&base);
+    assert_eq!(status, None, "abort で落ちる: {stderr}");
+    assert!(stderr.contains("crash-before-sync"), "{stderr}");
+    let pack = fixture.dir.join("packs").join("pack-000001.pack");
+    assert_eq!(
+        file_length(&pack),
+        8 + body.len() as u64,
+        "完全な 1 本(8 バイトの頭と本体)が write 済みで残る"
+    );
+
+    let id = uniqnode::c1::id_for_bytes(body);
+    let (status, lines, stderr) = fixture.run_logged(&["put", dir_text], body);
+    assert_eq!(status, Some(0), "再送: {stderr}");
+    assert!(
+        lines.contains(&format!("{id} (existing)")),
+        "recover が完全な 1 本を採用したので、再送は既に在ると答える: {lines:#?}"
+    );
+    let mut expected = fixture.names_synced_on_every_open();
+    expected.push(format!("file {}", pack.display()));
+    assert_synced_before_ack(&lines, &expected, &id, "crash-before-sync の後");
+}
+
+/// node_key を作る途中(tmp/ に書いて sync した後・rename の前)で落としても、短い鍵や空の鍵が
+/// node_key の名で残らない。開き直すと tmp/ の残骸を消して鍵を作り直し、その中身とデータの
+/// ディレクトリを応答より前に sync する。
+#[test]
+#[cfg(debug_assertions)]
+fn a_stop_in_the_middle_of_node_key_creation_leaves_no_key_and_reopens_synced() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = OpenSyncFixture::new("open-sync-node-key");
+    let dir_text = fixture.dir_text();
+    let (status, _, stderr) = fixture.run(
+        &["init", dir_text],
+        &[(uniqnode::fault::APPEND_FAULT_ENV, "crash-in-node-key:1")],
+        b"",
+    );
+    assert_eq!(status, None, "abort で落ちる: {stderr}");
+    assert!(stderr.contains("crash-in-node-key"), "{stderr}");
+    let key = fixture.dir.join("node_key");
+    assert!(!key.exists(), "rename の前に落ちたので node_key は無い");
+    let leftovers: Vec<PathBuf> = std::fs::read_dir(fixture.dir.join("tmp"))
+        .expect("read_dir tmp")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    assert_eq!(leftovers.len(), 1, "作りかけの鍵が tmp/ に残る: {leftovers:?}");
+    assert_eq!(file_length(&leftovers[0]), 32);
+
+    let (status, lines, stderr) = fixture.run_logged(&["init", dir_text], b"");
+    assert_eq!(status, Some(0), "開き直し: {stderr}");
+    assert_eq!(file_length(&key), 32);
+    let mode = std::fs::metadata(&key).expect("metadata").permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let remaining: Vec<_> = std::fs::read_dir(fixture.dir.join("tmp")).expect("read_dir").collect();
+    assert!(remaining.is_empty(), "tmp/ の残骸は消える: {remaining:?}");
+    // 作り直した鍵の tmp の中身の sync は、データのディレクトリの sync(rename の永続)より前。
+    let tmp_key_sync = lines
+        .iter()
+        .position(|line| line.starts_with(&format!("file {}", fixture.dir.join("tmp").display())))
+        .unwrap_or_else(|| panic!("作り直した鍵の tmp の中身を sync していない: {lines:#?}"));
+    let dir_sync = format!("dir {}", fixture.dir.display());
+    let first_dir_sync = lines.iter().position(|line| line == &dir_sync).expect("データのディレクトリの sync");
+    assert!(tmp_key_sync < first_dir_sync, "{lines:#?}");
+    assert_synced_before_ack(&lines, &fixture.names_synced_on_every_open(), "node_id: ", "鍵の作り直し");
 }
 
 /// node_key は 0600 で作られ、作りかけの tmp を残さない。

@@ -2,12 +2,19 @@
 //! 実プロセスの serve・mcp・CLI に通す試験。失敗は環境変数 UNIQNODE_APPEND_FAULT(debug ビルド
 //! だけが読む。node/src/fault.rs)で注入する。ポートは一時のもの、ストアは一時ディレクトリだけを
 //! 使う。ストアの層の試験は node/tests/append_failure.rs。
+//!
+//! 注入は debug ビルドにしか無いので、この試験は全部 debug ビルドだけで走る
+//! (`cargo test --release` では空になる)。
+
+#![cfg(debug_assertions)]
 
 mod common;
 use common::*;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
+use uniqnode::fault::APPEND_FAULT_ENV;
+use uniqnode::store::{IO_GUIDANCE, NO_SPACE_GUIDANCE};
 
 /// 次の pack への追記で 5 バイトだけ書いて ENOSPC(切り詰めは成功する。kind は no_space)。
 const NOSPACE_ON_NEXT_PACK: &str = "torn:5@pack:1";
@@ -35,8 +42,8 @@ fn assert_writes_disabled(response: &HttpResponse, kind: &str, context: &str) ->
     assert!(body.contains(&format!("\"kind\":\"{kind}\"")), "{context}: kind が無い: {body}");
     assert!(body.contains("\"writes_disabled\":{"), "{context}: writes_disabled の欄が無い: {body}");
     let guidance = match kind {
-        "no_space" => "空きを作ってから serve を再起動する",
-        _ => "ホストを再起動する",
+        "no_space" => NO_SPACE_GUIDANCE,
+        _ => IO_GUIDANCE,
     };
     assert!(body.contains(guidance), "{context}: 案内が無い: {body}");
     body
@@ -44,7 +51,7 @@ fn assert_writes_disabled(response: &HttpResponse, kind: &str, context: &str) ->
 
 /// 書けない状態の serve(1 回目の put を失敗させた)を起こし、失敗した put の応答を返す。
 fn disabled_server(name: &str, fault: &str) -> (Server, HttpResponse) {
-    let server = start_server_with_env(name, &[("UNIQNODE_APPEND_FAULT", fault)]);
+    let server = start_server_with_env(name, &[(APPEND_FAULT_ENV, fault)]);
     let failed = simple(&server.address, "POST", "/v1/objects", b"\"the first write fails\"");
     (server, failed)
 }
@@ -55,7 +62,7 @@ fn disabled_server(name: &str, fault: &str) -> (Server, HttpResponse) {
 fn the_failing_request_and_every_later_write_get_503_while_reads_continue() {
     let server = start_server_with_env(
         "af-serve-nospace",
-        &[("UNIQNODE_APPEND_FAULT", "torn:5@pack:2")],
+        &[(APPEND_FAULT_ENV, "torn:5@pack:2")],
     );
     let address = server.address.clone();
     let kept = put_object(&address, b"\"acknowledged before the failure\"");
@@ -111,6 +118,84 @@ fn an_io_failure_is_reported_as_io_with_its_own_guidance() {
     assert!(status_text(&server.address).contains("\"kind\":\"io\""));
 }
 
+/// 追記の失敗の 3 種(before・torn:5・sync)を pack と reflog のそれぞれに掛けた 6 通りを、
+/// 実プロセスの serve に通す。応答済みのオブジェクトと ref を 1 つずつ置いてから、pack は
+/// POST /v1/objects、reflog は PUT /v1/refs で最初の失敗を起こす。どれでも、失敗した要求は
+/// 503、以後の書き込み(put・ref・pin。存在しない target や root を指す要求も 400 でなく 503)
+/// も 503、読み出しは 200、/v1/status が kind と op を言う。
+#[test]
+fn every_append_fault_on_pack_and_reflog_answers_503_and_keeps_reads() {
+    let cases = [("before", "io", "write"), ("torn:5", "no_space", "write"), ("sync", "io", "sync")];
+    for (kind_text, kind, op) in cases {
+        for segment in ["pack", "reflog"] {
+            let context = format!("{kind_text}@{segment}");
+            let fault = format!("{kind_text}@{segment}:2");
+            let name = format!("af-serve-gate-{}-{segment}", kind_text.replace(':', "-"));
+            let server = start_server_with_env(&name, &[(APPEND_FAULT_ENV, &fault)]);
+            let address = server.address.clone();
+            let kept_body = format!("\"acknowledged before {context}\"");
+            let kept = put_object(&address, kept_body.as_bytes());
+            put_ref(&address, "notes/kept", Some(&kept));
+            assert!(status_text(&address).contains("\"writes_disabled\":null"), "{context}");
+
+            let failed = match segment {
+                "pack" => simple(&address, "POST", "/v1/objects", b"\"the failing write\""),
+                _ => simple(
+                    &address,
+                    "PUT",
+                    "/v1/refs/notes/failing",
+                    format!("{{\"target\":\"{kept}\"}}").as_bytes(),
+                ),
+            };
+            let body = assert_writes_disabled(&failed, kind, &format!("{context}: 失敗した要求"));
+            assert!(body.contains(&format!("\"op\":\"{op}\"")), "{context}: {body}");
+
+            let missing = uniqnode::c1::id_for_bytes(b"never stored");
+            let later_writes: [(&str, &str, String); 5] = [
+                ("POST", "/v1/objects", "\"a later write\"".to_string()),
+                ("PUT", "/v1/refs/notes/after", format!("{{\"target\":\"{kept}\"}}")),
+                ("PUT", "/v1/refs/notes/missing", format!("{{\"target\":\"{missing}\"}}")),
+                ("POST", "/v1/pins", format!("{{\"root\":\"{kept}\",\"min_replicas\":1}}")),
+                ("POST", "/v1/pins", format!("{{\"root\":\"{missing}\",\"min_replicas\":1}}")),
+            ];
+            for (method, path, request) in &later_writes {
+                let later = simple(&address, method, path, request.as_bytes());
+                assert_writes_disabled(&later, kind, &format!("{context}: 後の {method} {path} {request}"));
+            }
+
+            let read = simple(&address, "GET", &format!("/v1/objects/{kept}"), b"");
+            assert_eq!(read.status, 200, "{context}: {}", body_text(&read));
+            assert_eq!(read.body, kept_body.as_bytes(), "{context}");
+            let search = simple(&address, "POST", "/v1/search", b"{\"query\":\"anything\"}");
+            assert_eq!(search.status, 200, "{context}: {}", body_text(&search));
+            let status = status_text(&address);
+            assert!(status.contains(&format!("\"kind\":\"{kind}\"")), "{context}: {status}");
+            assert!(status.contains(&format!("\"op\":\"{op}\"")), "{context}: {status}");
+        }
+    }
+}
+
+/// sync の段の ENOSPC(nospace-sync)と、新しいセグメントの親の sync の失敗(dirsync)は、
+/// どちらも kind が io(ホストの再起動の案内)で、503 の本文の op と reason が段を言う。
+#[test]
+fn nospace_sync_and_dirsync_answer_503_as_io_with_their_op_and_reason() {
+    let cases = [
+        ("nospace-sync@pack:1", "sync", "os error 28"),
+        ("dirsync@pack:1", "dir_sync", "の親の sync"),
+    ];
+    for (fault, op, reason) in cases {
+        let name = format!("af-serve-{}", fault.replace(['@', ':'], "-"));
+        let (server, failed) = disabled_server(&name, fault);
+        let body = assert_writes_disabled(&failed, "io", fault);
+        assert!(body.contains(&format!("\"op\":\"{op}\"")), "{fault}: {body}");
+        assert!(body.contains(reason), "{fault}: reason が段を言わない: {body}");
+        assert!(!body.contains("no_space"), "{fault}: {body}");
+        let status = status_text(&server.address);
+        assert!(status.contains("\"kind\":\"io\""), "{fault}: {status}");
+        assert!(status.contains(&format!("\"op\":\"{op}\"")), "{fault}: {status}");
+    }
+}
+
 /// POST /v1/sync は、取り込むものが無くても(相手が空でも)書けない間は 503 で断る。
 #[test]
 fn sync_is_refused_with_503_even_when_there_is_nothing_to_ingest() {
@@ -135,7 +220,7 @@ fn query_body(target: &str, peer: &str, wait: bool) -> String {
 fn a_query_for_a_missing_object_is_refused_while_one_for_a_local_object_is_answered() {
     let server = start_server_with_env(
         "af-serve-query-refused",
-        &[("UNIQNODE_APPEND_FAULT", "before@pack:2")],
+        &[(APPEND_FAULT_ENV, "before@pack:2")],
     );
     let local = put_object(&server.address, b"\"held locally\"");
     let failed = simple(&server.address, "POST", "/v1/objects", b"\"fails\"");
@@ -212,7 +297,7 @@ fn a_query_whose_own_store_fails_reports_503_on_the_later_status_read() {
 
 /// 最初の pack 追記で EIO になる serve と、オブジェクトを 1 つ持つ相手。
 fn query_fixture(name: &str) -> (Server, Server, String) {
-    let server = start_server_with_env(name, &[("UNIQNODE_APPEND_FAULT", EIO_ON_NEXT_PACK)]);
+    let server = start_server_with_env(name, &[(APPEND_FAULT_ENV, EIO_ON_NEXT_PACK)]);
     let holder = start_server(&format!("{name}-holder"));
     let remote = put_object(&holder.address, b"\"fetched and then refused\"");
     (server, holder, remote)
@@ -231,7 +316,7 @@ fn a_rendition_is_returned_without_storing_while_writes_are_disabled() {
     assert_eq!(put.status, 200, "{}", body_text(&put));
     drop(first);
 
-    let server = start_server_at_with_env(dir, &[("UNIQNODE_APPEND_FAULT", EIO_ON_NEXT_PACK)]);
+    let server = start_server_at_with_env(dir, &[(APPEND_FAULT_ENV, EIO_ON_NEXT_PACK)]);
     let failed = simple(&server.address, "POST", "/v1/objects", b"\"fails\"");
     assert_writes_disabled(&failed, "io", "最初の put");
     let search = simple(
@@ -255,6 +340,55 @@ fn a_rendition_is_returned_without_storing_while_writes_are_disabled() {
         text.contains("{\"alias\":\"thumb\"") && text.contains("\"state\":\"absent\""),
         "写しは保存されないので absent のまま: {text}"
     );
+    // 作った行は、保存していないこと(Unstored)を言う。
+    let log_path = uniqnode::log::default_path(&server.dir, uniqnode::log::SERVE_ROLE);
+    let logged = std::fs::read_to_string(&log_path).expect("read serve log");
+    assert!(
+        logged.lines().any(|line| line.contains("uniqnode: rendition: ") && line.contains("Unstored")),
+        "写しの行が Unstored を言わない: {logged}"
+    );
+}
+
+/// 書ける状態で開き直したストアで、まだ作っていない写しの保存そのものが最初の失敗になる形。
+/// before@pack:1 では写しの put が、before@reflog:1 では put は通って ref(set_ref)が最初の
+/// 失敗になる。どちらもその GET が 503 と案内を受け取り、/v1/status が kind を言う。
+#[test]
+fn a_rendition_whose_own_store_is_the_first_failure_answers_503() {
+    require_poppler();
+    for (segment, objects_added) in [("pack", 0), ("reflog", 1)] {
+        let dir = unique_dir(&format!("af-serve-rendition-first-{segment}"));
+        let mut first = start_server_at(dir.clone());
+        first.remove_dir_on_drop = false;
+        let path = "/v1/collections/specs/documents/three_pages.pdf";
+        let put = simple(&first.address, "PUT", path, THREE_PAGE_PDF);
+        assert_eq!(put.status, 200, "{segment}: {}", body_text(&put));
+        drop(first);
+
+        let fault = format!("before@{segment}:1");
+        let server = start_server_at_with_env(dir, &[(APPEND_FAULT_ENV, &fault)]);
+        let search = simple(
+            &server.address,
+            "POST",
+            "/v1/search",
+            b"{\"query\":\"Page two\",\"top_k\":1,\"include_low_information\":true}",
+        );
+        assert_eq!(search.status, 200, "{segment}: {}", body_text(&search));
+        let chunk = json_text_field(&body_text(&search), "id").expect("チャンク ID");
+        let status = status_text(&server.address);
+        assert!(status.contains("\"writes_disabled\":null"), "{segment}: まだ書ける: {status}");
+        let objects_before = json_integer_field(&status, "objects");
+
+        let thumb = simple(&server.address, "GET", &format!("/v1/objects/{chunk}/rendition/thumb"), b"");
+        let body = assert_writes_disabled(&thumb, "io", &format!("{fault}: 写しの GET"));
+        assert!(body.contains("\"op\":\"write\""), "{fault}: {body}");
+        let status = status_text(&server.address);
+        assert!(status.contains("\"kind\":\"io\""), "{fault}: {status}");
+        assert_eq!(
+            json_integer_field(&status, "objects").zip(objects_before).map(|(after, before)| after - before),
+            Some(objects_added),
+            "{fault}: pack の失敗なら写しは入らず、reflog の失敗なら写しの put だけが通っている"
+        );
+    }
 }
 
 /// 転送する形の mcp の add_document は、ツールの失敗(isError)の文に書けない状態の理由と
@@ -288,7 +422,7 @@ fn the_mcp_error_text_carries_the_reason_and_guidance() {
     assert!(line.contains("\"isError\":true"), "{line}");
     assert!(line.contains("503"), "{line}");
     assert!(line.contains("writes disabled (no_space): "), "{line}");
-    assert!(line.contains("空きを作ってから serve を再起動する"), "{line}");
+    assert!(line.contains(NO_SPACE_GUIDANCE), "{line}");
 }
 
 fn uniqnode_with(arguments: &[&str], envs: &[(&str, &str)], stdin: &[u8]) -> (Option<i32>, String, String) {
@@ -315,12 +449,12 @@ fn the_cli_exits_1_with_the_reason_when_a_write_fails() {
     let dir_text = dir.to_str().expect("utf-8");
     let (code, _, stderr) = uniqnode_with(
         &["put", dir_text],
-        &[("UNIQNODE_APPEND_FAULT", NOSPACE_ON_NEXT_PACK)],
+        &[(APPEND_FAULT_ENV, NOSPACE_ON_NEXT_PACK)],
         b"\"cli write\"",
     );
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("writes disabled (no_space): "), "{stderr}");
-    assert!(stderr.contains("空きを作ってから serve を再起動する"), "{stderr}");
+    assert!(stderr.contains(NO_SPACE_GUIDANCE), "{stderr}");
 
     let peer = start_server("af-cli-peer");
     // 複製は ref の記録とその指すオブジェクトを運ぶ(ref の無いオブジェクトは差分にならない)。
@@ -328,11 +462,11 @@ fn the_cli_exits_1_with_the_reason_when_a_write_fails() {
     put_ref(&peer.address, "notes/synced", Some(&synced));
     let (code, _, stderr) = uniqnode_with(
         &["sync", dir_text, &peer.address],
-        &[("UNIQNODE_APPEND_FAULT", EIO_ON_NEXT_PACK)],
+        &[(APPEND_FAULT_ENV, EIO_ON_NEXT_PACK)],
         b"",
     );
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("writes disabled (io): "), "{stderr}");
-    assert!(stderr.contains("ホストを再起動する"), "{stderr}");
+    assert!(stderr.contains(IO_GUIDANCE), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }

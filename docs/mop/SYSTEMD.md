@@ -402,7 +402,9 @@ EOF
     持つが、S1b と S1d の間の開発のビルドは持たず 2 を返すので、検め手には採らない。vega の install はどの
     インスタンスでも共有のバイナリを差し替えるので、S1b 以後で S1d より前のビルドは vega のどのインスタンスにも
     install しない(第 29 版の APPEND_FAILURE の低 1。検め手として名を出すのも S1d 以後のビルドだけである)。
-    S1d をこの反映のゲートに残すかは操作者の裁定待ちである(APPEND_FAILURE の「操作者への問い」)。下の命令はこの命令を前提に
+    S1d をこの反映のゲートに残すかは操作者の裁定待ちである(APPEND_FAILURE の「操作者への問い」)。S1d を main に入れる
+    条件は据え物の試験と vega の実物の JSON の据え物で、vega での `--stage running` の 0 は本番への 1 回の反映の直後の
+    受け入れの確かめである。受け入れが 1 なら、直して据え直すまで下の命令は使えない(第 31 版の APPEND_FAILURE)。下の命令はこの命令を前提に
     するので、S1d がそれを実装するまでは手順の仕様であって、打てる命令としては確定していない(S1d の実装と
     一緒に、試験の通った出力の形に合わせて確定する)。
   - 検めの中身(要点): 数える unit は読み込みの状態に依らない(第 28 版。第 27 版は読み込み済みの unit の一覧
@@ -415,8 +417,14 @@ EOF
     取り、各々を読み込むだけ(状態は変えない)してから性質を読む。状態に記録があるのに数えられない unit は断る。
     service と timer でない `uniqnode-*`(socket・path など。service を起こしうる)は名を言って断る。出力の名は unit の
     Id で、問い合わせた名と Id が違う(alias)なら断り、同じ Id は 1 度だけ数える。数えた unit の `Wants`・`Requires`・
-    `BindsTo`・`Upholds`・`OnFailure`・`OnSuccess` の先のうち、`uniqnode-*` でなく、systemd が暗に足す型(target・slice・
-    mount・device・swap)でもないもの(vega では install が `--after` から描いた wg-quick@wg1.service)は、`Wants` の辺で
+    `BindsTo`・`Upholds`・`OnFailure`・`OnSuccess` の先のうち `uniqnode-*` でないものは、型では通さない(第 31 版。
+    第 30 版は target・slice・mount・device・swap を型だけで通したので、`--after helper.target` の target が
+    `Wants=helper.service` で共有のバイナリを走らせる service を起こす道が開いていた)。検めのコードの定数の
+    「標準の基盤の依存の先」の名の一覧(vega の実物から読んだ sysinit.target・network-online.target・nss-lookup.target・
+    -.mount・tmp.mount・-.slice・system.slice・`system-uniqnode\x2dserve.slice` などのテンプレートの slice・
+    `system-wg\x2dquick.slice`)の項目と、LoadState・FragmentPath・drop-in が無いこと・その項目自身の起こす依存の先の
+    集合が一致するもの(sysinit.target は集合を固定せず active を求める)は、辿らずに通す。一覧に無い target などは
+    辿らずに断る。残りの先(vega では install が `--after` から描いた wg-quick@wg1.service)は、`Wants` の辺で
     結ばれ、検めのコードの定数の「安全と確かめた依存の先」の一覧の項目と全部一致するときだけ、走ったまま通す。
     一覧は今は wg-quick@wg1.service だけで、FragmentPath(/lib/systemd/system/wg-quick@.service とそのバイト列の
     sha256)、drop-in が無いこと、Environment、ExecStart・ExecStop・ExecReload の行の字句、Exec* の道の realpath と
@@ -494,7 +502,9 @@ EOF
     node_id が答えに在ることを求める(第 29 版。この確かめは `settle_fn` の 1 つで、本体の最後とやめる道の 3 が使う)。
     /v1/status が答えた後に MainPID・NRestarts・ActiveEnterTimestamp をもう 1 度読み、10 秒の窓の始めと違えば
     (その間に起き直した)安定の確かめからやり直す。90 秒は sleep の和でなく実の経過時間(bash の `SECONDS`)で数え、
-    curl と `systemctl show` の時間も入る(第 30 版)。止める前に動いていた `@default` のうち一回走る service
+    curl と `systemctl show` の時間も入る(第 30 版)。期限は 10 秒の窓を始める前(残りが 10 秒に満たなければ始めずに
+    期限切れ)と成功を返す前に確かめ、`systemctl show` は `timeout` で残りの時間に、curl は 2 秒と残りの小さい方に
+    縛る(第 31 版。第 30 版は 84 秒で窓を始めれば 94 秒で成功を返しえた)。止める前に動いていた `@default` のうち一回走る service
     (`uniqnode-backup@default.service` など)は default-active に入れない(restart しても active に届かないので。
     `other` と同じ扱い。第 30 版)。
     起きないものがあれば状態を残して止まる。journalctl で理由を見て直し、もう要らない unit なら、案内の命令で
@@ -535,7 +545,15 @@ EOF
     入れない: 止めておいても親の起動で起こし直されるので、検めは「安全と確かめた依存の先」の一覧の項目(vega では
     wg-quick@wg1.service)と一致する `Wants` の先だけを走ったまま通し、他は断る(第 30 版の APPEND_FAILURE。第 29 版は
     戻す前の `systemctl mask --runtime` を求めたが、やめた)。vega の wg1 には何も打たない。断られた依存の先は、その
-    依存を持たない形で install を打ち直してから戻すか、戻さない。
+    依存を持たない形で install を打ち直してから戻すか、戻さない。標準の基盤の依存の先のうち sysinit.target は自身の
+    起こす依存の先の集合を固定しないので、/etc/systemd/system/sysinit.target.wants/ に足した service は検めない
+    (第 31 版)。共有のバイナリを走らせる service をそこに足したなら、戻す前に外す。vega には unattended-upgrades が
+    入っていて(jammy-security を自動で入れる。2026-10-01 に /etc/apt/apt.conf.d を読んで確かめた)、wireguard-tools の
+    更新で wg-quick@.service のバイト列か Exec* の行が変わると、wg1 の項目が一致せず、戻したいそのときに検めが断る
+    (第 31 版)。断りの標準エラーはそれを言い、直し方を 2 つ挙げる: 定数を改めた S1d 以後のビルドを据え直す(コードの
+    変更・レビュー・ビルドの時間がかかる)か、`--after` を外して install を打ち直す(serve が wg1 より先に起きうるので、
+    読み口 7441 の束縛が wg1 のアドレスより先に走って失敗し、2 秒おきの起き直しが起動の回数の上限 5 回/10 秒に
+    当たれば、手で起こすまで読み口が答えない)。
     旧いバイナリが走った間に書き込みの誤りを見たら、やめる道で S1b 以後へ上げ直す前にも
     ホストを再起動する(APPEND_FAILURE の「既知の限界(戻した後)」)。
   vega で打つ命令(S1d の実装の後に確定する):
@@ -553,7 +571,7 @@ legacy_files=(uniqnode-serve.service uniqnode-viewer.service uniqnode-backup.ser
 # shellcheck disable=SC2016
 state_fn='read_state() { local p=$1/$2 c u; if [ ! -e "$p" ] && [ ! -L "$p" ]; then return 0; fi; if [ -L "$p" ] || [ ! -f "$p" ] || [ ! -r "$p" ]; then echo "$p が読める通常のファイルでない(symlink・ディレクトリ・壊れたリンク・読めない)。状態を消さずに止める" >&2; return 1; fi; if ! c=$(/usr/bin/cat -- "$p"); then echo "$p を読み終えられない(cat が失敗した。理由は上の行)。状態を消さずに止める" >&2; return 1; fi; [ -n "$c" ] || return 0; while IFS= read -r u; do [[ $u =~ ^uniqnode-[A-Za-z0-9@._:-]+\.(service|timer)$ ]] || { echo "$p に unit の名でない行がある。状態を消さずに止める" >&2; return 1; }; done <<<"$c"; printf "%s\n" "$c"; }'
 # shellcheck disable=SC2016
-settle_fn='settle() { local u=$1 end=$((SECONDS + 90)) a b c addr="" usr="" body="" serve=0; case "$u" in uniqnode-serve.service|uniqnode-serve@*.service) serve=1 ;; esac; if [ "$serve" -eq 1 ]; then addr=$(/usr/bin/systemctl show -p Environment --value "$u" | /usr/bin/tr " " "\n" | /usr/bin/sed -n "s/^UNIQNODE_LISTEN=//p"); usr=$(/usr/bin/systemctl show -p User --value "$u"); if ! [[ $addr =~ ^[0-9.]+:[0-9]+$ ]] || ! [[ $usr =~ ^[a-z_][a-z0-9_-]*$ ]]; then echo "$u の主の口(UNIQNODE_LISTEN)か User= を読めないので、/v1/status で確かめられない"; return 1; fi; fi; while :; do a=$(/usr/bin/systemctl show -p ActiveState -p MainPID -p NRestarts -p ActiveEnterTimestampMonotonic "$u" | /usr/bin/sort) || a=""; b=""; if [[ $a == *ActiveState=active* ]] && [[ $a != *MainPID=0* ]]; then /usr/bin/sleep 10; b=$(/usr/bin/systemctl show -p ActiveState -p MainPID -p NRestarts -p ActiveEnterTimestampMonotonic "$u" | /usr/bin/sort) || b=""; if [ "$a" = "$b" ]; then if [ "$serve" -eq 0 ]; then return 0; fi; if body=$(/usr/sbin/runuser -u "$usr" -- /usr/bin/curl -fsS --max-time 2 "http://$addr/v1/status" 2>&1) && [[ $body == *"\"node_id\":\""* ]]; then c=$(/usr/bin/systemctl show -p ActiveState -p MainPID -p NRestarts -p ActiveEnterTimestampMonotonic "$u" | /usr/bin/sort) || c=""; if [ "$c" = "$a" ]; then return 0; fi; echo "$u が /v1/status の確かめの間に起き直した(または状態を読めない)。安定の確かめからやり直す"; fi; fi; fi; if [ "$SECONDS" -ge "$end" ]; then echo "$u が 90 秒のうちに、10 秒続けて同じ MainPID・NRestarts・ActiveEnterTimestamp で active にならない(serve は、その後の /v1/status が node_id を答えて同じプロセスのままであることも求める。最後: $(/usr/bin/tr "\n" " " <<<"${b:-$a}"))"; if [ "$serve" -eq 1 ]; then echo "$u の最後の /v1/status($addr を $usr として引いた): ${body:0:200}"; fi; return 1; fi; /usr/bin/sleep 2; done; }'
+settle_fn='bq() { local r=$(($1 - SECONDS)); shift; [ "$r" -gt 0 ] || return 124; /usr/bin/timeout "$r" "$@"; }; sq() { local o; o=$(bq "$2" /usr/bin/systemctl show -p ActiveState -p MainPID -p NRestarts -p ActiveEnterTimestampMonotonic "$1") || return 1; /usr/bin/sort <<<"$o"; }; settle() { local u=$1 end=$((SECONDS + 90)) a b c m env addr="" usr="" body="" serve=0; case "$u" in uniqnode-serve.service|uniqnode-serve@*.service) serve=1 ;; esac; if [ "$serve" -eq 1 ]; then env=$(bq "$end" /usr/bin/systemctl show -p Environment --value "$u") || env=""; addr=$(/usr/bin/tr " " "\n" <<<"$env" | /usr/bin/sed -n "s/^UNIQNODE_LISTEN=//p"); usr=$(bq "$end" /usr/bin/systemctl show -p User --value "$u") || usr=""; if ! [[ $addr =~ ^[0-9.]+:[0-9]+$ ]] || ! [[ $usr =~ ^[a-z_][a-z0-9_-]*$ ]]; then echo "$u の主の口(UNIQNODE_LISTEN)か User= を読めないので、/v1/status で確かめられない"; return 1; fi; fi; while :; do a=$(sq "$u" "$end") || a=""; b=""; if [[ $a == *ActiveState=active* ]] && [[ $a != *MainPID=0* ]] && [ $((end - SECONDS)) -ge 10 ]; then /usr/bin/sleep 10; b=$(sq "$u" "$end") || b=""; if [ "$a" = "$b" ] && [ "$SECONDS" -le "$end" ]; then if [ "$serve" -eq 0 ]; then return 0; fi; m=$((end - SECONDS)); [ "$m" -le 2 ] || m=2; if [ "$m" -gt 0 ] && body=$(/usr/sbin/runuser -u "$usr" -- /usr/bin/curl -fsS --max-time "$m" "http://$addr/v1/status" 2>&1) && [[ $body == *"\"node_id\":\""* ]]; then c=$(sq "$u" "$end") || c=""; if [ "$c" = "$a" ] && [ "$SECONDS" -le "$end" ]; then return 0; fi; echo "$u が /v1/status の確かめの間に起き直した(または状態を読めないか、期限を過ぎた)。安定の確かめからやり直す"; fi; fi; fi; if [ $((end - SECONDS)) -lt 10 ]; then echo "$u が 90 秒のうちに(残りが 10 秒の窓に足りなくなった時点で打ち切る)、10 秒続けて同じ MainPID・NRestarts・ActiveEnterTimestamp で active にならない(serve は、その後の /v1/status が node_id を答えて同じプロセスのままであることも求める。最後: $(/usr/bin/tr "\n" " " <<<"${b:-$a}"))"; if [ "$serve" -eq 1 ]; then echo "$u の最後の /v1/status($addr を $usr として引いた): ${body:0:200}"; fi; return 1; fi; /usr/bin/sleep 2; done; }'
 # shellcheck disable=SC2016
 wait_script="set -u; $settle_fn"'; rc=0; for u in "$@"; do settle "$u" || rc=1; done; exit "$rc"'
 # shellcheck disable=SC2016

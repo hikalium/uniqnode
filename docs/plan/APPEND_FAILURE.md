@@ -2,7 +2,7 @@
 
 <a id="d973833f-4e2b-4fc8-8a49-42f6821b6a7a"></a>
 
-版: 第 21 版(2026-10-01)。2026-10-01T00:01:28Z の操作者の規則(どの計画も、手元の GPU で lamalium を毎日の実務に使うという最終目標とのつながりを書く)に従い「最終目標とのつながり」を足した。第 20 版への Codex と Claude のレビュー(Codex 高 1: docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令は、バイナリを差し替える前に新しいバイナリの `store hold-status` で `open-marker` を検め、保留なら起こさない。そのための `store hold-status` を S1b に足し、S1b より前のバイナリへ戻すと保留を素通りすることとその規則を「S1b より前のバイナリへ戻す」に書いた、Claude 低 7: SYSTEMD.md の外す命令が固定の壊れで止まるとき、旧い timer を戻す命令を言う)を取り込んだ。S1c は範囲が操作者の裁定待ちなので設計の本文を動かさず、S1c だけに当たる指摘(Codex 中 2〜5・低 6、Claude 中 4・低 1 ほか)は「backup の写し元の検め」の頭の「裁定の後に扱う指摘」に並べた。第 20 版(2026-10-01)。第 19 版への Codex と Claude のレビュー(Codex 高 1・Claude 高 2: backup の公開を、写し先の世代のディレクトリを完成させてから `current` の symlink を 1 回の rename で切り替える形へ、Codex 高 2・Claude 中 3: 写し先のロックを backup の全体で持つ、Claude 高 1: 開き終えるまでは境界を答えず `opening` と答え、写し先より短い reflog の境界は断る、Codex 中 3: 閉じる要求で新しい外側の書き込みの番を閉め、入れ子だけを通す、Codex 中 4・Claude 低 5: 同じ pid・nonce の `NoSpace` の印も認める、Codex 中 5・中 6: docs/mop/SYSTEMD.md の戻す命令の unit の不在と外す命令の固定の検め、Claude 中 4: S1 を S1a・S1b・S1c に分けて段ごとのゲート、低 6〜13: hard link の条件、stage の片付け、照会の相手の `SO_PEERCRED`、境界の別の `Mutex`、accept の起こし方、印の読み直し、開く途中の RAII、uid の試験の debug の口、低 14: 直す文書に SYSTEMD.md の表)を取り込んだ。第 19 版(2026-10-01)。第 18 版への Codex と Claude のレビュー(Codex 高 1・Claude 中 3: 書き込みの途中の旗を入れ子と早い戻りとパニックに耐える数え値と RAII の番へ、Codex 高 2・高 3・中 5・Claude 中 2・低 11: backup を、ロックの持ち主が答える永続化済みの境界までの写しと、写し先の tmp/ での段取り・検め・公開の後の削除へ組み直し、ロックの socket に accept の輪と照会の期限、印に開くたびの nonce、Codex 中 4: 2 度目のシグナルを受ける輪を終わり方から分ける、低 9: GC の競合の試験の 2 つの停止点と期待値、Claude 高 1: 開くことの失敗を手綱に記録する、中 5: install の断りの完了条件、低 10: 終わり方の 2 度呼び)を取り込んだ。第 18 版(2026-10-01)。第 17 版への Codex と Claude のレビュー(Codex 高 1: GC の D の packs/ の sync をストアのロックの中で行い、終わり方と排他にする、Codex 中 2〜4・低 6: 旧い名の unit を外す命令の backup の待ち・退避の対象・退避先の一意・パイプラインの失敗、Claude 中 1: 読むだけの走査の Drop は印を書かない、中 2: CLI のシグナルは共有の小さな手綱で閉じる、中 3: serve のログがデータのディレクトリの祖先を作る、中 4: 保留の写し元を backup が写さない、中 5: vega で共有するバイナリと旧い名の unit、低 5: シグナルで閉じたときの終了コード、低 6: 開く途中のシグナル、低 8: 外す命令の字句の試験)を取り込んだ。第 17 版(2026-10-01)。第 14 版(9d04834)への Claude のレビュー(高 1: 保留で開いた serve が sync していない
+版: 第 22 版(2026-10-01)。第 21 版への Codex と Claude のレビュー(Codex 高 1・Claude 中: 旧い名の unit へ戻す命令は、共有のバイナリを使う graph_a・graph_b を含む全部の書き手を止め、全部のストアの hold-status が 0 のときだけ差し替える、Codex 高 2: 保留を知る版と確かめたときだけ今のバイナリで起こし直す案内を出す、Codex 中 3: 印の不在と照会の誤りを分ける、Codex 中 4: 壊れた印の release-hold にも再起動か umount・fsck・mount し直しの前提、Claude 中: 差し替えの後に打ち直せるよう、検め手を退避の外へ写す、Claude 中: CLI の形を main.rs の `uniqnode <command> <data_dir> [args]` に合わせて `uniqnode hold-status <dir>` と `uniqnode release-hold <dir>` へ改め、文書の字句と CLI の名を照らす repo_hygiene の試験を S1b に足す、Claude 中: S1b の戻し方の再起動が手で起こした llama-server を止める代価と OOMScoreAdjust の案、Codex 低 7・Claude 低: 命令ごとの開き方の表に hold-status と release-hold、その完了条件の拡げ、Claude 低: SYSTEMD.md の終了コード 1・2 の案内と外す命令の旧い timer の trap、Claude 低: 旧いバイナリへ落ちる他の道)を取り込んだ。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 21 版(2026-10-01)。2026-10-01T00:01:28Z の操作者の規則(どの計画も、手元の GPU で lamalium を毎日の実務に使うという最終目標とのつながりを書く)に従い「最終目標とのつながり」を足した。第 20 版への Codex と Claude のレビュー(Codex 高 1: docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令は、バイナリを差し替える前に新しいバイナリの `store hold-status` で `open-marker` を検め、保留なら起こさない。そのための `store hold-status` を S1b に足し、S1b より前のバイナリへ戻すと保留を素通りすることとその規則を「S1b より前のバイナリへ戻す」に書いた、Claude 低 7: SYSTEMD.md の外す命令が固定の壊れで止まるとき、旧い timer を戻す命令を言う)を取り込んだ。S1c は範囲が操作者の裁定待ちなので設計の本文を動かさず、S1c だけに当たる指摘(Codex 中 2〜5・低 6、Claude 中 4・低 1 ほか)は「backup の写し元の検め」の頭の「裁定の後に扱う指摘」に並べた。第 20 版(2026-10-01)。第 19 版への Codex と Claude のレビュー(Codex 高 1・Claude 高 2: backup の公開を、写し先の世代のディレクトリを完成させてから `current` の symlink を 1 回の rename で切り替える形へ、Codex 高 2・Claude 中 3: 写し先のロックを backup の全体で持つ、Claude 高 1: 開き終えるまでは境界を答えず `opening` と答え、写し先より短い reflog の境界は断る、Codex 中 3: 閉じる要求で新しい外側の書き込みの番を閉め、入れ子だけを通す、Codex 中 4・Claude 低 5: 同じ pid・nonce の `NoSpace` の印も認める、Codex 中 5・中 6: docs/mop/SYSTEMD.md の戻す命令の unit の不在と外す命令の固定の検め、Claude 中 4: S1 を S1a・S1b・S1c に分けて段ごとのゲート、低 6〜13: hard link の条件、stage の片付け、照会の相手の `SO_PEERCRED`、境界の別の `Mutex`、accept の起こし方、印の読み直し、開く途中の RAII、uid の試験の debug の口、低 14: 直す文書に SYSTEMD.md の表)を取り込んだ。第 19 版(2026-10-01)。第 18 版への Codex と Claude のレビュー(Codex 高 1・Claude 中 3: 書き込みの途中の旗を入れ子と早い戻りとパニックに耐える数え値と RAII の番へ、Codex 高 2・高 3・中 5・Claude 中 2・低 11: backup を、ロックの持ち主が答える永続化済みの境界までの写しと、写し先の tmp/ での段取り・検め・公開の後の削除へ組み直し、ロックの socket に accept の輪と照会の期限、印に開くたびの nonce、Codex 中 4: 2 度目のシグナルを受ける輪を終わり方から分ける、低 9: GC の競合の試験の 2 つの停止点と期待値、Claude 高 1: 開くことの失敗を手綱に記録する、中 5: install の断りの完了条件、低 10: 終わり方の 2 度呼び)を取り込んだ。第 18 版(2026-10-01)。第 17 版への Codex と Claude のレビュー(Codex 高 1: GC の D の packs/ の sync をストアのロックの中で行い、終わり方と排他にする、Codex 中 2〜4・低 6: 旧い名の unit を外す命令の backup の待ち・退避の対象・退避先の一意・パイプラインの失敗、Claude 中 1: 読むだけの走査の Drop は印を書かない、中 2: CLI のシグナルは共有の小さな手綱で閉じる、中 3: serve のログがデータのディレクトリの祖先を作る、中 4: 保留の写し元を backup が写さない、中 5: vega で共有するバイナリと旧い名の unit、低 5: シグナルで閉じたときの終了コード、低 6: 開く途中のシグナル、低 8: 外す命令の字句の試験)を取り込んだ。第 17 版(2026-10-01)。第 14 版(9d04834)への Claude のレビュー(高 1: 保留で開いた serve が sync していない
 レコードを複製の口でピアへ渡す、中 1: 開いた後の抜け道とシグナル、中 2: 既存の試験との食い違いと Drop、中 3: 命令ごとの
 開き方、中 4: GC の D のディレクトリの sync、中 5: 旧い名の unit からの移行を本番への反映の前提に、低 3〜8)を、
 第 16 版に照らし直して取り込んだ。第 16 版(2026-10-01)。第 15 版(3162e7f)への vega の Codex の再レビュー(高なし、中: ストアの障害でない
@@ -48,6 +48,19 @@ Claude(N1)が独立に見つけた。[docs/plan/FEED.md](#fa8de6f9-59f8-4512-a81
   - 日々の運用に持ち込む代価(S1b): 同じブートの中で serve が SIGKILL・OOM・異常終了で落ちると、ホストを
     再起動するまで保存が 503 になる(方針 5 の代価)。lamalium の保存はその間止まる(検索は答える)。
     systemd の stop・restart は ExecStop と SIGTERM で無事に終わるので、平常の更新では起きない。
+  - 戻し方の重さ(第 21 版への Codex と Claude のレビューの Claude 中): vega の 3 つの llama-server(8082 の
+    gpt-oss-120b、8083 の bge-m3、8084 の bge-reranker)は利用者の端末の session scope の下で手で起こしたもので、
+    systemd の unit ではない(docs/analysis/20261001-vega-llm-processes.md の「プロセス」)。そのため、保留を
+    解くためのホストの再起動は、lamalium の LLM(8082)と uniqnode の埋め込み・rerank(8083・8084)も止め、
+    手で起こし直すまで戻らない(gpt-oss-120b の読み込みは 63 GB がページキャッシュに在って 39 秒、無ければ
+    もっとかかる)。その間、lamalium は推論できず、uniqnode の検索は BM25 だけ・元の順位に落ちる。docs/plan/LLM_UNITS.md
+    で unit になるまではこの重さが続く。代わりの umount・fsck・mount し直しも、ストアは /work2 に在り、
+    llama-server のバイナリとモデル(/work2/llm)と作業ディレクトリも同じファイルシステムなので、それらを
+    止めないと umount できず、同じだけ重い。OOM の側では、vega でいちばん大きいのは 66.5 GiB の
+    gpt-oss-120b(oom_score_adj は 0)で、OOM killer はふつうそれを選ぶが、serve が選ばれると保留に入る。
+    案: system の serve の unit に `OOMScoreAdjust=-500` を置き、OOM のときに serve が後回しになるようにする
+    (負の値は system の unit でだけ効く。user の unit には置かない)。入れるかは S1b の unit の変更と一緒に
+    操作者が決める。
   - 操作者の作業: 本番へ入れる前に、vega で旧い名の unit から `@default` へ移す sudo の 1 ブロック
     (API_AUTH の A2 と共通で、1 回で両方の前提を満たす)と、S1 が揃った後の install の打ち直しの 1 ブロック。
   - 止まる間: 移行の間(外してから据え直すまで。ビルドを先に済ませれば数分)、主の口 7440・読み口 7441・
@@ -477,18 +490,25 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      誤りが無いことは再開の根拠にならない(書き戻しの誤りは報告された後は見えなくなり、sync の段の
      ENOSPC も Io に入る。第 9 版への Codex の再レビューの高 2)。ホストを再起動できないときの代わりは、
      ストアを置いたファイルシステムを umount して fsck し、mount し直して page cache を捨てた後に、
-     `uniqnode store release-hold --data-dir <dir>` で印を `Clean` にすることである。検めを通らない
+     `uniqnode release-hold <dir>` で印を `Clean` にすることである。検めを通らない
      印(読めない・短い・CRC が合わない・状態が不明)は boot_id を信用しないので、ホストを再起動
      しても同じ判定のまま保留が続く。この形は、再起動の後でも release-hold が要る(案内の文もそう
      書き分ける。第 11 版への Codex の再レビューの中 1)。release-hold は
      ストアのロックを取って行い(serve や他の CLI が開いている間は断る)、fsck と mount し直しは
      操作者の作業として案内の文に書く。
-   - 保留の照会(第 20 版への Codex と Claude のレビューの Codex 高 1): `uniqnode store hold-status --data-dir <dir>`
+   - 保留の照会(第 20 版への Codex と Claude のレビューの Codex 高 1): `uniqnode hold-status <dir>`
      は、release-hold と同じくストアのロックを取り(開いているプロセスがいれば断る)、印を読むだけで書かない。
      書ける道がそのまま開いてよい形(印が無い、`Clean`、検めを通る boot_id の違う印、同じ boot_id の
      `NoSpace`)なら状態を 1 行言って 0、保留の形(同じ boot_id の `Running` と `Io`、検めを通らない印)なら
-     理由と上の戻し方を言って 3、ロックを取れないなどの誤りは 1 で終える。「S1b より前のバイナリへ戻す」の
-     検めに使う。
+     理由と上の戻し方を言って 3、ロックを取れない・ストアでない道などの誤りは 1、使い方の誤りは 2 で終える。
+     「S1b より前のバイナリへ戻す」の検めに使う。
+   - CLI の形(第 21 版への Codex と Claude のレビューの Claude 中): 2 つとも main.rs の
+     `uniqnode <command> <data_dir> [args]`(main.rs の 17 行付近の使い方と 714〜731 行付近の振り分け)に従い、
+     `uniqnode hold-status <dir>` と `uniqnode release-hold <dir>` とする(第 21 版までの
+     `uniqnode store hold-status --data-dir <dir>` の形は main.rs に無い)。S1b より前のバイナリは未知の命令を
+     使い方の誤りとして 2 で終える(main.rs の 2118 行付近の `_ => usage()`)ので、終了コード 2 は「この版は
+     hold-status を知らないか、引数を誤った」と読め、どちらも検めていない側に倒す。docs/mop/SYSTEMD.md が操作者に打たせる字句と CLI の名が食い違わないよう、
+     repo_hygiene の試験で照らす(must/0023。完了条件)。
    - 代価: 同じブートの中で serve が SIGKILL・OOM・異常終了で落ちると、I/O の誤りが無くてもホストを
      再起動するまで書けない状態で起きる。systemd の stop と restart を無事な終わり方にするため、unit
      に `ExecStop=`(主の口へ `POST /v1/admin/shutdown` を送り、終わりを待つ)を足す。今の serve は
@@ -538,6 +558,8 @@ install の確認も同じ関数)は、`Store::open` の recover で削除・切
 | status・get・refs・fsck | `open_existing`(recover が削除・切り詰め・sync をする) | 読むだけの走査 |
 | embed | `open`(ストアは読むだけで、書くのは derived/ のベクトルの控え) | 読むだけの走査(在るストアだけ) |
 | backup の写し先の検め(`verify_copy`) | `open_existing`(写し先の尻切れを切り詰める) | 読むだけの走査 |
+| hold-status | (無い) | `Store::open` を呼ばない。ストアのロックを取って印を読むだけで、走査・`mkdir`・tmp/ の片付け・削除・切り詰め・sync をしない |
+| release-hold | (無い) | `Store::open` を呼ばない。ストアのロックを取って印を読み、`Clean` に書き換える(印の `pwrite` と `fdatasync` だけ)。走査・`mkdir`・tmp/ の片付け・削除・切り詰めをしない |
 | mcp の Forward、viewer、install | 開かない(install はロックを探るだけ) | 開かない |
 
 読むだけの走査は、方針 5 の書けない道と同じ関数で、ストアのロックは取る(serve と同時に走らない今の
@@ -545,6 +567,11 @@ install の確認も同じ関数)は、`Store::open` の recover で削除・切
 ストアにも答える。init と status は今 1 つの腕(main.rs の 1382 行付近)なので分ける。backup の
 `torn_tails_cut` は、ファイルが縮んだかではなく、走査の有効な長さとファイルの長さの差から出す(写し先の
 アクティブのセグメントは次回の backup が丸ごと写し直すので、切り詰めなくてよい)。
+
+hold-status と release-hold の行は第 21 版への Codex と Claude のレビュー(Codex 低 7・Claude 低)で足した。
+どちらも、ストアでない道(`open-marker` も MANIFEST も無いディレクトリ、無い道)では何も作らずに理由を言って
+1 で終える(初期化しない)。今の `open_existing` は `Store::open` を経て recover するので、それに載せると
+読むだけの照会が尻切れを切り詰め、tmp/ を片付けてしまう。
 
 S1c の範囲は操作者の裁定待ち(A 現案 / B 縮小(推奨)/ C 外す)。B は、backup が写し元の `open-marker` を読み、
 `Clean` か生きた持ち主のときだけ写して他は断り、写し先は平らな形のまま置き、写す窓の中で起きた Io は既知の限界と
@@ -828,9 +855,17 @@ backup.rs の冒頭の「残骸の削除は MANIFEST を据える前」と docs/
     `write_failure` と印の `Io` を記録して番を返した後に `write_failure` を見て印を書き換えない。印は `Io`、
     shutdown の本文は `"marker":"left"`、同じ boot_id で保留に開く。
   - `gc-dirsync` を掛けずに P1 から D を先に通した形は、印が `Clean` で書ける道に開く。
-- `store hold-status` は、印が無い・`Clean`・boot_id の違う印・同じ boot_id の `NoSpace` で 0、同じ boot_id の
+- `uniqnode hold-status <dir>` は、印が無い・`Clean`・boot_id の違う印・同じ boot_id の `NoSpace` で 0、同じ boot_id の
   `Running` と `Io`・検めを通らない印で 3、serve が開いている間は 1 で終わり、どの形でも印のバイト列が変わらない
-  (第 20 版への Codex と Claude のレビューの Codex 高 1)。
+  (第 20 版への Codex と Claude のレビューの Codex 高 1)。加えて、reflog と pack の尻切れ・tmp/ の残骸・印なしを
+  含むストアに当てた後、ストアの全部のファイルの集合とバイト列(セグメントの長さと tmp/ の中身を含む)が前と同じで、
+  `mkdir`・切り詰め・削除・sync の呼び出しが 0 回である。ストアでない道(空のディレクトリと無い道)では何も作らずに
+  1 で終わり、引数の誤り(`<dir>` が無い、余る)は 2 で終わる。release-hold も、ストアでない道では何も作らずに 1、
+  印以外のファイルの集合とバイト列は前と同じである(第 21 版への Codex と Claude のレビューの Codex 低 7・Claude 低)。
+- CLI の名と文書の字句(第 21 版への Codex と Claude のレビューの Claude 中。must/0023): node/tests/repo_hygiene.rs に、
+  docs/mop/SYSTEMD.md のコードブロック(操作者に貼らせる命令)の中で `hold-status`・`release-hold` を打つ字句が、main.rs の
+  使い方に載る命令の名と `uniqnode <command> <data_dir>` の形に一致する(命令の名の前に `store` が無く、`--data-dir` が
+  無い)ことを確かめる試験を足す。散文の中の経緯の記述(旧い形の名を挙げる版の行など)は照らさない。使い方の文面は `usage_text` の 1 箇所なので、試験はそれを読んで名を取り出す。
 - 保留のストアと書けるストアに `uniqnode status`・fsck・get・refs を当てて終えた後、印のバイト列が
   変わっていない(読むだけの走査の Drop は印を書かない。第 17 版への Claude のレビューの中 1)。
 - `Store` を main のスレッドで値として持つ書く CLI(put、取り込み)に、持続的な書き込みの途中と、書き込みの
@@ -913,7 +948,7 @@ backup.rs の冒頭の「残骸の削除は MANIFEST を据える前」と docs/
 | 段 | 中身 | 大きさ |
 |---|---|---|
 | S1a | `append_durable` と包みへの寄せ、新しいセグメントのディレクトリの sync、`WriteFailure` と `WritesDisabled`、fstat と切り詰めの試み、封印と `gc_commit` の順の入れ替え、GC の D の packs/ の sync の失敗を書けない状態へ、`atomic_write` の tmp 名、周期的な書き手の飛ばし、export の絞り、注入、HTTP と MCP の 503(`POST /v1/sync` の入口の判定、query と rendition の扱いを含む)、status と健全性の欄、ログを開く前のデータのディレクトリの検めと log.rs の `create_dir_all` の撤去、install の経路の 1 つずつの `mkdir` と根までの sync、`node_key` の tmp(`create_new`・0600・sync・rename)、1a の開くときの sync、install の断り(旧い名の unit が残る間の共有のバイナリの差し替え。API_AUTH の A1 より先に入るなら)、テスト、SPEC §5(永続化)への 1 段落 | M |
-| S1b | `open-marker`(固定長・CRC・boot_id・nonce)と開く道の 2 分岐、読むだけの走査の関数と「命令ごとの開き方」の表のとおりの付け替え、保留の serve の複製の口の 503、release-hold と `store hold-status` の CLI、無事な終わり方の関数と 1 つの終わり方への寄せ、`CloseHandle`(閉じる手綱。書き込みの番の数え値と RAII、閉じる要求で外側の番を閉める、`OpeningGuard`、`open_failed`・`poisoned`、終わり方の 2 度呼びと `finish` の `Once`)、Store の Drop(`wrote_running` のときだけ)、SIGTERM と SIGINT の受け取り(`extern "C"`。受ける輪と閉じる役の分離)と終了コード、GC の D の sync をストアのロックの中へ、serve の束縛と A1・A2 の起動時の断りを開くより前へ、unit の ExecStop(system と user の `uniqnode-serve@.service`)、backup の `not_copied` の `open-marker`、テスト | L |
+| S1b | `open-marker`(固定長・CRC・boot_id・nonce)と開く道の 2 分岐、読むだけの走査の関数と「命令ごとの開き方」の表のとおりの付け替え、保留の serve の複製の口の 503、`uniqnode release-hold <dir>` と `uniqnode hold-status <dir>` の CLI(`Store::open` を通らない)と、SYSTEMD.md の字句を CLI の名と照らす repo_hygiene の試験、無事な終わり方の関数と 1 つの終わり方への寄せ、`CloseHandle`(閉じる手綱。書き込みの番の数え値と RAII、閉じる要求で外側の番を閉める、`OpeningGuard`、`open_failed`・`poisoned`、終わり方の 2 度呼びと `finish` の `Once`)、Store の Drop(`wrote_running` のときだけ)、SIGTERM と SIGINT の受け取り(`extern "C"`。受ける輪と閉じる役の分離)と終了コード、GC の D の sync をストアのロックの中へ、serve の束縛と A1・A2 の起動時の断りを開くより前へ、unit の ExecStop(system と user の `uniqnode-serve@.service`)と、操作者が採るなら system の unit の `OOMScoreAdjust=-500`(「最終目標とのつながり」の代価の案)、backup の `not_copied` の `open-marker`、テスト | L |
 | S1c | ロックの socket の accept の輪(`poll` と起こし用の対、`SO_PEERCRED` の uid の絞り)と答えの写しの `Mutex`、`opening` と開き終えた後の永続化済みの境界、backup の照会(期限、uid と pid の検め)と境界までの写し、写し先より短い reflog の断り、写し先のロック、世代のディレクトリと `current` の切り替え・hard link の条件・片付け、印の読み直し、テスト | M |
 
 段ごとのゲート(第 19 版への Claude のレビューの中 4。第 19 版は S1 を 1 段の M としていたが、中身は L〜XL だった): 各段は、上の完了条件のうち自分の中身に当たる項目の試験と `cargo test` の全体が緑で、その段の差分へのレビューで高の指摘が無いと確かめてから main に入れる。S1a のゲートは、印にも終わり方にも backup にも依らない項目である: 注入の各種で失敗した要求が 5xx・以後が 503・読み出しが続くこと、応答済みの書き込みが開き直した後に消えないこと、`sync-keep` と export の絞り、pack の `torn` の後の読み出し、封印と `gc_commit` への `manifest`・`manifest-dirsync`、GC の B・D の失敗の扱い、kind の分けと 503 の本文と `POST /v1/sync`、複製の受け側、最初の要求の 503、install の経路の sync(中断からの再実行を含む)、query と rendition、親の無い道、install の断り。印を要る項目(「kind が Io の状態で serve だけを起こし直す」「`crash-before-dirsync` の後に同じ boot_id で開く」「開き直したときの `writes_disabled` は、読み直した印で分かれる」など)は S1b のゲートに入る。S1b のゲートは印・保留・複製の口・終わり方・シグナル・書き込みの番・閉じる要求・開く途中・2 度呼び・shutdown の応答・GC の D の競合・読むだけの走査の項目。S1c のゲートは backup の項目(写し元の検め、境界、NoSpace の印、印の読み直し、公開の各段の停止点、写し先の排他、hard link、ロックの socket の照会と輪の止め方)である。S1a だけの間は、書けない状態がプロセスの中でしか続かない(serve の再起動で書き込みが戻る。欠陥 9 の形は S1b まで残る)ので、本番への反映は S1a〜S1c が揃ってから 1 回で行う。
@@ -922,7 +957,8 @@ S1 で一緒に直す文書(第 14 版への Claude のレビューの低 3): �
 裂かれていても fsck なしで回復する(node/tests/crash.rs)」(docs/mop/systemd/system/uniqnode-serve@.service
 の 37 行付近と user の 42 行付近。同じ boot_id の SIGKILL の後は保留で起きる、へ)、docs/mop/SYSTEMD.md
 (116 行付近の同じ根拠、「停止」の「SIGTERM を受け取る手続きを持たないので即座に落ちる」、「更新」の
-restart の説明、保留と release-hold の案内)、backup の `not_copied`(backup.rs の 285 行付近。
+restart の説明、保留と release-hold の案内、「更新」に S1b 以後のストアへ S1b より前の checkout から install しない
+注意。第 21 版への Codex と Claude のレビューの Claude 低)、backup の `not_copied`(backup.rs の 285 行付近。
 `open-marker` は写さない既知の名として扱い、毎回「知らない名前」に出さない)、backup.rs の冒頭の
 コメントと docs/mop/BACKUP.md の「残骸の削除は MANIFEST を据える前」「ロックを取らない」(backup の写し元の検めの
 (1)〜(3) の順と、持ち主への照会へ。第 18 版への Codex と Claude のレビュー)、docs/mop/BACKUP.md の写し先の形と
@@ -959,11 +995,34 @@ install は据え先に旧い名の unit が残っている間は、インスタ
 S1b より前のバイナリへ戻す(第 20 版への Codex と Claude のレビューの Codex 高 1): S1b より前のバイナリの
 `Store::open` は `open-marker` を見ずに recover して書く。保留のストア(同じ boot_id の `Running` と `Io`、検めを
 通らない印)をそれで開くと保留を素通りし、page cache にだけ在る完全なレコードを採ってその後ろへ書く道が戻る。
-規則: S1b 以後から S1b より前のバイナリへ戻すときは、serve を止めた後・バイナリを差し替える前に、まだ据わって
-いる S1b 以後のバイナリで `uniqnode store hold-status` を打ち、0 のときだけ戻したバイナリで起こす。3 なら起こさず、
-方針 5 の戻し方(同じ boot_id の `Running` と `Io` はホストの再起動。再起動できなければ umount・fsck・mount し直しの
-後の release-hold。検めを通らない印は release-hold か、検め済みの backup からの復元)を済ませ、hold-status が 0 に
-なってから戻す。旧いバイナリに検めを頼らない。docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令はこの形で書いて
-ある。既知の限界: 旧いバイナリが走る間は S1 の守りが無い(今と同じ)。旧いバイナリは印を書かないので、その間の
+規則: S1b 以後から S1b より前のバイナリへ戻すときは、そのバイナリを走らせる全部の書き手(vega では共有の
+/home/hikalium/.local/bin/uniqnode を使う既定・graph_a・graph_b の serve と、それらを起こし直す timer)を止めた後・
+バイナリを差し替える前に、S1b 以後のバイナリ(差し替えの後にも残るよう、退避の外へ写した検め手)で全部のストアに
+`uniqnode hold-status <dir>` を打ち、全部が 0 のときだけ戻したバイナリで起こす(第 21 版への Codex と Claude の
+レビューの Codex 高 1・Claude 中)。3 なら起こさず、方針 5 の戻し方を済ませ、hold-status が 0 になってから戻す:
+同じ boot_id の `Running` と `Io` はホストの再起動で解ける。検めを通らない印は、ホストの再起動か、umount・fsck・
+mount し直して page cache を捨てた後に release-hold するか、検め済みの backup から戻す。再起動できずに umount・fsck・
+mount し直したときも、その後の release-hold で戻す。どの印でも、page cache を捨てる前の release-hold はしない
+(方針 5 の前提。第 21 版への Codex と Claude のレビューの Codex 中 4)。1(ロックの持ち主がいる、ストアでない道)と
+2(検め手が hold-status を知らない、引数の誤り)も 0 でないので起こさない。旧いバイナリに検めを頼らない。
+docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令はこの形で書いてある。
+
+旧いバイナリへ落ちる他の道(第 21 版への Codex と Claude のレビューの Claude 低):
+
+- 古い checkout からの install: install は共有のバイナリを rename で置き換える(install.rs の `install_binary`)。
+  S1b より前の checkout で install を打つと、止める・検める段なしに、次の起動から全インスタンスが旧いバイナリで
+  走る。S1b 以後の install にこれを断らせることはできない(打つのは旧い checkout の install だから)。既知の限界とし、
+  docs/mop/SYSTEMD.md の「更新」に、S1b 以後のストアへ S1b より前の checkout から install しないこと、戻すなら
+  上の規則の命令(全ストアの hold-status)を先に打つことを書く(S1b の文書の直し)。
+- MCP の Local の `exec` による差し替え: 実行ファイルが更新されると自分を `exec` で差し替える(mcp.rs の
+  `exec_replacement`)ので、共有のバイナリが旧いものへ戻されると、走っている Local も旧いイメージへ替わる。
+  S1b 以後の Local は `exec` の前に `Clean` を書いて閉じる(方針 5)ので、差し替えの瞬間に保留を作らない。ただし
+  差し替えの前から保留だったストアでは、Local は保留で開いていて `exec` の後の旧いイメージが印を見ずに書く。
+  これは共有のバイナリを差し替える道(上の 2 つ)のどちらかが先に起きたときだけで、上の規則の命令は差し替えの前に
+  全ストアを検めるので、その命令で戻すなら起きない。古い checkout の install で戻した形は 1 つ目の既知の限界に
+  含まれる。--serve-url の無い Local がストアのロックを持っていれば、規則の命令の hold-status は 1 で止まる。
+- 手でのコピー(`cp` で共有のバイナリを置き換える): 1 つ目と同じ既知の限界で、規則の命令を使う。
+
+既知の限界(戻した後): 旧いバイナリが走る間は S1 の守りが無い(今と同じ)。旧いバイナリは印を書かないので、その間の
 書き込みの誤りを印は知らず、後で S1b 以後へ上げ直すと、戻す前の `Clean` のまま書ける道で開く。旧いバイナリの間に
 書き込みの誤りを見たら、上げ直す前にホストを再起動する。

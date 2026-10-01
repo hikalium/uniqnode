@@ -1191,6 +1191,25 @@ fn refuse_misplaced_listen_agent(role: &str, options: &RunOptions) {
     }
 }
 
+/// ストアを開く常駐(serve と mcp の Local)が、ログを開く前に呼ぶ: データのディレクトリが
+/// 無ければ `mkdir` だけで作り、親が無ければ何も作らずに 1 で終わる。理由は標準エラー
+/// (system の unit なら journal)にだけ言う(ログの置き場がまだ無いため)。書く CLI は
+/// ログを開かないので、Store::open の中の同じ検めで足りる。
+///
+/// ログをデータのディレクトリの中(既定の `<dir>/logs`)に置くときだけ、ここで作る。
+/// `--log` で外へ置くときと `--no-log` のときは、ログがデータのディレクトリに触れないので、
+/// 検めは Store::open に任せる(起動時の引数の検査で断る serve はデータのディレクトリに
+/// 触れない、という API_AUTH の 1 の約束を保つ)。
+fn prepare_data_dir_or_exit(dir: &str, role: &str, log: &LogOptions) {
+    if !log.enabled || log.path.is_some() {
+        return;
+    }
+    if let Err(error) = uniqnode::store::prepare_data_dir(std::path::Path::new(dir)) {
+        eprintln!("uniqnode: {role}: ストアを開けない: {error}");
+        std::process::exit(1);
+    }
+}
+
 /// ログの保存を始める(既定で有効)。既定の道が開けなければ利用者の書ける場所へ倒し、
 /// --log で明示された道が開けなければ倒さずに理由を言って標準エラーだけで続ける(どちらの
 /// 判断も uniqnode::log にある。should/0135)。黙って落とさない(must/0022)が、ログを
@@ -1886,6 +1905,11 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
         // LLM クライアントが吸って利用者に見せないので、ファイルが唯一読める記録になる。
         "mcp" => {
             let options = parse_mcp_options(rest);
+            // ストアを直接開く形は、ログを開く前にデータのディレクトリを検める(親が無ければ
+            // 何も作らずに断る。ログの logs/ が先にデータのディレクトリを作らないように)。
+            if options.serve_url.is_none() {
+                prepare_data_dir_or_exit(dir, uniqnode::log::MCP_ROLE, &options.run.log);
+            }
             // 何よりも先に開く。ストアを開けない・転送先が誤っている、といった起動時の
             // 失敗こそ残したい記録である。
             start_logging(dir, uniqnode::log::MCP_ROLE, &options.run.log);
@@ -1969,6 +1993,9 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
         "serve" => {
             let address = rest.first().map(String::as_str).unwrap_or_else(|| usage());
             let options = parse_run_options(&rest[1..]);
+            // ログを開く前にデータのディレクトリを検める(親が無ければ何も作らずに、標準
+            // エラーにだけ理由を言って断る。APPEND_FAILURE の方針 1a)。
+            prepare_data_dir_or_exit(dir, uniqnode::log::SERVE_ROLE, &options.log);
             // ストアを開くより先にログを開く。「開けない」「そのアドレスを使えない」も
             // 残したい記録である。
             start_logging(dir, uniqnode::log::SERVE_ROLE, &options.log);

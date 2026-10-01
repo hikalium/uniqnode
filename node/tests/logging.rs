@@ -150,6 +150,8 @@ fn the_log_rotates_by_size_and_keeps_a_bounded_number_of_generations() {
 #[test]
 fn the_destination_can_be_moved_with_the_log_option() {
     let elsewhere = unique_dir("log-elsewhere").join("運用").join("serve.log");
+    // --log の道は親が在ることを求める(祖先を作らない。APPEND_FAILURE の方針 1a)。
+    std::fs::create_dir_all(elsewhere.parent().expect("親")).expect("mkdir");
     let mut server = start_server_capturing_stderr(
         "log-moved",
         &["--log", elsewhere.to_str().expect("utf-8")],
@@ -340,4 +342,34 @@ fn an_unopenable_log_is_reported_and_serve_keeps_serving() {
 
     std::fs::remove_dir_all(&dir).expect("cleanup");
     std::fs::remove_file(&blocking_file).expect("cleanup");
+}
+
+/// 親の無い道を渡した serve と、ストアを直接開く形の mcp は、ログを開く前に理由を言って
+/// 終わり、データのディレクトリも logs/ も作らない(APPEND_FAILURE の方針 1a: 祖先は作らない。
+/// ログが先にデータのディレクトリを作ると、ストアの「親が無ければ断る」が効かなくなる)。
+#[test]
+fn a_data_directory_without_a_parent_is_refused_before_the_log_is_opened() {
+    let root = unique_dir("log-no-parent");
+    let dir = root.join("missing").join("store");
+    let state_home = unique_dir("log-no-parent-state");
+    for (role, arguments) in [
+        ("serve", vec!["serve", dir.to_str().expect("utf-8"), "127.0.0.1:0"]),
+        ("mcp", vec!["mcp", dir.to_str().expect("utf-8")]),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_uniqnode"))
+            .args(&arguments)
+            .env("XDG_STATE_HOME", &state_home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run uniqnode");
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert_eq!(output.status.code(), Some(1), "{role}: {stderr}");
+        assert!(stderr.contains("が無い"), "{role}: 親の無いことを言っていない: {stderr}");
+        assert!(stderr.contains(dir.to_str().expect("utf-8")), "{role}: 道を言っていない: {stderr}");
+        assert!(!root.exists(), "{role}: データのディレクトリの祖先を作った");
+        assert!(!state_home.exists(), "{role}: ログを倒す先に書いた(ログを開く前に断るはず)");
+        assert!(output.stdout.is_empty(), "{role}: 標準出力に書いた");
+    }
 }

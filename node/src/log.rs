@@ -56,6 +56,20 @@ pub fn generation_path(path: &Path, number: u32) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// ログファイルの親のディレクトリの扱い(APPEND_FAILURE の方針 1a)。データのディレクトリの
+/// 中と利用者が指した道では祖先を作らない: 親の無い道を渡されたとき、ログがデータの
+/// ディレクトリを先に作ると、ストアの「親が無ければ断る」が効かなくなるためである。
+#[derive(Clone, Copy)]
+enum Parent {
+    /// 既定の `<data_dir>/logs`: その 1 段だけを `mkdir` する(データのディレクトリは作らない)。
+    MkdirOnly,
+    /// `--log` で指した道: 親が在ることを求める。無ければ開けない(呼び手は標準エラーだけで
+    /// 続ける)。
+    MustExist,
+    /// 倒す先(利用者の状態のディレクトリ。ストアの外): 祖先ごと作る。
+    CreateAll,
+}
+
 /// 開いているログファイル。プロセスに 1 つだけ持つ。
 static DESTINATION: Mutex<Option<Destination>> = Mutex::new(None);
 
@@ -64,7 +78,7 @@ static DESTINATION: Mutex<Option<Destination>> = Mutex::new(None);
 /// 黙って変えると、指した所を読みに行った者が何も見つけられない。倒すのは既定の道のとき
 /// だけである(open_default)。
 pub fn open(path: &Path, max_bytes: u64) -> Result<(), String> {
-    let destination = Destination::open(path.to_path_buf(), max_bytes)
+    let destination = Destination::open(path.to_path_buf(), max_bytes, Parent::MustExist)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     *lock() = Some(destination);
     Ok(())
@@ -82,7 +96,7 @@ pub fn open(path: &Path, max_bytes: u64) -> Result<(), String> {
 /// 倒すか否かの判断も、ここにしかない(should/0135。serve・mcp・viewer が同じ関数を呼ぶ)。
 pub fn open_default(data_dir: &Path, role: &str, max_bytes: u64) -> Result<PathBuf, String> {
     let preferred = default_path(data_dir, role);
-    let refused = match Destination::open(preferred.clone(), max_bytes) {
+    let refused = match Destination::open(preferred.clone(), max_bytes, Parent::MkdirOnly) {
         Ok(destination) => {
             *lock() = Some(destination);
             return Ok(preferred);
@@ -95,7 +109,7 @@ pub fn open_default(data_dir: &Path, role: &str, max_bytes: u64) -> Result<PathB
             preferred.display()
         ));
     };
-    let destination = Destination::open(fallback.clone(), max_bytes).map_err(|error| {
+    let destination = Destination::open(fallback.clone(), max_bytes, Parent::CreateAll).map_err(|error| {
         format!("{}: {refused}。倒す先 {}: {error}", preferred.display(), fallback.display())
     })?;
     *lock() = Some(destination);
@@ -175,9 +189,24 @@ struct Destination {
 }
 
 impl Destination {
-    fn open(path: PathBuf, max_bytes: u64) -> std::io::Result<Destination> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+    fn open(path: PathBuf, max_bytes: u64, parent_policy: Parent) -> std::io::Result<Destination> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            match parent_policy {
+                Parent::MkdirOnly => match std::fs::create_dir(parent) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                },
+                Parent::MustExist => {
+                    if !parent.is_dir() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("親のディレクトリ {} が無い(作らない)", parent.display()),
+                        ));
+                    }
+                }
+                Parent::CreateAll => std::fs::create_dir_all(parent)?,
+            }
         }
         // 追記で開く。前回の走行の記録は消さない(消してよいのは回転で溢れた世代だけ)。
         let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
@@ -261,9 +290,10 @@ mod tests {
     #[test]
     fn rotation_keeps_four_generations_and_drops_the_oldest() {
         let dir = scratch("rotation");
+        std::fs::create_dir_all(&dir).expect("mkdir");
         let path = default_path(&dir, SERVE_ROLE);
         // 1 行 21 バイト(20 文字 + 改行)、上限 40 バイトなので 2 行で 1 世代。
-        let mut destination = Destination::open(path.clone(), 40).expect("open");
+        let mut destination = Destination::open(path.clone(), 40, Parent::MkdirOnly).expect("open");
         for number in 0..20 {
             destination.append(&format!("line {number:015}")).expect("append");
         }
@@ -296,7 +326,7 @@ mod tests {
     fn a_line_longer_than_the_limit_is_still_written() {
         let dir = scratch("longline");
         let path = default_path(&dir, SERVE_ROLE);
-        let mut destination = Destination::open(path.clone(), 8).expect("open");
+        let mut destination = Destination::open(path.clone(), 8, Parent::CreateAll).expect("open");
         destination.append("これは上限 8 バイトより長い 1 行である").expect("append");
         let written = std::fs::read_to_string(&path).expect("read");
         assert!(
@@ -311,10 +341,10 @@ mod tests {
     fn reopening_appends_instead_of_truncating() {
         let dir = scratch("append");
         let path = default_path(&dir, SERVE_ROLE);
-        let mut first = Destination::open(path.clone(), DEFAULT_MAX_BYTES).expect("open");
+        let mut first = Destination::open(path.clone(), DEFAULT_MAX_BYTES, Parent::CreateAll).expect("open");
         first.append("前回の走行").expect("append");
         drop(first);
-        let mut second = Destination::open(path.clone(), DEFAULT_MAX_BYTES).expect("reopen");
+        let mut second = Destination::open(path.clone(), DEFAULT_MAX_BYTES, Parent::CreateAll).expect("reopen");
         second.append("今回の走行").expect("append");
         let written = std::fs::read_to_string(&path).expect("read");
         assert_eq!(written, "前回の走行\n今回の走行\n", "追記になっていない: {written}");
@@ -359,6 +389,28 @@ mod tests {
             error.contains("blocked"),
             "断りの文がどの道で失敗したかを言っていない: {error}"
         );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 祖先は作らない(APPEND_FAILURE の方針 1a): 既定の道は logs/ の 1 段だけを作り、データの
+    /// ディレクトリが無ければ開けない。--log の道は親が在ることを求める。
+    #[test]
+    fn the_log_never_creates_the_data_directory_or_other_ancestors() {
+        let dir = scratch("no-ancestors");
+        let missing_data_dir = dir.join("store");
+        assert!(Destination::open(default_path(&missing_data_dir, SERVE_ROLE), 40, Parent::MkdirOnly)
+            .is_err());
+        assert!(!dir.exists(), "データのディレクトリの祖先を作った");
+
+        std::fs::create_dir_all(&missing_data_dir).expect("mkdir");
+        Destination::open(default_path(&missing_data_dir, SERVE_ROLE), 40, Parent::MkdirOnly)
+            .expect("logs/ の 1 段は作る");
+        assert!(missing_data_dir.join(DIRECTORY_NAME).is_dir());
+
+        let given = dir.join("elsewhere").join("serve.log");
+        let error = open(&given, DEFAULT_MAX_BYTES).expect_err("親の無い --log の道");
+        assert!(error.contains("elsewhere"), "{error}");
+        assert!(!dir.join("elsewhere").exists(), "--log の道の親を作った");
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

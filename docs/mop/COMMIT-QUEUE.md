@@ -45,8 +45,9 @@ vega の検査の依頼は、同じホストの Claude Code のセッション�
 することはない。中継は次のように行う。
 
 1. Codex は、送るメッセージ 1 通ごとに全文をそのホストの調整のファイル(crystal では
-   `/home/lamalium/lamalium-install/coordination.md`)に書く。各メッセージには、ホスト名と UTC の時刻
-   から作るメッセージの ID、宛先(CQ か vega のセッション)、種別(統合の依頼、問い合わせへの答え、
+   `/home/lamalium/lamalium-install/coordination.md`)に書く。各メッセージには、
+   `<ホスト名>-<秒までの UTC の時刻>-<その秒の中の連番>` の形のメッセージの ID(例
+   `crystal-20261001T145500Z-1`)、宛先(CQ か vega のセッション)、種別(統合の依頼、問い合わせへの答え、
    検査の依頼)、関わるリポジトリと先頭の SHA を書く。統合の依頼と、同じ SHA の検査の依頼や答えは、
    メッセージの ID で別のものとして見分ける。
 2. Codex は同じホストの Claude Code のセッションへ、認証付きのローカルソケットで知らせる。知らせ方と、
@@ -65,7 +66,9 @@ vega の検査の依頼は、同じホストの Claude Code のセッション�
    返す。その Claude のセッションが、全文を同じファイルへ書き戻す。統合の結果(送られた SHA と main へ
    入った SHA の組)、差し戻し(赤の理由と出力の要点)、問い合わせ、vega の検査の結果(下の HEAD と
    HEAD^ の SHA と落ちたテスト)のどれも、元のメッセージの ID に対応づけて書く。書いたら、Codex へ
-   turn/steer で知らせる(lamalium の docs/mop/STEER-CODEX-THREAD.md)。
+   知らせる。知らせ方は lamalium の docs/mop/STEER-CODEX-THREAD.md にあり、Codex の turn が実行中なら
+   turn/steer、thread が止まっているなら queue か通常の入力を使う(steer は止まった thread を動かさ
+   ない)。Codex は次に動いたときにもファイルを読むので、知らせを取りこぼしても答えは失われない。
    Codex が問い合わせに答えるときは、新しいメッセージの ID で 1 から同じ経路で送り、答える問い合わせの
    元のメッセージの ID を書き添える。
 

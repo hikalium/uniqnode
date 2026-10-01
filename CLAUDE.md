@@ -58,3 +58,26 @@ claude.ai の lamalium のプロジェクトを通して操作者に届ける項
 使わない。node/tests/repo_hygiene.rs が追跡している文書とソースから「錠」を拒む。
 
 理由: 日本語の技術文書で lock を錠と呼ぶ慣行は無く、読み手が引っかかる。利用者の裁定。
+
+## main へ統合するのは Commit Queue の役のセッションだけである(2026-10-01)
+
+uniqnode・lamalium・sumi の main へ統合するのは、Commit Queue(CQ)の役を持つ 1 つの
+セッションの 1 エージェントだけである。ほかのセッション(ホストの Claude と Codex、プロジェクトの
+スレッド、サブエージェント)は main へ push しない。自分の変更をコミットして `cargo test` を緑にし、
+自分のブランチを push して、リポジトリ、ブランチ、commit id、目的と統合の意思を CQ へ送る。
+CQ はその変更を最新の `origin/main` の先頭へ rebase し、`cargo test` が緑のときだけ main を
+fast-forward して push する。マージコミットは作らない。push までに main が動いたら、rebase と
+テストをやり直す。着地したら main へ入った commit id を送り手へ知らせる。rebase の衝突やテストの
+赤で取り込めないときは、変更を直さず、失敗した検査と出力の要点を添えて送り手へ差し戻す。
+
+CQ はクラウドで動き、vega に届かない。vega の上でしか通らないテスト(127.0.0.1:8083 の埋め込み
+サーバや 127.0.0.1:8084 のリランカーが要るもの、vega の pdftoppm 22.02 を前提にするもの、据え付けで
+systemd と nft を使うもの、IPv6 を使うもの、root で走ると権限の拒否が起きないもの)は、CQ の手元では
+`origin/main` でも落ちる(2026-10-01 に a8e287d で 13 件)。
+そこで CQ は `cargo test --no-fail-fast` を `origin/main` と rebase した木の両方で回し、rebase した木で
+落ちて `origin/main` で通るテストだけを赤とする。CQ の手元で落ちるテストに触れる変更は、送り手が
+vega で `cargo test` を回して、その結果を CQ への知らせに書く。CQ の宛先と手順は lamalium の
+docs/mop/WORKTREE.md の Integrate and deploy 節にある。
+
+理由: 利用者の指示(2026-10-01 13:16Z「本セッションのみが実際のmainへの統合作業を実施する」)。
+どのセッションも main へ直接 push してよいとした 2026-09-30 の裁定を置き換える。

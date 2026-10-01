@@ -2189,8 +2189,8 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         };
         return Err(format!(
             "据え先 {} にテンプレートになる前の名の unit が残っている({})。{conflict}。\
-             何も置かずに断る(バイナリも差し替えない)。先に外す(docs/mop/SYSTEMD.md の\
-             「旧い名の unit から移る」): {}。nft を使っているなら古い表も消す\
+             何も置かずに断る(バイナリも差し替えない)。先に外す\
+             (SYSTEMD (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「旧い名の unit から移る」): {}。nft を使っているなら古い表も消す\
              (nft delete table inet uniqnode)",
             options.unit_dir.display(),
             legacy.join(" "),

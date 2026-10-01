@@ -2,7 +2,7 @@
 
 <a id="d973833f-4e2b-4fc8-8a49-42f6821b6a7a"></a>
 
-版: 第 22 版(2026-10-01)。第 21 版への Codex と Claude のレビュー(Codex 高 1・Claude 中: 旧い名の unit へ戻す命令は、共有のバイナリを使う graph_a・graph_b を含む全部の書き手を止め、全部のストアの hold-status が 0 のときだけ差し替える、Codex 高 2: 保留を知る版と確かめたときだけ今のバイナリで起こし直す案内を出す、Codex 中 3: 印の不在と照会の誤りを分ける、Codex 中 4: 壊れた印の release-hold にも再起動か umount・fsck・mount し直しの前提、Claude 中: 差し替えの後に打ち直せるよう、検め手を退避の外へ写す、Claude 中: CLI の形を main.rs の `uniqnode <command> <data_dir> [args]` に合わせて `uniqnode hold-status <dir>` と `uniqnode release-hold <dir>` へ改め、文書の字句と CLI の名を照らす repo_hygiene の試験を S1b に足す、Claude 中: S1b の戻し方の再起動が手で起こした llama-server を止める代価と OOMScoreAdjust の案、Codex 低 7・Claude 低: 命令ごとの開き方の表に hold-status と release-hold、その完了条件の拡げ、Claude 低: SYSTEMD.md の終了コード 1・2 の案内と外す命令の旧い timer の trap、Claude 低: 旧いバイナリへ落ちる他の道)を取り込んだ。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 21 版(2026-10-01)。2026-10-01T00:01:28Z の操作者の規則(どの計画も、手元の GPU で lamalium を毎日の実務に使うという最終目標とのつながりを書く)に従い「最終目標とのつながり」を足した。第 20 版への Codex と Claude のレビュー(Codex 高 1: docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令は、バイナリを差し替える前に新しいバイナリの `store hold-status` で `open-marker` を検め、保留なら起こさない。そのための `store hold-status` を S1b に足し、S1b より前のバイナリへ戻すと保留を素通りすることとその規則を「S1b より前のバイナリへ戻す」に書いた、Claude 低 7: SYSTEMD.md の外す命令が固定の壊れで止まるとき、旧い timer を戻す命令を言う)を取り込んだ。S1c は範囲が操作者の裁定待ちなので設計の本文を動かさず、S1c だけに当たる指摘(Codex 中 2〜5・低 6、Claude 中 4・低 1 ほか)は「backup の写し元の検め」の頭の「裁定の後に扱う指摘」に並べた。第 20 版(2026-10-01)。第 19 版への Codex と Claude のレビュー(Codex 高 1・Claude 高 2: backup の公開を、写し先の世代のディレクトリを完成させてから `current` の symlink を 1 回の rename で切り替える形へ、Codex 高 2・Claude 中 3: 写し先のロックを backup の全体で持つ、Claude 高 1: 開き終えるまでは境界を答えず `opening` と答え、写し先より短い reflog の境界は断る、Codex 中 3: 閉じる要求で新しい外側の書き込みの番を閉め、入れ子だけを通す、Codex 中 4・Claude 低 5: 同じ pid・nonce の `NoSpace` の印も認める、Codex 中 5・中 6: docs/mop/SYSTEMD.md の戻す命令の unit の不在と外す命令の固定の検め、Claude 中 4: S1 を S1a・S1b・S1c に分けて段ごとのゲート、低 6〜13: hard link の条件、stage の片付け、照会の相手の `SO_PEERCRED`、境界の別の `Mutex`、accept の起こし方、印の読み直し、開く途中の RAII、uid の試験の debug の口、低 14: 直す文書に SYSTEMD.md の表)を取り込んだ。第 19 版(2026-10-01)。第 18 版への Codex と Claude のレビュー(Codex 高 1・Claude 中 3: 書き込みの途中の旗を入れ子と早い戻りとパニックに耐える数え値と RAII の番へ、Codex 高 2・高 3・中 5・Claude 中 2・低 11: backup を、ロックの持ち主が答える永続化済みの境界までの写しと、写し先の tmp/ での段取り・検め・公開の後の削除へ組み直し、ロックの socket に accept の輪と照会の期限、印に開くたびの nonce、Codex 中 4: 2 度目のシグナルを受ける輪を終わり方から分ける、低 9: GC の競合の試験の 2 つの停止点と期待値、Claude 高 1: 開くことの失敗を手綱に記録する、中 5: install の断りの完了条件、低 10: 終わり方の 2 度呼び)を取り込んだ。第 18 版(2026-10-01)。第 17 版への Codex と Claude のレビュー(Codex 高 1: GC の D の packs/ の sync をストアのロックの中で行い、終わり方と排他にする、Codex 中 2〜4・低 6: 旧い名の unit を外す命令の backup の待ち・退避の対象・退避先の一意・パイプラインの失敗、Claude 中 1: 読むだけの走査の Drop は印を書かない、中 2: CLI のシグナルは共有の小さな手綱で閉じる、中 3: serve のログがデータのディレクトリの祖先を作る、中 4: 保留の写し元を backup が写さない、中 5: vega で共有するバイナリと旧い名の unit、低 5: シグナルで閉じたときの終了コード、低 6: 開く途中のシグナル、低 8: 外す命令の字句の試験)を取り込んだ。第 17 版(2026-10-01)。第 14 版(9d04834)への Claude のレビュー(高 1: 保留で開いた serve が sync していない
+版: 第 23 版(2026-10-01)。第 22 版への Codex と Claude のレビューを取り込んだ。指摘は全部 docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令(と、その原則を書く「S1b より前のバイナリへ戻す」)に当たり、指摘ごとに直さず、次の原則で命令を組み直した: 命令が知る unit を全部止めた後に、共有のバイナリ・退避のバイナリ・検め手を走らせるプロセスが残れば差し替えない(Codex 高 2: 一覧に無いストアを開く mcp の Local と CLI、Codex 中 5: 前の回に戻した旧い serve。旧い serve・viewer・backup の timer も止め、走る旧い backup を待つ)、起こし直す unit を退避の隣の状態のディレクトリに和で残し、全部が active と確かめてから完了とする(Codex 中 4・Claude 中 1)、ストアの道を `readlink -e` と `[ -d ]` で確かめて `find -H` で照会する(Codex 高 1・Claude 中 2)、操作者が置いた検め手を先に使い、今のバイナリの写しは候補として 0 か 3 の答えを見てから採る(Codex 中 3・Claude 低 5・低 6)、`UNIQNODE_DATA_DIR` を D-Bus の文字列の配列から字句の一致で読み、hold-status をストアの持ち主として走らせ、sudo 自身の 1 を対応の印と見ない(Codex 中 6・Claude 低 4)、外す命令の timer の案内を外す行が通るまで残す(Codex 低 7)、`@default` の据わりを drop-in か is-enabled で決める(Claude 低 3)。加えて CLI の形の段落の振り分けの行を `run` の match に改めた(Claude 低 7)。最終目標とのつながりの代価に、戻す前に vega の Claude Code の mcp の Local を閉じることを足した。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 22 版(2026-10-01)。第 21 版への Codex と Claude のレビュー(Codex 高 1・Claude 中: 旧い名の unit へ戻す命令は、共有のバイナリを使う graph_a・graph_b を含む全部の書き手を止め、全部のストアの hold-status が 0 のときだけ差し替える、Codex 高 2: 保留を知る版と確かめたときだけ今のバイナリで起こし直す案内を出す、Codex 中 3: 印の不在と照会の誤りを分ける、Codex 中 4: 壊れた印の release-hold にも再起動か umount・fsck・mount し直しの前提、Claude 中: 差し替えの後に打ち直せるよう、検め手を退避の外へ写す、Claude 中: CLI の形を main.rs の `uniqnode <command> <data_dir> [args]` に合わせて `uniqnode hold-status <dir>` と `uniqnode release-hold <dir>` へ改め、文書の字句と CLI の名を照らす repo_hygiene の試験を S1b に足す、Claude 中: S1b の戻し方の再起動が手で起こした llama-server を止める代価と OOMScoreAdjust の案、Codex 低 7・Claude 低: 命令ごとの開き方の表に hold-status と release-hold、その完了条件の拡げ、Claude 低: SYSTEMD.md の終了コード 1・2 の案内と外す命令の旧い timer の trap、Claude 低: 旧いバイナリへ落ちる他の道)を取り込んだ。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 21 版(2026-10-01)。2026-10-01T00:01:28Z の操作者の規則(どの計画も、手元の GPU で lamalium を毎日の実務に使うという最終目標とのつながりを書く)に従い「最終目標とのつながり」を足した。第 20 版への Codex と Claude のレビュー(Codex 高 1: docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令は、バイナリを差し替える前に新しいバイナリの `store hold-status` で `open-marker` を検め、保留なら起こさない。そのための `store hold-status` を S1b に足し、S1b より前のバイナリへ戻すと保留を素通りすることとその規則を「S1b より前のバイナリへ戻す」に書いた、Claude 低 7: SYSTEMD.md の外す命令が固定の壊れで止まるとき、旧い timer を戻す命令を言う)を取り込んだ。S1c は範囲が操作者の裁定待ちなので設計の本文を動かさず、S1c だけに当たる指摘(Codex 中 2〜5・低 6、Claude 中 4・低 1 ほか)は「backup の写し元の検め」の頭の「裁定の後に扱う指摘」に並べた。第 20 版(2026-10-01)。第 19 版への Codex と Claude のレビュー(Codex 高 1・Claude 高 2: backup の公開を、写し先の世代のディレクトリを完成させてから `current` の symlink を 1 回の rename で切り替える形へ、Codex 高 2・Claude 中 3: 写し先のロックを backup の全体で持つ、Claude 高 1: 開き終えるまでは境界を答えず `opening` と答え、写し先より短い reflog の境界は断る、Codex 中 3: 閉じる要求で新しい外側の書き込みの番を閉め、入れ子だけを通す、Codex 中 4・Claude 低 5: 同じ pid・nonce の `NoSpace` の印も認める、Codex 中 5・中 6: docs/mop/SYSTEMD.md の戻す命令の unit の不在と外す命令の固定の検め、Claude 中 4: S1 を S1a・S1b・S1c に分けて段ごとのゲート、低 6〜13: hard link の条件、stage の片付け、照会の相手の `SO_PEERCRED`、境界の別の `Mutex`、accept の起こし方、印の読み直し、開く途中の RAII、uid の試験の debug の口、低 14: 直す文書に SYSTEMD.md の表)を取り込んだ。第 19 版(2026-10-01)。第 18 版への Codex と Claude のレビュー(Codex 高 1・Claude 中 3: 書き込みの途中の旗を入れ子と早い戻りとパニックに耐える数え値と RAII の番へ、Codex 高 2・高 3・中 5・Claude 中 2・低 11: backup を、ロックの持ち主が答える永続化済みの境界までの写しと、写し先の tmp/ での段取り・検め・公開の後の削除へ組み直し、ロックの socket に accept の輪と照会の期限、印に開くたびの nonce、Codex 中 4: 2 度目のシグナルを受ける輪を終わり方から分ける、低 9: GC の競合の試験の 2 つの停止点と期待値、Claude 高 1: 開くことの失敗を手綱に記録する、中 5: install の断りの完了条件、低 10: 終わり方の 2 度呼び)を取り込んだ。第 18 版(2026-10-01)。第 17 版への Codex と Claude のレビュー(Codex 高 1: GC の D の packs/ の sync をストアのロックの中で行い、終わり方と排他にする、Codex 中 2〜4・低 6: 旧い名の unit を外す命令の backup の待ち・退避の対象・退避先の一意・パイプラインの失敗、Claude 中 1: 読むだけの走査の Drop は印を書かない、中 2: CLI のシグナルは共有の小さな手綱で閉じる、中 3: serve のログがデータのディレクトリの祖先を作る、中 4: 保留の写し元を backup が写さない、中 5: vega で共有するバイナリと旧い名の unit、低 5: シグナルで閉じたときの終了コード、低 6: 開く途中のシグナル、低 8: 外す命令の字句の試験)を取り込んだ。第 17 版(2026-10-01)。第 14 版(9d04834)への Claude のレビュー(高 1: 保留で開いた serve が sync していない
 レコードを複製の口でピアへ渡す、中 1: 開いた後の抜け道とシグナル、中 2: 既存の試験との食い違いと Drop、中 3: 命令ごとの
 開き方、中 4: GC の D のディレクトリの sync、中 5: 旧い名の unit からの移行を本番への反映の前提に、低 3〜8)を、
 第 16 版に照らし直して取り込んだ。第 16 版(2026-10-01)。第 15 版(3162e7f)への vega の Codex の再レビュー(高なし、中: ストアの障害でない
@@ -60,7 +60,9 @@ Claude(N1)が独立に見つけた。[docs/plan/FEED.md](#fa8de6f9-59f8-4512-a81
     gpt-oss-120b(oom_score_adj は 0)で、OOM killer はふつうそれを選ぶが、serve が選ばれると保留に入る。
     案: system の serve の unit に `OOMScoreAdjust=-500` を置き、OOM のときに serve が後回しになるようにする
     (負の値は system の unit でだけ効く。user の unit には置かない)。入れるかは S1b の unit の変更と一緒に
-    操作者が決める。
+    操作者が決める。S1b より前のバイナリへ戻す命令(docs/mop/SYSTEMD.md)は、共有のバイナリを走らせる
+    プロセスが unit の外に残る間は断るので、vega の Claude Code のセッションが起こした mcp の Local も閉じて
+    から打つ(その間、そのセッションからは uniqnode を引けない。第 22 版への Codex と Claude のレビュー)。
   - 操作者の作業: 本番へ入れる前に、vega で旧い名の unit から `@default` へ移す sudo の 1 ブロック
     (API_AUTH の A2 と共通で、1 回で両方の前提を満たす)と、S1 が揃った後の install の打ち直しの 1 ブロック。
   - 止まる間: 移行の間(外してから据え直すまで。ビルドを先に済ませれば数分)、主の口 7440・読み口 7441・
@@ -503,10 +505,12 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      理由と上の戻し方を言って 3、ロックを取れない・ストアでない道などの誤りは 1、使い方の誤りは 2 で終える。
      「S1b より前のバイナリへ戻す」の検めに使う。
    - CLI の形(第 21 版への Codex と Claude のレビューの Claude 中): 2 つとも main.rs の
-     `uniqnode <command> <data_dir> [args]`(main.rs の 17 行付近の使い方と 714〜731 行付近の振り分け)に従い、
+     `uniqnode <command> <data_dir> [args]`(main.rs の 17 行付近の使い方と、1455 行付近の `run` の `match command`
+     による振り分け。第 22 版が振り分けとしていた 714〜731 行付近は `main` の前置きの検査で、振り分けではない。
+     第 22 版への Codex と Claude のレビューの Claude 低 7)に従い、
      `uniqnode hold-status <dir>` と `uniqnode release-hold <dir>` とする(第 21 版までの
      `uniqnode store hold-status --data-dir <dir>` の形は main.rs に無い)。S1b より前のバイナリは未知の命令を
-     使い方の誤りとして 2 で終える(main.rs の 2118 行付近の `_ => usage()`)ので、終了コード 2 は「この版は
+     使い方の誤りとして 2 で終える(main.rs の 2257 行付近の、`run` の末尾の `_ => usage()`)ので、終了コード 2 は「この版は
      hold-status を知らないか、引数を誤った」と読め、どちらも検めていない側に倒す。docs/mop/SYSTEMD.md が操作者に打たせる字句と CLI の名が食い違わないよう、
      repo_hygiene の試験で照らす(must/0023。完了条件)。
    - 代価: 同じブートの中で serve が SIGKILL・OOM・異常終了で落ちると、I/O の誤りが無くてもホストを
@@ -995,11 +999,21 @@ install は据え先に旧い名の unit が残っている間は、インスタ
 S1b より前のバイナリへ戻す(第 20 版への Codex と Claude のレビューの Codex 高 1): S1b より前のバイナリの
 `Store::open` は `open-marker` を見ずに recover して書く。保留のストア(同じ boot_id の `Running` と `Io`、検めを
 通らない印)をそれで開くと保留を素通りし、page cache にだけ在る完全なレコードを採ってその後ろへ書く道が戻る。
-規則: S1b 以後から S1b より前のバイナリへ戻すときは、そのバイナリを走らせる全部の書き手(vega では共有の
-/home/hikalium/.local/bin/uniqnode を使う既定・graph_a・graph_b の serve と、それらを起こし直す timer)を止めた後・
-バイナリを差し替える前に、S1b 以後のバイナリ(差し替えの後にも残るよう、退避の外へ写した検め手)で全部のストアに
-`uniqnode hold-status <dir>` を打ち、全部が 0 のときだけ戻したバイナリで起こす(第 21 版への Codex と Claude の
-レビューの Codex 高 1・Claude 中)。3 なら起こさず、方針 5 の戻し方を済ませ、hold-status が 0 になってから戻す:
+規則: S1b 以後から S1b より前のバイナリへ戻すときは、そのバイナリを走らせる全部の書き手を止めた後・バイナリを
+差し替える前に、S1b 以後のバイナリ(差し替えの後にも残るよう、退避の外に置いた検め手)で、止めたものが使う
+全部のストアに `uniqnode hold-status <dir>` を打ち、全部が 0 のときだけ戻したバイナリで起こす(第 21 版への
+Codex と Claude のレビューの Codex 高 1・Claude 中)。「全部の書き手」は一覧で数えず、プロセスで確かめる
+(第 22 版への Codex と Claude のレビュー。第 22 版までは命令が知る unit とストアの一覧に寄せていて、一覧に無い
+ストアを開く mcp の Local や手で打った CLI(Codex 高 2)、前の回に戻して起きている旧い serve(Codex 中 5)を
+漏らした): 命令が知る unit(vega では `uniqnode-*` の serve・viewer・backup・graph-pull の全部。旧い名と `@` の
+全インスタンス)を止めた後に、/proc の全プロセスの実行ファイルを解き、共有のバイナリ・退避のバイナリ・検め手の
+どれかを走らせるものが残っていれば、pid と cmdline を言って差し替えずに止まる。止めて打ち直したとき、そのプロセスの
+`<data_dir>` の引数から決まったストアも検める(決まらなければ門で断ったことが守りで、操作者がそのストアを自分で
+検める)。打ち直しでも止めたものを起こし落とさないよう、起こし直す unit は退避の隣の状態のディレクトリに和で
+残し、全部が active と確かめてから完了とする。検め手は操作者が置いたものを先に使い、今のバイナリの写しは候補と
+して置いて、少なくとも 1 つのストアに 0 か 3 で答えたときだけ採る(知らない版で操作者の検め手を上書きしない)。
+ストアの道は解いてディレクトリと確かめてから照会し、`UNIQNODE_DATA_DIR` は D-Bus の文字列の配列から字句の一致で
+読み、hold-status はストアの持ち主として走らせる。3 なら起こさず、方針 5 の戻し方を済ませ、hold-status が 0 になってから戻す:
 同じ boot_id の `Running` と `Io` はホストの再起動で解ける。検めを通らない印は、ホストの再起動か、umount・fsck・
 mount し直して page cache を捨てた後に release-hold するか、検め済みの backup から戻す。再起動できずに umount・fsck・
 mount し直したときも、その後の release-hold で戻す。どの印でも、page cache を捨てる前の release-hold はしない
@@ -1018,9 +1032,10 @@ docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令はこの形で書いて
   `exec_replacement`)ので、共有のバイナリが旧いものへ戻されると、走っている Local も旧いイメージへ替わる。
   S1b 以後の Local は `exec` の前に `Clean` を書いて閉じる(方針 5)ので、差し替えの瞬間に保留を作らない。ただし
   差し替えの前から保留だったストアでは、Local は保留で開いていて `exec` の後の旧いイメージが印を見ずに書く。
-  これは共有のバイナリを差し替える道(上の 2 つ)のどちらかが先に起きたときだけで、上の規則の命令は差し替えの前に
-  全ストアを検めるので、その命令で戻すなら起きない。古い checkout の install で戻した形は 1 つ目の既知の限界に
-  含まれる。--serve-url の無い Local がストアのロックを持っていれば、規則の命令の hold-status は 1 で止まる。
+  上の規則の命令は、共有のバイナリを走らせるプロセスが 1 つでも残る間は差し替えない(--serve-url の有無に依らず、
+  走っている Local はその門で止まる)ので、その命令で戻すならこの形は起きない(第 22 版への Codex と Claude の
+  レビューの Codex 高 2。第 22 版は全ストアを検めることで防げるとしていたが、検めるのは命令が知るストアだけで、
+  別のストアを開く Local を漏らした)。古い checkout の install で戻した形は 1 つ目の既知の限界に含まれる。
 - 手でのコピー(`cp` で共有のバイナリを置き換える): 1 つ目と同じ既知の限界で、規則の命令を使う。
 
 既知の限界(戻した後): 旧いバイナリが走る間は S1 の守りが無い(今と同じ)。旧いバイナリは印を書かないので、その間の

@@ -388,264 +388,175 @@ EOF
   S1b より前のバイナリの `Store::open` は `open-marker` を見ずに recover して書くので、S1b 以後のバイナリが残した
   `Io` や同じ boot_id の `Running` の上でそれを起こすと、保留を素通りして、page cache にだけ在る完全なレコードを
   採ってその後ろへ書く道が戻る。そのため差し替えの前に、共有のバイナリを走らせるものを全部止め、それらが使う
-  ストアの保留を検める。この命令は第 25 版の APPEND_FAILURE まで、レビューのたびに見つかる端の形を 1 つずつ扱う
-  枝を足して約 450 行に育ち、複雑さそのものが危険になった(第 25 版への 2 つのレビューがともにそう言った)。第 26 版で、
-  まれな非常の道(S1b を入れた後に S1b より前のバイナリへ戻す)として小さく組み直した。普通でないものは扱わずに
-  断り、断りは手で直して打ち直す。
-  - 道は 1 本: 止める前の門 → 止める → 止めた後の門 → ストアの検め → 差し替え → 起こす → 確かめる。
-  - 止める範囲: /etc/systemd/system の `uniqnode-*` の unit と drop-in のディレクトリと、systemd が読み込んでいる
-    `uniqnode-*` の unit の和(テンプレートそのものは除く。2 つの一覧は別々に取り、どちらかの取得が失敗したら止まる)。
-    timer を止め、一回走る service(`Type=oneshot` で `RemainAfterExit=no`)は終わりを待ち(合わせて 30 分で止まる)、
-    残りの service(前の回に戻した旧い名の serve・viewer も含む)を止め、`@default` の 3 つは disable する。終わりを
-    待つ間は Ctrl-C を押さない。外側の tee は `-i` で Ctrl-C を受けないが、`sudo bash` と ts は止まり、記録と止まった
-    ときの案内が途切れる。
-  - 止める前の門(何も止めないうちに断る): `uniqnode-*` の全部の service の ExecStartPre・ExecStart・ExecStartPost を
-    D-Bus から読み、走らせる道が 4 つのバイナリ(共有のバイナリ・退避のバイナリ・検め手・候補)でも、短い許しの一覧
-    (/usr/bin/curl・/usr/sbin/nft・/usr/bin/git)でもなければ断る。許しの一覧は vega の実物から決めた: 2026-10-01 に
-    読むだけで見た unit では、uniqnode-graph-pull.service の ExecStart が curl、serve の ExecStartPre=+ が nft で、
-    他の行は全部共有のバイナリだった。git は下の「git の木を定期に取り込む」が例に書く ingest-git の ExecStartPre= の
-    ため。`/bin/sh -c` などの包みはここで断る(中で何が走り、どのストアを開くかを unit から決められない)。4 つの
-    バイナリを走らせる行は、第 2 引数が字句どおり `${UNIQNODE_DATA_DIR}` で、unit が `UNIQNODE_DATA_DIR` を持つときだけ
-    通す。検めるストアは、こうして通った unit の `UNIQNODE_DATA_DIR`(D-Bus の `Environment` の文字列の配列から jq で
-    字句の一致で取る。後の代入が勝つ)と既定のストアだけである。続けて /proc の全プロセスを調べ、`uniqnode-*.service`
-    の cgroup の外で 4 つのバイナリのどれかを走らせるもの(/proc/<pid>/exe の道か inode の一致。道の末尾の
-    「 (deleted)」は外す)があれば断る。実行ファイルの道か inode を読めない生きたプロセスは、消えた・ゾンビ・カーネルの
-    スレッドと確かめたものを除き、unit の中でも外でも断る。最後にストアの道を検める(下)。
+  ストアの保留を検める。
+  - 検めを Rust へ移した理由(第 27 版の APPEND_FAILURE): 第 26 版までは、この検めをシェルで書いていた。ところが
+    レビューのたびに、unit が検めたものと別のストアを開く systemd の設定がもう 1 つ見つかった(第 26 版への
+    レビューでは、`Environment=` を上書きする `EnvironmentFile=`、`WorkingDirectory=` に対して解かれる相対の
+    `UNIQNODE_DATA_DIR`、`RootDirectory=`・`RootImage=`・bind mount)。シェルでこれらを漏れなく数え上げることは
+    できない。そこで検めを、S1b 以後のバイナリの `uniqnode legacy-rollback-preflight <固定した退避> --stage
+    running|stopped` に移す。戻す道は S1b を入れた後にしか要らないので、検め手は定義から S1b 以後のバイナリで
+    あり、その判断は手で辿る代わりに cargo の試験で固定できる。中身は APPEND_FAILURE の方針 5 の「戻す前の
+    検め」に書く。下の命令はこの命令を前提にするので、S1b がそれを実装するまでは手順の仕様であって、打てる
+    命令としては確定していない(S1b の実装と一緒に、試験の通った出力の形に合わせて確定する)。
+  - 検めの中身(要点): `uniqnode-*` の unit を systemd の性質から数え、install が描く unit は、Exec* の道と引数・
+    Environment・WorkingDirectory・User などが install の描くものと 1 つずつ一致するときだけ通す。
+    EnvironmentFiles・RootDirectory・RootImage・Bind*・TemporaryFileSystem・MountImages は空でなければ断る。
+    install が描かない unit(graph-pull など)は、どの Exec* でも検めの対象のバイナリを走らせないときだけ通す。
+    旧い名の unit は、固定した退避の units.tar.gz の中身とバイト列で一致するときだけ通す。ストアの道は通った
+    unit の描かれた値から取り、絶対で、制御文字を含まず、symlink を含まないディレクトリで、持ち主が unit の
+    User= であることを確かめる。/proc の全プロセスを読み、読めない生きたプロセスと、`uniqnode-*` の cgroup の
+    外で検めの対象のバイナリ(道か inode の一致。「 (deleted)」も)を走らせるものは断る。止めた後の回
+    (`--stage stopped`)は、数えた unit が全部止まっていて、どのプロセスもそれらのバイナリを走らせないことを
+    求め、各ストアに hold-status と同じ判定をプロセスの中で打つ。出力は 1 行に 1 つの unit と最後の `end` で、
+    道を含まない。終了コードは 0 が通る、3 が保留、4 がどのストアも 1、2 が使い方の誤りか命令を知らない版、
+    他は断りで、理由は標準エラーに出る。
+  - 道は 1 本: 固定した退避の検め → 状態を読む → 検め(running)→ 状態に和を書く → 止める → 検め(stopped)→
+    nft の表を外してバイナリを差し替え、旧い名の unit を展開 → 検め(stopped。展開した旧い名の unit も見る)→
+    起こす → 確かめる。
+  - 止める範囲は検めが出す unit の全部である。timer を止め、`@default` の unit は disable し、一回走る service
+    (`Type=oneshot` で `RemainAfterExit=no`)は終わりを待ち(合わせて 30 分で止まる)、残りの service(前の回に
+    戻した旧い名の serve・viewer も含む)を止める。ts は Ctrl-C を受けないよう包み、外側の tee は `-i` なので、
+    Ctrl-C は `sudo bash` だけを止め、記録と止まったときの案内は残る。それでも待つ間は Ctrl-C を押さない。
   - vega でいちばんありそうな断りは、Claude Code のセッションが起こした mcp の Local である(--serve-url の有無に
     依らない。uniqnode の作業ツリーで開いたセッションのたびに 1 つ起き、共有のバイナリが変わると自分を exec で差し
-    替えるので、旧いバイナリへ替わって保留を素通りしうる)。2026-10-01 に利用者の権限で走らせた読むだけの写しでも、
-    一致したのはこれ 1 つだった。手で打った CLI(取り込み・gc・fsck など)も当たる。命令はそれらを止めない(操作者の
-    もの。must/0022)ので、戻す前に vega の Claude Code のセッションを全部閉じる。止めた後と差し替えの直前にも同じ門を
-    (unit の中を除かずに)通す。
+    替えるので、旧いバイナリへ替わって保留を素通りしうる)。手で打った CLI(取り込み・gc・fsck など)も当たる。
+    命令はそれらを止めない(操作者のもの。must/0022)ので、戻す前に vega の Claude Code のセッションを全部閉じる。
   - 共有のバイナリでない書き手: 別のプロジェクトの MCP の設定が、`--serve-url` の無い target/debug/uniqnode mcp を
-    本番のストアへ起こすことがある。門を素通りするが、ストアのロックを持つので、hold-status が 1 を返すか、差し替えの
-    後に旧い serve が起きない。どちらの文もこの形を言う。戻す前にそれも閉じる。
-  - 道の検め: 各ストアを `readlink -e` で解く。出力の後ろに印の文字を足して受け、`$( )` が末尾の改行を削っても別の
-    道へ化けないようにする。`UNIQNODE_DATA_DIR` の値(jq の中で、`$( )` が受ける前に確かめる)か解いた道が、改行などの
-    制御文字を含むか空なら断る。ディレクトリであること、持ち主が unit の User=(空なら root)と同じことを確かめ、
-    `find -H` で `open-marker` を照会する。照会の失敗は「印が無い」と扱わずに断る。止めた後にもう一度同じ検めをする。
-  - 保留の検め: どのストアにも印が無ければ(S1b 以後のバイナリが開いたことが無い)保留は無いので進む。1 つでも在れば、
-    検め手の `uniqnode hold-status <ストア>`(APPEND_FAILURE の方針 5。印を読むだけで書かない)をストアの持ち主として
-    全部のストアに打ち、全部が 0 のときだけ差し替える。検め手は、操作者が /var/backups/uniqnode-legacy-checker に置いた
-    もの(か前の回に採ったもの)を先に使い、無いか知らない版なら、止める前の門の後に今のバイナリを写した候補
-    /var/backups/uniqnode-legacy-checker.candidate を試す(今のバイナリが退避と同じなら写さない)。0 か 3 を 1 つでも
-    答えたものだけを確かめた検め手とし、候補を採るのは検め手の道が空いているときだけである(操作者が置いたものは
-    上書きしない)。3(保留)は、ホストを再起動するか、ストアを置いたファイルシステムを umount・fsck・mount し直して
+    本番のストアへ起こすことがある。検めの対象のバイナリでないのでプロセスの検めは素通りするが、ストアのロックを
+    持つので、止めた後の検めでそのストアが 1 を答える(全部のストアなら終了コード 4)か、差し替えの後に旧い serve が
+    起きない。どちらの文もこの形を言う。戻す前にそれも閉じる。
+  - 保留(終了コード 3): ホストを再起動するか、ストアを置いたファイルシステムを umount・fsck・mount し直して
     page cache を捨てた後でなければ release-hold しない。同じ boot_id の `Running` と `Io` は再起動だけで解ける。
     ホストの再起動は手で起こした llama-server(8082〜8084)も止める(APPEND_FAILURE の「最終目標とのつながり」の代価)。
-    1 は hold-status の誤りか sudo の失敗、2 は hold-status を知らない S1b より前の版で、どれも直前の行を読んで直す。
-  - 状態: 門と道の検めを通った直後に、そのとき動いている timer と常駐の service(`@default` と旧い名の 3 つを除く)を
-    restart へ、`@default` のうち `systemctl is-enabled` が字句どおり `enabled` を答えるもの(`enabled-runtime` は
-    入れない)を default-enabled へ、動いているものを default-active へ、前の回の分との和で状態のディレクトリ
-    /var/backups/uniqnode-legacy-rollback-state に書く(tmp から rename)。状態は一時の配列へ全部読み、読み終えてから
-    入れ替える。読み込まれない unit と一回走る service は restart から外す。読めなければ、状態を消す案内は出さず、
-    原因を直して打ち直すよう言う。
-  - 起こす: 旧い名の 3 つを enable --now し、restart を start し、1 つにつき 60 秒まで待って 1 つずつ active と
-    確かめてから状態を消す(起こす命令が失敗しても、確かめで全部が active なら通る)。起きないものがあれば状態を
-    残して止まる。journalctl で理由を見て直し、もう要らない unit なら restart から手で外して打ち直す。
-  - やめる道は 1 本で、どの段で止まっても同じである(`EXIT` の trap が出す。命令は全部、記録へ追記する形): 1. 確かめた
-    検め手を `install -m 0755 -o hikalium -g hikalium` で /home/hikalium/.local/bin/uniqnode に据える(この回に確かめて
-    いなければ `<確認済みの S1b 以後のビルド>` と書き、先に置いて hold-status が 0 か 3 を返すと確かめるよう言う)。
-    2. 旧い名の unit を展開した後なら、上の外す命令と下の「user 単位から移る」の install の命令を打つ。3. default-enabled
-    を enable し、default-active と restart を start し、1 つずつ 60 秒まで待って active と確かめてから状態を消す。
-    S1b 以後のバイナリはどの状態の印でも保留を守るので、始まったときのバイナリで起こし直す理由は無い(第 25 版までの、
-    バイナリを時刻や inode で見分けて段ごとに案内を変える形はやめた)。状態がまだ無い回(初めての回が止める前に
-    断ったとき)は何も変えていないので、直して打ち直すだけでよい。状態に起こすものが何も無ければ、何も止めていないと
-    言う。
+  - 検め手は /var/backups/uniqnode-legacy-checker である。無ければ、今の共有のバイナリが退避と違うときだけそれを
+    写す。検め手が命令を知らなければ(終了コード 2)、S1b 以後のビルドを置き直すよう言って止まる。
+  - 状態: 最初の検めの直後に、検めの出力から、そのとき動いている timer と常駐の service(`@default` と旧い名を
+    除く)を restart へ、`@default` のうち字句どおり `enabled` のものを default-enabled へ、動いているものを
+    default-active へ、前の回の分との和で状態のディレクトリ /var/backups/uniqnode-legacy-rollback-state に書く
+    (tmp から rename)。状態は一時の配列へ全部読み、unit の名の形をしていない行があれば断り、読み終えてから
+    入れ替える。読めなければ、状態を消す案内は出さず、原因を直して打ち直すよう言う。
+  - 起こす: 旧い名の 3 つを enable --now し、restart を restart し、1 つにつき 60 秒まで待って 1 つずつ active と
+    確かめてから状態を消す。起きないものがあれば状態を残して止まる。journalctl で理由を見て直し、もう要らない
+    unit なら、案内の命令で restart から外して打ち直す。
+  - やめる道は 1 本で、どの段で止まっても同じである(`EXIT` の trap が出す。命令は全部、時刻を付けて記録へ追記する
+    形): 1. 共有のバイナリが退避と同じ(差し替えた後)なら、確かめた検め手を `install -m 0755 -o hikalium -g hikalium`
+    で /home/hikalium/.local/bin/uniqnode に据える(差し替える前なら飛ばす。この回に検め手を確かめていなければ
+    `<確認済みの S1b 以後のビルド>` と書く)。2. 旧い名の unit を展開した後なら、上の外す命令と下の「user 単位から
+    移る」の install の命令を打つ。3. default-enabled を enable し、default-active と restart を restart し(旧い
+    バイナリで起きているものも S1b 以後のもので起こし直す)、1 つずつ 60 秒まで待って active と確かめ、
+    default-enabled が enabled と確かめてから状態を消す。S1b 以後のバイナリはどの状態の印でも保留を守るので、
+    始まったときのバイナリで起こし直す理由は無い。状態がまだ無い回は何も変えていないので、直して打ち直すだけで
+    よい。状態に記録が無ければ、そう言う。
   - 打ち直し: どこで止まっても同じ命令を打ち直せばよい。止める・待つ・disable は止まっているものには何もせず、
-    状態は和で残り、検め手は上書きされず、差し替えと展開は同じものを置き直すだけである。止まっている間は、主の口
-    7440・読み口 7441・viewer 7450、graph の口 7442〜7445(lamalium-plan)、graph の viewer 7452・7454、毎分の
-    graph-pull の timer と backup の timer が止まり、打ち直しが通るか、やめる道を打ち終えるまで続く。前の回が止めた
-    ものは、その後の回が止める前に断っても止まったままである(APPEND_FAILURE の「最終目標とのつながり」の代価)。
-  vega で打つ命令:
+    状態は和で残り、差し替えと展開は同じものを置き直すだけである。止まっている間は、主の口 7440・読み口 7441・
+    viewer 7450、graph の口 7442〜7445(lamalium-plan)、graph の viewer 7452・7454、毎分の graph-pull の timer と
+    backup の timer が止まり、打ち直しが通るか、やめる道を打ち終えるまで続く。前の回が止めたものは、その後の回が
+    止める前に断っても止まったままである(APPEND_FAILURE の「最終目標とのつながり」の代価)。
+  - 既知の限界: 検めが見るのは今走っているプロセスと system の `uniqnode-*` の unit だけで、今走っていない書き手
+    (`uniqnode-*` でない unit、user の unit、cron)は覆わない。それらが戻した後に旧いバイナリを起こしうるなら、
+    戻す前に止めておく。旧いバイナリが走った間に書き込みの誤りを見たら、やめる道で S1b 以後へ上げ直す前にも
+    ホストを再起動する(APPEND_FAILURE の「既知の限界(戻した後)」)。
+  vega で打つ命令(S1b の実装の後に確定する):
 
 ```
-( set -o pipefail; sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee -i -a /tmp/uniqnode-legacy-rollback.log; echo "exit status: $?" | /usr/bin/tee -a /tmp/uniqnode-legacy-rollback.log )
+( set -o pipefail; sudo bash -s <<'EOF' 2>&1 | ( trap '' INT; exec /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' ) | /usr/bin/tee -i -a /tmp/uniqnode-legacy-rollback.log; echo "exit status: $?" | /usr/bin/tee -a /tmp/uniqnode-legacy-rollback.log )
 set -euo pipefail
 binary=/home/hikalium/.local/bin/uniqnode
 checker=/var/backups/uniqnode-legacy-checker
-candidate=/var/backups/uniqnode-legacy-checker.candidate
+pinned=/var/backups/uniqnode-legacy-pinned
 state=/var/backups/uniqnode-legacy-rollback-state
-default_store=/work2/llm_playground_host_dir/uniqnode-store
 log=/tmp/uniqnode-legacy-rollback.log
 old_units=(uniqnode-serve.service uniqnode-viewer.service uniqnode-backup.timer)
-default_names=(uniqnode-serve@default.service uniqnode-viewer@default.service uniqnode-backup@default.timer)
-allowed=(/usr/bin/curl /usr/sbin/nft /usr/bin/git)
-if ! saved=$(/usr/bin/readlink -e /var/backups/uniqnode-legacy-pinned); then echo "固定した退避 /var/backups/uniqnode-legacy-pinned が無い。何も変えずに止める"; exit 1; fi
+# shellcheck disable=SC2016
+wait_script='rc=0; for u in "$@"; do w=0; until [ "$(systemctl is-active "$u")" = active ]; do if [ "$w" -ge 60 ]; then echo "$u が 60 秒たっても active にならない"; rc=1; break; fi; sleep 2; w=$((w + 2)); done; done; exit "$rc"'
+# shellcheck disable=SC2016
+enabled_script='rc=0; for u in "$@"; do s=$(systemctl is-enabled "$u" 2>/dev/null || true); if [ "$s" != enabled ]; then echo "$u が enabled でない(${s:-照会の失敗})"; rc=1; fi; done; exit "$rc"'
+# shellcheck disable=SC2016
+drop_script='/usr/bin/grep -vxF -- "$1" "$2" > "$2.new"; [ $? -le 1 ] && /usr/bin/mv -f "$2.new" "$2"'
+saved=""; loaded=0; checker_ok=0; restart=(); default_on=(); default_up=()
+logged() {
+  printf '%s' "( set -o pipefail; { $1; } 2>&1 | ( trap '' INT; exec /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' ) | /usr/bin/tee -i -a $log; echo \"exit status: \$?\" | /usr/bin/tee -a $log )"
+}
+on_failure() {
+  local put="<確認済みの S1b 以後のビルド>" restore=""
+  local -a ups=("${default_up[@]}" "${restart[@]}")
+  if [ "$loaded" -eq 0 ]; then echo "状態 $state を読み終えていない(理由は上の行)。$state は消さずに、原因を直してこの命令を打ち直す"; return; fi
+  if [ ! -d "$state" ]; then echo "この回は unit を何も止めず、バイナリも差し替えず、状態も作っていない。直してこの命令を打ち直す"; return; fi
+  if [ "${#ups[@]}" -eq 0 ] && [ "${#default_on[@]}" -eq 0 ]; then echo "$state には、起こし直す unit も enable し直す @default も記録されていない"; fi
+  echo "直してこの命令を打ち直せば先へ進む。戻すのをやめるなら、どの段で止まっても次を順に打つ(S1b 以後のバイナリはどの形の印でも保留を守るので、元のバイナリで起こし直す理由は無い)"
+  if [ "$checker_ok" -eq 1 ]; then put=$checker; fi
+  if [ -z "$saved" ] || /usr/bin/cmp -s "$binary" "$saved/uniqnode"; then
+    if [ "$checker_ok" -eq 0 ]; then echo "  (この回は検め手を確かめていない。S1b 以後のビルドを置き、sudo <それ> legacy-rollback-preflight $pinned --stage running が 2 でない終了コードを返すと確かめてから使う)"; fi
+    echo "  1. 共有のバイナリを S1b 以後のものへ戻す: $(logged "sudo install -m 0755 -o hikalium -g hikalium $put $binary")"
+  else
+    echo "  1. 共有のバイナリはまだ差し替えていないので飛ばす"
+  fi
+  if [ -e /etc/systemd/system/uniqnode-serve.service ]; then echo "  2. 旧い名の unit を展開してある。上の「旧い名の unit から移る」の外す命令を打ち、続けて下の「user 単位から移る」の install の命令を打つ"; fi
+  if [ "${#default_on[@]}" -gt 0 ]; then restore="sudo systemctl enable ${default_on[*]}; "; fi
+  if [ "${#ups[@]}" -gt 0 ]; then restore="${restore}sudo systemctl restart ${ups[*]}; "; fi
+  restore="${restore}/usr/bin/bash -c '$wait_script' _ ${ups[*]} && /usr/bin/bash -c '$enabled_script' _ ${default_on[*]} && sudo rm -rf $state"
+  echo "  3. enable されていた @default を enable し、動いていた @default と止めた unit を起こし直し(旧いバイナリで起きているものも替える)、1 つずつ active と enabled を確かめてから状態を消す: $(logged "$restore")"
+  echo "  起きない unit をもう起こさないなら、$state/restart から外してから 3 を打ち直す: $(logged "sudo /usr/bin/bash -c '$drop_script' _ <unit> $state/restart")"
+}
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then on_failure; fi; exit "$rc"' EXIT
+if ! saved=$(/usr/bin/readlink -e "$pinned"); then saved=""; echo "固定した退避 $pinned が無い。何も変えずに止める"; exit 1; fi
 echo "戻す退避: $saved"
 listing=$(/usr/bin/tar -tzf "$saved/units.tar.gz")
 /usr/bin/grep -qxF uniqnode-serve.service <<<"$listing" || { echo "$saved/units.tar.gz に uniqnode-serve.service が無い。何も変えずに止める"; exit 1; }
 if [ ! -f "$saved/uniqnode" ] || [ ! -x "$saved/uniqnode" ]; then echo "$saved/uniqnode が無いか実行できない。何も変えずに止める"; exit 1; fi
-tool_paths=()
-for f in "$binary" "$saved/uniqnode" "$checker" "$candidate"; do tool_paths+=("$f" "$(/usr/bin/readlink -m -- "$f")"); done
-tools_json=$(/usr/bin/jq -cn '$ARGS.positional' --args "${tool_paths[@]}")
-allowed_json=$(/usr/bin/jq -cn '$ARGS.positional' --args "${allowed[@]}")
-# shellcheck disable=SC2016
-exec_filter='.data[] | .[0] as $p | (.[1][2] // "") as $d
-  | if ($tools | any(. == $p)) then (if $d == "${UNIQNODE_DATA_DIR}" then "store" else "第 2 引数が ${UNIQNODE_DATA_DIR} でない " + ($p | @json) end)
-    elif ($allowed | any(. == $p)) then "other" else "許していない道 " + ($p | @json) end'
-env_filter='[.data[] | select(startswith("UNIQNODE_DATA_DIR="))] | last // error("UNIQNODE_DATA_DIR が無い") | .[18:]
-  | if . == "" or (explode | any(. < 32 or . == 127)) then error("空か制御文字を含む") else . end'
-# shellcheck disable=SC2016
-wait_script='rc=0; for u in "$@"; do w=0; until [ "$(systemctl is-active "$u")" = active ]; do if [ "$w" -ge 60 ]; then echo "$u が 60 秒たっても active にならない"; rc=1; break; fi; sleep 2; w=$((w + 2)); done; done; exit "$rc"'
-unit_prop() {
-  local path
-  path=$(/usr/bin/busctl --json=short call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager LoadUnit s "$1" | /usr/bin/jq -r '.data[0]') || return 1
-  /usr/bin/busctl --json=short get-property org.freedesktop.systemd1 "$path" org.freedesktop.systemd1.Service "$2"
-}
-unit_kind() {
-  local type rae
-  case "$1" in *.timer) kind=timer; return 0 ;; esac
-  type=$(systemctl show -p Type --value "$1") || return 1
-  rae=$(systemctl show -p RemainAfterExit --value "$1") || return 1
-  if [ "$type" = oneshot ] && [ "$rae" = no ]; then kind=oneshot; else kind=daemon; fi
-}
-logged() {
-  printf '( set -o pipefail; { %s; } 2>&1 | /usr/bin/tee -a %s; echo "exit status: $?" | /usr/bin/tee -a %s )' "$1" "$log" "$log"
-}
-loaded=0; checker_used=""; restart=(); default_on=(); default_up=()
 load_state() {
-  local u load
+  local f u
   local -a r=() on=() up=()
   loaded=0
-  if [ -f "$state/restart" ]; then
+  for f in restart default-enabled default-active; do
+    [ -f "$state/$f" ] || continue
     while IFS= read -r u; do
-      [ -n "$u" ] || continue
-      load=$(systemctl show -p LoadState --value "$u") || return 1
-      if [ "$load" != loaded ]; then echo "$state/restart の $u は読み込まれない(LoadState: $load)。起こせないので一覧から外す"; continue; fi
-      unit_kind "$u" || return 1
-      if [ "$kind" = oneshot ]; then echo "$state/restart の $u は一回走る service なので起こし直さない(timer が起こす)"; continue; fi
-      r+=("$u")
-    done < "$state/restart" || return 1
-  fi
-  if [ -f "$state/default-enabled" ]; then mapfile -t on < "$state/default-enabled" || return 1; fi
-  if [ -f "$state/default-active" ]; then mapfile -t up < "$state/default-active" || return 1; fi
+      [[ $u =~ ^uniqnode-[A-Za-z0-9@._:-]+\.(service|timer)$ ]] || { echo "$state/$f に unit の名でない行がある"; return 1; }
+      case "$f" in restart) r+=("$u") ;; default-enabled) on+=("$u") ;; default-active) up+=("$u") ;; esac
+    done < "$state/$f" || return 1
+  done
   restart=("${r[@]}"); default_on=("${on[@]}"); default_up=("${up[@]}"); loaded=1
 }
-on_failure() {
-  local put restore=""
-  local -a ups=("${default_up[@]}" "${restart[@]}")
-  if [ "$loaded" -eq 0 ]; then echo "前の回の状態 $state を読み終えていない(理由は上の行)。$state は消さずに、原因を直してこの命令を打ち直す"; return; fi
-  if [ ! -d "$state" ]; then echo "この回は unit を何も止めず、バイナリも差し替えず、状態も作っていない。直してこの命令を打ち直す"; return; fi
-  if [ "${#ups[@]}" -eq 0 ] && [ "${#default_on[@]}" -eq 0 ]; then echo "$state には起こし直す unit も enable し直す @default も無い(どの回も、動いていた unit を止めていない)"; fi
-  echo "直してこの命令を打ち直せば先へ進む。戻すのをやめるなら、どの段で止まっても次を順に打つ(S1b 以後のバイナリはどの形の印でも保留を守るので、元のバイナリで起こし直す理由は無い)"
-  if [ -n "$checker_used" ]; then put=$checker_used; else
-    put="<確認済みの S1b 以後のビルド>"
-    echo "  (この回は検め手を確かめていない。先に S1b 以後のビルドを置き、sudo -u hikalium -H <それ> hold-status $default_store が 0 か 3 を返すと確かめてから使う。$checker や $candidate も同じく確かめてから)"
-  fi
-  echo "  1. S1b 以後のバイナリを据える: $(logged "sudo install -m 0755 -o hikalium -g hikalium $put $binary")"
-  if [ -e /etc/systemd/system/uniqnode-serve.service ]; then echo "  2. 旧い名の unit を展開してある。上の「旧い名の unit から移る」の外す命令を打ち、続けて下の「user 単位から移る」の install の命令を打つ"; fi
-  if [ "${#default_on[@]}" -gt 0 ]; then restore="sudo systemctl enable ${default_on[*]}; "; fi
-  if [ "${#ups[@]}" -gt 0 ]; then restore="${restore}sudo systemctl start ${ups[*]}; "; fi
-  restore="${restore}/usr/bin/bash -c '$wait_script' _ ${ups[*]} && sudo rm -rf $state"
-  echo "  3. 止める前に enable されていた @default を enable し、動いていた @default と止めた unit を起こし、1 つずつ active を確かめてから状態を消す: $(logged "$restore")"
-}
-trap 'rc=$?; if [ "$rc" -ne 0 ]; then on_failure; fi; exit "$rc"' EXIT
-if [ -d "$state" ]; then
-  load_state || { echo "前の回の状態 $state を読めない"; exit 1; }
-else
-  loaded=1
+if [ -d "$state" ]; then load_state || { echo "前の回の状態 $state を読めない"; exit 1; }; else loaded=1; fi
+if [ ! -e "$checker" ]; then
+  if /usr/bin/cmp -s "$binary" "$saved/uniqnode"; then echo "検め手 $checker が無く、共有のバイナリは退避と同じ(S1b より前)。S1b 以後のビルドを sudo install -m 0755 -o root -g root <ビルド> $checker で置いてから打ち直す"; exit 1; fi
+  /usr/bin/install -m 0755 -o root -g root "$binary" "$checker.new"
+  /usr/bin/mv -f "$checker.new" "$checker"
+  echo "今の共有のバイナリを検め手として写した: $checker"
 fi
-scan_processes() {
-  local p pid exe ino f match line st ppid flags
-  local -a inodes=()
-  found=0; opaque=0
-  for f in "$binary" "$saved/uniqnode" "$checker" "$candidate"; do if [ -e "$f" ]; then inodes+=("$(/usr/bin/stat -L -c %d:%i -- "$f")"); fi; done
-  for p in /proc/[0-9]*; do
-    pid=${p#/proc/}
-    if exe=$(/usr/bin/readlink "$p/exe" 2>/dev/null) && ino=$(/usr/bin/stat -L -c %d:%i -- "$p/exe" 2>/dev/null); then
-      match=0
-      for f in "${tool_paths[@]}"; do if [ "${exe% (deleted)}" = "$f" ]; then match=1; fi; done
-      for f in "${inodes[@]}"; do if [ "$ino" = "$f" ]; then match=1; fi; done
-      [ "$match" -eq 1 ] || continue
-      if [ "$1" = pre ] && /usr/bin/grep -qE '^[0-9]+:[^:]*:/system\.slice/(system-uniqnode[^/]*\.slice/)?uniqnode-[^/]+\.service(/|$)' "$p/cgroup" 2>/dev/null; then continue; fi
-      found=$((found + 1))
-      echo "4 つのバイナリのどれかを走らせるプロセス: pid $pid(利用者 $(/usr/bin/stat -c %U "$p" 2>/dev/null))、$(printf %q "$exe"): $(/usr/bin/tr '\0' ' ' < "$p/cmdline" 2>/dev/null)"
-    else
-      [ -d "$p" ] || continue
-      if line=$(/usr/bin/cat "$p/stat" 2>/dev/null); then
-        read -r st ppid _ _ _ _ flags _ <<<"${line##*) }"
-        case "$ppid$flags" in
-          ''|*[!0-9]*) ;;
-          *) if [ "$st" = Z ] || [ $((flags & 0x00200000)) -ne 0 ]; then continue; fi ;;
-        esac
-      fi
-      [ -d "$p" ] || continue
-      opaque=$((opaque + 1))
-      echo "実行ファイルの道か inode を読めない生きたプロセス: pid $pid(利用者 $(/usr/bin/stat -c %U "$p" 2>/dev/null)): $(/usr/bin/tr '\0' ' ' < "$p/cmdline" 2>/dev/null)。ゾンビでもカーネルのスレッドでもないので、4 つのバイナリを走らせていないと確かめられない"
-    fi
-  done
+preflight() {
+  local rc=0
+  report=$("$checker" legacy-rollback-preflight "$saved" --stage "$1") || rc=$?
+  case "$rc" in
+    0) checker_ok=1 ;;
+    3) checker_ok=1; echo "保留のストアがある(どれかと戻し方は上の行)。ホストを再起動するか、ストアを置いたファイルシステムを umount・fsck・mount し直して page cache を捨ててから打ち直す。再起動は手で起こした llama-server(8082〜8084)も止める(docs/plan/APPEND_FAILURE.md の方針 5)"; exit 1 ;;
+    4) checker_ok=1; echo "どのストアも 1 を答えた。ロックを持つプロセスが残っているか(--serve-url の無い target/debug/uniqnode mcp などの別のバイナリ)、unit のストアの道が誤っている。上の行を読んで直し、打ち直す"; exit 1 ;;
+    2) echo "$checker が legacy-rollback-preflight を知らない(S1b より前の版)か、引数を誤った。S1b 以後のビルドを sudo install -m 0755 -o root -g root <ビルド> $checker で置き直してから打ち直す"; exit 1 ;;
+    *) echo "戻す前の検め($1)が断った(終了コード $rc。理由は上の行)。直してから打ち直す"; exit 1 ;;
+  esac
 }
-check_stores() {
-  local i s out real owner j dup found_marker
-  stores=(); owners=(); marked=()
-  for i in "${!unit_paths[@]}"; do
-    s=${unit_paths[$i]}
-    if ! out=$(/usr/bin/readlink -e -- "$s" && printf x) || [[ $out != *$'\n'x ]]; then echo "${unit_from[$i]} のストア $(printf %q "$s") を解決できない(無いか、途中のリンクが切れている)。$1"; exit 1; fi
-    real=${out%$'\n'x}
-    if [[ $real == *[[:cntrl:]]* ]] || [ ! -d "$real" ]; then echo "${unit_from[$i]} のストア $(printf %q "$s") の解決先 $(printf %q "$real") が制御文字を含むか、ディレクトリでない。$1"; exit 1; fi
-    owner=$(/usr/bin/stat -c %U -- "$real")
-    if [ "${unit_users[$i]}" != "$owner" ]; then echo "${unit_from[$i]} の User=${unit_users[$i]} と、ストア $real の持ち主 $owner が食い違う。$1"; exit 1; fi
-    dup=0
-    for j in "${stores[@]}"; do if [ "$j" = "$real" ]; then dup=1; fi; done
-    [ "$dup" -eq 0 ] || continue
-    if ! found_marker=$(/usr/bin/find -H "$real" -mindepth 1 -maxdepth 1 -name open-marker -print); then echo "$real の open-marker を照会できない(読めないか I/O の誤り。不在とは扱わない)。$1"; exit 1; fi
-    stores+=("$real"); owners+=("$owner")
-    if [ -n "$found_marker" ]; then marked+=("$real"); fi
-  done
-  echo "道を検めたストア: ${stores[*]}(open-marker があるもの: ${marked[*]:-なし})"
+parse_report() {
+  local tag name kind group en act extra up n=0 ended=0
+  tm=(); waits=(); ds=(); defs=(); now=(); dnow=(); dact=()
+  while read -r tag name kind group en act extra; do
+    if [ "$tag" = end ] && [ "$ended" -eq 0 ] && [ "$name" = "$n" ] && [ -z "$kind" ]; then ended=1; continue; fi
+    if [ "$tag" != unit ] || [ "$ended" -eq 1 ] || [ -z "$act" ] || [ -n "$extra" ]; then return 1; fi
+    [[ $name =~ ^uniqnode-[A-Za-z0-9@._:-]+\.(service|timer)$ ]] || return 1
+    n=$((n + 1))
+    case "$kind" in timer) tm+=("$name") ;; oneshot) waits+=("$name") ;; daemon) ds+=("$name") ;; *) return 1 ;; esac
+    case "$act" in active|activating|reloading|deactivating) up=1 ;; inactive|failed) up=0 ;; *) return 1 ;; esac
+    case "$group" in
+      default) defs+=("$name"); if [ "$en" = enabled ]; then dnow+=("$name"); fi; if [ "$up" -eq 1 ]; then dact+=("$name"); fi ;;
+      other) if [ "$up" -eq 1 ] && [ "$kind" != oneshot ]; then now+=("$name"); fi ;;
+      legacy) ;;
+      *) return 1 ;;
+    esac
+  done <<<"$report"
+  [ "$ended" -eq 1 ]
 }
-if ! fs_units=$(/usr/bin/find /etc/systemd/system -mindepth 1 -maxdepth 1 \( -name 'uniqnode-*.service' -o -name 'uniqnode-*.timer' -o -name 'uniqnode-*.service.d' -o -name 'uniqnode-*.timer.d' \) -printf '%f\n'); then echo "/etc/systemd/system の uniqnode-* を列挙できない。何も止めずに止める"; exit 1; fi
-if ! sd_units=$(systemctl list-units --all --plain --no-legend --type=service,timer 'uniqnode-*'); then echo "systemd が読み込んでいる uniqnode-* の unit を列挙できない。何も止めずに止める"; exit 1; fi
-units_text=$(printf '%s\n%s\n' "$(/usr/bin/sed 's/\.d$//' <<<"$fs_units")" "$(/usr/bin/awk '$2 == "loaded" {print $1}' <<<"$sd_units")" | /usr/bin/sed '/@\.service$/d; /@\.timer$/d; /^$/d' | /usr/bin/sort -u)
-mapfile -t units <<<"$units_text"
-timers=(); waits=(); daemons=()
-for u in "${units[@]}"; do
-  [ -n "$u" ] || continue
-  load=$(systemctl show -p LoadState --value "$u")
-  if [ "$load" != loaded ]; then echo "$u は読み込まれない(LoadState: $load)。走りえないので飛ばす"; continue; fi
-  unit_kind "$u" || { echo "$u の Type か RemainAfterExit を読めない。何も止めずに止める"; exit 1; }
-  case "$kind" in timer) timers+=("$u") ;; oneshot) waits+=("$u") ;; daemon) daemons+=("$u") ;; esac
-done
-echo "止める timer: ${timers[*]:-なし} / 終わりを待つ一回走る service(起こし直さず、timer が次に起こす): ${waits[*]:-なし} / 止める常駐の service: ${daemons[*]:-なし}"
-unit_paths=("$default_store"); unit_users=(hikalium); unit_from=("既定のストア")
-for u in "${daemons[@]}" "${waits[@]}"; do
-  uses=0
-  for prop in ExecStartPre ExecStart ExecStartPost; do
-    if ! verdicts=$(unit_prop "$u" "$prop" | /usr/bin/jq -r --argjson tools "$tools_json" --argjson allowed "$allowed_json" "$exec_filter"); then echo "$u の $prop を D-Bus から読めない。何も止めずに止める"; exit 1; fi
-    while IFS= read -r v; do
-      case "$v" in
-        store) uses=1 ;;
-        other|'') ;;
-        *) echo "$u の $prop: $v。この命令は、4 つのバイナリ(第 2 引数が \${UNIQNODE_DATA_DIR} のもの)と ${allowed[*]} の他を走らせる uniqnode-* の unit を扱わない(/bin/sh -c などの包みの中で何が走るかを決められない)。何も止めずに止める。その unit を止めて外すか、形を直してから打ち直す"; exit 1 ;;
-      esac
-    done <<<"$verdicts"
-  done
-  [ "$uses" -eq 1 ] || continue
-  if ! dir=$(unit_prop "$u" Environment | /usr/bin/jq -er "$env_filter"); then echo "$u は 4 つのバイナリのどれかを走らせるのに、UNIQNODE_DATA_DIR が無いか、読めないか、空か、制御文字を含む(理由は上の行)。何も止めずに止める"; exit 1; fi
-  user=$(systemctl show -p User --value "$u")
-  unit_paths+=("$dir"); unit_users+=("${user:-root}"); unit_from+=("$u")
-done
-scan_processes pre
-if [ $((found + opaque)) -gt 0 ]; then
-  echo "止める前の門: uniqnode-*.service の外で 4 つのバイナリ(共有・退避・検め手・候補)のどれかを走らせるプロセスが $found 個、実行ファイルを確かめられない生きたプロセスが $opaque 個ある。vega では Claude Code のセッションが起こした mcp の Local がふつうこれに当たる(uniqnode の作業ツリーで開いたセッションのたびに 1 つ起きる)。手で打った CLI(取り込み・gc・fsck など)も当たる。上の pid を止めて(mcp ならそのセッションを閉じて)から打ち直す"
-  exit 1
-fi
-check_stores "何も止めずに止める"
-default_units=()
-for u in "${default_names[@]}"; do
-  case "$u" in *.timer) svc=${u%.timer}.service ;; *) svc=$u ;; esac
-  if [ -d "/etc/systemd/system/$svc.d" ] || systemctl is-enabled --quiet "$u"; then default_units+=("$u"); fi
-done
-now=(); dnow=(); dact=()
-for u in "${timers[@]}" "${daemons[@]}"; do
-  case " ${default_names[*]} ${old_units[*]} " in *" $u "*) continue ;; esac
-  case "$(systemctl is-active "$u" || true)" in active|activating|reloading|deactivating) now+=("$u") ;; esac
-done
-for u in "${default_names[@]}"; do
-  if [ "$(systemctl is-enabled "$u" 2>/dev/null || true)" = enabled ]; then dnow+=("$u"); fi
-  case "$(systemctl is-active "$u" || true)" in active|activating|reloading|deactivating) dact+=("$u") ;; esac
-done
+preflight running
+parse_report || { echo "戻す前の検めの出力を読めない(形が違う)。何も止めずに止める"; exit 1; }
+echo "止める timer: ${tm[*]:-なし} / 終わりを待つ一回走る service(起こし直さず、timer が次に起こす): ${waits[*]:-なし} / 止める常駐の service: ${ds[*]:-なし}"
 [ -d "$state" ] || /usr/bin/mkdir -m 0700 "$state"
 write_list() {
   local f=$1; shift
@@ -657,55 +568,20 @@ write_list default-enabled "${default_on[@]}" "${dnow[@]}"
 write_list default-active "${default_up[@]}" "${dact[@]}"
 load_state || { echo "書いた状態 $state を読み直せない"; exit 1; }
 echo "最後に起こし直す unit(前の回の分との和。$state/restart): ${restart[*]:-なし} / 止める前に enable されていた @default: ${default_on[*]:-なし} / 止める前に動いていた @default(戻すのをやめるときだけ起こす): ${default_up[*]:-なし}"
-if [ -f "$binary" ] && [ -x "$binary" ] && ! /usr/bin/cmp -s "$binary" "$saved/uniqnode"; then
-  /usr/bin/install -m 0755 -o root -g root "$binary" "$candidate.new"
-  /usr/bin/mv -f "$candidate.new" "$candidate"
-  echo "今のバイナリを検め手の候補として写した: $candidate(hold-status を知ると確かめてから使う)"
-fi
-if [ "${#timers[@]}" -gt 0 ]; then systemctl stop "${timers[@]}"; echo "止めた: ${timers[*]}"; fi
-if [ "${#default_units[@]}" -gt 0 ]; then systemctl disable "${default_units[@]}"; echo "disable した: ${default_units[*]}"; fi
+if [ "${#tm[@]}" -gt 0 ]; then systemctl stop "${tm[@]}"; echo "止めた: ${tm[*]}"; fi
+if [ "${#defs[@]}" -gt 0 ]; then systemctl disable "${defs[@]}"; echo "disable した: ${defs[*]}"; fi
 waited=0
 for u in "${waits[@]}"; do
   while :; do
-    st=$(systemctl is-active "$u" || true)
+    st=$(systemctl show -p ActiveState --value "$u")
     case "$st" in inactive|failed) break ;; esac
     if [ "$waited" -ge 1800 ]; then echo "$u が 30 分たっても終わらない(状態: $st)。何も差し替えずに止める"; exit 1; fi
     echo "$u の終わりを待つ(状態: $st。Ctrl-C を押さない)"; sleep 10; waited=$((waited + 10))
   done
 done
-if [ "${#daemons[@]}" -gt 0 ]; then systemctl stop "${daemons[@]}"; echo "止めた: ${daemons[*]}"; fi
-for u in "${timers[@]}" "${waits[@]}" "${daemons[@]}"; do
-  st=$(systemctl is-active "$u" || true)
-  case "$st" in inactive|failed) ;; *) echo "$u がまだ止まっていない(状態: $st)。何も差し替えずに止める"; exit 1 ;; esac
-done
-scan_processes post
-if [ $((found + opaque)) -gt 0 ]; then echo "止めた後の門: 4 つのバイナリのどれかを走らせるプロセスが $found 個、実行ファイルを確かめられない生きたプロセスが $opaque 個ある。上の pid を止めて(mcp ならそのセッションを閉じて)から打ち直す。何も差し替えずに止める"; exit 1; fi
-check_stores "何も差し替えずに止める"
-if [ "${#marked[@]}" -gt 0 ]; then
-  for c in "$checker" "$candidate"; do
-    if [ ! -f "$c" ] || [ ! -x "$c" ]; then continue; fi
-    ok=0; held=(); bad=0
-    for i in "${!stores[@]}"; do
-      if /usr/bin/sudo -u "${owners[$i]}" -H "$c" hold-status "${stores[$i]}"; then rc=0; else rc=$?; fi
-      case "$rc" in
-        0) ok=$((ok + 1)); echo "${stores[$i]}: 書ける道でそのまま開いてよい形(hold-status が 0)" ;;
-        3) ok=$((ok + 1)); held+=("$i"); echo "${stores[$i]}: 保留(hold-status が 3。理由は直前の行)" ;;
-        *) bad=1; echo "${stores[$i]}: $c で検められない(終了コード $rc。1 は hold-status の誤りか sudo の失敗で、--serve-url の無い target/debug/uniqnode mcp などがロックを持つときもここに当たる。2 は hold-status を知らない S1b より前の版)。直前の行を読む" ;;
-      esac
-    done
-    if [ "$ok" -eq 0 ]; then echo "$c はどのストアにも 0 も 3 も答えなかった。この検め手は使わない"; continue; fi
-    checker_used=$c
-    if [ "$c" = "$candidate" ] && [ ! -e "$checker" ]; then /usr/bin/mv -f "$candidate" "$checker"; checker_used=$checker; echo "候補を検め手として採った: $checker"; fi
-    break
-  done
-  if [ -z "$checker_used" ]; then echo "印のあるストア(${marked[*]})を検められる検め手が無い。S1b 以後のビルドを sudo install -m 0755 -o root -g root <ビルド> $checker で置いてから打ち直す。何も差し替えずに止める"; exit 1; fi
-  for i in "${held[@]}"; do
-    echo "保留の ${stores[$i]}: ホストを再起動するか、ストアを置いたファイルシステムを umount・fsck・mount し直して page cache を捨ててから打ち直す。同じ boot_id の Running と Io は再起動だけで解ける。検めを通らない印は、その後に sudo -u ${owners[$i]} -H $checker_used release-hold ${stores[$i]} を打つか、検め済みの backup から戻す。ホストの再起動は手で起こした llama-server(8082〜8084)も止める(docs/plan/APPEND_FAILURE.md の方針 5)"
-  done
-  if [ "$bad" -eq 1 ] || [ "${#held[@]}" -gt 0 ]; then echo "全部のストアが 0 ではない。旧いバイナリでは起こさず、何も差し替えずに止める"; exit 1; fi
-fi
-scan_processes post
-if [ $((found + opaque)) -gt 0 ]; then echo "検めの後に、4 つのバイナリのどれかを走らせるプロセスか、確かめられない生きたプロセスが現れた。上の pid を止めてから打ち直す。何も差し替えずに止める"; exit 1; fi
+if [ "${#ds[@]}" -gt 0 ]; then systemctl stop "${ds[@]}"; echo "止めた: ${ds[*]}"; fi
+preflight stopped
+parse_report || { echo "止めた後の検めの出力を読めない(形が違う)。何も差し替えずに止める"; exit 1; }
 tables=$(/usr/sbin/nft list tables)
 if /usr/bin/grep -qxF 'table inet uniqnode_default' <<<"$tables"; then /usr/sbin/nft delete table inet uniqnode_default; fi
 /usr/bin/install -m 0755 -o hikalium -g hikalium "$saved/uniqnode" /home/hikalium/.local/bin/.uniqnode.rollback
@@ -713,10 +589,12 @@ if /usr/bin/grep -qxF 'table inet uniqnode_default' <<<"$tables"; then /usr/sbin
 echo "バイナリを戻した: $binary <- $saved/uniqnode"
 /usr/bin/tar -C /etc/systemd/system -xzf "$saved/units.tar.gz"
 systemctl daemon-reload
+preflight stopped
+parse_report || { echo "展開した後の検めの出力を読めない(形が違う)。旧い名の unit を起こさずに止める"; exit 1; }
 systemctl enable --now "${old_units[@]}" || echo "systemctl enable --now ${old_units[*]} が失敗した。1 つずつ確かめる"
-if [ "${#restart[@]}" -gt 0 ]; then systemctl start "${restart[@]}" || echo "systemctl start ${restart[*]} が失敗した。1 つずつ確かめる"; fi
+if [ "${#restart[@]}" -gt 0 ]; then systemctl restart "${restart[@]}" || echo "systemctl restart ${restart[*]} が失敗した。1 つずつ確かめる"; fi
 if ! /usr/bin/bash -c "$wait_script" _ "${old_units[@]}" "${restart[@]}"; then
-  echo "起きていない unit がある(上の行)。journalctl -u <unit> で理由を見て直し、この命令を打ち直す。もう起こさなくてよい unit なら $state/restart から手で外してから打ち直す。serve が起きないなら、--serve-url の無い target/debug/uniqnode mcp などの別のバイナリのプロセスがストアのロックを取っていないかも見る"
+  echo "起きていない unit がある(上の行)。journalctl -u <unit> で理由を見て直し、この命令を打ち直す。もう起こさなくてよい unit なら、次で $state/restart から外してから打ち直す: $(logged "sudo /usr/bin/bash -c '$drop_script' _ <unit> $state/restart")。serve が起きないなら、--serve-url の無い target/debug/uniqnode mcp などの別のバイナリのプロセスがストアのロックを取っていないかも見る"
   exit 1
 fi
 echo "起こし直した: ${old_units[*]} ${restart[*]}"
@@ -727,10 +605,9 @@ EOF
 ```
 
   `@default` の unit の現物(テンプレート)と drop-in は残るが、disable したので動かない。据え直すときは上の
-  外す命令から打ち直す。検め手 /var/backups/uniqnode-legacy-checker(と、採らなかった候補
-  /var/backups/uniqnode-legacy-checker.candidate)も残る(打ち直しとやめる道に使う。要らなくなれば操作者が消す)。
-  状態のディレクトリ /var/backups/uniqnode-legacy-rollback-state(restart・default-enabled・default-active。第 25 版が
-  残した stores は読まない)は、全部が起きたと確かめたとき、またはやめる道の最後に消える。済んだかは、
+  外す命令から打ち直す。検め手 /var/backups/uniqnode-legacy-checker も残る(打ち直しとやめる道に使う。要らなく
+  なれば操作者が消す)。状態のディレクトリ /var/backups/uniqnode-legacy-rollback-state(restart・default-enabled・
+  default-active)は、全部が起きたと確かめたとき、またはやめる道の最後に消える。済んだかは、
   /tmp/uniqnode-legacy-rollback.log の最後が「旧い名の unit に戻し終えた」と `exit status: 0` であることで確かめる。
 
 ### user 単位から移る

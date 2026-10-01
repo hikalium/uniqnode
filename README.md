@@ -99,7 +99,9 @@ unit として載せるなら同じ命令を sudo で `--system` 付きで打つ
 commit したら、指示を待たずにそのまま `git push` する(エージェントも人も同じ)。push する前に
 `cargo test` を通す。手元にだけ commit を溜めると、他の機械や別のセッションから見えず、
 据え付けや移行の手順が古い版を前提に組まれてしまう(2026-09-29 の利用者の指示)。
-テストと検査が緑なら、PR を通さずに main へ線形に積んで push してよい(2026-09-30 の操作者の裁定)。
+ただし、セッションが push するのは自分のブランチであり、main へ統合するのは Commit Queue の役の
+セッションの 1 エージェントだけである。緑のブランチの commit id と統合の意思を Commit Queue へ送り、
+Commit Queue が PR を通さずに main へ線形に積む(2026-10-01 の利用者の指示。手順は CLAUDE.md)。
 
 https で push して 403(Permission to hikalium/uniqnode.git denied)が返るのは、たいてい
 グローバルの `gh auth git-credential` が答えていて、その PAT にこのリポジトリへの書き込みが

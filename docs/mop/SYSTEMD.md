@@ -271,7 +271,9 @@ Claude のレビュー):
   読めて uniqnode-serve.service が入っていること、その uniqnode が実行できるファイルであること。どれかが
   欠ければ、今回の退避(確かめ済み)を残したまま何も外さずに止まる(第 19 版の APPEND_FAILURE への Codex と
   Claude のレビューの Codex 中 6)。固定をどう直すか(壊れた固定を消して今回の退避を固定し直すか)は、
-  操作者が記録の 2 つの道を見て決める。
+  操作者が記録の 2 つの道を見て決める。この止まり方では旧い timer が止まったままなので、止まる文は
+  `sudo systemctl start uniqnode-backup.timer` で戻す命令を添える(固定を直すまでの間も毎日の backup を
+  続けるため。第 20 版の APPEND_FAILURE への Codex と Claude のレビューの Claude 低 7)。
 - nft の表は在るときだけ消す。在るかは `nft list tables` の答えで決め、その一覧の取得が失敗したら(nft が
   無い、照会の誤り)止まる。第 18 版の `if nft list table …` は失敗も「表が無い」と扱い、完了の文と終了
   コード 0 を出していた(同じレビューの中 8)。外した後に nft や install が失敗して打ち直しても、前の退避を
@@ -295,11 +297,12 @@ if [ "${#present[@]}" -eq 0 ]; then
   echo "旧い名の unit は既に無い。退避と外しを飛ばす"
 else
   systemctl stop uniqnode-backup.timer || true
+  timer_hint="旧い timer は止めたままである。直すまでの間も毎日の backup を続けるなら sudo systemctl start uniqnode-backup.timer で戻す"
   waited=0
   while :; do
     state=$(systemctl is-active uniqnode-backup.service || true)
     case "$state" in inactive|failed) break ;; esac
-    if [ "$waited" -ge 1800 ]; then echo "旧い backup が 30 分たっても終わらない(状態: $state)。何も外さずに止める"; exit 1; fi
+    if [ "$waited" -ge 1800 ]; then echo "旧い backup が 30 分たっても終わらない(状態: $state)。何も外さずに止める。$timer_hint"; exit 1; fi
     echo "旧い backup の終わりを待つ(状態: $state)"
     sleep 10; waited=$((waited + 10))
   done
@@ -312,10 +315,10 @@ else
   if ! { /usr/bin/cp -p "$binary" "$saved/uniqnode" && /usr/bin/cmp -s "$binary" "$saved/uniqnode"; }; then /usr/bin/rm -rf "$saved"; echo "$binary を退避へ写せない。退避を消し、外さずに止める"; exit 1; fi
   echo "退避: $saved (${present[*]} と $binary)"
   if [ -e "$pin" ] || [ -L "$pin" ]; then
-    if ! pinned=$(/usr/bin/readlink -e "$pin") || [ ! -d "$pinned" ]; then echo "固定 $pin が壊れている(解決先が無いか、ディレクトリでない)。何も外さずに止める。今回の退避 $saved は残す"; exit 1; fi
-    if ! pinned_listing=$(/usr/bin/tar -tzf "$pinned/units.tar.gz"); then echo "固定した退避 $pinned/units.tar.gz を読めない。何も外さずに止める。今回の退避 $saved は残す"; exit 1; fi
-    /usr/bin/grep -qxF uniqnode-serve.service <<<"$pinned_listing" || { echo "固定した退避 $pinned/units.tar.gz に uniqnode-serve.service が無い。何も外さずに止める。今回の退避 $saved は残す"; exit 1; }
-    [ -f "$pinned/uniqnode" ] && [ -x "$pinned/uniqnode" ] || { echo "固定した退避 $pinned/uniqnode が無いか実行できない。何も外さずに止める。今回の退避 $saved は残す"; exit 1; }
+    if ! pinned=$(/usr/bin/readlink -e "$pin") || [ ! -d "$pinned" ]; then echo "固定 $pin が壊れている(解決先が無いか、ディレクトリでない)。何も外さずに止める。今回の退避 $saved は残す。$timer_hint"; exit 1; fi
+    if ! pinned_listing=$(/usr/bin/tar -tzf "$pinned/units.tar.gz"); then echo "固定した退避 $pinned/units.tar.gz を読めない。何も外さずに止める。今回の退避 $saved は残す。$timer_hint"; exit 1; fi
+    /usr/bin/grep -qxF uniqnode-serve.service <<<"$pinned_listing" || { echo "固定した退避 $pinned/units.tar.gz に uniqnode-serve.service が無い。何も外さずに止める。今回の退避 $saved は残す。$timer_hint"; exit 1; }
+    [ -f "$pinned/uniqnode" ] && [ -x "$pinned/uniqnode" ] || { echo "固定した退避 $pinned/uniqnode が無いか実行できない。何も外さずに止める。今回の退避 $saved は残す。$timer_hint"; exit 1; }
     echo "固定した退避は既に在り、戻す命令が使える形である: $pin -> $pinned。今回の退避は固定しない"
   else
     /usr/bin/ln -sT "$saved" "$pin"
@@ -358,7 +361,18 @@ EOF
   ものへ据え直し(同じレビューの中 4)、unit の退避を /etc/systemd/system に展開して daemon-reload し、旧い 3 つを
   enable --now する(同じ主の口を取り合うので、両方を同時に置かない)。バイナリは graph_a・graph_b の serve と
   共有なので、それらも次の起動から移行の前のバイナリで走る(移行の前と同じ形。走っている間は今のイメージの
-  まま)。vega で打つ命令:
+  まま)。
+  バイナリを戻す前に、ストアの保留を検める(第 20 版の APPEND_FAILURE への Codex と Claude のレビューの
+  Codex 高 1)。S1b より前のバイナリの `Store::open` は `open-marker` を見ずに recover して書くので、新しい
+  バイナリが残した `Io` や同じ boot_id の `Running` の上でそれを起こすと、保留を素通りして、page cache に
+  だけ在る完全なレコードを採ってその後ろへ書く道が戻る。そこで、`@default` を止めた後・バイナリを差し替える
+  前に、まだ据わっている新しいバイナリで `uniqnode store hold-status --data-dir <ストア>`(APPEND_FAILURE の
+  方針 5。印を読むだけで書かない)を打ち、0 のときだけ先へ進む。0 でなければ(保留、または印があるのに
+  今のバイナリが hold-status を知らない)何も差し替えずに止まり、止まる文が戻し方を言う: 同じ boot_id の
+  `Running` と `Io` はホストを再起動してから打ち直す(再起動できなければ umount・fsck・mount し直しの後に
+  release-hold)、検めを通らない印は release-hold か検め済みの backup からの復元。印が無いストア
+  (S1b より前のバイナリだけが開いた)は保留が無いので検めずに進む。旧いバイナリに検めを頼らないので、
+  どの版へ戻すときも同じ命令で通る。vega で打つ命令:
 
 ```
 ( set -o pipefail; sudo bash -s <<'EOF' 2>&1 | /usr/bin/ts '%Y-%m-%dT%H:%M:%S%z' | /usr/bin/tee -a /tmp/uniqnode-legacy-rollback.log; echo "exit status: $?" | /usr/bin/tee -a /tmp/uniqnode-legacy-rollback.log )
@@ -385,6 +399,21 @@ while :; do
   echo "backup@default の終わりを待つ(状態: $state)"
   sleep 10; waited=$((waited + 10))
 done
+store=/work2/llm_playground_host_dir/uniqnode-store
+if [ -e "$store/open-marker" ]; then
+  if /usr/bin/sudo -u hikalium -H "$binary" store hold-status --data-dir "$store"; then
+    echo "open-marker は書ける道でそのまま開いてよい形(hold-status が 0)。旧いバイナリへ戻す"
+  else
+    rc=$?
+    echo "hold-status が $rc で終わった(3 は保留、それ以外は検められない)。旧いバイナリでは起こさず、ここで止める。@default は止まったまま"
+    echo "同じ boot_id の Running か Io: ホストを再起動してからこの命令を打ち直す(再起動できなければ umount・fsck・mount し直しの後に sudo -u hikalium -H $binary store release-hold --data-dir $store)"
+    echo "検めを通らない印: fsck の後の release-hold か、検め済みの backup からの復元(docs/plan/APPEND_FAILURE.md の方針 5 と「S1b より前のバイナリへ戻す」)"
+    echo "戻すのをやめるなら sudo systemctl enable --now uniqnode-serve@default.service uniqnode-viewer@default.service uniqnode-backup@default.timer で今のバイナリのまま起こす(保留なら読み出しだけ答える)"
+    exit 1
+  fi
+else
+  echo "$store/open-marker が無い(S1b より前のバイナリだけが開いたストア)。保留は無い"
+fi
 tables=$(/usr/sbin/nft list tables)
 if /usr/bin/grep -qxF 'table inet uniqnode_default' <<<"$tables"; then /usr/sbin/nft delete table inet uniqnode_default; fi
 /usr/bin/install -m 0755 -o hikalium -g hikalium "$saved/uniqnode" /home/hikalium/.local/bin/.uniqnode.rollback

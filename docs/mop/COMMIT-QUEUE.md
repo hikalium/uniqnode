@@ -49,11 +49,13 @@ Codex には SendMessage が無い。crystal の Codex は、依頼の全文を
 vega の検査(下の「送り手の手順」の 4)は、vega の Claude のセッション
 (`bridge:session_01EVEBXiTc3Wrjfoetpbkij2`)に頼む。頼む側は、push 済みのブランチの
 リポジトリ、ブランチ、先頭の SHA を送る。vega のセッションは、その SHA を fetch し、
-`git worktree add --detach <新しい場所> <SHA>` で専用の作業場所を作り、`git rev-parse HEAD` が
-その SHA と一致し `git status --porcelain` が空であることを確かめてから、そこで
-`cargo test --no-fail-fast` を回す。返すのは、実際の `git rev-parse HEAD` と `HEAD^` の SHA と、
-落ちたテストの名前(無ければ無いこと)である。vega のセッション自身が送り手なら、同じ形で自分で
-回す。
+`git worktree add --detach <新しい場所> <SHA>` で専用の作業場所を作り、`cd <新しい場所>` で
+そこへ移る。`git rev-parse HEAD` がその SHA と一致し、`git status --porcelain` が空であることを
+確かめてから、そこで `cargo test --no-fail-fast` を回す。返すのは、そこで取った実際の
+`git rev-parse HEAD` と `HEAD^` の SHA と、落ちたテストの名前(無ければ無いこと)である。
+`HEAD^` は先頭の直前の親で、ブランチの基点とは限らない(基点は送り手が CQ へ別に送る)。
+終わったら元のチェックアウトへ戻り、`git worktree remove <新しい場所>` で作業場所を消す。
+vega のセッション自身が送り手なら、同じ形で自分で回す。
 
 ## 合格の条件
 
@@ -101,8 +103,10 @@ node/ の下のファイルは、Markdown でも説明の文書に当たらな�
    - レビュー: どのモデルで、どの SHA に通したか。軽微で明確な変更として通していないなら、その旨。
 
 差し戻されたら、push 済みのブランチを書き換えない(must/0011)。最新の `origin/main` から新しい
-ブランチを切り、自分の変更を cherry-pick して直し、手順 2 からやり直す。CQ が統合する前に main が
-進んだときも、同じやり方で新しいブランチを作る。進んだ main を自分のブランチへ merge しない。
+ブランチを切り、自分の変更を cherry-pick して直し、手順 2 からやり直す。main が進んでも、
+送り手は自分からは作り直さず、CQ の答えを待つ。説明の文書だけの変更なら CQ が積み直し、コードの
+変更なら CQ が差し戻すので、差し戻されたときだけ作り直す。同じ変更の古い依頼と新しい依頼を並べ
+ないためである。進んだ main を自分のブランチへ merge しない。
 
 ## CQ の手順
 
@@ -164,9 +168,10 @@ CQ が表を直す変更を送る。
 
 | テスト | ファイル | 落ちる形 |
 |---|---|---|
-| `a_node_that_is_not_registered_gets_no_answer` | node/tests/distributed_search.rs | ピアの応答の読み取りが `Resource temporarily unavailable (os error 11)` で時間切れになり、`"outcome":"timed_out"` が返る |
+| `a_node_that_is_not_registered_gets_no_answer` | node/tests/distributed_search.rs | 2 つ目の問い(向こうの peers.json に trust_level 0 で載せた後)の断りの理由を確かめる `assert!(untrusted.contains("trust_level"), ...)`(147 行)で落ちる。応答の peers の項は `"state":"silent"` で、note が `応答読み取り: Resource temporarily unavailable (os error 11)` である(trust_level による断りの文が届く前に読み取りが時間切れになっている) |
 
 2026-10-01 の観測: CQ の手元では a8e287d でも落ち、単独で 5 回回すと 1 回落ちた。vega では同じ日に
-全テストを 3 回、このテストだけを 10 回回し、1 度も落ちていない。1 回の問いは budget_ms 2500 の
-時間切れを待つので、遅い環境では待ち時間の境目にかかりうる(確かめてはいない)。直す仕事は
+全テストを 3 回、このテストだけを 10 回回し、1 度も落ちていない。最初と 2 つ目の問いは budget_ms 2500 の
+時間切れを待つので、遅い環境では 2 つ目の問いの断りの応答が待ち時間の境目にかかりうる(確かめては
+いない)。CQ の手元で落ちる形を詳しく記録したのは 1 回だけである。直す仕事は
 計画へ積む。直したら、この表から行を消す。

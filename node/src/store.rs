@@ -117,19 +117,21 @@ pub struct WriteFailure {
     pub since: i64,
 }
 
+/// kind が no_space のときの戻し方の案内(方針 5)。試験はこの定数で照らす(must/0023)。
+pub const NO_SPACE_GUIDANCE: &str = "ストアを置いたファイルシステムに空きを作ってから serve を再起動する\
+     (空きを足しても自動では戻らない)";
+
+/// kind が io のときの戻し方の案内(方針 5)。
+pub const IO_GUIDANCE: &str = "ホストを再起動する(できなければ、ストアを置いたファイルシステムを umount して \
+     fsck し、mount し直してから起こす)。serve の再起動だけでは、page cache に残った\
+     書けなかった末尾の後ろに書くことになりうる";
+
 impl WriteFailure {
     /// 戻し方の案内(方針 5)。
     pub fn guidance(&self) -> &'static str {
         match self.kind {
-            FailureKind::NoSpace => {
-                "ストアを置いたファイルシステムに空きを作ってから serve を再起動する\
-                 (空きを足しても自動では戻らない)"
-            }
-            FailureKind::Io => {
-                "ホストを再起動する(できなければ、ストアを置いたファイルシステムを umount して \
-                 fsck し、mount し直してから起こす)。serve の再起動だけでは、page cache に残った\
-                 書けなかった末尾の後ろに書くことになりうる"
-            }
+            FailureKind::NoSpace => NO_SPACE_GUIDANCE,
+            FailureKind::Io => IO_GUIDANCE,
         }
     }
 
@@ -247,7 +249,8 @@ pub struct Store {
     /// 書けない状態(APPEND_FAILURE の方針 2)。Some なら全ての書き込みの入口が断る。戻るのは
     /// ストアを開き直したときだけである。
     write_failure: Option<WriteFailure>,
-    /// 失敗の注入(テスト用の口。node/src/fault.rs)。
+    /// 失敗の注入(テスト用の口。node/src/fault.rs)。debug ビルドだけにある。
+    #[cfg(debug_assertions)]
     fault: Option<crate::fault::Fault>,
     /// 同一データディレクトリの二重オープン防止(プロセス終了で自動解放される
     /// Linux 抽象名前空間ソケットをロックとして使う)。
@@ -468,7 +471,7 @@ pub(crate) fn scan_pack_references(
 
 /// gc が tmp/ に書く新しい pack の名前の頭。開くときに tmp/ を空にするので、書きかけの
 /// 新 pack はクラッシュ後に残らない。
-pub(crate) const GC_TMP_PREFIX: &str = "gc-";
+pub const GC_TMP_PREFIX: &str = "gc-";
 
 /// 追記の位置(pack 番号とその中のオフセット)。gc が「ここより後に追記されたレコード」を
 /// 問うためのカーソル(Store::references_since)。
@@ -514,9 +517,42 @@ pub(crate) fn unique_tmp_path(dir: &Path, head: &str) -> PathBuf {
     dir.join("tmp").join(format!("{head}-{}-{number}", std::process::id()))
 }
 
+/// sync の記録の口。`UNIQNODE_SYNC_LOG=<道>` で、ストアと install が行う sync を 1 行ずつ
+/// その道へ追記する(`file <道>` か `dir <道>`)。開くたびに何が sync されたかを、実プロセスの
+/// 試験が数えるための口で、debug ビルドだけが読む。
+pub const SYNC_LOG_ENV: &str = "UNIQNODE_SYNC_LOG";
+
+pub(crate) const ENOSPC: i32 = 28;
+pub(crate) const EDQUOT: i32 = 122;
+
+/// sync を 1 回記録する(debug ビルドで SYNC_LOG_ENV があるときだけ)。記録に失敗しても
+/// 本来の sync の結果は変えない。
+pub(crate) fn note_sync(what: &str, path: &Path) {
+    #[cfg(debug_assertions)]
+    {
+        if let Some(log) = std::env::var_os(SYNC_LOG_ENV) {
+            if let Ok(mut file) =
+                std::fs::OpenOptions::new().create(true).append(true).open(log)
+            {
+                let _ = file.write_all(format!("{what} {}\n", path.display()).as_bytes());
+            }
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (what, path);
+    }
+}
+
+/// ディレクトリを開いて sync する(記録つき)。
+pub(crate) fn sync_dir(path: &Path) -> std::io::Result<()> {
+    note_sync("dir", path);
+    std::fs::File::open(path)?.sync_all()
+}
+
 /// atomic_write の段。注入の口(write_manifest)が段ごとに誤りを差し込む。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AtomicStep {
+pub(crate) enum AtomicStep {
     BeforeRename,
     BeforeDirSync,
 }
@@ -539,7 +575,7 @@ fn atomic_write_steps(
     let written = (|| {
         let mut file = std::fs::File::create(&tmp_path)?;
         file.write_all(content)?;
-        crate::fault::note_sync("file", &tmp_path);
+        note_sync("file", &tmp_path);
         file.sync_all()
     })();
     if let Err(error) = written {
@@ -552,7 +588,7 @@ fn atomic_write_steps(
     }
     // rename を含むディレクトリエントリの永続化。
     hook(AtomicStep::BeforeDirSync)
-        .and_then(|_| crate::fault::sync_dir(target.parent().expect("親ディレクトリがある")))
+        .and_then(|_| sync_dir(target.parent().expect("親ディレクトリがある")))
         .map_err(|error| ("rename の後のディレクトリの sync", error))
 }
 
@@ -682,7 +718,8 @@ impl Store {
 
     pub fn open(config: StoreConfig) -> Result<Store> {
         let dir = config.data_dir.clone();
-        let fault = crate::fault::Fault::from_env().map_err(StoreError::Invalid)?;
+        #[cfg(debug_assertions)]
+        let mut fault = crate::fault::Fault::from_env().map_err(StoreError::Invalid)?;
         // 順は APPEND_FAILURE の方針 1a の末尾: データのディレクトリの mkdir(ロックの名は
         // 正規化した道から作るので先に要る)→ ロック → packs/・reflog/・tmp/ の mkdir →
         // tmp/ の片付け → node_key → recover → 開くときの sync → 書き込みの受け付け。
@@ -702,7 +739,16 @@ impl Store {
             }
         }
 
-        let secret_seed = Self::load_or_create_key(&dir)?;
+        // node_key を作る途中で落とす口(debug ビルドだけ。crash-in-node-key)。
+        #[cfg(debug_assertions)]
+        let mut before_key_rename = || {
+            if let Some(fault) = fault.as_mut() {
+                fault.on_node_key();
+            }
+        };
+        #[cfg(not(debug_assertions))]
+        let mut before_key_rename = || {};
+        let secret_seed = Self::load_or_create_key(&dir, &mut before_key_rename)?;
         let node_id_hex = sha2::hex(&ed25519::public_key(&secret_seed));
 
         let (sealed_packs, sealed_reflogs) = Self::load_manifest(&dir)?;
@@ -726,6 +772,7 @@ impl Store {
             gc_touched: None,
             gc_running: false,
             write_failure: None,
+            #[cfg(debug_assertions)]
             fault,
             _lock: lock,
         };
@@ -741,7 +788,7 @@ impl Store {
     fn sync_on_open(&self) -> Result<()> {
         let dir = &self.config.data_dir;
         let key_path = dir.join(NODE_KEY_NAME);
-        crate::fault::note_sync("file", &key_path);
+        note_sync("file", &key_path);
         std::fs::File::open(&key_path)
             .and_then(|file| file.sync_all())
             .map_err(|error| open_sync_error("鍵", &key_path, error))?;
@@ -750,14 +797,14 @@ impl Store {
                 continue;
             }
             let path = pack_path(dir, number);
-            crate::fault::note_sync("file", &path);
+            note_sync("file", &path);
             std::fs::File::open(&path)
                 .and_then(|file| file.sync_data())
                 .map_err(|error| open_sync_error("pack", &path, error))?;
         }
         for number in REFLOG.numbers(dir)? {
             let path = reflog_path(dir, number);
-            crate::fault::note_sync("file", &path);
+            note_sync("file", &path);
             std::fs::File::open(&path)
                 .and_then(|file| file.sync_data())
                 .map_err(|error| open_sync_error("reflog", &path, error))?;
@@ -765,7 +812,7 @@ impl Store {
         let parent = data_dir_parent(dir)?;
         for directory in [dir.join(PACK.directory), dir.join(REFLOG.directory), dir.clone(), parent]
         {
-            crate::fault::sync_dir(&directory)
+            sync_dir(&directory)
                 .map_err(|error| open_sync_error("ディレクトリ", &directory, error))?;
         }
         Ok(())
@@ -787,6 +834,8 @@ impl Store {
     }
 
     /// 失敗の注入を掛ける(テスト用の口。字句は node/src/fault.rs)。前に掛けたものは捨てる。
+    /// debug ビルドだけにあり、release のライブラリには無い。
+    #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn inject_fault(&mut self, spec: &str) -> Result<()> {
         self.fault = Some(crate::fault::Fault::parse(spec).map_err(StoreError::Invalid)?);
@@ -806,7 +855,7 @@ impl Store {
         }
         let errno = error.raw_os_error();
         let kind = match (op, errno, cleanup) {
-            (WriteOp::Write, Some(crate::fault::ENOSPC | crate::fault::EDQUOT), Cleanup::Ok) => {
+            (WriteOp::Write, Some(ENOSPC | EDQUOT), Cleanup::Ok) => {
                 FailureKind::NoSpace
             }
             _ => FailureKind::Io,
@@ -866,39 +915,36 @@ impl Store {
             ));
         }
         let new_file = before == 0;
+        // 注入(debug ビルドだけ。node/src/fault.rs)。release では各段が本来の操作だけになる。
+        #[cfg(debug_assertions)]
         let fired =
             self.fault.as_mut().and_then(|fault| fault.on_append(segment.directory, new_file));
         let record = encode_record(payload);
 
         // write の段。
-        use crate::fault::FaultKind;
-        let written = match fired {
-            Some(FaultKind::Before) => Err(crate::fault::injected(crate::fault::EIO)),
-            Some(FaultKind::Torn(n)) => file
-                .write_all(&record[..n.min(record.len())])
-                .and(Err(crate::fault::injected(crate::fault::ENOSPC))),
-            _ => file.write_all(&record),
-        };
+        #[cfg(debug_assertions)]
+        let written = crate::fault::write_stage(fired, &mut file, &record);
+        #[cfg(not(debug_assertions))]
+        let written = file.write_all(&record);
         // sync の段。
         let (op, outcome) = match written {
             Err(error) => (WriteOp::Write, Err(error)),
             Ok(()) => {
-                crate::fault::note_sync("file", &path);
-                let synced = match fired {
-                    Some(FaultKind::Sync | FaultKind::SyncKeep) => {
-                        Err(crate::fault::injected(crate::fault::EIO))
-                    }
-                    Some(FaultKind::NospaceSync) => {
-                        Err(crate::fault::injected(crate::fault::ENOSPC))
-                    }
-                    _ => file.sync_data(),
-                };
+                note_sync("file", &path);
+                #[cfg(debug_assertions)]
+                let synced = crate::fault::sync_stage(fired, &file);
+                #[cfg(not(debug_assertions))]
+                let synced = file.sync_data();
                 (WriteOp::Sync, synced)
             }
         };
         if let Err(error) = outcome {
+            #[cfg(debug_assertions)]
+            let fail_cleanup = crate::fault::fails_cleanup(fired);
+            #[cfg(not(debug_assertions))]
+            let fail_cleanup = false;
             // 切り詰めは再起動の再生を軽くするための best-effort で、正しさは書けない状態が持つ。
-            let cleanup = if fired == Some(FaultKind::SyncKeep) {
+            let cleanup = if fail_cleanup {
                 Cleanup::Failed
             } else {
                 match file.set_len(before).and_then(|_| file.sync_all()) {
@@ -911,18 +957,11 @@ impl Store {
         }
         drop(file);
         if new_file {
-            if fired == Some(FaultKind::CrashBeforeDirsync) {
-                eprintln!(
-                    "uniqnode: store: {}=crash-before-dirsync なので abort する(テスト用の口)",
-                    crate::fault::APPEND_FAULT_ENV
-                );
-                std::process::abort();
-            }
             let parent = path.parent().expect("セグメントには親がある").to_path_buf();
-            let synced = match fired {
-                Some(FaultKind::Dirsync) => Err(crate::fault::injected(crate::fault::EIO)),
-                _ => crate::fault::sync_dir(&parent),
-            };
+            #[cfg(debug_assertions)]
+            let synced = crate::fault::dirsync_stage(fired, &parent);
+            #[cfg(not(debug_assertions))]
+            let synced = sync_dir(&parent);
             if let Err(error) = synced {
                 let context = format!("新しいセグメント {} の親の sync", path.display());
                 return Err(self.enter_writes_disabled(
@@ -974,7 +1013,8 @@ impl Store {
         }
     }
 
-    fn load_or_create_key(dir: &Path) -> Result<[u8; 32]> {
+    /// `before_rename` は作るときだけ、tmp/ に書いて sync した後・rename の前に呼ぶ(注入の口)。
+    fn load_or_create_key(dir: &Path, before_rename: &mut dyn FnMut()) -> Result<[u8; 32]> {
         let key_path = dir.join(NODE_KEY_NAME);
         if key_path.exists() {
             let bytes = std::fs::read(&key_path)?;
@@ -1002,11 +1042,12 @@ impl Store {
                     .mode(0o600)
                     .open(&tmp_path)?;
                 file.write_all(&seed)?;
-                crate::fault::note_sync("file", &tmp_path);
+                note_sync("file", &tmp_path);
                 file.sync_all()?;
             }
+            before_rename();
             std::fs::rename(&tmp_path, &key_path)?;
-            crate::fault::sync_dir(dir)?;
+            sync_dir(dir)?;
             Ok(seed)
         }
     }
@@ -1025,18 +1066,14 @@ impl Store {
     fn write_manifest(&mut self, sealed_packs: &[u64], op: WriteOp) -> Result<()> {
         self.check_writable()?;
         let content = self.manifest_content(sealed_packs);
+        #[cfg(debug_assertions)]
         let fired = self.fault.as_mut().and_then(|fault| fault.on_manifest());
+        #[cfg(debug_assertions)]
+        let mut hook = |step| crate::fault::manifest_step(fired, step);
+        #[cfg(not(debug_assertions))]
+        let mut hook = |_| Ok(());
         let dir = self.config.data_dir.clone();
-        let written = atomic_write_steps(&dir, &dir.join(MANIFEST_NAME), &content, &mut |step| {
-            use crate::fault::FaultKind;
-            match (step, fired) {
-                (AtomicStep::BeforeRename, Some(FaultKind::Manifest))
-                | (AtomicStep::BeforeDirSync, Some(FaultKind::ManifestDirsync)) => {
-                    Err(crate::fault::injected(crate::fault::EIO))
-                }
-                _ => Ok(()),
-            }
-        });
+        let written = atomic_write_steps(&dir, &dir.join(MANIFEST_NAME), &content, &mut hook);
         match written {
             Ok(()) => Ok(()),
             Err((step, error)) => {
@@ -1433,11 +1470,13 @@ impl Store {
     /// 記録がロックの中で済む)。
     pub(crate) fn gc_sync_packs_dir(&mut self) -> Result<()> {
         let packs = self.config.data_dir.join(PACK.directory);
-        let fired = self.fault.as_mut().and_then(|fault| fault.on_gc_dirsync());
-        let synced = match fired {
-            Some(_) => Err(crate::fault::injected(crate::fault::EIO)),
-            None => crate::fault::sync_dir(&packs),
+        #[cfg(debug_assertions)]
+        let synced = {
+            let fired = self.fault.as_mut().and_then(|fault| fault.on_gc_dirsync());
+            crate::fault::gc_dirsync_stage(fired, &packs)
         };
+        #[cfg(not(debug_assertions))]
+        let synced = sync_dir(&packs);
         match synced {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -1462,6 +1501,8 @@ impl Store {
     /// 追記されていない)なら封印せず None(空の pack を封印すると次回の回収の対象に
     /// なるだけで、意味が無い)。
     pub fn seal_active_pack_for_gc(&mut self) -> Result<Option<u64>> {
+        // 空でも書けない状態を先に言う(空の早期 return が禁止状態を素通りさせない)。
+        self.check_writable()?;
         if self.active_pack_length == 0 {
             return Ok(None);
         }
@@ -1560,7 +1601,7 @@ impl Store {
                     ));
                 }
                 let packs = target.parent().expect("packs/ がある").to_path_buf();
-                if let Err(error) = crate::fault::sync_dir(&packs) {
+                if let Err(error) = sync_dir(&packs) {
                     let context = format!("GC の新 pack の rename の後の {} の sync", packs.display());
                     return Err(self.enter_writes_disabled(
                         WriteOp::GcCommit,
@@ -1632,6 +1673,8 @@ impl Store {
 
     /// 自分の名前空間の ref を更新する。target=None が tombstone。
     pub fn set_ref(&mut self, path: &str, target: Option<&str>) -> Result<u64> {
+        // 書けない状態は引数の検査より先に言う(不正な引数でも 400 でなく 503 と復旧の案内)。
+        self.check_writable()?;
         if path.is_empty() || path.starts_with('/') {
             return Err(StoreError::Invalid("ref パスが不正".into()));
         }
@@ -1659,6 +1702,7 @@ impl Store {
 
     /// pin(root の到達閉包に min_replicas を要求する。0 で解除。SPEC §4.5)。
     pub fn set_pin(&mut self, root: &str, min_replicas: u32) -> Result<u64> {
+        self.check_writable()?;
         if min_replicas > 0 && !self.object_index.contains_key(root) {
             return Err(StoreError::Invalid(format!("root {root} が存在しない")));
         }
@@ -1672,6 +1716,7 @@ impl Store {
 
     /// 保持表明(SPEC §4.5)。held=true は root の閉包を確約層で保持していることの表明。
     pub fn set_attest(&mut self, root: &str, held: bool) -> Result<u64> {
+        self.check_writable()?;
         if held && !self.object_index.contains_key(root) {
             return Err(StoreError::Invalid(format!(
                 "保持していない root {root} に held=true は表明できない"

@@ -2067,9 +2067,18 @@ fn handle_rendition(context: &ApiContext, chunk_id: &str, alias: &str) -> Respon
     match crate::rendition::commit(&mut store, work, rendered) {
         Ok(rendition) => {
             // 作ったことは記録に残す(費用の実測は、この行だけが後から読める根拠になる)。
+            // 保存したか、書けない状態なので保存せずに返したか(Unstored)も同じ行で言う:
+            // Unstored は次の要求でも作り直すので、同じ写しの行が繰り返し出る理由がここで読める。
+            let origin = match &rendition.origin {
+                crate::rendition::RenditionOrigin::Unstored => {
+                    "書けない状態なので保存していない(Unstored)".to_string()
+                }
+                crate::rendition::RenditionOrigin::Generated => "保存した(Generated)".to_string(),
+                other => format!("{other:?}"),
+            };
             crate::log_line!(
                 "uniqnode: rendition: {chunk_id} の {alias} を {elapsed_ms} ミリ秒で作った\
-                 ({} バイト、{})",
+                 ({} バイト、{}、{origin})",
                 rendition.bytes.len(),
                 rendition.recipe
             );

@@ -1683,6 +1683,7 @@ mod tests {
     /// 書けない間も、まだ作っていない写しは作って返す。保存はせず、ref も張らない
     /// (APPEND_FAILURE の方針 2: 読み出しを続ける約束を写しの閲覧でも守る)。
     #[test]
+    #[cfg(debug_assertions)]
     fn renditions_are_returned_unstored_while_writes_are_disabled() {
         require_poppler(Tool::Pdftoppm);
         let dir = temp_dir("unstored");

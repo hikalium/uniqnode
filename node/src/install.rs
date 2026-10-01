@@ -2521,7 +2521,7 @@ fn mkdir_each_element(dir: &Path) -> Result<(), String> {
 /// (APPEND_FAILURE の方針 1a)。
 pub fn sync_path_to_root(dir: &Path) -> Result<(), String> {
     for element in dir.ancestors() {
-        crate::fault::sync_dir(element).map_err(|error| {
+        crate::store::sync_dir(element).map_err(|error| {
             format!(
                 "{} を sync できない(ストア {} の名前を根まで永続させるため、経路の全ての要素を\
                  開いて sync する): {error}",

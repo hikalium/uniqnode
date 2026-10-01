@@ -11,6 +11,7 @@ pub mod distributed_search;
 pub mod ed25519;
 pub mod embed;
 pub mod eval;
+#[cfg(debug_assertions)]
 pub mod fault;
 pub mod fetch;
 pub mod gc;

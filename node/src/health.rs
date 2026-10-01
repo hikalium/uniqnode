@@ -198,6 +198,10 @@ pub struct HealthEngine {
     /// ストアが書けない状態に入ったことを記録したか(遷移で 1 度だけ記録する。should/0129)。
     writes_disabled_recorded: Mutex<bool>,
     started: Instant,
+    /// 書き込みを伴う動作(伝播交換・修復・降格)を始めた記録(試験だけ)。書けない間に
+    /// 飛ばしたことを、ストアが拒んだことと区別して観測する。
+    #[cfg(test)]
+    actions: Mutex<Vec<String>>,
 }
 
 /// ストアが書けない状態に入った遷移の記録の root と state(HealthEvent の欄を借りる)。
@@ -233,8 +237,19 @@ impl HealthEngine {
             events: Mutex::new(Vec::new()),
             writes_disabled_recorded: Mutex::new(false),
             started: Instant::now(),
+            #[cfg(test)]
+            actions: Mutex::new(Vec::new()),
         }
     }
+
+    /// 書き込みを伴う動作を始めたことを記録する(試験のビルドだけ。本番では何もしない)。
+    #[cfg(test)]
+    fn note_action(&self, action: &str, subject: &str) {
+        self.actions.lock().expect("actions lock").push(format!("{action} {subject}"));
+    }
+
+    #[cfg(not(test))]
+    fn note_action(&self, _action: &str, _subject: &str) {}
 
     /// ストアが書けない状態か。入った遷移を 1 度だけ記録する(周期ごとには記録しない。
     /// 飛ばしたことは、この 1 行と /v1/status の writes_disabled が示す)。
@@ -379,6 +394,7 @@ impl HealthEngine {
             }
             // 書けない間は伝播交換(取り込み = 書き込み)を黙って飛ばす。
             if accepted && !self.writes_disabled() {
+                self.note_action("exchange", address);
                 let mut report = SyncReport::default();
                 if let Err(e) = sync::sync_records(&self.store, &peer, &mut report) {
                     crate::log_line!("uniqnode: 伝播交換({address}): {e}");
@@ -396,9 +412,11 @@ impl HealthEngine {
                 continue;
             }
             if assessment.repair_selected {
+                self.note_action("repair", &root);
                 self.execute_repair(&root, &peer_addresses);
             }
             if assessment.demote_selected {
+                self.note_action("demote", &root);
                 let mut store = self.store.lock().expect("store lock");
                 match store.set_attest(&root, false) {
                     Ok(_) => {
@@ -717,21 +735,157 @@ mod tests {
         assert!(!result.repair_selected && !result.demote_selected);
     }
 
-    /// ストアが書けない状態に入ったら、周期は書き込みを飛ばし、入ったことを 1 度だけ記録する
-    /// (周期ごとに積まない)。
-    #[test]
-    fn a_disabled_store_is_recorded_once_and_the_tick_writes_nothing() {
-        let dir = std::env::temp_dir()
-            .join(format!("uniqnode-health-unit-{}-writes-disabled", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let mut store = Store::open(crate::store::StoreConfig::new(&dir)).expect("open");
-        store.inject_fault("before@pack:1").expect("inject");
-        assert!(store.put_object(b"fails").is_err());
-        let seq = store.last_seq();
+    /// 偽のピア: 127.0.0.1 の一時のポートで待ち、来た要求の道を記録する。/v1/status には
+    /// `node_id` を名乗り(容量は無制限)、/v1/replication/signers には空を返し、他は 404。
+    #[cfg(debug_assertions)]
+    fn fake_peer(node_id: String) -> (String, Arc<Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr").to_string();
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&paths);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_err() {
+                    continue;
+                }
+                loop {
+                    let mut header = String::new();
+                    match reader.read_line(&mut header) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) if header.trim_end_matches(['\r', '\n']).is_empty() => break,
+                        Ok(_) => {}
+                    }
+                }
+                let path = request_line.split_whitespace().nth(1).unwrap_or("").to_string();
+                seen.lock().expect("paths lock").push(path.clone());
+                let (status, body) = match path.as_str() {
+                    "/v1/status" => ("200 OK", format!("{{\"node_id\":\"{node_id}\"}}")),
+                    "/v1/replication/signers" => ("200 OK", "{\"signers\":[]}".to_string()),
+                    _ => ("404 Not Found", "{\"error\":\"not here\"}".to_string()),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (address, paths)
+    }
+
+    /// 周期が伝播交換・修復・降格を全部始める据え物。ピアが 1 つ(偽のピア。名乗る node_id は
+    /// 別のストア other のもの)と、pin が 2 つある:
+    /// - 修復の root: other が持ち、other が min_replicas 2 で pin して保持を表明している。
+    ///   自分は持っていない。保持者は other だけで足りず、t_prop が 0 なので自分が修復に選ばれ、
+    ///   other(偽のピア)から取り寄せに行く。
+    /// - 降格の root: 自分と other が持ち、両方が保持を表明している。自分が min_replicas 1 で
+    ///   pin しているので過剰で、自分が rendezvous の最下位になる root を選ぶので降格に選ばれる。
+    ///
+    /// `disable` なら、据えた後に最初の pack の追記を失敗させて書けない状態に入れる。返り値は
+    /// (エンジン、ストア、偽のピアが受けた要求の道、修復の root、降格の root、消す場所)。
+    #[cfg(debug_assertions)]
+    #[allow(clippy::type_complexity)]
+    fn writer_fixture(
+        name: &str,
+        disable: bool,
+    ) -> (HealthEngine, Arc<Mutex<Store>>, Arc<Mutex<Vec<String>>>, String, String, PathBuf) {
+        let base = std::env::temp_dir()
+            .join(format!("uniqnode-health-unit-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("mkdir base");
+        let dir = base.join("self");
+        let mut store = Store::open(crate::store::StoreConfig::new(&dir)).expect("open self");
+        let mut other =
+            Store::open(crate::store::StoreConfig::new(base.join("other"))).expect("open other");
+        let self_id = store.node_id_hex().to_string();
+        let other_id = other.node_id_hex().to_string();
+
+        let (repair_root, _) = other.put_object(b"{\"repair\":\"root\"}").expect("put");
+        other.set_pin(&repair_root, 2).expect("pin");
+        other.set_attest(&repair_root, true).expect("attest");
+
+        let demote_root = (0..)
+            .map(|i| format!("{{\"demote\":{i}}}"))
+            .find(|body| {
+                let id = crate::c1::id_for_bytes(body.as_bytes());
+                rendezvous_rank(&id, &self_id) > rendezvous_rank(&id, &other_id)
+            })
+            .expect("自分が最下位になる root");
+        let (demote_id, _) = other.put_object(demote_root.as_bytes()).expect("put");
+        other.set_attest(&demote_id, true).expect("attest");
+        store.put_object(demote_root.as_bytes()).expect("put");
+        store.set_attest(&demote_id, true).expect("attest");
+        store.set_pin(&demote_id, 1).expect("pin");
+
+        for record in other.export_ref_records(&other_id, 0).expect("export") {
+            store.ingest_ref_record(&record).expect("ingest");
+        }
+        drop(other);
+
+        let (address, paths) = fake_peer(other_id);
+        std::fs::write(dir.join("peers.json"), format!("{{\"peers\":[{{\"address\":\"{address}\"}}]}}"))
+            .expect("peers.json");
+        if disable {
+            store.inject_fault("before@pack:1").expect("inject");
+            assert!(store.put_object(b"fails").is_err());
+        }
         let store = Arc::new(Mutex::new(store));
-        let engine = HealthEngine::new(Arc::clone(&store), dir.clone(), params());
+        let mut fixture_params = params();
+        fixture_params.t_prop = Duration::ZERO;
+        let engine = HealthEngine::new(Arc::clone(&store), dir, fixture_params);
+        (engine, store, paths, repair_root, demote_id, base)
+    }
+
+    /// 書ける据え物では、1 周期が伝播交換・修復・降格を全部始める(据え物が書き手を要する
+    /// ことの確かめ)。同じ据え物を書けない状態にすると、どれも始めず(偽のピアには生存確認の
+    /// /v1/status しか来ない)、何も書かず、入ったことを 1 度だけ記録する(周期ごとに積まない)。
+    /// ストアの拒否だけでは、交換と修復の通信と、降格の試みは止まらない。止めるのは周期の
+    /// 飛ばしである。
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_disabled_store_skips_exchange_repair_and_demotion_and_is_recorded_once() {
+        let (engine, store, paths, repair_root, demote_root, base) =
+            writer_fixture("writers-enabled", false);
+        engine.tick();
+        let actions = engine.actions.lock().expect("actions lock").clone();
+        let address = crate::query::read_peer_entries(&base.join("self"))[0].address.clone();
+        for wanted in [
+            format!("exchange {address}"),
+            format!("repair {repair_root}"),
+            format!("demote {demote_root}"),
+        ] {
+            assert!(actions.contains(&wanted), "書ける据え物で {wanted} が始まらない: {actions:?}");
+        }
+        let requested = paths.lock().expect("paths lock").clone();
+        assert!(
+            requested.iter().any(|path| path == "/v1/replication/signers"),
+            "交換が偽のピアに来ていない: {requested:?}"
+        );
+        assert!(
+            requested.iter().any(|path| path != "/v1/status" && path != "/v1/replication/signers"),
+            "修復の取り寄せが偽のピアに来ていない: {requested:?}"
+        );
+        drop(engine);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&base);
+
+        let (engine, store, paths, _, _, base) = writer_fixture("writers-disabled", true);
+        let seq = store.lock().expect("lock").last_seq();
         engine.tick();
         engine.tick();
+        let actions = engine.actions.lock().expect("actions lock").clone();
+        assert!(actions.is_empty(), "書けない間に書き手が始まった: {actions:?}");
+        let requested = paths.lock().expect("paths lock").clone();
+        assert!(!requested.is_empty(), "生存確認は続く");
+        assert!(
+            requested.iter().all(|path| path == "/v1/status"),
+            "書けない間に生存確認より先の要求が出た: {requested:?}"
+        );
         let recorded: Vec<HealthEvent> = engine
             .events_snapshot()
             .into_iter()
@@ -743,6 +897,6 @@ mod tests {
         assert_eq!(store.lock().expect("lock").last_seq(), seq, "周期は何も書かない");
         drop(engine);
         drop(store);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

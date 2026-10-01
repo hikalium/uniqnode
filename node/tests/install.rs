@@ -56,6 +56,22 @@ fn uniqnode_with_path(arguments: &[&str], path: &str) -> CommandOutcome {
     }
 }
 
+/// 環境変数を足して走らせる(途中で止めるテスト用の口と sync の記録。node/src/install.rs の
+/// INSTALL_ABORT_ENV と node/src/fault.rs の SYNC_LOG_ENV)。
+fn uniqnode_with_env(arguments: &[&str], envs: &[(&str, &str)]) -> CommandOutcome {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_uniqnode"));
+    command.args(arguments);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command.output().expect("spawn uniqnode");
+    CommandOutcome {
+        status: output.status.code().expect("exit code"),
+        stdout: String::from_utf8(output.stdout).expect("utf-8 stdout"),
+        stderr: String::from_utf8(output.stderr).expect("utf-8 stderr"),
+    }
+}
+
 /// systemctl が PATH に在るか(本番と同じ探し方。should/0135)。無ければ理由を出して
 /// 呼び手が戻る。
 fn systemctl_available() -> bool {
@@ -1219,19 +1235,26 @@ fn the_default_copy_directory_is_split_per_instance() {
     assert_eq!(options.backup_dir, Path::new("/mnt/copies/plan"));
 }
 
-/// テンプレートになる前の名の unit が据え先に残っているとき: 既定のインスタンスは取り合うので
-/// 断り、外す命令を添える。別の名のインスタンスは取り合わないので、そのまま進む。
+/// テンプレートになる前の名の unit が据え先に残っているとき: インスタンスに依らず何も置かずに
+/// 断り、外す命令と docs/mop/SYSTEMD.md の「旧い名の unit から移る」を添える。既定のインスタンス
+/// は主の口とストアを取り合い、別の名のインスタンスも全インスタンスが共有するバイナリを差し替える
+/// ので、旧い serve の次の起動が新しいバイナリを旧い unit で走らせる(APPEND_FAILURE の完了条件の
+/// 「install の断り」)。断ったとき、据え先のバイナリのバイト列と mtime は前と同じである。旧い名を
+/// 外せば据わる(systemctl に触れないよう、経路の sync の後で止める口で確かめる)。
 /// should/0137: legacy_units_present の判定を空の Vec に固定すると、1 つ目の assert が赤に
 /// なる(実験した)。
 #[test]
-fn the_units_from_before_the_template_stop_only_the_default_instance() {
-    if !systemctl_available() {
-        return;
-    }
+fn the_units_from_before_the_template_refuse_every_instance_and_keep_the_binary() {
     let work = work_dir("legacy-units");
     let unit_dir = work.join("units");
     std::fs::create_dir_all(&unit_dir).expect("mkdir");
-    std::fs::write(unit_dir.join("uniqnode-serve.service"), "# 古い名の unit\n").expect("write");
+    let legacy_unit = unit_dir.join("uniqnode-serve.service");
+    std::fs::write(&legacy_unit, "# 古い名の unit\n").expect("write");
+    let binary = work.join("bin").join("uniqnode");
+    std::fs::create_dir_all(binary.parent().expect("親")).expect("mkdir");
+    std::fs::write(&binary, b"the binary the old units run").expect("write");
+    let mtime = |path: &Path| std::fs::metadata(path).expect("metadata").modified().expect("mtime");
+    let binary_mtime = mtime(&binary);
 
     let arguments = |instance: &str, port: u16, store: &str| {
         vec![
@@ -1246,36 +1269,172 @@ fn the_units_from_before_the_template_stop_only_the_default_instance() {
             "--backup-dir".to_string(),
             work.join(format!("copy-{instance}")).to_string_lossy().to_string(),
             "--bin".to_string(),
-            work.join("bin").join("uniqnode").to_string_lossy().to_string(),
+            binary.to_string_lossy().to_string(),
             "--unit-dir".to_string(),
             unit_dir.to_string_lossy().to_string(),
             "--no-start".to_string(),
         ]
     };
-    let run = |words: &[String]| uniqnode(&words.iter().map(String::as_str).collect::<Vec<_>>());
+    let run = |words: &[String]| {
+        uniqnode_with_env(
+            &words.iter().map(String::as_str).collect::<Vec<_>>(),
+            &[("UNIQNODE_INSTALL_ABORT_AFTER", "synced")],
+        )
+    };
 
-    let outcome = run(&arguments("default", 7480, "store-default"));
+    for (instance, port) in [("default", 7480), ("graph", 7490)] {
+        let outcome = run(&arguments(instance, port, &format!("store-{instance}")));
+        assert_eq!(outcome.status, 1, "{instance}: {}\n{}", outcome.stdout, outcome.stderr);
+        assert!(
+            outcome.stderr.contains("uniqnode-serve.service")
+                && outcome.stderr.contains("disable --now")
+                && outcome.stderr.contains("nft delete table inet uniqnode")
+                && outcome.stderr.contains("「旧い名の unit から移る」"),
+            "{instance}: 外す命令と古い表の始末と移る手順を添える: {}",
+            outcome.stderr
+        );
+        assert!(
+            !unit_dir.join("uniqnode-serve@.service").exists(),
+            "{instance}: 断ったのだから何も置かない"
+        );
+        assert!(!work.join(format!("store-{instance}")).exists(), "{instance}: ストアを作った");
+        assert_eq!(
+            std::fs::read(&binary).expect("read"),
+            b"the binary the old units run",
+            "{instance}: 断ったのにバイナリを差し替えた"
+        );
+        assert_eq!(mtime(&binary), binary_mtime, "{instance}: 断ったのにバイナリに触れた");
+    }
+    let graph = run(&arguments("graph", 7490, "store-graph"));
+    assert!(graph.stderr.contains("共有する"), "別の名のインスタンスの断りの理由: {}", graph.stderr);
+
+    // 旧い名を外せば据わる(経路の sync の後、daemon-reload の前で止める)。
+    std::fs::remove_file(&legacy_unit).expect("rm");
+    let outcome = run(&arguments("graph", 7490, "store-graph"));
     assert_eq!(outcome.status, 1, "{}\n{}", outcome.stdout, outcome.stderr);
     assert!(
-        outcome.stderr.contains("uniqnode-serve.service")
-            && outcome.stderr.contains("disable --now")
-            && outcome.stderr.contains("nft delete table inet uniqnode"),
-        "外す命令と古い表の始末を添える: {}",
+        outcome.stderr.contains("UNIQNODE_INSTALL_ABORT_AFTER=synced"),
+        "止める口より前で断られた: {}",
         outcome.stderr
     );
+    assert!(unit_dir.join("uniqnode-serve@.service").exists());
+    assert!(work.join("store-graph").is_dir());
+    assert_ne!(std::fs::read(&binary).expect("read"), b"the binary the old units run");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// install はストアの経路の足りない要素を上から 1 つずつ作り、作ったかどうかに依らず、データの
+/// ディレクトリから根までの全ての要素を下から順に sync する。mkdir の後・sync の前で中断した
+/// install を打ち直すと、「既に在る」要素の名前まで sync する(APPEND_FAILURE の方針 1a)。
+/// systemctl には触れない(テスト用の口で daemon-reload の前に止める)。
+#[test]
+fn install_syncs_the_store_path_to_the_root_even_after_an_interrupted_run() {
+    let work = work_dir("path-sync");
+    let store = work.join("a").join("b").join("store");
+    let sync_log = work.join("sync.log");
+    let arguments: Vec<String> = vec![
+        "install".to_string(),
+        store.to_string_lossy().to_string(),
+        "--instance".to_string(),
+        "pathsync".to_string(),
+        "--listen".to_string(),
+        "127.0.0.1:7500".to_string(),
+        "--viewer-listen".to_string(),
+        "127.0.0.1:7501".to_string(),
+        "--backup-dir".to_string(),
+        work.join("copy").to_string_lossy().to_string(),
+        "--bin".to_string(),
+        work.join("bin").join("uniqnode").to_string_lossy().to_string(),
+        "--unit-dir".to_string(),
+        work.join("units").to_string_lossy().to_string(),
+        "--no-start".to_string(),
+    ];
+    let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    let log_text = sync_log.to_string_lossy().to_string();
+
+    // 1 回目: 経路を作った後、sync の前で止める。
+    let interrupted = uniqnode_with_env(
+        &words,
+        &[("UNIQNODE_INSTALL_ABORT_AFTER", "mkdir"), ("UNIQNODE_SYNC_LOG", &log_text)],
+    );
+    assert_eq!(interrupted.status, 1, "{}\n{}", interrupted.stdout, interrupted.stderr);
+    assert!(interrupted.stderr.contains("UNIQNODE_INSTALL_ABORT_AFTER=mkdir"), "{}", interrupted.stderr);
+    assert!(store.is_dir(), "経路の要素を作っていない");
+    let synced_before = std::fs::read_to_string(&sync_log).unwrap_or_default();
     assert!(
-        !unit_dir.join("uniqnode-serve@.service").exists(),
-        "断ったのだから何も置かない"
+        !synced_before.lines().any(|line| line == format!("dir {}", store.display())),
+        "止めたのは sync の前のはず: {synced_before}"
     );
 
-    let outcome = run(&arguments("graph", 7490, "store-graph"));
-    assert_eq!(outcome.status, 0, "{}\n{}", outcome.stdout, outcome.stderr);
-    assert!(
-        outcome.stdout.contains("据え先に古い名の unit がある")
-            && outcome.stdout.contains("取り合わない"),
-        "{}",
-        outcome.stdout
+    // 2 回目: 全部が既に在る。それでも根までの全ての要素を下から順に sync する。
+    let rerun = uniqnode_with_env(
+        &words,
+        &[("UNIQNODE_INSTALL_ABORT_AFTER", "synced"), ("UNIQNODE_SYNC_LOG", &log_text)],
     );
-    assert!(unit_dir.join("uniqnode-serve@.service").exists());
+    assert_eq!(rerun.status, 1, "{}\n{}", rerun.stdout, rerun.stderr);
+    assert!(rerun.stderr.contains("UNIQNODE_INSTALL_ABORT_AFTER=synced"), "{}", rerun.stderr);
+    let synced = std::fs::read_to_string(&sync_log).expect("sync の記録");
+    let expected: Vec<String> =
+        store.ancestors().map(|element| format!("dir {}", element.display())).collect();
+    assert_eq!(expected.last().map(String::as_str), Some("dir /"), "根まで数えていない");
+    let lines: Vec<&str> = synced.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| *line == expected[0])
+        .unwrap_or_else(|| panic!("ストアを sync していない: {synced}"));
+    assert_eq!(
+        &lines[start..start + expected.len()],
+        expected.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+        "データのディレクトリから根まで、下から順に sync していない: {synced}"
+    );
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// 根までの経路に開けない要素があれば、飛ばさずにその道と理由を言って install の失敗にする。
+#[test]
+fn install_fails_with_the_path_when_an_ancestor_cannot_be_opened() {
+    use std::os::unix::fs::PermissionsExt;
+    let work = work_dir("path-unreadable");
+    let locked = work.join("locked");
+    std::fs::create_dir_all(&locked).expect("mkdir");
+    let store = locked.join("store");
+    std::fs::create_dir_all(&store).expect("mkdir");
+    // 書けて辿れるが読めない(0333): 名前は作れるが、開いて sync できない。
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o333)).expect("chmod");
+    if std::fs::File::open(&locked).is_ok() {
+        // root で走っていると読めてしまう。前提を出して戻る。
+        println!("0333 のディレクトリを開けてしまう(root で走っている)ので、この試験は走らせない");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::fs::remove_dir_all(&work).expect("cleanup");
+        return;
+    }
+    let outcome = uniqnode_with_env(
+        &[
+            "install",
+            store.to_str().expect("utf-8"),
+            "--instance",
+            "unreadable",
+            "--listen",
+            "127.0.0.1:7510",
+            "--viewer-listen",
+            "127.0.0.1:7511",
+            "--backup-dir",
+            work.join("copy").to_str().expect("utf-8"),
+            "--bin",
+            work.join("bin").join("uniqnode").to_str().expect("utf-8"),
+            "--unit-dir",
+            work.join("units").to_str().expect("utf-8"),
+            "--no-start",
+        ],
+        &[("UNIQNODE_INSTALL_ABORT_AFTER", "synced")],
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!(outcome.status, 1, "{}\n{}", outcome.stdout, outcome.stderr);
+    assert!(
+        outcome.stderr.contains(&format!("{} を sync できない", locked.display())),
+        "開けない要素の道を言っていない: {}",
+        outcome.stderr
+    );
+    assert!(!outcome.stderr.contains("UNIQNODE_INSTALL_ABORT_AFTER"), "{}", outcome.stderr);
     std::fs::remove_dir_all(&work).expect("cleanup");
 }

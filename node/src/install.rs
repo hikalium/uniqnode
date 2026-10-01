@@ -2165,33 +2165,37 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         ),
     )?;
 
-    // (0) テンプレート unit になる前の名が据え先に残っていないか。残ったまま既定の
-    // インスタンスを据えると、同じ主の口と同じストアを 2 つの unit が取り合う。黙って
-    // 外しはしない(操作者のものを止めるのは操作者の判断。must/0022)。別の名の
-    // インスタンスなら取り合わないので、そのまま進む。
+    // (0) テンプレート unit になる前の名が据え先に残っていないか。残っていれば、インスタンスに
+    // 依らず何も置かずに断る。既定のインスタンスなら、同じ主の口と同じストアを 2 つの unit が
+    // 取り合う。別の名のインスタンスでも、install は全インスタンスが共有するバイナリを
+    // 差し替えるので、旧い serve の次の起動(restart・再起動)が新しいバイナリを旧い unit
+    // (ExecStop= も新しい制限も無い)で走らせる(APPEND_FAILURE の段取り。第 18 版への Claude の
+    // レビューの中 5)。黙って外しはしない(操作者のものを止めるのは操作者の判断。must/0022)。
     let legacy = legacy_units_present(&options.unit_dir);
     if !legacy.is_empty() {
-        if options.instance == DEFAULT_INSTANCE {
-            return Err(format!(
-                "据え先 {} にテンプレートになる前の名の unit が残っている({})。既定の\
-                 インスタンス {DEFAULT_INSTANCE} を据えると、同じ主の口と同じストアを 2 つの \
-                 unit が取り合う。先に外す: {}。nft を使っているなら古い表も消す\
-                 (nft delete table inet uniqnode)。別の実体を足すだけなら \
-                 {INSTANCE_FLAG} <名> で名前を分ける",
-                options.unit_dir.display(),
-                legacy.join(" "),
-                legacy_units_removal_command(scope, &options.unit_dir, &legacy)
-            ));
-        }
-        say(
-            out,
-            &format!(
-                "据え先に古い名の unit がある({})が、据えるのは {} なので取り合わない\
-                 (そのまま残す)",
-                legacy.join(" "),
-                options.instance
-            ),
-        )?;
+        let conflict = if options.instance == DEFAULT_INSTANCE {
+            format!(
+                "既定のインスタンス {DEFAULT_INSTANCE} を据えると、同じ主の口と同じストアを 2 つの \
+                 unit が取り合う"
+            )
+        } else {
+            format!(
+                "インスタンス {} は旧い名と取り合わないが、install は全インスタンスが共有する \
+                 バイナリ {} を差し替えるので、旧い名の serve の次の起動(restart・再起動)が新しい\
+                 バイナリを旧い unit で走らせる",
+                options.instance,
+                options.binary.display()
+            )
+        };
+        return Err(format!(
+            "据え先 {} にテンプレートになる前の名の unit が残っている({})。{conflict}。\
+             何も置かずに断る(バイナリも差し替えない)。先に外す(docs/mop/SYSTEMD.md の\
+             「旧い名の unit から移る」): {}。nft を使っているなら古い表も消す\
+             (nft delete table inet uniqnode)",
+            options.unit_dir.display(),
+            legacy.join(" "),
+            legacy_units_removal_command(scope, &options.unit_dir, &legacy)
+        ));
     }
 
     // (1) バイナリ。
@@ -2275,7 +2279,8 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         (&options.backup_dir, "写し先"),
     ] {
         let existed = dir.exists();
-        std::fs::create_dir_all(dir).map_err(|e| format!("{} を作れない: {e}", dir.display()))?;
+        mkdir_each_element(dir)?;
+        install_abort_point(InstallAbort::AfterMkdir)?;
         // root が作ったディレクトリは実行ユーザの所有にする。在ったものの所有者は変えない
         // (最後の確認が見る)。
         let owner_note = match scope.account() {
@@ -2285,6 +2290,10 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
             }
             _ => String::new(),
         };
+        // 作ったかどうかに依らず、根までの名前を永続させる(前の install が mkdir の後・sync の
+        // 前で中断していても、再実行で「既に在る」要素の名前まで永続する。serve が開く時点で
+        // 親の名前まで永続している、という Store::open の前提をここで満たす)。
+        sync_path_to_root(dir)?;
         say(
             out,
             &format!(
@@ -2293,6 +2302,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
             ),
         )?;
     }
+    install_abort_point(InstallAbort::AfterSync)?;
 
     // (4) daemon-reload。
     systemctl_ok(scope, &["daemon-reload"])?;
@@ -2483,6 +2493,80 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     let timers = systemctl_ok(scope, &["list-timers", &options.backup_timer(), "--no-pager"])?;
     for line in timers.lines().take_while(|line| !line.trim().is_empty()) {
         say(out, &format!("次の刻み: {line}"))?;
+    }
+    Ok(())
+}
+
+/// 経路の足りない要素を上から 1 つずつ `mkdir` する(`create_dir_all` を使わないのは、作る
+/// 要素と、在ったが通れない要素を、道を添えて言い分けるため。名前の永続は sync_path_to_root)。
+fn mkdir_each_element(dir: &Path) -> Result<(), String> {
+    let mut path = PathBuf::new();
+    for component in dir.components() {
+        path.push(component);
+        if path.is_dir() {
+            continue;
+        }
+        match std::fs::create_dir(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {}
+            Err(error) => return Err(format!("{} を作れない: {error}", path.display())),
+        }
+    }
+    Ok(())
+}
+
+/// ディレクトリから根までの全ての要素を、下から順に開いて sync する(各要素の sync が、その
+/// 中の子の名前を永続させる)。開けない要素があれば飛ばさず、その道と理由を言って失敗にする:
+/// 据えた後に serve が「親を sync できない」で起きない形を、先に install で言う
+/// (APPEND_FAILURE の方針 1a)。
+pub fn sync_path_to_root(dir: &Path) -> Result<(), String> {
+    for element in dir.ancestors() {
+        crate::fault::sync_dir(element).map_err(|error| {
+            format!(
+                "{} を sync できない(ストア {} の名前を根まで永続させるため、経路の全ての要素を\
+                 開いて sync する): {error}",
+                element.display(),
+                dir.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// install を途中で止めるテスト用の口(debug ビルドだけが読む)。中断からの再実行と、
+/// systemctl に触れずに経路の sync を確かめる試験が使う。
+pub const INSTALL_ABORT_ENV: &str = "UNIQNODE_INSTALL_ABORT_AFTER";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InstallAbort {
+    /// データのディレクトリの経路を mkdir した後、sync の前(値 `mkdir`)。
+    AfterMkdir,
+    /// ストアと写し先の経路の sync の後、daemon-reload の前(値 `synced`)。
+    AfterSync,
+}
+
+fn install_abort_point(point: InstallAbort) -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    {
+        let wanted = match std::env::var(INSTALL_ABORT_ENV).ok().as_deref() {
+            Some("mkdir") => Some(InstallAbort::AfterMkdir),
+            Some("synced") => Some(InstallAbort::AfterSync),
+            Some(other) => {
+                return Err(format!("{INSTALL_ABORT_ENV}={other:?} が読めない(mkdir か synced)"))
+            }
+            None => None,
+        };
+        if wanted == Some(point) {
+            let name = match point {
+                InstallAbort::AfterMkdir => "mkdir",
+                InstallAbort::AfterSync => "synced",
+            };
+            return Err(format!("{INSTALL_ABORT_ENV}={name} により、ここで止める(テスト用)"));
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = point;
     }
     Ok(())
 }

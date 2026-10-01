@@ -507,4 +507,6 @@ graph_* を据え直すと、旧い serve の次の起動(restart・再起動)�
 主の口の全ての接続が 403 になる。vega では、どのインスタンスの install も `@default` への移行の後に打つ
 (docs/mop/SYSTEMD.md の「旧い名の unit から移る」の注意)。加えて、install は据え先に旧い名の unit が
 残っている間は、インスタンスに依らず共有のバイナリの差し替えを断るように直す(A1 か S1a のうち先に入る
-方に含め、完了条件の「install の断り」の試験で閉じる。第 12 版への Claude のレビューの中 5)。
+方に含め、完了条件の「install の断り」の試験で閉じる。第 12 版への Claude のレビューの中 5)。この直しは
+APPEND_FAILURE の S1a で入った(install.rs の (0)。試験は node/tests/install.rs の
+the_units_from_before_the_template_refuse_every_instance_and_keep_the_binary)。

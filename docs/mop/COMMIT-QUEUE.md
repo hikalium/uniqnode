@@ -40,14 +40,28 @@ CQ は、claude.ai の lamalium のプロジェクトのスレッド「Commit Qu
 `session_0121YxhvvFnBHVUwzPYgESRo` へ送る。CQ はその送り手のセッションへ send_message で返す。
 CQ のセッションが替わったら、プロジェクトの調整役が新しい宛先を送り手へ知らせる。
 
-Codex には SendMessage が無い。CQ へ統合を頼む Codex は、依頼の全文をそのホストの調整のファイル
-(crystal では `/home/lamalium/lamalium-install/coordination.md`)に書き、同じホストの Claude Code の
-セッションへ認証付きのローカルソケットで知らせる(lamalium の docs/mop/NOTIFY-CLAUDE-SESSION.md。
-turn/steer が届くのは Codex と ChatGPT のチャットで、Claude Code には届かない)。その Claude の
-セッションが全文を CQ へ送り、「CQ へ中継済み」と時刻を同じファイルへ書き、後で CQ の答え
-(main へ入った commit id、または失敗した検査を添えた差し戻し)も同じファイルへ書き戻す。ホストで
-Claude のセッションが動いていないときは、依頼はファイルの中で待ち、Codex は中継を待っていることを
-自分の報告で操作者へ伝える。Codex が自分で main へ push することはない。
+Codex には SendMessage が無い。Codex が CQ へ送るもの(統合の依頼と、CQ の問い合わせへの答え)と、
+vega の検査の依頼は、同じホストの Claude Code のセッションが中継する。Codex が自分で main へ push
+することはない。中継は次のように行う。
+
+1. Codex は全文をそのホストの調整のファイル(crystal では
+   `/home/lamalium/lamalium-install/coordination.md`)に書く。依頼はリポジトリと先頭の SHA で識別する。
+2. Codex は同じホストの Claude Code のセッションへ、認証付きのローカルソケットで知らせる。知らせ方と、
+   届いたことの確かめ方は、lamalium の docs/mop/NOTIFY-CLAUDE-SESSION.md にある(別のリポジトリなので、
+   #uuid の参照では指せない)。turn/steer が届くのは Codex と ChatGPT のチャットで、Claude Code には
+   届かない。
+3. 中継するのは、そのホストの Claude のセッション 1 つだけである。そのセッションは、ファイルに
+   「CQ へ中継済み」の記録がまだ無い依頼だけを CQ へ送り、送ったらすぐに時刻を添えてその記録を書く。
+   送ったかどうか分からないときは、送り直す前に、同じリポジトリと SHA の依頼が届いているかを CQ に
+   問い合わせる。
+4. その Claude のセッションは、動き出したときと知らせを受けたときに、ファイルの中でまだ中継していない
+   依頼を確かめて中継する。Claude のセッションが動いていないときや、知らせが届かなかったときは、依頼は
+   ファイルの中で待つ。Codex は中継を待っていることを自分の報告で操作者へ伝え、Claude のセッションが
+   動き出したら知らせ直す。
+5. CQ と vega のセッションから返ってきたものは、全文を同じファイルへ書き戻す。統合の結果(送られた
+   SHA と main へ入った SHA の組)、差し戻し(赤の理由と出力の要点)、問い合わせ、vega の検査の結果
+   (下の HEAD と HEAD^ の SHA と落ちたテスト)のどれも、元の依頼のリポジトリと SHA に対応づけて書く。
+   Codex が問い合わせに答えるときも、1 から同じ経路で送る。
 
 vega の検査(下の「送り手の手順」の 4)は、vega の Claude のセッション
 (`bridge:session_01EVEBXiTc3Wrjfoetpbkij2`)に頼む。頼む側は、push 済みのブランチの
@@ -114,7 +128,9 @@ node/ の下のファイルは、Markdown でも説明の文書に当たらな�
 ## CQ の手順
 
 1. 送られたブランチを fetch し、先頭が送られた commit id と一致することを確かめる。一致しなければ
-   積まずに送り手へ問い合わせる。レビューの欄が空のときも、統合せずに問い合わせる。
+   積まずに送り手へ問い合わせる。レビューの欄が空のときも、統合せずに問い合わせる。同じリポジトリと
+   先頭の SHA の依頼が 2 度届いたら、2 度目は積まず、1 度目の結果(済んでいなければ、処理中であること)
+   を返す。
 2. 取り込む範囲(`origin/main..<先頭>`)に merge commit が無いことを
    `git log --merges origin/main..<先頭>` が空であることで確かめる。あれば差し戻す。
 3. 範囲の各 commit を「合格の条件」の節の方法で調べ、説明の文書だけの変更かどうかを決める。

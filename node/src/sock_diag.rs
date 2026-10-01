@@ -190,12 +190,22 @@ pub fn lookup(expected: Endpoints) -> Result<Vec<Answer>, String> {
             let _ = sender.send(result);
         })
         .map_err(|e| format!("sock_diag の照会のスレッドを作れない: {e}"))?;
+    receive_before(&receiver, deadline)
+}
+
+/// 照会のスレッドの答えを絶対の期限まで待つ。受けが成功した後にも期限を見る: recv_timeout は
+/// 期限より先にキューを見るので、呼び手が止まって期限の後に再開したときや、照会のスレッドが
+/// 最後の期限の確かめから送りまでに遅れたときに、期限の後の答えを返しうる。それも捨てる。
+fn receive_before<T>(
+    receiver: &std::sync::mpsc::Receiver<Result<T, String>>,
+    deadline: std::time::Instant,
+) -> Result<T, String> {
     let left = deadline.saturating_duration_since(std::time::Instant::now());
+    let expired = || Err(format!("sock_diag の照会が期限({QUERY_TIMEOUT:?})の内に終わらない"));
     match receiver.recv_timeout(left) {
+        Ok(_) if std::time::Instant::now() >= deadline => expired(),
         Ok(result) => result,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            Err(format!("sock_diag の照会が期限({QUERY_TIMEOUT:?})の内に終わらない"))
-        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => expired(),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             Err("sock_diag の照会のスレッドが答えずに終わった".to_string())
         }
@@ -660,6 +670,22 @@ mod tests {
 
     fn at(text: &str) -> SocketAddr {
         text.parse().expect("socket address")
+    }
+
+    /// 期限の前に届いて待っていた答えでも、受け取りが期限の後なら捨てる(呼び手が止まって
+    /// 期限の後に再開した場合)。期限の前の受け取りは答えを返す。
+    #[test]
+    fn an_answer_taken_after_the_deadline_is_discarded() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let past = std::time::Instant::now();
+        sender.send(Ok(1000u32)).expect("send");
+        std::thread::sleep(Duration::from_millis(5));
+        let late = receive_before(&receiver, past);
+        assert!(late.is_err(), "期限の後の答えを採った: {late:?}");
+
+        sender.send(Ok(1000u32)).expect("send");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        assert_eq!(receive_before(&receiver, deadline), Ok(1000));
     }
 
     /// 相手のソケット(127.0.0.1:40000 から 127.0.0.1:7440 へ)から見た 4 つ組。

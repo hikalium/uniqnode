@@ -40,11 +40,14 @@ CQ は、claude.ai の lamalium のプロジェクトのスレッド「Commit Qu
 `session_0121YxhvvFnBHVUwzPYgESRo` へ送る。CQ はその送り手のセッションへ send_message で返す。
 CQ のセッションが替わったら、プロジェクトの調整役が新しい宛先を送り手へ知らせる。
 
-Codex には SendMessage が無い。crystal の Codex は、依頼の全文を
-`/home/lamalium/lamalium-install/coordination.md` に書き、crystal の Claude のセッション
-(`bridge:session_01MaBCbXUfCELqmukmhAB7wT`)へ turn/steer で知らせる。その Claude のセッションが
-全文を CQ へ送り、CQ の答えを同じファイルへ書き戻す(lamalium の CLAUDE.md の Codex の節にある
-分担の形である)。
+Codex には SendMessage が無い。CQ へ統合を頼む Codex は、依頼の全文をそのホストの調整のファイル
+(crystal では `/home/lamalium/lamalium-install/coordination.md`)に書き、同じホストの Claude Code の
+セッションへ認証付きのローカルソケットで知らせる(lamalium の docs/mop/NOTIFY-CLAUDE-SESSION.md。
+turn/steer が届くのは Codex と ChatGPT のチャットで、Claude Code には届かない)。その Claude の
+セッションが全文を CQ へ送り、「CQ へ中継済み」と時刻を同じファイルへ書き、後で CQ の答え
+(main へ入った commit id、または失敗した検査を添えた差し戻し)も同じファイルへ書き戻す。ホストで
+Claude のセッションが動いていないときは、依頼はファイルの中で待ち、Codex は中継を待っていることを
+自分の報告で操作者へ伝える。Codex が自分で main へ push することはない。
 
 vega の検査(下の「送り手の手順」の 4)は、vega の Claude のセッション
 (`bridge:session_01EVEBXiTc3Wrjfoetpbkij2`)に頼む。頼む側は、push 済みのブランチの

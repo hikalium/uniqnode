@@ -173,6 +173,14 @@ node/src/fetch.rs で、取る・見分ける・名前を決める・出所を�
   誰が直せるかで分ける: 400 は URL や name の誤り、415 は取り込める種別でない、502 は
   向こうから取れない(繋がらない・期限切れ・2xx でない・上限超え)、503 は道具(curl・
   pdftotext)が無い、500 は取れたのにこちらで処理できない。
+- arXiv の論文は abs ページ(`https://arxiv.org/abs/<id>`)をこの入口に渡す。HTML の自足化で
+  citation_title・citation_author・citation_date の meta と要旨が残り、PDF が要るなら
+  `https://arxiv.org/pdf/<id>` を同じ入口に渡す。書誌を export API
+  (export.arxiv.org/api/query)から取る道は使わない: id をまとめて問うと、ほぼ確実に
+  200 のまま本文 14 バイトの「Rate exceeded.」を返す。中身が空でないので `[ -s file ]` の
+  ような素朴な成否の判定を通り、空欄だらけの書誌が入る。abs ページは 3 秒おきの 22 本で
+  全て取れた(2026-08-18 の実測)。どうしても export API を使うなら、応答に `<entry>` が
+  あることを確かめてから入れる。
 
 ## 注釈の取り込みと照合
 

@@ -101,6 +101,23 @@ commit したら、指示を待たずにそのまま `git push` する(エージ
 据え付けや移行の手順が古い版を前提に組まれてしまう(2026-09-29 の利用者の指示)。
 テストと検査が緑なら、PR を通さずに main へ線形に積んで push してよい(2026-09-30 の操作者の裁定)。
 
+https で push して 403(Permission to hikalium/uniqnode.git denied)が返るのは、たいてい
+グローバルの `gh auth git-credential` が答えていて、その PAT にこのリポジトリへの書き込みが
+無いときである。グローバルの gh の設定は他のリポジトリに波及するので直さず、この checkout の
+`.git/config` にだけ効く credential helper を足す。1 行目の空値がグローバルの helper を
+打ち消し、2 行目が Contents: Read and write を持つ fine-grained PAT を置いたファイル(権限 600)を読む:
+
+```
+git config --local --add credential.https://github.com.helper ''
+git config --local --add credential.https://github.com.helper '!f() { echo username=x-access-token; echo "password=$(cat <PAT のファイル>)"; }; f'
+```
+
+どちらも `--add` で足す。`--add` 無しの `git config --local <名前> <値>` は既存の 1 件を
+置き換えるので、空値が消えて gh 側が先に答えてしまう。403 が出たら、
+`git config --local --get-all credential.https://github.com.helper` がこの 2 行を返すか、PAT の
+ファイルが読めるかを先に見る。既定ブランチの変更のような Administration 権限の要る操作は、
+この PAT でも 403 になるので Web UI で行う。
+
 設計の変更・修正・実装に入る前に、軽微で明確な変更を除き、複数の種類のモデルでレビューを
 通す。書き手とは別の Claude(サブエージェント)に加え、Codex(GPT)か Gemini の少なくとも一方に
 読ませる。各指摘には重要度(高・中・低)を付けさせる。実装に入るのは、再レビューで次の 2 点を

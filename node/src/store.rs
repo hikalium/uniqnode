@@ -528,7 +528,7 @@ pub(crate) const EDQUOT: i32 = 122;
 /// 成功した sync を 1 回記録する(debug ビルドで SYNC_LOG_ENV があるときだけ)。sync が Ok を
 /// 返した後にだけ呼ぶ(記録の行は「その sync が成功した」ことの証で、試験はそれを応答と
 /// 照らす)。記録に失敗しても本来の sync の結果は変えない。
-fn note_sync(what: &str, path: &Path) {
+pub(crate) fn note_sync(what: &str, path: &Path) {
     #[cfg(debug_assertions)]
     {
         if let Some(log) = std::env::var_os(SYNC_LOG_ENV) {
@@ -636,6 +636,12 @@ pub fn opened_by_another_process(dir: &Path) -> Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => Ok(false),
         Err(e) => Err(e.into()),
     }
+}
+
+/// ストアのロックだけを取る(印を読み書きする hold-status と release-hold が、Store::open を
+/// 通らずに使う)。返り値を落とすとロックを放す。
+pub(crate) fn acquire_store_lock(dir: &Path) -> Result<std::os::unix::net::UnixListener> {
+    Store::acquire_lock(dir)
 }
 
 /// このディレクトリをストアのデータディレクトリと認めるか。認めなければ、何が要るかを

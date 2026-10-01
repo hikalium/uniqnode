@@ -26,6 +26,7 @@ pub mod install;
 pub mod json;
 pub mod log;
 pub mod main_door;
+pub mod marker;
 pub mod mcp;
 pub mod outline;
 pub mod query;

@@ -176,7 +176,7 @@ node/src/fetch.rs で、取る・見分ける・名前を決める・出所を�
 - arXiv の論文は abs ページ(`https://arxiv.org/abs/<id>`)をこの入口に渡す。HTML の自足化で
   citation_title・citation_author・citation_date の meta と要旨が残り、PDF が要るなら
   `https://arxiv.org/pdf/<id>` を同じ入口に渡す。export API(export.arxiv.org/api/query)は
-  この入口の外にあり、書誌の取り口としては abs ページに劣る: 2026-08-18 に 22 本の id を
+  この入口の外にある。abs ページを書誌の取り口にしたのは、次の観測による: 2026-08-18 に 22 本の id を
   まとめて問うたときは、状態コード 200 のまま本文が 14 バイトの「Rate exceeded.」だけの
   応答が続いた。状態コードでも本文の有無でも成功と区別できず、そのまま書誌に使うと空欄
   だらけになる。同じ日に abs ページを 3 秒おきに 22 本取ったときは、全て取れた。

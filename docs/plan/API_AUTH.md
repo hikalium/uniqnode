@@ -454,10 +454,6 @@ std を呼ばず、子プロセス `getent ahosts -- <host>`(std と同じ NSS �
 - fetch が、serve の機械自身のインタフェースのアドレスへの転送(試験では、試験の機械の LAN 側のアドレスか、
   debug ビルドだけが読む口で差し替えたインタフェースの一覧のアドレスで viewer か serve を待たせる)と、それを直に
   指す最初の URL を理由を言って断る(第 14 版。5 の「自分の機械のアドレスも断る」)。
-- install の断り(第 12 版への Claude のレビューの中 5): 据え先の unit_dir に旧い名の unit(LEGACY_UNITS の
-  どれか)を置いた試験の据え先で `install --instance graph_a` を打つと、理由と docs/mop/SYSTEMD.md の「旧い名の
-  unit から移る」を言って断り、据え先のバイナリのバイト列と mtime が前と同じである。旧い名が無ければ据わる。
-  A1 と APPEND_FAILURE の S1a(S1 の最初の段)のうち先に入る方の完了条件にする(APPEND_FAILURE の完了条件と同じ試験)。
 - root で走る system の install の起動の確認が、root の直接の接続は断る serve に対して通る。
 - `--main-allow-uid` に overflowuid を入れた serve が理由を言って起動を断り、写せない uid の接続が 403 になる。
 - 実際の unit の制限の下(install で据え付けた serve)で、許す uid の接続が通り、許さない uid は断られ、

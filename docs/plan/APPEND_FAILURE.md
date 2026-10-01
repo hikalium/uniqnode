@@ -47,7 +47,7 @@ Claude(N1)が独立に見つけた。[docs/plan/FEED.md](#fa8de6f9-59f8-4512-a81
 - 代価:
   - 大きさ: S1a M、S1b L、S1c M(S1c の範囲は操作者の裁定待ち。B なら backup が印を読むだけの小さな段に
     縮み、C なら無くなる)、S1d L(戻す前の検め。第 28 版で S1b から分けた。本番への反映の前に入る)。設計の版を 31 重ねたとおり、中身は細かく、実装とレビューに日数がかかる。
-    S1a は実装した(「段取り」の「S1a の実装の記録」。レビュー待ちで、main にはまだ入れていない)。S1b はまだ
+    S1a は main に入っている(今の挙動は SPEC §5.3 と「段取り」の S1a の行が指す文書)。S1b はまだ
     実装していない(2026-10-01 に node/src を grep で確かめた。`open-marker` も `hold-status` も無い)。S1d の `--stage stopped` は S1b の印と hold-status の判定の上に作るので、S1d は S1b の後に始まる(「段取り」)。
     S1d は、S1b を入れた後に S1b より前のバイナリへ戻すまれな非常の道だけを守り、平常の日の保存と検索には
     関わらない。それでも今の段取りでは本番への反映のゲートに入っている。S1d は S1c とその裁定・API_AUTH の A4 と
@@ -1338,27 +1338,21 @@ backup.rs の冒頭の「残骸の削除は MANIFEST を据える前」と docs/
 - shutdown の応答を受け取った時点で、印が `Clean` で永続している(応答を書く前に `fdatasync` が済んだ
   ことを数える口で見る)。`write_failure` があれば本文が `"marker":"left"` と理由を言う(第 14 版への
   Claude のレビューの低 7)。
-- install の断り(第 18 版への Claude のレビューの中 5): 据え先の unit_dir に旧い名の unit
-  (`uniqnode-serve.service` など LEGACY_UNITS のどれか)を置いた試験の据え先で `install --instance graph_a` を
-  打つと、理由(旧い名の unit が残っていて、共有のバイナリを差し替えると旧い serve の次の起動が新しい
-  バイナリを旧い unit で走らせる)と docs/mop/SYSTEMD.md の「旧い名の unit から移る」を言って断り、据え先の
-  バイナリのバイト列と mtime が前と同じである。旧い名が無ければ据わる。この試験は、この直しを含む段
-  (API_AUTH の A1 か S1a のうち先に入る方)の完了条件にする。
 
 ## 段取り
 
 | 段 | 中身 | 大きさ |
 |---|---|---|
-| S1a | `append_durable` と包みへの寄せ、新しいセグメントのディレクトリの sync、`WriteFailure` と `WritesDisabled`、fstat と切り詰めの試み、封印と `gc_commit` の順の入れ替え、GC の D の packs/ の sync の失敗を書けない状態へ、`atomic_write` の tmp 名、周期的な書き手の飛ばし、export の絞り、注入、HTTP と MCP の 503(`POST /v1/sync` の入口の判定、query と rendition の扱いを含む)、status と健全性の欄、ログを開く前のデータのディレクトリの検めと log.rs の `create_dir_all` の撤去、install の経路の 1 つずつの `mkdir` と根までの sync、`node_key` の tmp(`create_new`・0600・sync・rename)、1a の開くときの sync、install の断り(旧い名の unit が残る間の共有のバイナリの差し替え。API_AUTH の A1 より先に入るなら)、テスト、SPEC §5(永続化)への 1 段落 | M |
-| S1b | `open-marker`(固定長・CRC・boot_id・nonce)と開く道の 2 分岐、読むだけの走査の関数と「命令ごとの開き方」の表のとおりの付け替え、保留の serve の複製の口の 503、`uniqnode release-hold <dir>` と `uniqnode hold-status <dir>` の CLI(`Store::open` を通らない)と、SYSTEMD.md の字句を CLI の名と照らす repo_hygiene の試験、無事な終わり方の関数と 1 つの終わり方への寄せ、`CloseHandle`(閉じる手綱。書き込みの番の数え値と RAII、閉じる要求で外側の番を閉める、`OpeningGuard`、`open_failed`・`poisoned`、終わり方の 2 度呼びと `finish` の `Once`)、Store の Drop(`wrote_running` のときだけ)、SIGTERM と SIGINT の受け取り(`extern "C"`。受ける輪と閉じる役の分離)と終了コード、GC の D の sync をストアのロックの中へ、serve の束縛と A1・A2 の起動時の断りを開くより前へ、unit の ExecStop(system と user の `uniqnode-serve@.service`)と、操作者が採るなら system の unit の `OOMScoreAdjust=-500`(「最終目標とのつながり」の代価の案)、backup の `not_copied` の `open-marker`、テスト | L |
+| S1a | main に入っている。今の挙動は SPEC §5.3(永続化と書けない状態)、[docs/design/GC.md](#9b1ceac3-f3cf-4595-87cb-6e40ce0900e5) の D、[docs/design/LOGGING.md](#14a4e260-70af-4c52-9f19-1c116bddd004)、[docs/design/TESTING.md](#267326f7-e919-48f2-9737-fe0c0daec9d5) の「書き込みの失敗」の層(注入の字句と debug ビルドだけの口) | M |
+| S1b | `open-marker`(固定長・CRC・boot_id・nonce)と開く道の 2 分岐、読むだけの走査の関数と「命令ごとの開き方」の表のとおりの付け替え、保留の serve の複製の口の 503、`uniqnode release-hold <dir>` と `uniqnode hold-status <dir>` の CLI(`Store::open` を通らない)と、SYSTEMD.md の字句を CLI の名と照らす repo_hygiene の試験、無事な終わり方の関数と 1 つの終わり方への寄せ、`CloseHandle`(閉じる手綱。書き込みの番の数え値と RAII、閉じる要求で外側の番を閉める、`OpeningGuard`、`open_failed`・`poisoned`、終わり方の 2 度呼びと `finish` の `Once`)、Store の Drop(`wrote_running` のときだけ)、SIGTERM と SIGINT の受け取り(`extern "C"`。受ける輪と閉じる役の分離)と終了コード、serve の束縛と A1・A2 の起動時の断りを開くより前へ、unit の ExecStop(system と user の `uniqnode-serve@.service`)と、操作者が採るなら system の unit の `OOMScoreAdjust=-500`(「最終目標とのつながり」の代価の案)、backup の `not_copied` の `open-marker`、テスト | L |
 | S1c | ロックの socket の accept の輪(`poll` と起こし用の対、`SO_PEERCRED` の uid の絞り)と答えの写しの `Mutex`、`opening` と開き終えた後の永続化済みの境界、backup の照会(期限、uid と pid の検め)と境界までの写し、写し先より短い reflog の断り、写し先のロック、世代のディレクトリと `current` の切り替え・hard link の条件・片付け、印の読み直し、テスト | M |
 | S1d | 戻す前の検め `uniqnode legacy-rollback-preflight <固定した退避> --stage running|stopped --state <状態のディレクトリ>`(方針 5。読み口の差し替えられる層と busctl・tar の子プロセス、node/src/json.rs の `Json::Bool(bool)` への拡げと呼び手の直し、読み込み済みの一覧を含む読み込みに依らない unit の数え、service と timer でない型と alias の断り、起こす依存の先の「標準の基盤の依存の先」の名の一覧(第 31 版。型では通さない)と「安全と確かめた依存の先」の一覧(今は wg-quick@wg1.service)と他の断り、`Type=oneshot` で `RemainAfterExit=yes` の断り、install の読み戻しと `normalize`、許しの一覧、/proc の検め、保留の検め、`--probe`、試験の据え物と vega の実物の据え物)、docs/mop/SYSTEMD.md の戻す命令をその出力の形に合わせて確定すること、repo_hygiene の照らしに `legacy-rollback-preflight` の形(`--probe` を含む)を足すこと。反映の直後の vega での `--stage running` の受け入れの確かめは S1d の中身でなく、本番への反映の後に打つ(第 31 版) | L |
 
-段ごとのゲート(第 19 版への Claude のレビューの中 4。第 19 版は S1 を 1 段の M としていたが、中身は L〜XL だった): 各段は、上の完了条件のうち自分の中身に当たる項目の試験と `cargo test` の全体が緑で、その段の差分へのレビューで高の指摘が無いと確かめてから main に入れる。S1a のゲートは、印にも終わり方にも backup にも依らない項目である: 注入の各種で失敗した要求が 5xx・以後が 503・読み出しが続くこと、応答済みの書き込みが開き直した後に消えないこと、`sync-keep` と export の絞り、pack の `torn` の後の読み出し、封印と `gc_commit` への `manifest`・`manifest-dirsync`、GC の B・D の失敗の扱い、kind の分けと 503 の本文と `POST /v1/sync`、複製の受け側、最初の要求の 503、install の経路の sync(中断からの再実行を含む)、query と rendition、親の無い道、install の断り。印を要る項目(「kind が Io の状態で serve だけを起こし直す」「`crash-before-dirsync` の後に同じ boot_id で開く」「開き直したときの `writes_disabled` は、読み直した印で分かれる」など)は S1b のゲートに入る。S1b のゲートは印・保留・複製の口・終わり方・シグナル・書き込みの番・閉じる要求・開く途中・2 度呼び・shutdown の応答・GC の D の競合・読むだけの走査の項目。S1c のゲートは backup の項目(写し元の検め、境界、NoSpace の印、印の読み直し、公開の各段の停止点、写し先の排他、hard link、ロックの socket の照会と輪の止め方)である。S1d のゲート(main に入れる条件)は戻す前の検めの項目(据え物の各形、第 28 版と第 31 版で足した形、vega の実物の JSON の据え物)の試験と `cargo test` の全体が緑で、差分へのレビューに高が無いことである。S1d の受け入れは別に置く: 本番への 1 回の反映の直後に vega で `--stage running` が 0 を返したことの記録(前提は完了条件の「実物の形を据え物に取り込む」の項。vega の Claude Code のセッションを閉じて打つ)である(第 31 版。第 30 版への Claude のレビューの中 1。第 30 版はこの記録をゲートに入れていたが、vega に S1d 以後のビルドを据えることは本番への反映そのもので、反映はゲートを待つので輪になっていた)。受け入れが 1 を返したら、直すまで検め付きの戻す道は無く、その間に戻すなら「操作者への問い」の案 3 の手順を使うか、戻さない。S1a だけの間は、書けない状態がプロセスの中でしか続かない(serve の再起動で書き込みが戻る。欠陥 9 の形は S1b まで残る)ので、本番への反映は S1a〜S1c と S1d が揃ってから 1 回で行う。
+段ごとのゲート(第 19 版への Claude のレビューの中 4。第 19 版は S1 を 1 段の M としていたが、中身は L〜XL だった): 各段は、上の完了条件のうち自分の中身に当たる項目の試験と `cargo test` の全体が緑で、その段の差分へのレビューで高の指摘が無いと確かめてから main に入れる。S1a はゲートを通って main に入っている。S1a の中身のうち印を要る項目(「kind が Io の状態で serve だけを起こし直す」「`crash-before-dirsync` の後に同じ boot_id で開く」「開き直したときの `writes_disabled` は、読み直した印で分かれる」など)は S1b のゲートに入る。S1b のゲートは印・保留・複製の口・終わり方・シグナル・書き込みの番・閉じる要求・開く途中・2 度呼び・shutdown の応答・GC の D の競合・読むだけの走査の項目。S1c のゲートは backup の項目(写し元の検め、境界、NoSpace の印、印の読み直し、公開の各段の停止点、写し先の排他、hard link、ロックの socket の照会と輪の止め方)である。S1d のゲート(main に入れる条件)は戻す前の検めの項目(据え物の各形、第 28 版と第 31 版で足した形、vega の実物の JSON の据え物)の試験と `cargo test` の全体が緑で、差分へのレビューに高が無いことである。S1d の受け入れは別に置く: 本番への 1 回の反映の直後に vega で `--stage running` が 0 を返したことの記録(前提は完了条件の「実物の形を据え物に取り込む」の項。vega の Claude Code のセッションを閉じて打つ)である(第 31 版。第 30 版への Claude のレビューの中 1。第 30 版はこの記録をゲートに入れていたが、vega に S1d 以後のビルドを据えることは本番への反映そのもので、反映はゲートを待つので輪になっていた)。受け入れが 1 を返したら、直すまで検め付きの戻す道は無く、その間に戻すなら「操作者への問い」の案 3 の手順を使うか、戻さない。S1a だけの間は、書けない状態がプロセスの中でしか続かない(serve の再起動で書き込みが戻る。欠陥 9 の形は S1b まで残る)ので、本番への反映は S1a〜S1c と S1d が揃ってから 1 回で行う。
 
 S1d を分けた決め(第 28 版。第 27 版への Claude のレビューの中 3): 第 27 版は戻す前の検めを S1b に入れ、S1b を L のままにしていた。だが検めは、busctl と tar を子プロセスで読む層、読み込みに依らない unit の数え、install の読み戻し、/proc の検め、据え物の組と、それだけで L の大きさがあり、S1b の他の中身(印・終わり方・シグナル)とはレビューの主題も別である。S1b に入れたまま XL と書き直す案と比べ、分ける方を採った。理由: S1b の差分を印と終わり方のレビューに絞れ、検めの差分は systemd の実物の形に詳しいレビューに当てられる。戻す道が要るのは S1b 以後を本番に据えた後だけなので、本番への反映の前に S1d が入っていれば足りる(本番に据わる S1b 以後のバイナリは全部この命令を持つ)。代価は、S1b と S1d の間の開発のビルドがこの命令を持たないことで、それらは検め手の候補として 2 を返し、命令は採らない。そのため、S1b 以後で S1d より前のビルドは、vega のどのインスタンスにも install しない(第 29 版の低 1。vega の install はインスタンスに依らず共有のバイナリ /home/hikalium/.local/bin/uniqnode を差し替えるので、1 つのインスタンスへの install が全インスタンスを戻す命令の無い版にする)。第 28 版はここに「S1(S1a〜S1c の総称)と FEED の F2 の前提は変えない」と書いたが、これは誤解を招いた(第 28 版への Claude のレビューの中 4): F2 の前提の中身(S1 の全体)は変わらないが、本番への反映が S1d を待つので、S1 の本番も F2 もその分だけ遅れる。遅れの量は S1d の日数そのものではない(第 30 版。第 29 版への Claude のレビューの中 2): S1d は S1b の後に始まるが、S1c とその裁定、API_AUTH の A4 と並べて進められるので、遅れるのは S1d が S1a〜S1c・S1c の裁定・API_AUTH の A4 のうち最後に揃うものより後に終わる分だけである。ありそうな形(第 31 版。第 30 版への Claude のレビューの低 2): S1d(L)も S1c(M。裁定が C なら無くなり、B なら小さく縮む)も S1b の後に始まるので、S1d がいちばん最後に終わる見込みが高く、遅れはおよそ L と M の差、裁定が C なら L の全部である(B ならその間)。案 1 では、反映の直後の受け入れの確かめ(vega のセッションを閉じて打つ数分と、1 を返せば直して据え直すまで)もこれに加わる。S1d を反映のゲートから外す案は「操作者への問い」に置いた。
 
-第 30 版の後の進め方(第 29 版の「この版で改訂を止め、S1d の実装に移る」を改めた。第 29 版への Claude のレビューの中 2): 次に実装するのは S1a、その次が S1b である。S1d の `--stage stopped` は S1b の `open-marker` と hold-status の判定の上に作るが、node/src にはどちらもまだ無く、S1a も S1b も実装していない(2026-10-01 に node/src を grep で確かめた)ので、S1d を先に実装することはできない。S1d は S1b の後に入り、案 1 では本番への反映のゲートの前に、案 2・案 3 ではゲートの外で入る(「操作者への問い」)。文書の改訂はこの第 30 版で止める。第 21〜30 版のレビューは、毎回シェルの命令と検めの仕様に新しい端の形を見つけてきた。これ以上を文書の上で詰めるより、据え物の試験と vega の実物の JSON で確かめる方が速く確かである。残る端の形は、S1d の差分とその据え物の試験で閉じる。docs/mop/SYSTEMD.md の戻す命令のシェルは、S1d の実装と一緒に、試験の通った出力の形に合わせて確定する(それまでは手順の仕様で、打たない)。S1a・S1b・S1d の差分へのレビューで見つかるものは、文書でなくコードと据え物で直し、文書はその差分に合わせて改める。
+第 30 版の後の進め方(第 29 版の「この版で改訂を止め、S1d の実装に移る」を改めた。第 29 版への Claude のレビューの中 2): 次に実装するのは S1b である。S1d の `--stage stopped` は S1b の `open-marker` と hold-status の判定の上に作るが、どちらも S1b の中身で node/src にはまだ無い(2026-10-01 に node/src を grep で確かめた)ので、S1d を先に実装することはできない。S1d は S1b の後に入り、案 1 では本番への反映のゲートの前に、案 2・案 3 ではゲートの外で入る(「操作者への問い」)。文書の改訂はこの第 30 版で止める。第 21〜30 版のレビューは、毎回シェルの命令と検めの仕様に新しい端の形を見つけてきた。これ以上を文書の上で詰めるより、据え物の試験と vega の実物の JSON で確かめる方が速く確かである。残る端の形は、S1d の差分とその据え物の試験で閉じる。docs/mop/SYSTEMD.md の戻す命令のシェルは、S1d の実装と一緒に、試験の通った出力の形に合わせて確定する(それまでは手順の仕様で、打たない)。S1a・S1b・S1d の差分へのレビューで見つかるものは、文書でなくコードと据え物で直し、文書はその差分に合わせて改める。
 
 第 31 版の記録(第 30 版への Codex と Claude のレビュー): 第 30 版の「この版で改訂を止める」を 1 度破った。理由は 2 つに限る: 操作者へ出す文の正しさ(「操作者への問い」の案 3 の進める条件と 5 の手順の漏れ、遅れの量、S1d のゲートの輪、wg1.conf の確かめと unattended-upgrades の限界。どれも操作者が裁定や依頼に答えるときに読む字句である)と、S1d の範囲の高 1 つ(型だけで通していた起こす依存の先。仕様の穴なので、仕様の字句を直してから S1d を実装する)。小さな settle の期限の直し(Codex 低 3)も同じ回に入れた。これからは、S1d の範囲の指摘は文書でなく S1d の差分(コードと据え物の試験)で直す。文書を改めるのは、操作者へ出す文が誤っているときと、その差分に文書を合わせるときだけである。
 
@@ -1383,34 +1377,7 @@ restart の説明、保留と release-hold の案内、「更新」に S1b 以�
 
 S1(S1a〜S1c の総称)は、段ごとに上のゲートを通してから入る。FEED の F2 は S1 の全体を前提にする。
 
-S1a の実装の記録(2026-10-01。版は上げず、状態だけを書き足した): S1a は実装した。コミットは main の 93d905c の
-上の 2a82736・1b4b8e8・e4c98ac・39e12f4・9e1ac72 と、それへの Codex と Claude のレビューの直しを積んだもの
-(枝 s1a-append-durable)である。直しの再レビューを通してから main に入れる。本番への反映は上のとおり
-S1a〜S1c と S1d が揃ってから 1 回で、S1a だけでは据えない。実装で決めたこと(本文の方針に書いていなかった細部):
-
-- 失敗の注入の字句は `UNIQNODE_APPEND_FAULT=<種類>[@pack|@reflog]:<何回目>` である。`torn:<n>` はそれ自体が
-  種類の字句で(例 `torn:5@pack:2`、`torn:5:1`)、何回目は 1 から数え、その種類が掛かりうる操作だけを数える
-  (追記の種類は追記ごと、`dirsync` と `crash-before-dirsync` は新しいファイルを作った追記ごと、`manifest` と
-  `manifest-dirsync` は MANIFEST の書き込みごと、`gc-dirsync` は GC の D の sync ごと)。`@pack`・`@reflog` は
-  追記の種類にだけ付く。開くときの sync の試験のために、abort する種類を 2 つ足した: `crash-before-sync`
-  (追記を全部 write した後・ファイルの sync の前)と `crash-in-node-key`(node_key を tmp/ に書いて sync した
-  後・rename の前。node_key の作成ごとに数える)。
-- 注入は debug ビルドにだけ在る。release のビルドには、環境変数を読む口だけでなく、注入の型・`Store::inject_fault`・
-  abort の枝も無い(node/src/fault.rs は `cfg(debug_assertions)`。sync の記録 `UNIQNODE_SYNC_LOG` と sync の本体は
-  本番も使うので node/src/store.rs に置く)。注入に頼る試験は `cargo test --release` では走らない。
-- install を途中で止める口は `UNIQNODE_INSTALL_ABORT_AFTER=mkdir|synced`(データのディレクトリの経路を mkdir
-  した後・sync の前か、経路の sync の後・daemon-reload の前)。これも debug ビルドだけが読む。
-- 書けない間は、dry-run の gc も断る(`gc_try_begin` が書き込みの入口なので、dry-run もそこを通る)。
-- 書けない間は、既に在るオブジェクトの put も断る(「既に在る」と答えると、書けたと読める応答になるため)。
-- 書き込みの入口は、引数の検査より先に書けない状態を言う(`set_ref`・`set_pin`・`set_attest` と、空の pack なら
-  何もしない `seal_active_pack_for_gc` の先頭で `check_writable`)。不正な引数や存在しない対象を指す要求も、
-  書けない間は 400 でなく 503 と案内を受け取る。
-- GC の D の packs/ の sync は、S1a でストアのロックの中に置いた(方針 3 の D の項。失敗の記録がロックの中で
-  済む)。表の S1b の「GC の D の sync をストアのロックの中へ」は S1a で済んでいる。
-- install の経路の根までの sync は、ストアの経路に加えて写し先(backup)の経路も対象にする。
-- ログを開く前のデータのディレクトリの検め(無ければ `mkdir`、親が無ければ 1 で終わる)は、既定の
-  `<dir>/logs` にログを置くときだけ行う。`--log` で外へ置くときと `--no-log` のときは、ログがデータの
-  ディレクトリに触れないので、検めは `Store::open` に任せる。
+S1b〜S1d が足す失敗の注入は、S1a の字句と数え方([docs/design/TESTING.md](#267326f7-e919-48f2-9737-fe0c0daec9d5) の「書き込みの失敗」の層)に従い、debug ビルドにだけ置く。
 
 本番への反映の前提(第 14 版への Claude のレビューの中 5): vega の主のストアの serve は、今も旧い名の
 unit `uniqnode-serve.service`(と `uniqnode-viewer.service`・`uniqnode-backup.timer`)で動いている
@@ -1430,9 +1397,10 @@ graph_a・graph_b の `uniqnode-serve@graph_*.service` は、同じ /home/hikali
 (2026-10-01 に /etc/systemd/system/ の drop-in の ExecStart= で確かめた)。共有のバイナリを差し替えると、
 旧い serve の次の起動(restart・再起動)が S1 のバイナリを ExecStop の無い unit で走らせる(API_AUTH の A2 の
 バイナリなら AF_NETLINK が無く主の口が全部 403)。そのため install は据え先に旧い名の unit が残っている間は、
-インスタンスに依らず何も置かずに断り、共有のバイナリも差し替えない(理由と docs/mop/SYSTEMD.md の「旧い名の
-unit から移る」を言う。S1a で入った。今の挙動は docs/mop/SYSTEMD.md の「テンプレートになる前の名の unit から
-移る」)。vega では、どのインスタンスの install も `@default` への移行の後に打つ。
+インスタンスに依らず何も置かずに断り、共有のバイナリも差し替えない(理由と
+[docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「旧い名の unit から移る」を言う。挙動の説明は同じ
+文書の「テンプレートになる前の名の unit から移る」)。vega では、どのインスタンスの install も `@default` への
+移行の後に打つ。
 
 S1b より前のバイナリへ戻す(第 20 版への Codex と Claude のレビューの Codex 高 1): S1b より前のバイナリの
 `Store::open` は `open-marker` を見ずに recover して書く。保留のストア(同じ boot_id の `Running` と `Io`、検めを
@@ -1573,7 +1541,7 @@ docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令はこの形で書いて
 
 背景: 本番への反映は S1a〜S1c と S1d が揃ってから 1 回と決めている(「段取り」)。S1d(L)は、S1b を入れた後に
 S1b より前のバイナリへ戻すまれな非常の道の検めで、平常の日の lamalium の保存と検索には関わらない。S1d は S1b の
-印と hold-status の上に作るので S1b の後に始まり(次に実装するのは S1a、その次が S1b。「段取り」)、S1c とその裁定、
+印と hold-status の上に作るので S1b の後に始まり(S1a は main に入っていて、次に実装するのは S1b。「段取り」)、S1c とその裁定、
 API_AUTH の A4 と並べて進められる。それでもゲートに入っているので、S1d が S1a〜S1c・S1c の裁定・API_AUTH の A4 の
 うち最後に揃うものより後に終わる分だけ、S1 の本番への反映が遅れ、S1 を前提にする FEED の F2(lamalium の文書の
 毎時の取り込み。日々の仕事に直に効く)も同じだけ遅れる(第 30 版。第 29 版は S1d の日数だけ遅れると書いていた。

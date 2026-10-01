@@ -2,7 +2,7 @@
 
 <a id="d973833f-4e2b-4fc8-8a49-42f6821b6a7a"></a>
 
-版: 第 27 版(2026-10-01)。docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令の、シェルで書いた門は、レビューのたびに unit が検めたものと別のストアを開く systemd の設定をもう 1 つ見つけられてきた(第 26 版への Codex のレビューは、`Environment=` を上書きする `EnvironmentFile=`、`WorkingDirectory=` に対して解かれる相対の `UNIQNODE_DATA_DIR`、`RootDirectory=`・`RootImage=`・bind mount を挙げた)。シェルではこれらを漏れなく数え上げられないので、unit・ストア・プロセス・保留の検めを S1b 以後のバイナリの `uniqnode legacy-rollback-preflight <固定した退避> --stage running|stopped` に移し、S1b の中身と完了条件に足した(方針 5 の「戻す前の検め」。unit は install の描くものと性質ごとに一致するときだけ通し、install が描かない unit は対象のバイナリを走らせないときだけ通す。各レビューで挙がった断りの形を全部、試験の据え物で固定する)。戻す道は S1b の後にしか要らないので、検め手は定義から S1b 以後であり、判断は手で辿る代わりに cargo の試験で守れる。命令は 262 行から 141 行に縮み、固定した退避の検め・状態の読み込み・検め・状態の和・止める・止めた後の検め・差し替えと展開・展開した後の検め・起こすの 1 本になった。やめる道は 1 本のまま、restart と default-active を start でなく restart で起こし(旧いバイナリで起きているものも替える。Claude 中 1)、default-enabled の enabled も確かめてから状態を消し(Codex 中 4)、差し替える前なら 1 を飛ばし(Claude 低 4)、各命令の ts を Ctrl-C から外し(Claude 低 6・低 7)、restart から外す命令を添えた(Claude 低 7)。状態の照会の失敗は、検めが性質を読めなければ断ることと、待つ間の `systemctl show` の失敗で止まることで扱う(Codex 中 3)。記録が無いときは記録が無いとだけ言う(Codex 低 5)。trap を固定した退避の検めの前に置き(Claude 低 5)、どのストアも 1 を答えた形に別の案内を出し(Claude 低 8)、既知の限界に今走っていない書き手(`uniqnode-*` でない unit、user の unit、cron)を足し(Claude 低 10)、「既知の限界(戻した後)」にやめる道で上げ直すときも書いた(Claude 中 1)。命令は S1b が検めを実装するまでは手順の仕様で、S1b の実装と一緒に確定する。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 26 版(2026-10-01)。第 25 版への 2 つのレビューは、docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令が 7 回のレビューで約 450 行に育ち、その複雑さそのものが危険だと揃って言った。そこで指摘ごとに枝を足すのをやめ、まれな非常の道として小さく、普通でないものには閉じる形に組み直した(命令は 447 行から 262 行へ): 道は止める前の門・止める・止めた後の門・ストアの検め・差し替え・起こす・確かめるの 1 本にし、やめる道もどの段でも同じ 1 つ(確かめた S1b 以後の検め手を据え、旧い名を展開した後なら外して install を打ち直し、止めたものを起こして 1 つずつ 60 秒まで待って active と確かめてから状態を消す)にした。バイナリを時刻や inode で見分ける形、段ごとの案内、始まったときのバイナリで起こし直す枝は消した。止める前の門で、`uniqnode-*` の service の ExecStartPre・ExecStart・ExecStartPost が 4 つのバイナリと短い許しの一覧(vega の実物にある curl と nft、文書の例にある git)の他を走らせるもの(`/bin/sh -c` などの包み)と、4 つのバイナリを走らせるのに第 2 引数が `${UNIQNODE_DATA_DIR}` でないか `UNIQNODE_DATA_DIR` を持たないものを断り、ストアは `UNIQNODE_DATA_DIR` と既定のストアからだけ取る(unit の中のプロセスの argv からストアを拾う形と stores の記録はやめた)。読めない生きたプロセスは unit の中でも断る。ストアの道が改行などの制御文字を含めば、`$( )` が削る前に断る(値は jq の中で、`readlink -e` の出力は後ろに印の文字を足して受ける)。状態は一時の配列へ読み終えてから入れ替え、読めなければ状態を消す案内を出さない。起こすものが記録に無ければ何も止めていないと言い、起こし直す unit の写しは門の直後に取り、外側の tee を `-i` にして待つ間に Ctrl-C を押さないよう書いた。この文書の「最終目標とのつながり」の代価と「S1b より前のバイナリへ戻す」もこれに合わせた。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 25 版(2026-10-01)。第 24 版への Codex と Claude のレビューを取り込んだ。指摘は全部 docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令と、この文書の「最終目標とのつながり」と「S1b より前のバイナリへ戻す」に当たる: やめるときの active の確かめを 1 つずつにし、全部が active のときだけ状態を消す(Codex 中 1)、`@default` の enable(字句どおりの `enabled` だけ)と稼働を default-enabled と default-active に分けて残し、やめるときは enable されていたものだけ enable し、動いていたものだけ起こす(Codex 中 2・Claude 低 3。install の `--no-start` のときも動いていたものを起こす)、`enable --now` と `start` の失敗を捕らえて 1 つずつの確かめと外す命令の案内まで進む(Codex 低 3)、止める前の門で unit の cgroup の中のプロセスのストアも残し、`UNIQNODE_DATA_DIR` を持たず `ExecStart` が 4 つのバイナリの unit は断る(Claude 中 1)、止める前にもストアの道を解いて照会する(Claude 低 1)、stores から外す命令を `LC_ALL=C grep -azvxF` にし、改行を含む道は手で外すよう言う(Claude 低 2)、差し替えの段の失敗でもバイナリを見分けて元へ戻す案内を出し、途中の写しを消すよう言う(Claude 低 4)、状態の和を止める前の門の後に書き、状態の無かった回の断りは状態のディレクトリを消すだけでよいと言う(Claude 低 5)、退避と同じ中身でも時刻が退避と同じなら元のバイナリとして元へ戻す(Claude 低 6)、止まる口に graph の viewer 7452・7454 と毎分の graph-pull の timer を足し、前の回が止めたものは止まったままと書く(Claude 低 7)、外す命令を記録へ追記する形で出す(Claude 低 8)。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 24 版(2026-10-01)。第 23 版への Codex と Claude のレビューを取り込んだ。指摘は docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令と、この文書の「最終目標とのつながり」と「S1b より前のバイナリへ戻す」に当たる: プロセスの門を読めないプロセスに対して閉じる形にした(exe を解けないプロセスは、消えた・ゾンビ・カーネルのスレッドと確かめたときだけ除き、他は pid と理由を言って断る。道に加えて inode でも比べ、別のマウントの名前空間のものも拾う。Codex 高 1・Claude 低 1)、一回走る service(`Type=oneshot` で `RemainAfterExit=no`)を起こし直す一覧に入れず、終わりを待つだけにした(Codex 中 2)、展開の後にやめる案内を、止めたものを起こして active と確かめてから状態を消す順にした(Codex 中 3・Claude 中 1)、unit の 2 つの一覧を別々に取って失敗を隠さない(Codex 中 4)、案内で S1b 以後のバイナリとして名を出すのはこの回に 0 か 3 を答えた検め手だけにした(Codex 低 5)、何かを止める前にも門を通し(unit の cgroup の中のものを除く)、差し替えの前に断ったときは、始まったときと同じバイナリで元の形へ戻す案内を出し、そのために `@default` の enable の状態を状態のディレクトリに残す(Claude 中 2)、前の回の門が残したストアと起きない unit を状態から外す命令を添える(Claude 低 2)、代価に vega の全部の Claude Code のセッションを閉じること・別のプロジェクトの MCP の設定が起こす共有でないバイナリの mcp・戻す間に止まる口と timer を足した(Claude 低 3)。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 23 版(2026-10-01)。第 22 版への Codex と Claude のレビューを取り込んだ。指摘は全部 docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令(と、その原則を書く「S1b より前のバイナリへ戻す」)に当たり、指摘ごとに直さず、次の原則で命令を組み直した: 命令が知る unit を全部止めた後に、共有のバイナリ・退避のバイナリ・検め手を走らせるプロセスが残れば差し替えない(Codex 高 2: 一覧に無いストアを開く mcp の Local と CLI、Codex 中 5: 前の回に戻した旧い serve。旧い serve・viewer・backup の timer も止め、走る旧い backup を待つ)、起こし直す unit を退避の隣の状態のディレクトリに和で残し、全部が active と確かめてから完了とする(Codex 中 4・Claude 中 1)、ストアの道を `readlink -e` と `[ -d ]` で確かめて `find -H` で照会する(Codex 高 1・Claude 中 2)、操作者が置いた検め手を先に使い、今のバイナリの写しは候補として 0 か 3 の答えを見てから採る(Codex 中 3・Claude 低 5・低 6)、`UNIQNODE_DATA_DIR` を D-Bus の文字列の配列から字句の一致で読み、hold-status をストアの持ち主として走らせ、sudo 自身の 1 を対応の印と見ない(Codex 中 6・Claude 低 4)、外す命令の timer の案内を外す行が通るまで残す(Codex 低 7)、`@default` の据わりを drop-in か is-enabled で決める(Claude 低 3)。加えて CLI の形の段落の振り分けの行を `run` の match に改めた(Claude 低 7)。最終目標とのつながりの代価に、戻す前に vega の Claude Code の mcp の Local を閉じることを足した。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 22 版(2026-10-01)。第 21 版への Codex と Claude のレビュー(Codex 高 1・Claude 中: 旧い名の unit へ戻す命令は、共有のバイナリを使う graph_a・graph_b を含む全部の書き手を止め、全部のストアの hold-status が 0 のときだけ差し替える、Codex 高 2: 保留を知る版と確かめたときだけ今のバイナリで起こし直す案内を出す、Codex 中 3: 印の不在と照会の誤りを分ける、Codex 中 4: 壊れた印の release-hold にも再起動か umount・fsck・mount し直しの前提、Claude 中: 差し替えの後に打ち直せるよう、検め手を退避の外へ写す、Claude 中: CLI の形を main.rs の `uniqnode <command> <data_dir> [args]` に合わせて `uniqnode hold-status <dir>` と `uniqnode release-hold <dir>` へ改め、文書の字句と CLI の名を照らす repo_hygiene の試験を S1b に足す、Claude 中: S1b の戻し方の再起動が手で起こした llama-server を止める代価と OOMScoreAdjust の案、Codex 低 7・Claude 低: 命令ごとの開き方の表に hold-status と release-hold、その完了条件の拡げ、Claude 低: SYSTEMD.md の終了コード 1・2 の案内と外す命令の旧い timer の trap、Claude 低: 旧いバイナリへ落ちる他の道)を取り込んだ。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 21 版(2026-10-01)。2026-10-01T00:01:28Z の操作者の規則(どの計画も、手元の GPU で lamalium を毎日の実務に使うという最終目標とのつながりを書く)に従い「最終目標とのつながり」を足した。第 20 版への Codex と Claude のレビュー(Codex 高 1: docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令は、バイナリを差し替える前に新しいバイナリの `store hold-status` で `open-marker` を検め、保留なら起こさない。そのための `store hold-status` を S1b に足し、S1b より前のバイナリへ戻すと保留を素通りすることとその規則を「S1b より前のバイナリへ戻す」に書いた、Claude 低 7: SYSTEMD.md の外す命令が固定の壊れで止まるとき、旧い timer を戻す命令を言う)を取り込んだ。S1c は範囲が操作者の裁定待ちなので設計の本文を動かさず、S1c だけに当たる指摘(Codex 中 2〜5・低 6、Claude 中 4・低 1 ほか)は「backup の写し元の検め」の頭の「裁定の後に扱う指摘」に並べた。第 20 版(2026-10-01)。第 19 版への Codex と Claude のレビュー(Codex 高 1・Claude 高 2: backup の公開を、写し先の世代のディレクトリを完成させてから `current` の symlink を 1 回の rename で切り替える形へ、Codex 高 2・Claude 中 3: 写し先のロックを backup の全体で持つ、Claude 高 1: 開き終えるまでは境界を答えず `opening` と答え、写し先より短い reflog の境界は断る、Codex 中 3: 閉じる要求で新しい外側の書き込みの番を閉め、入れ子だけを通す、Codex 中 4・Claude 低 5: 同じ pid・nonce の `NoSpace` の印も認める、Codex 中 5・中 6: docs/mop/SYSTEMD.md の戻す命令の unit の不在と外す命令の固定の検め、Claude 中 4: S1 を S1a・S1b・S1c に分けて段ごとのゲート、低 6〜13: hard link の条件、stage の片付け、照会の相手の `SO_PEERCRED`、境界の別の `Mutex`、accept の起こし方、印の読み直し、開く途中の RAII、uid の試験の debug の口、低 14: 直す文書に SYSTEMD.md の表)を取り込んだ。第 19 版(2026-10-01)。第 18 版への Codex と Claude のレビュー(Codex 高 1・Claude 中 3: 書き込みの途中の旗を入れ子と早い戻りとパニックに耐える数え値と RAII の番へ、Codex 高 2・高 3・中 5・Claude 中 2・低 11: backup を、ロックの持ち主が答える永続化済みの境界までの写しと、写し先の tmp/ での段取り・検め・公開の後の削除へ組み直し、ロックの socket に accept の輪と照会の期限、印に開くたびの nonce、Codex 中 4: 2 度目のシグナルを受ける輪を終わり方から分ける、低 9: GC の競合の試験の 2 つの停止点と期待値、Claude 高 1: 開くことの失敗を手綱に記録する、中 5: install の断りの完了条件、低 10: 終わり方の 2 度呼び)を取り込んだ。第 18 版(2026-10-01)。第 17 版への Codex と Claude のレビュー(Codex 高 1: GC の D の packs/ の sync をストアのロックの中で行い、終わり方と排他にする、Codex 中 2〜4・低 6: 旧い名の unit を外す命令の backup の待ち・退避の対象・退避先の一意・パイプラインの失敗、Claude 中 1: 読むだけの走査の Drop は印を書かない、中 2: CLI のシグナルは共有の小さな手綱で閉じる、中 3: serve のログがデータのディレクトリの祖先を作る、中 4: 保留の写し元を backup が写さない、中 5: vega で共有するバイナリと旧い名の unit、低 5: シグナルで閉じたときの終了コード、低 6: 開く途中のシグナル、低 8: 外す命令の字句の試験)を取り込んだ。第 17 版(2026-10-01)。第 14 版(9d04834)への Claude のレビュー(高 1: 保留で開いた serve が sync していない
+版: 第 28 版(2026-10-01)。第 27 版(d02d1f3)への Codex と Claude のレビューを取り込んだ。指摘は全部、方針 5 の「戻す前の検め」と docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令に当たる: 検めは unit を D-Bus の `ListUnitsByPatterns`(読み込み済みの unit だけを返す)で数えていたので、止めて disable した `@default`、止めた後に systemd が捨てた unit、tar から展開しただけの旧い名の unit とそれらのストアを漏らし、命令が旧いバイナリで起こしえた。unit のファイル・インスタンスの drop-in と wants の symlink・LEGACY_UNITS・退避の要素・命令の状態(新しい `--state`)の和を取り、各々を `LoadUnit` で読み込むだけしてから性質を読む形にし、記録があるのに数えられない unit を断り、命令の側も各検めの後に起こす記録のある unit が出力に全部あることを確かめる(Codex 高 1・Claude 高 1)。install が描かない unit は、拒みの一覧(対象のバイナリを走らせない)をやめ、Exec* の道を realpath と inode で明示の許しの一覧(vega では /usr/bin/curl だけ)と比べ、cgroup の中を除くのは描いたものと一致した unit と旧い名の unit だけにした(Claude 高 2)。読み戻した Options が install の `normalize` と検めを通り `normalize` で変わらないことを求め、`tool_path` と `firewall_backend` を読み戻しの入力として名指した(Claude 中 1)。出力を数えた unit の全部と定めた(Claude 中 2)。D-Bus と tar を絶対の道の busctl と tar の子プロセスで読み、差し替えられる層を据え物の境にし、検めを S1b から別の段 S1d(L。本番への反映の前に入る)に分けた(Claude 中 3。分ける方を採った理由は「段取り」)。vega の実物の busctl の JSON を据え物に取り込むことと、S1d を据えた後に vega で `--stage running` が 0 を返すことを完了条件に足した(Claude 中 4)。やめる道の 3 は、打つたびに状態を読み直して検め、enable と restart の終了コードを捕らえ、全部が通ったときだけ状態と検め手を消す(Codex 中 2・低 5)。検め手は候補と採ったものを分け、最初の検めが 0 で出力が読める形のときだけ採る(Codex 中 3)。状態の最後の行が改行で終わらなくても読み(Codex 低 4)、固定した退避の検めで止まったときは何も変えていないと言い(Claude 低 3)、検め手を戻し終えたときとやめ終えたときに消し(Claude 低 4)、やめる道の 2 を旧い名のどの unit のファイルがあっても出し(Claude 低 5)、UnitFileState を enabled・disabled・static・indirect に限り(Claude 低 6)、`--after` から描く `Wants=` の先を既知の限界に足し(Claude 低 7。許しの一覧を当てない理由は方針 5)、`NeedDaemonReload=no` を求めた(Claude 低 8)。「最終目標とのつながり」の代価に S1d の大きさと vega での確かめの依頼を足した。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 27 版(2026-10-01)。docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令の、シェルで書いた門は、レビューのたびに unit が検めたものと別のストアを開く systemd の設定をもう 1 つ見つけられてきた(第 26 版への Codex のレビューは、`Environment=` を上書きする `EnvironmentFile=`、`WorkingDirectory=` に対して解かれる相対の `UNIQNODE_DATA_DIR`、`RootDirectory=`・`RootImage=`・bind mount を挙げた)。シェルではこれらを漏れなく数え上げられないので、unit・ストア・プロセス・保留の検めを S1b 以後のバイナリの `uniqnode legacy-rollback-preflight <固定した退避> --stage running|stopped` に移し、S1b の中身と完了条件に足した(方針 5 の「戻す前の検め」。unit は install の描くものと性質ごとに一致するときだけ通し、install が描かない unit は対象のバイナリを走らせないときだけ通す。各レビューで挙がった断りの形を全部、試験の据え物で固定する)。戻す道は S1b の後にしか要らないので、検め手は定義から S1b 以後であり、判断は手で辿る代わりに cargo の試験で守れる。命令は 262 行から 141 行に縮み、固定した退避の検め・状態の読み込み・検め・状態の和・止める・止めた後の検め・差し替えと展開・展開した後の検め・起こすの 1 本になった。やめる道は 1 本のまま、restart と default-active を start でなく restart で起こし(旧いバイナリで起きているものも替える。Claude 中 1)、default-enabled の enabled も確かめてから状態を消し(Codex 中 4)、差し替える前なら 1 を飛ばし(Claude 低 4)、各命令の ts を Ctrl-C から外し(Claude 低 6・低 7)、restart から外す命令を添えた(Claude 低 7)。状態の照会の失敗は、検めが性質を読めなければ断ることと、待つ間の `systemctl show` の失敗で止まることで扱う(Codex 中 3)。記録が無いときは記録が無いとだけ言う(Codex 低 5)。trap を固定した退避の検めの前に置き(Claude 低 5)、どのストアも 1 を答えた形に別の案内を出し(Claude 低 8)、既知の限界に今走っていない書き手(`uniqnode-*` でない unit、user の unit、cron)を足し(Claude 低 10)、「既知の限界(戻した後)」にやめる道で上げ直すときも書いた(Claude 中 1)。命令は S1b が検めを実装するまでは手順の仕様で、S1b の実装と一緒に確定する。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 26 版(2026-10-01)。第 25 版への 2 つのレビューは、docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令が 7 回のレビューで約 450 行に育ち、その複雑さそのものが危険だと揃って言った。そこで指摘ごとに枝を足すのをやめ、まれな非常の道として小さく、普通でないものには閉じる形に組み直した(命令は 447 行から 262 行へ): 道は止める前の門・止める・止めた後の門・ストアの検め・差し替え・起こす・確かめるの 1 本にし、やめる道もどの段でも同じ 1 つ(確かめた S1b 以後の検め手を据え、旧い名を展開した後なら外して install を打ち直し、止めたものを起こして 1 つずつ 60 秒まで待って active と確かめてから状態を消す)にした。バイナリを時刻や inode で見分ける形、段ごとの案内、始まったときのバイナリで起こし直す枝は消した。止める前の門で、`uniqnode-*` の service の ExecStartPre・ExecStart・ExecStartPost が 4 つのバイナリと短い許しの一覧(vega の実物にある curl と nft、文書の例にある git)の他を走らせるもの(`/bin/sh -c` などの包み)と、4 つのバイナリを走らせるのに第 2 引数が `${UNIQNODE_DATA_DIR}` でないか `UNIQNODE_DATA_DIR` を持たないものを断り、ストアは `UNIQNODE_DATA_DIR` と既定のストアからだけ取る(unit の中のプロセスの argv からストアを拾う形と stores の記録はやめた)。読めない生きたプロセスは unit の中でも断る。ストアの道が改行などの制御文字を含めば、`$( )` が削る前に断る(値は jq の中で、`readlink -e` の出力は後ろに印の文字を足して受ける)。状態は一時の配列へ読み終えてから入れ替え、読めなければ状態を消す案内を出さない。起こすものが記録に無ければ何も止めていないと言い、起こし直す unit の写しは門の直後に取り、外側の tee を `-i` にして待つ間に Ctrl-C を押さないよう書いた。この文書の「最終目標とのつながり」の代価と「S1b より前のバイナリへ戻す」もこれに合わせた。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 25 版(2026-10-01)。第 24 版への Codex と Claude のレビューを取り込んだ。指摘は全部 docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令と、この文書の「最終目標とのつながり」と「S1b より前のバイナリへ戻す」に当たる: やめるときの active の確かめを 1 つずつにし、全部が active のときだけ状態を消す(Codex 中 1)、`@default` の enable(字句どおりの `enabled` だけ)と稼働を default-enabled と default-active に分けて残し、やめるときは enable されていたものだけ enable し、動いていたものだけ起こす(Codex 中 2・Claude 低 3。install の `--no-start` のときも動いていたものを起こす)、`enable --now` と `start` の失敗を捕らえて 1 つずつの確かめと外す命令の案内まで進む(Codex 低 3)、止める前の門で unit の cgroup の中のプロセスのストアも残し、`UNIQNODE_DATA_DIR` を持たず `ExecStart` が 4 つのバイナリの unit は断る(Claude 中 1)、止める前にもストアの道を解いて照会する(Claude 低 1)、stores から外す命令を `LC_ALL=C grep -azvxF` にし、改行を含む道は手で外すよう言う(Claude 低 2)、差し替えの段の失敗でもバイナリを見分けて元へ戻す案内を出し、途中の写しを消すよう言う(Claude 低 4)、状態の和を止める前の門の後に書き、状態の無かった回の断りは状態のディレクトリを消すだけでよいと言う(Claude 低 5)、退避と同じ中身でも時刻が退避と同じなら元のバイナリとして元へ戻す(Claude 低 6)、止まる口に graph の viewer 7452・7454 と毎分の graph-pull の timer を足し、前の回が止めたものは止まったままと書く(Claude 低 7)、外す命令を記録へ追記する形で出す(Claude 低 8)。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 24 版(2026-10-01)。第 23 版への Codex と Claude のレビューを取り込んだ。指摘は docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令と、この文書の「最終目標とのつながり」と「S1b より前のバイナリへ戻す」に当たる: プロセスの門を読めないプロセスに対して閉じる形にした(exe を解けないプロセスは、消えた・ゾンビ・カーネルのスレッドと確かめたときだけ除き、他は pid と理由を言って断る。道に加えて inode でも比べ、別のマウントの名前空間のものも拾う。Codex 高 1・Claude 低 1)、一回走る service(`Type=oneshot` で `RemainAfterExit=no`)を起こし直す一覧に入れず、終わりを待つだけにした(Codex 中 2)、展開の後にやめる案内を、止めたものを起こして active と確かめてから状態を消す順にした(Codex 中 3・Claude 中 1)、unit の 2 つの一覧を別々に取って失敗を隠さない(Codex 中 4)、案内で S1b 以後のバイナリとして名を出すのはこの回に 0 か 3 を答えた検め手だけにした(Codex 低 5)、何かを止める前にも門を通し(unit の cgroup の中のものを除く)、差し替えの前に断ったときは、始まったときと同じバイナリで元の形へ戻す案内を出し、そのために `@default` の enable の状態を状態のディレクトリに残す(Claude 中 2)、前の回の門が残したストアと起きない unit を状態から外す命令を添える(Claude 低 2)、代価に vega の全部の Claude Code のセッションを閉じること・別のプロジェクトの MCP の設定が起こす共有でないバイナリの mcp・戻す間に止まる口と timer を足した(Claude 低 3)。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 23 版(2026-10-01)。第 22 版への Codex と Claude のレビューを取り込んだ。指摘は全部 docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令(と、その原則を書く「S1b より前のバイナリへ戻す」)に当たり、指摘ごとに直さず、次の原則で命令を組み直した: 命令が知る unit を全部止めた後に、共有のバイナリ・退避のバイナリ・検め手を走らせるプロセスが残れば差し替えない(Codex 高 2: 一覧に無いストアを開く mcp の Local と CLI、Codex 中 5: 前の回に戻した旧い serve。旧い serve・viewer・backup の timer も止め、走る旧い backup を待つ)、起こし直す unit を退避の隣の状態のディレクトリに和で残し、全部が active と確かめてから完了とする(Codex 中 4・Claude 中 1)、ストアの道を `readlink -e` と `[ -d ]` で確かめて `find -H` で照会する(Codex 高 1・Claude 中 2)、操作者が置いた検め手を先に使い、今のバイナリの写しは候補として 0 か 3 の答えを見てから採る(Codex 中 3・Claude 低 5・低 6)、`UNIQNODE_DATA_DIR` を D-Bus の文字列の配列から字句の一致で読み、hold-status をストアの持ち主として走らせ、sudo 自身の 1 を対応の印と見ない(Codex 中 6・Claude 低 4)、外す命令の timer の案内を外す行が通るまで残す(Codex 低 7)、`@default` の据わりを drop-in か is-enabled で決める(Claude 低 3)。加えて CLI の形の段落の振り分けの行を `run` の match に改めた(Claude 低 7)。最終目標とのつながりの代価に、戻す前に vega の Claude Code の mcp の Local を閉じることを足した。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 22 版(2026-10-01)。第 21 版への Codex と Claude のレビュー(Codex 高 1・Claude 中: 旧い名の unit へ戻す命令は、共有のバイナリを使う graph_a・graph_b を含む全部の書き手を止め、全部のストアの hold-status が 0 のときだけ差し替える、Codex 高 2: 保留を知る版と確かめたときだけ今のバイナリで起こし直す案内を出す、Codex 中 3: 印の不在と照会の誤りを分ける、Codex 中 4: 壊れた印の release-hold にも再起動か umount・fsck・mount し直しの前提、Claude 中: 差し替えの後に打ち直せるよう、検め手を退避の外へ写す、Claude 中: CLI の形を main.rs の `uniqnode <command> <data_dir> [args]` に合わせて `uniqnode hold-status <dir>` と `uniqnode release-hold <dir>` へ改め、文書の字句と CLI の名を照らす repo_hygiene の試験を S1b に足す、Claude 中: S1b の戻し方の再起動が手で起こした llama-server を止める代価と OOMScoreAdjust の案、Codex 低 7・Claude 低: 命令ごとの開き方の表に hold-status と release-hold、その完了条件の拡げ、Claude 低: SYSTEMD.md の終了コード 1・2 の案内と外す命令の旧い timer の trap、Claude 低: 旧いバイナリへ落ちる他の道)を取り込んだ。S1c の本文と「裁定の後に扱う指摘」は操作者の裁定待ちのまま動かしていない。第 21 版(2026-10-01)。2026-10-01T00:01:28Z の操作者の規則(どの計画も、手元の GPU で lamalium を毎日の実務に使うという最終目標とのつながりを書く)に従い「最終目標とのつながり」を足した。第 20 版への Codex と Claude のレビュー(Codex 高 1: docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令は、バイナリを差し替える前に新しいバイナリの `store hold-status` で `open-marker` を検め、保留なら起こさない。そのための `store hold-status` を S1b に足し、S1b より前のバイナリへ戻すと保留を素通りすることとその規則を「S1b より前のバイナリへ戻す」に書いた、Claude 低 7: SYSTEMD.md の外す命令が固定の壊れで止まるとき、旧い timer を戻す命令を言う)を取り込んだ。S1c は範囲が操作者の裁定待ちなので設計の本文を動かさず、S1c だけに当たる指摘(Codex 中 2〜5・低 6、Claude 中 4・低 1 ほか)は「backup の写し元の検め」の頭の「裁定の後に扱う指摘」に並べた。第 20 版(2026-10-01)。第 19 版への Codex と Claude のレビュー(Codex 高 1・Claude 高 2: backup の公開を、写し先の世代のディレクトリを完成させてから `current` の symlink を 1 回の rename で切り替える形へ、Codex 高 2・Claude 中 3: 写し先のロックを backup の全体で持つ、Claude 高 1: 開き終えるまでは境界を答えず `opening` と答え、写し先より短い reflog の境界は断る、Codex 中 3: 閉じる要求で新しい外側の書き込みの番を閉め、入れ子だけを通す、Codex 中 4・Claude 低 5: 同じ pid・nonce の `NoSpace` の印も認める、Codex 中 5・中 6: docs/mop/SYSTEMD.md の戻す命令の unit の不在と外す命令の固定の検め、Claude 中 4: S1 を S1a・S1b・S1c に分けて段ごとのゲート、低 6〜13: hard link の条件、stage の片付け、照会の相手の `SO_PEERCRED`、境界の別の `Mutex`、accept の起こし方、印の読み直し、開く途中の RAII、uid の試験の debug の口、低 14: 直す文書に SYSTEMD.md の表)を取り込んだ。第 19 版(2026-10-01)。第 18 版への Codex と Claude のレビュー(Codex 高 1・Claude 中 3: 書き込みの途中の旗を入れ子と早い戻りとパニックに耐える数え値と RAII の番へ、Codex 高 2・高 3・中 5・Claude 中 2・低 11: backup を、ロックの持ち主が答える永続化済みの境界までの写しと、写し先の tmp/ での段取り・検め・公開の後の削除へ組み直し、ロックの socket に accept の輪と照会の期限、印に開くたびの nonce、Codex 中 4: 2 度目のシグナルを受ける輪を終わり方から分ける、低 9: GC の競合の試験の 2 つの停止点と期待値、Claude 高 1: 開くことの失敗を手綱に記録する、中 5: install の断りの完了条件、低 10: 終わり方の 2 度呼び)を取り込んだ。第 18 版(2026-10-01)。第 17 版への Codex と Claude のレビュー(Codex 高 1: GC の D の packs/ の sync をストアのロックの中で行い、終わり方と排他にする、Codex 中 2〜4・低 6: 旧い名の unit を外す命令の backup の待ち・退避の対象・退避先の一意・パイプラインの失敗、Claude 中 1: 読むだけの走査の Drop は印を書かない、中 2: CLI のシグナルは共有の小さな手綱で閉じる、中 3: serve のログがデータのディレクトリの祖先を作る、中 4: 保留の写し元を backup が写さない、中 5: vega で共有するバイナリと旧い名の unit、低 5: シグナルで閉じたときの終了コード、低 6: 開く途中のシグナル、低 8: 外す命令の字句の試験)を取り込んだ。第 17 版(2026-10-01)。第 14 版(9d04834)への Claude のレビュー(高 1: 保留で開いた serve が sync していない
 レコードを複製の口でピアへ渡す、中 1: 開いた後の抜け道とシグナル、中 2: 既存の試験との食い違いと Drop、中 3: 命令ごとの
 開き方、中 4: GC の D のディレクトリの sync、中 5: 旧い名の unit からの移行を本番への反映の前提に、低 3〜8)を、
 第 16 版に照らし直して取り込んだ。第 16 版(2026-10-01)。第 15 版(3162e7f)への vega の Codex の再レビュー(高なし、中: ストアの障害でない
@@ -44,7 +44,7 @@ Claude(N1)が独立に見つけた。[docs/plan/FEED.md](#fa8de6f9-59f8-4512-a81
   ときの保険と、FEED の前提を満たすことで、毎日の使い勝手が良くなる変更ではない。
 - 代価:
   - 大きさ: S1a M、S1b L、S1c M(S1c の範囲は操作者の裁定待ち。B なら backup が印を読むだけの小さな段に
-    縮み、C なら無くなる)。設計の版を 20 重ねたとおり、中身は細かく、実装とレビューに日数がかかる。
+    縮み、C なら無くなる)、S1d L(戻す前の検め。第 28 版で S1b から分けた。本番への反映の前に入る)。設計の版を 20 重ねたとおり、中身は細かく、実装とレビューに日数がかかる。
   - 日々の運用に持ち込む代価(S1b): 同じブートの中で serve が SIGKILL・OOM・異常終了で落ちると、ホストを
     再起動するまで保存が 503 になる(方針 5 の代価)。lamalium の保存はその間止まる(検索は答える)。
     systemd の stop・restart は ExecStop と SIGTERM で無事に終わるので、平常の更新では起きない。
@@ -70,12 +70,15 @@ Claude(N1)が独立に見つけた。[docs/plan/FEED.md](#fa8de6f9-59f8-4512-a81
     読み口 7441・viewer 7450、graph の口 7442〜7445(lamalium-plan)、graph の viewer 7452・7454、毎分の graph-pull の
     timer と backup の timer が止まり、命令が止めた後に断ったときは、直して打ち直しが通るか、やめる手順を打ち
     終えるまで止まったままである。止める前に断った回は何も止めないが、前の回が止めたものは止まったままである
-    (第 24 版への Codex と Claude のレビューの Claude 低 7)。命令の検め(第 27 版から S1b の
-    `uniqnode legacy-rollback-preflight`)は普通でないもの(install の描くものと性質が 1 つでも違う unit、install が
-    描かないのに対象のバイナリを走らせる unit、実行ファイルを読めない生きたプロセス、相対か symlink を含むか制御
-    文字を含むストアの道)を扱わずにわざと断る。断りは操作者が手で直して(install を打ち直して描き直すなど)打ち
-    直すので、その分の手間が代価に加わる。この検めは S1b の大きさ(L)の中に入り、S1b の実装とレビューの日数を
-    増やす。代わりに、戻す命令のレビューのたびに端の形を足す回り道(第 21〜26 版)が試験で閉じ、命令は短くなる。
+    (第 24 版への Codex と Claude のレビューの Claude 低 7)。命令の検め(第 27 版から S1b 以後の
+    `uniqnode legacy-rollback-preflight`。第 28 版で実装を S1d に分けた)は普通でないもの(install の描くものと性質が
+    1 つでも違う unit、install が描かない unit で Exec* の道が許しの一覧(vega では /usr/bin/curl だけ)に無いもの、
+    実行ファイルを読めない生きたプロセス、相対か symlink を含むか制御文字を含むストアの道)を扱わずにわざと断る。
+    断りは操作者が手で直して(install を打ち直して描き直すなど)打ち直すので、その分の手間が代価に加わる。
+    docs/mop/SYSTEMD.md の例の ingest-git の unit を据えた機械では、許しの一覧に git を足すコードの変更が要る。
+    この検めは S1d(L)として S1b と別に実装とレビューの日数がかかり、本番への反映はそれを待つ。vega での確かめに
+    操作者の sudo の依頼が 1 つ増える(`--stage running` を読むだけで打つ)。代わりに、戻す命令のレビューのたびに
+    端の形を足す回り道(第 21〜27 版)が試験で閉じ、命令の判断はシェルでなく試験の通ったコードに寄る。
     やめるときの案内は、どの段でも S1b 以後のバイナリを据えて止めたものを起こし直す 1 つの手順である。
     戻す命令が使われるのは S1b を入れた後に S1b より前へ戻すまれな非常のときだけで、平常の日の lamalium の保存と
     検索には関わらない。
@@ -84,7 +87,7 @@ Claude(N1)が独立に見つけた。[docs/plan/FEED.md](#fa8de6f9-59f8-4512-a81
   - 止まる間: 移行の間(外してから据え直すまで。ビルドを先に済ませれば数分)、主の口 7440・読み口 7441・
     viewer 7450 が止まり、lamalium の保存と検索が失敗する。本番への反映の install でも、serve の起こし直しと
     索引の温め(本番の規模で 10 秒ほど)の間止まる。
-  - 本番への反映は S1a〜S1c が揃ってから 1 回と決めている(「段取り」)ので、S1c の裁定が出るまで反映の
+  - 本番への反映は S1a〜S1c と S1d が揃ってから 1 回と決めている(「段取り」)ので、S1c の裁定が出るまで反映の
     時期も決まらない。
 
 ## 欠陥(今のコードの事実)
@@ -529,45 +532,107 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
      使い方の誤りとして 2 で終える(main.rs の 2257 行付近の、`run` の末尾の `_ => usage()`)ので、終了コード 2 は「この版は
      hold-status を知らないか、引数を誤った」と読め、どちらも検めていない側に倒す。docs/mop/SYSTEMD.md が操作者に打たせる字句と CLI の名が食い違わないよう、
      repo_hygiene の試験で照らす(must/0023。完了条件)。
-   - 戻す前の検め(第 27 版。第 26 版への Codex のレビューの高 1・高 2 と、それまでの全部のレビューの門の指摘):
-     `uniqnode legacy-rollback-preflight <固定した退避> --stage running|stopped`。「S1b より前のバイナリへ戻す」の
-     命令(docs/mop/SYSTEMD.md)が、何かを止める前・止めた後・旧い名の unit を展開した後に打つ。全部のストアを
-     見るので特別な 1 つのストアは無く、`<data_dir>` の位置には固定した退避のディレクトリ(旧いバイナリ
-     `uniqnode` と `units.tar.gz` を持つ)を置く。`admin-keygen <keyfile>` や `cert-make` と同じく、データの
-     ディレクトリを取らない命令の形である。検めることは次の 4 つで、どれも読めない・分からないときは断る側に倒す。
-     - unit: system の `uniqnode-*` の service と timer を systemd の性質(D-Bus の `ListUnitsByPatterns` と各 unit の
-       性質)で数える。install が描く unit(`uniqnode-serve@`・`uniqnode-viewer@`・`uniqnode-backup@` のインスタンス)は、
-       install.rs を唯一の正として、その unit の drop-in から Options を読み戻し(`drop_ins` の逆。描いて読み戻して
-       描き直すと同じ字句になることを試験で固定する)、描き直したものと次を 1 つずつ比べ、全部が等しいときだけ通す:
-       FragmentPath と DropInPaths(テンプレートの現物と install の drop-in だけで、どちらのバイト列も描いたものと
-       同じ)、ExecCondition・ExecStartPre・ExecStart・ExecStartPost・ExecReload・ExecStop・ExecStopPost の道と
-       引数の並び(`${UNIQNODE_DATA_DIR}` などは展開する前の字句)、Environment(テンプレートと drop-in を systemd と
-       同じ規則で重ねた並び)、EnvironmentFiles(空)、WorkingDirectory、RootDirectory・RootImage(空)、
-       BindPaths・BindReadOnlyPaths・TemporaryFileSystem・MountImages(空)、User。ProtectHome= のように install
-       自身が書く設定は、描いたものと同じなので通る。timer は、それが起こす service が通るときだけ通す。旧い名の
-       unit(LEGACY_UNITS)は今の install が描かないので、固定した退避の `units.tar.gz` の要素を描いたものの代わりに
-       し、unit の現物と drop-in がそのバイト列と同じで、上の空であるべき性質が空で、対象のバイナリを走らせる行の
-       第 2 引数が `${UNIQNODE_DATA_DIR}` でその値が絶対の道のときだけ通す。install が描かない unit(vega の
-       uniqnode-graph-pull の curl、docs/mop/SYSTEMD.md の例の ingest-git)は、どの Exec* でも対象のバイナリを
-       走らせないときだけ通す(git などの許しの一覧は持たない。`/bin/sh -c` などの包みは、中で何が走るかを決め
-       られないので、対象のバイナリを走らせるものと同じく断る)。他は全部断る。対象のバイナリは、通った unit が
-       描く `--bin`、固定した退避の `uniqnode`、検め手自身(`/proc/self/exe`)である。
+   - 戻す前の検め(第 27 版。第 26 版への Codex のレビューの高 1・高 2 と、それまでの全部のレビューの門の指摘。
+     第 28 版で第 27 版への Codex と Claude のレビューを取り込んだ。実装は S1d。「段取り」):
+     `uniqnode legacy-rollback-preflight <固定した退避> --stage running|stopped --state <状態のディレクトリ>`。
+     「S1b より前のバイナリへ戻す」の命令(docs/mop/SYSTEMD.md)が、何かを止める前・止めた後・旧い名の unit を展開
+     した後に打つ。全部のストアを見るので特別な 1 つのストアは無く、`<data_dir>` の位置には固定した退避のディレクトリ
+     (旧いバイナリ `uniqnode` と `units.tar.gz` を持つ)を置く。`admin-keygen <keyfile>` や `cert-make` と同じく、
+     データのディレクトリを取らない命令の形である。`--state` は命令の状態のディレクトリ(restart・default-enabled・
+     default-active)で、無ければ記録が無いものとし、あるのに読めなければ断る。検めることは次の 4 つで、どれも
+     読めない・分からないときは断る側に倒す。
+     - 読み口(第 28 版。第 27 版への Claude のレビューの中 3): node は依存を持たない(should/0101。node/Cargo.toml の
+       `[dependencies]` は空)ので、D-Bus の client も tar の読み手も crate で足さない。systemd の性質は絶対の道の
+       `/usr/bin/busctl --json=short`(`call org.freedesktop.systemd1 /org/freedesktop/systemd1
+       org.freedesktop.systemd1.Manager ListUnitFilesByPatterns`・`LoadUnit`・`get-property` の `UnitPath` と各 unit の
+       性質)を子プロセスで走らせ、その JSON を node/src/json.rs の読み手で読む。units.tar.gz は `/usr/bin/tar -tzf` で
+       要素の名を、`/usr/bin/tar -xOzf <退避>/units.tar.gz <要素>` で要素のバイト列を読む。/proc は道の根を差し替え
+       られる読み手で読む。この 3 つ(systemd の性質、tar の要素、/proc の根)は 1 つの差し替えられる層(trait)の
+       後ろに置き、試験の据え物はその層の偽物を与える。子プロセスの失敗・JSON の形の違い・知らない型は断りに倒す。
+       PATH は使わない(root で走るので、道は絶対で書く)。
+     - unit を数える(第 28 版。第 27 版への Codex と Claude のレビューの高 1): 第 27 版は D-Bus の
+       `ListUnitsByPatterns` で数えていたが、これは systemd に読み込まれている unit しか返さない。止めて disable
+       した `@default`、止めた後に systemd が捨てた unit、tar から展開しただけでまだ読み込まれていない旧い名の unit
+       が数えから漏れ、そのストアを検めないまま、命令の起こす段が旧いバイナリで起こしえた。そこで読み込みの状態に
+       依らずに数える。名の集合は次の和である: `ListUnitFilesByPatterns` の `uniqnode-*` の unit のファイル(テンプレート
+       自身は数えず、インスタンスを生む元として使う)、Manager の `UnitPath` の各ディレクトリの
+       `uniqnode-*@*.service.d/override.conf` と `uniqnode-*@*.timer.d/` の drop-in から取ったインスタンスの名、同じ
+       ディレクトリの `*.wants/`・`*.requires/` の下の `uniqnode-*` の symlink の名(enable されたインスタンス)、
+       install の LEGACY_UNITS、固定した退避の units.tar.gz の要素の unit の名、`--state` の 3 つのファイルの名。各々に
+       `LoadUnit`(読み込むだけで、起こさず、enable も変えない)を打ってから性質を読む。`LoadState` が `not-found` で
+       ファイルも無い名は、LEGACY_UNITS と退避の要素なら「無い」として数えず、`--state` に記録された名なら断る
+       (記録があるのに数えられない unit は起こせない)。`loaded` でない他の `LoadState`(`masked`・`error`・
+       `bad-setting`)は断る。`NeedDaemonReload` が `no` でない unit も断る(読んだ性質がディスクのファイルと違いうる。
+       第 27 版への Claude のレビューの低 8)。
+     - unit を通す: install が描く unit(`uniqnode-serve@`・`uniqnode-viewer@`・`uniqnode-backup@` のインスタンス)は、
+       install.rs を唯一の正として、その unit の drop-in から Options を読み戻し(`drop_ins` の逆)、描き直したものと
+       次を 1 つずつ比べ、全部が等しいときだけ通す。読み戻した Options は、install の `normalize`(install.rs の 945 行
+       付近。`check_instance`・`check_listen`・`check_after_unit`・`check_agent_writable`・`check_agent_collection`・
+       `check_agent_graph`・`check_firewall_allow` などの install の検めを含む)を通り、かつ `normalize` を通しても
+       変わらないことを求める(第 28 版。第 27 版への Claude のレビューの中 1。install が描きえない Options から描き
+       直して一致させる道を閉じる)。`drop_ins` が Options の外から取る入力も読み戻しの対象として名を挙げる:
+       `tool_path`(drop-in の `Environment=PATH=` の値。`tool_path()` の value の形でなければ断る)と
+       `firewall_backend`(serve の drop-in の `ExecStartPre=+<nft> -f <道>` から `Nft` とその道を、ufw の形からは
+       `Ufw` を読み、どちらの形でもない ExecStartPre は断る。nft の規則ファイルも描いたもののバイト列と比べる)。
+       比べるもの: FragmentPath と DropInPaths(テンプレートの現物と install の drop-in だけで、どちらのバイト列も描いた
+       ものと同じ)、ExecCondition・ExecStartPre・ExecStart・ExecStartPost・ExecReload・ExecStop・ExecStopPost の道と
+       引数の並びと接頭の印(`${UNIQNODE_DATA_DIR}` などは展開する前の字句。`+`・`@`・`:`・`!`・`-` の印は systemd 249
+       では `ExecStartEx` などの `Ex` の性質の flags にしか出ないので、`Ex` の性質を読み、無ければ断る。第 27 版への
+       Claude のレビューの中 4)、Environment(テンプレートと drop-in を systemd と同じ規則で重ねた並び。後の代入が
+       同じ名を上書きしたときの位置は、実物の busctl の JSON から取った据え物で決める)、EnvironmentFiles(空)、
+       WorkingDirectory、RootDirectory・RootImage(空)、BindPaths・BindReadOnlyPaths・TemporaryFileSystem・
+       MountImages(空)、User。ProtectHome= のように install 自身が書く設定は、描いたものと同じなので通る。timer は、
+       それが起こす service が通るときだけ通す。旧い名の unit(LEGACY_UNITS)は今の install が描かないので、固定した
+       退避の `units.tar.gz` の要素を描いたものの代わりにし、unit の現物と drop-in がそのバイト列と同じで、上の空で
+       あるべき性質が空で、対象のバイナリを走らせる行の第 2 引数が `${UNIQNODE_DATA_DIR}` でその値が絶対の道のときだけ
+       通す。`@default` と旧い名の unit の UnitFileState は `enabled`・`disabled`・`static`・`indirect` のどれかに限り、
+       `enabled-runtime`・`linked`・`masked` などは断る(第 27 版への Claude のレビューの低 6。シェルの側は全部の group
+       に同じ限りを掛ける)。
+     - install が描かない unit(第 28 版。第 27 版への Claude のレビューの高 2): 第 27 版は「どの Exec* でも対象の
+       バイナリを走らせないときだけ通す」としたが、これは対象のバイナリを数え上げる拒みの一覧で、包みのスクリプト
+       (/usr/local/bin/pull.sh の中で共有のバイナリを呼ぶ)、/usr/bin/env・nice・timeout・flock のような他の
+       プログラムを起こすプログラム、共有のバイナリへの symlink を漏らす。そこで許しの一覧にする: どの Exec*
+       (ExecCondition から ExecStopPost まで全部)の道も、realpath で解いた道と inode が、明示の許しの一覧の
+       どれかの realpath と inode に一致するときだけ通す。一覧は node のコードの定数で、今は `/usr/bin/curl` だけで
+       ある(vega の uniqnode-graph-pull が走らせるのはこれだけ。2026-10-01 に `systemctl show -p ExecStart
+       uniqnode-graph-pull.service` で確かめた)。許しの一覧の実物の inode が対象のバイナリの inode と同じなら、それも
+       断る。docs/mop/SYSTEMD.md の例の ingest-git(git)は一覧に無いので、それを据えた機械では断られる。足すときは
+       コードの定数と据え物の試験を一緒に足す(決め: 設定で足せる形にすると、許しの一覧が試験の外で育ち、
+       レビューのたびに漏れが見つかった第 21〜26 版の形に戻るため)。他は全部断る。対象のバイナリは、通った unit
+       が描く `--bin`、固定した退避の `uniqnode`、検め手自身(`/proc/self/exe`)である。
+     - `Wants=` の先(第 27 版への Claude のレビューの低 7): install が `--after` から描く `Wants=`(vega では
+       wg-quick@wg1.service)は `uniqnode-*` の外の unit で、起こすときに一緒に起きうる。決め: 検めず、既知の
+       限界に書く(「S1b より前のバイナリへ戻す」)。それらの中身は uniqnode が描かず、許しの一覧を当てると
+       前提の unit ごとに解釈系(wg-quick は shell のスクリプト)を一覧に足すことになり、一覧の意味が崩れる。
+       既知の限界の「`uniqnode-*` でない unit」と同じ種類として扱う。
      - ストア: 通った unit の描かれた `UNIQNODE_DATA_DIR` から取る。絶対の道で、制御文字を含まないことを確かめ、
        解いた道が元の道と同じ(symlink を含まない)ディレクトリで、持ち主が unit の User= の uid であることを求める。
      - プロセス: /proc の全プロセスを読む(第 23 版からの門と同じく閉じる形)。実行ファイルの道か inode を読めない
        生きたプロセスは、消えた・ゾンビ・カーネルのスレッドと確かめたものを除き、unit の中でも外でも断る。
-       `uniqnode-*` の service の cgroup の外で対象のバイナリ(道か inode の一致。道の末尾の「 (deleted)」は外して
-       比べる)を走らせるものも断る。検め手自身の pid は除く。`--stage stopped` では cgroup の中のものも断り、
-       数えた unit が全部 `inactive` か `failed` であることも求める。
+       対象のバイナリ(道か inode の一致。道の末尾の「 (deleted)」は外して比べる)を走らせるものも断る。除くのは
+       検め手自身の pid と、`--stage running` で、描いたものと一致して通った unit と旧い名の unit の cgroup の中の
+       プロセスだけである(install が描かない unit の cgroup の中のものは除かない。第 27 版への Claude のレビューの
+       高 2)。`--stage stopped` では cgroup の中のものも断り、数えた unit が全部 `inactive` か `failed` であることも
+       求める。
      - 保留(`--stage stopped` だけ。動いている serve はロックと自分の `Running` を持つので、止める前には判定しない):
        各ストアに hold-status と同じ判定をプロセスの中で打ち、ストアごとに 0・3・1 を道とともに標準エラーへ言う。
-     出力: 標準出力に、止めて後で起こし直す unit を 1 行に 1 つ、`unit <名> <kind> <group> <UnitFileState> <ActiveState>`
-     の 6 語で並べ、最後に `end <行の数>` を置く。kind は `timer`・`oneshot`(`Type=oneshot` で `RemainAfterExit=no`)・
-     `daemon`、group は `default`(`@default` の serve・viewer・backup の timer)・`legacy`(旧い名の serve・viewer・
-     backup の timer)・`other`。名は `uniqnode-[A-Za-z0-9@._:-]+\.(service|timer)` に限り、道は標準出力に出さない
-     (シェルで道を読み分けない)。終了コード: 0 は通る、3 は保留のストアがある(他は全部 0)、4 はどのストアも 1、
-     2 は使い方の誤り(S1b より前の版はこの命令を知らず、`run` の末尾の `usage()` で 2 になる)、1 はその他の断りで、
-     理由を標準エラーに言う。読むだけで、unit・ストア・印のどれも変えない。
+     出力: 標準出力に、数えた unit の全部を、止まっているか動いているかや enable の状態に依らず 1 行に 1 つ、
+     `unit <名> <kind> <group> <UnitFileState> <ActiveState>` の 6 語で並べ、最後に `end <行の数>` を置く(第 28 版。
+     第 27 版は「止めて後で起こし直す unit」と書いていたが、シェルは止まった `@default` も disable の相手として
+     読み、記録された unit が出力にあることも確かめるので、全部を出す。第 27 版への Claude のレビューの中 2)。
+     同じ名は 2 度出さない。出力に名がある unit は、そのストアをこの回の検めが見たことを意味する。kind は `timer`・
+     `oneshot`(`Type=oneshot` で `RemainAfterExit=no`)・`daemon`、group は `default`(`@default` の serve・viewer・
+     backup の timer)・`legacy`(旧い名の serve・viewer・backup の timer)・`other`。名は
+     `uniqnode-[A-Za-z0-9@._:-]+\.(service|timer)` に限り、道は標準出力に出さない(シェルで道を読み分けない)。
+     命令は、各検めの後に、起こす記録のある unit(状態の全部と、展開した後は旧い名の 3 つ)が出力に全部あることを
+     確かめ、無ければ起こさずに止まる(第 28 版。検めの側も `--state` の記録を数えられなければ断るので、両側で閉じる)。
+     終了コード: 0 は通る、3 は保留のストアがある(他は全部 0)、4 はどのストアも 1、2 は使い方の誤り(S1d より前の
+     版はこの命令を知らず、`run` の末尾の `usage()` で 2 になる)、1 はその他の断りで、理由を標準エラーに言う。
+     読むだけで、unit の稼働と enable・ストア・印のどれも変えない(`LoadUnit` は systemd に unit を読み込ませるだけ)。
+     検め手の採り方(第 28 版。第 27 版への Codex のレビューの中 3): 命令は、置いてあった検め手か今の共有のバイナリの
+     写しを候補とし、最初の検め(`--stage running`)が 0 で終わって出力が読める形のときだけ採る。`--stage running` は
+     保留を判定しないので、正しい検め手の答えは 0 か断りしかない。2 でないこと(126・127・sudo の失敗・シグナルも
+     当たる)を確かめとは扱わない。
    - 代価: 同じブートの中で serve が SIGKILL・OOM・異常終了で落ちると、I/O の誤りが無くてもホストを
      再起動するまで書けない状態で起きる。systemd の stop と restart を無事な終わり方にするため、unit
      に `ExecStop=`(主の口へ `POST /v1/admin/shutdown` を送り、終わりを待つ)を足す。今の serve は
@@ -923,7 +988,7 @@ backup.rs の冒頭の「残骸の削除は MANIFEST を据える前」と docs/
   印以外のファイルの集合とバイト列は前と同じである(第 21 版への Codex と Claude のレビューの Codex 低 7・Claude 低)。
 - CLI の名と文書の字句(第 21 版への Codex と Claude のレビューの Claude 中。must/0023): node/tests/repo_hygiene.rs に、
   docs/mop/SYSTEMD.md のコードブロック(操作者に貼らせる命令)の中で `hold-status`・`release-hold`・`legacy-rollback-preflight` を打つ字句が、main.rs の
-  使い方に載る命令の名と `uniqnode <command> <data_dir>` の形(`legacy-rollback-preflight` は `<data_dir>` の位置に固定した退避)に一致する(命令の名の前に `store` が無く、`--data-dir` が
+  使い方に載る命令の名と `uniqnode <command> <data_dir>` の形(`legacy-rollback-preflight` は `<data_dir>` の位置に固定した退避で、`--stage` と `--state` を取る)に一致する(命令の名の前に `store` が無く、`--data-dir` が
   無い)ことを確かめる試験を足す。散文の中の経緯の記述(旧い形の名を挙げる版の行など)は照らさない。使い方の文面は `usage_text` の 1 箇所なので、試験はそれを読んで名を取り出す。
 - 戻す前の検め(`uniqnode legacy-rollback-preflight`。第 27 版): systemd の性質と /proc を差し替えられる据え物(unit の
   性質の表、テンプレートと drop-in の現物、退避の `units.tar.gz`、偽の /proc の木)の上で試す。install が描いた
@@ -942,6 +1007,45 @@ backup.rs の冒頭の「残骸の削除は MANIFEST を据える前」と docs/
   同じ boot_id の `Running` か `Io` のストアを 1 つ含むと 3、全部のストアのロックを別のプロセスが持つと 4 で、
   どの形でも印とストアのバイト列が前と同じである。性質を読む呼び出しの失敗を注入すると 1 で終える(読めない
   ものを通る側に倒さない)。`--stage` の無い形、余る引数は 2 で終える。
+  第 28 版で足す形(第 27 版への Codex と Claude のレビュー。これらの据え物は「読み口」の差し替えられる層の偽物で
+  与える):
+  - 読み込みに依らない数え(高 1): `@default` を止めて disable し、読み込み済みの一覧から消えた据え物で、その
+    ストアが同じ boot_id の `Io` なら `--stage stopped` は 3 で終える(数えから漏れて 0 にならない)。tar から展開した
+    だけで読み込まれていない旧い名の unit は数えられ、退避のバイト列と比べられる(同じなら出力に `legacy` の行が出て
+    0、1 バイト違えば 1)。`--state` の restart に記録されているのに unit のファイルも drop-in も無い名は 1 で終える。
+    インスタンスの drop-in だけがあり読み込まれていない `uniqnode-serve@graph_c.service` も数えて比べる。
+    `LoadState` が `masked` の unit、`NeedDaemonReload` が `yes` の unit も 1 で終える(低 8)。
+  - 許しの一覧(高 2): install が描かない unit の Exec* が、共有のバイナリを呼ぶ包みのスクリプト
+    (/usr/local/bin/pull.sh)、`/usr/bin/env uniqnode …`、`/usr/bin/nice`・`/usr/bin/timeout`・`/usr/bin/flock` で
+    包んだ形、共有のバイナリへの symlink(道は許しの一覧と違い、realpath は共有のバイナリ)、curl への symlink
+    でも inode が違う別のファイルのどれでも 1 で終える。/usr/bin/curl を直に走らせる graph-pull は通る。
+    install が描かない unit の cgroup の中で対象のバイナリを走らせるプロセスは、`--stage running` でも 1 で終える。
+  - 読み戻しの検め(中 1): drop-in から読み戻した Options が `normalize` に断られる形(不正なインスタンス名、
+    `--after` に unit の名でない字句)と、`normalize` を通すと変わる形(`..` を含むか symlink を経る `--bin` やデータのディレクトリ。install.rs の
+    `absolute` が canonicalize して変える)は、描き直した
+    字句が一致するように作っても 1 で終える。`Environment=PATH=` が `tool_path()` の形でない drop-in と、nft でも
+    ufw でもない ExecStartPre を持つ serve も 1 で終える。
+  - 出力の形(中 2): 止まって disable された `@default`、動いている graph_a、止まった旧い名の unit を並べた据え物で、
+    出力に全部が状態どおりの 6 語の行で 1 度ずつ出る。
+  - UnitFileState(低 6): `@default` か旧い名の unit が `enabled-runtime`・`linked`・`masked` なら 1 で終える。
+  - `Ex` の性質(中 4): `ExecStartEx` の無い性質の表では 1 で終える。`+` の印を flags に持つ ExecStartPre を描いた
+    serve は通り、印の無い同じ道の ExecStartPre なら 1 で終える。
+- 実物の形を据え物に取り込む(第 28 版。第 27 版への Claude のレビューの中 4): 合成した据え物は systemd の実物の
+  形(Environment の上書きが位置を保つこと、接頭の印が systemd 249 では `Ex` の性質にしか出ないこと)を外しうる。
+  S1d の完了条件として、vega の graph_a の serve(`uniqnode-serve@graph_a.service`)、`uniqnode-graph-pull.service`、
+  旧い名の serve の性質を、読むだけの照会で JSON に取り、据え物として node/tests の下に置く。取り方は、vega の
+  hikalium の端末で(root は要らない) `/usr/bin/busctl --json=short call org.freedesktop.systemd1
+  /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager LoadUnit s <unit>` で unit の道を得て、
+  `/usr/bin/busctl --json=short call org.freedesktop.systemd1 <道> org.freedesktop.DBus.Properties GetAll s ""` を
+  `org.freedesktop.systemd1.Unit` と `org.freedesktop.systemd1.Service`(timer は `.Timer`)について打ち、出力を
+  ファイルへ残す(旧い名の serve は、移行の後は固定した退避の units.tar.gz を一時の据え先で読ませた形で取る)。
+  検めはこの 3 つの据え物で 0(graph_a と graph-pull)と、退避との比べ(旧い名)を通る。加えて、S1d を vega に
+  据えた後、操作者に `--stage running`(読むだけ)を打ってもらい 0 であることを確かめる。/proc の全プロセスの
+  exe を読むので root が要り、CLAUDE.md の作法どおり、ホスト(vega)・理由・記録の残る形の命令を添えた依頼として
+  調整役のセッションへ送る: `sudo /home/hikalium/.local/bin/uniqnode legacy-rollback-preflight
+  /var/backups/uniqnode-legacy-pinned --stage running --state /var/backups/uniqnode-legacy-rollback-state 2>&1 |
+  ts '%Y-%m-%dT%H:%M:%S%z' | tee /tmp/uniqnode-preflight-running.log`(固定した退避が無ければ、その時点の退避を
+  指す)。0 でなければ、断りの理由を直すか検めを直してから、本番への反映に進む。
 - 保留のストアと書けるストアに `uniqnode status`・fsck・get・refs を当てて終えた後、印のバイト列が
   変わっていない(読むだけの走査の Drop は印を書かない。第 17 版への Claude のレビューの中 1)。
 - `Store` を main のスレッドで値として持つ書く CLI(put、取り込み)に、持続的な書き込みの途中と、書き込みの
@@ -1024,10 +1128,13 @@ backup.rs の冒頭の「残骸の削除は MANIFEST を据える前」と docs/
 | 段 | 中身 | 大きさ |
 |---|---|---|
 | S1a | `append_durable` と包みへの寄せ、新しいセグメントのディレクトリの sync、`WriteFailure` と `WritesDisabled`、fstat と切り詰めの試み、封印と `gc_commit` の順の入れ替え、GC の D の packs/ の sync の失敗を書けない状態へ、`atomic_write` の tmp 名、周期的な書き手の飛ばし、export の絞り、注入、HTTP と MCP の 503(`POST /v1/sync` の入口の判定、query と rendition の扱いを含む)、status と健全性の欄、ログを開く前のデータのディレクトリの検めと log.rs の `create_dir_all` の撤去、install の経路の 1 つずつの `mkdir` と根までの sync、`node_key` の tmp(`create_new`・0600・sync・rename)、1a の開くときの sync、install の断り(旧い名の unit が残る間の共有のバイナリの差し替え。API_AUTH の A1 より先に入るなら)、テスト、SPEC §5(永続化)への 1 段落 | M |
-| S1b | `open-marker`(固定長・CRC・boot_id・nonce)と開く道の 2 分岐、読むだけの走査の関数と「命令ごとの開き方」の表のとおりの付け替え、保留の serve の複製の口の 503、`uniqnode release-hold <dir>` と `uniqnode hold-status <dir>` の CLI(`Store::open` を通らない)、戻す前の検め `uniqnode legacy-rollback-preflight <固定した退避> --stage running|stopped`(方針 5。unit・ストア・プロセス・保留の検めと、試験の据え物。docs/mop/SYSTEMD.md の戻す命令をその出力の形に合わせて確定する)と、SYSTEMD.md の字句を CLI の名と照らす repo_hygiene の試験、無事な終わり方の関数と 1 つの終わり方への寄せ、`CloseHandle`(閉じる手綱。書き込みの番の数え値と RAII、閉じる要求で外側の番を閉める、`OpeningGuard`、`open_failed`・`poisoned`、終わり方の 2 度呼びと `finish` の `Once`)、Store の Drop(`wrote_running` のときだけ)、SIGTERM と SIGINT の受け取り(`extern "C"`。受ける輪と閉じる役の分離)と終了コード、GC の D の sync をストアのロックの中へ、serve の束縛と A1・A2 の起動時の断りを開くより前へ、unit の ExecStop(system と user の `uniqnode-serve@.service`)と、操作者が採るなら system の unit の `OOMScoreAdjust=-500`(「最終目標とのつながり」の代価の案)、backup の `not_copied` の `open-marker`、テスト | L |
+| S1b | `open-marker`(固定長・CRC・boot_id・nonce)と開く道の 2 分岐、読むだけの走査の関数と「命令ごとの開き方」の表のとおりの付け替え、保留の serve の複製の口の 503、`uniqnode release-hold <dir>` と `uniqnode hold-status <dir>` の CLI(`Store::open` を通らない)と、SYSTEMD.md の字句を CLI の名と照らす repo_hygiene の試験、無事な終わり方の関数と 1 つの終わり方への寄せ、`CloseHandle`(閉じる手綱。書き込みの番の数え値と RAII、閉じる要求で外側の番を閉める、`OpeningGuard`、`open_failed`・`poisoned`、終わり方の 2 度呼びと `finish` の `Once`)、Store の Drop(`wrote_running` のときだけ)、SIGTERM と SIGINT の受け取り(`extern "C"`。受ける輪と閉じる役の分離)と終了コード、GC の D の sync をストアのロックの中へ、serve の束縛と A1・A2 の起動時の断りを開くより前へ、unit の ExecStop(system と user の `uniqnode-serve@.service`)と、操作者が採るなら system の unit の `OOMScoreAdjust=-500`(「最終目標とのつながり」の代価の案)、backup の `not_copied` の `open-marker`、テスト | L |
 | S1c | ロックの socket の accept の輪(`poll` と起こし用の対、`SO_PEERCRED` の uid の絞り)と答えの写しの `Mutex`、`opening` と開き終えた後の永続化済みの境界、backup の照会(期限、uid と pid の検め)と境界までの写し、写し先より短い reflog の断り、写し先のロック、世代のディレクトリと `current` の切り替え・hard link の条件・片付け、印の読み直し、テスト | M |
+| S1d | 戻す前の検め `uniqnode legacy-rollback-preflight <固定した退避> --stage running|stopped --state <状態のディレクトリ>`(方針 5。読み口の差し替えられる層と busctl・tar の子プロセス、読み込みに依らない unit の数え、install の読み戻しと `normalize`、許しの一覧、/proc の検め、保留の検め、試験の据え物と vega の実物の据え物)、docs/mop/SYSTEMD.md の戻す命令をその出力の形に合わせて確定すること、repo_hygiene の照らしに `legacy-rollback-preflight` の形を足すこと、vega での `--stage running` の確かめ | L |
 
-段ごとのゲート(第 19 版への Claude のレビューの中 4。第 19 版は S1 を 1 段の M としていたが、中身は L〜XL だった): 各段は、上の完了条件のうち自分の中身に当たる項目の試験と `cargo test` の全体が緑で、その段の差分へのレビューで高の指摘が無いと確かめてから main に入れる。S1a のゲートは、印にも終わり方にも backup にも依らない項目である: 注入の各種で失敗した要求が 5xx・以後が 503・読み出しが続くこと、応答済みの書き込みが開き直した後に消えないこと、`sync-keep` と export の絞り、pack の `torn` の後の読み出し、封印と `gc_commit` への `manifest`・`manifest-dirsync`、GC の B・D の失敗の扱い、kind の分けと 503 の本文と `POST /v1/sync`、複製の受け側、最初の要求の 503、install の経路の sync(中断からの再実行を含む)、query と rendition、親の無い道、install の断り。印を要る項目(「kind が Io の状態で serve だけを起こし直す」「`crash-before-dirsync` の後に同じ boot_id で開く」「開き直したときの `writes_disabled` は、読み直した印で分かれる」など)は S1b のゲートに入る。S1b のゲートは印・保留・複製の口・終わり方・シグナル・書き込みの番・閉じる要求・開く途中・2 度呼び・shutdown の応答・GC の D の競合・読むだけの走査・戻す前の検めの項目。S1c のゲートは backup の項目(写し元の検め、境界、NoSpace の印、印の読み直し、公開の各段の停止点、写し先の排他、hard link、ロックの socket の照会と輪の止め方)である。S1a だけの間は、書けない状態がプロセスの中でしか続かない(serve の再起動で書き込みが戻る。欠陥 9 の形は S1b まで残る)ので、本番への反映は S1a〜S1c が揃ってから 1 回で行う。
+段ごとのゲート(第 19 版への Claude のレビューの中 4。第 19 版は S1 を 1 段の M としていたが、中身は L〜XL だった): 各段は、上の完了条件のうち自分の中身に当たる項目の試験と `cargo test` の全体が緑で、その段の差分へのレビューで高の指摘が無いと確かめてから main に入れる。S1a のゲートは、印にも終わり方にも backup にも依らない項目である: 注入の各種で失敗した要求が 5xx・以後が 503・読み出しが続くこと、応答済みの書き込みが開き直した後に消えないこと、`sync-keep` と export の絞り、pack の `torn` の後の読み出し、封印と `gc_commit` への `manifest`・`manifest-dirsync`、GC の B・D の失敗の扱い、kind の分けと 503 の本文と `POST /v1/sync`、複製の受け側、最初の要求の 503、install の経路の sync(中断からの再実行を含む)、query と rendition、親の無い道、install の断り。印を要る項目(「kind が Io の状態で serve だけを起こし直す」「`crash-before-dirsync` の後に同じ boot_id で開く」「開き直したときの `writes_disabled` は、読み直した印で分かれる」など)は S1b のゲートに入る。S1b のゲートは印・保留・複製の口・終わり方・シグナル・書き込みの番・閉じる要求・開く途中・2 度呼び・shutdown の応答・GC の D の競合・読むだけの走査の項目。S1c のゲートは backup の項目(写し元の検め、境界、NoSpace の印、印の読み直し、公開の各段の停止点、写し先の排他、hard link、ロックの socket の照会と輪の止め方)である。S1d のゲートは戻す前の検めの項目(据え物の各形、第 28 版で足した形、vega の実物の据え物)と、vega で `--stage running` が 0 を返したことの記録である。S1a だけの間は、書けない状態がプロセスの中でしか続かない(serve の再起動で書き込みが戻る。欠陥 9 の形は S1b まで残る)ので、本番への反映は S1a〜S1c と S1d が揃ってから 1 回で行う。
+
+S1d を分けた決め(第 28 版。第 27 版への Claude のレビューの中 3): 第 27 版は戻す前の検めを S1b に入れ、S1b を L のままにしていた。だが検めは、busctl と tar を子プロセスで読む層、読み込みに依らない unit の数え、install の読み戻し、/proc の検め、据え物の組と、それだけで L の大きさがあり、S1b の他の中身(印・終わり方・シグナル)とはレビューの主題も別である。S1b に入れたまま XL と書き直す案と比べ、分ける方を採った。理由: S1b の差分を印と終わり方のレビューに絞れ、検めの差分は systemd の実物の形に詳しいレビューに当てられる。戻す道が要るのは S1b 以後を本番に据えた後だけなので、本番への反映の前に S1d が入っていれば足りる(本番に据わる S1b 以後のバイナリは全部この命令を持つ)。代価は、S1b と S1d の間の開発のビルドがこの命令を持たないことで、それらは検め手の候補として 2 を返し、命令は採らない。S1(S1a〜S1c の総称)と FEED の F2 の前提は変えない。
 
 S1 で一緒に直す文書(第 14 版への Claude のレビューの低 3): 配る unit のコメント「書き込み途中で
 裂かれていても fsck なしで回復する(node/tests/crash.rs)」(docs/mop/systemd/system/uniqnode-serve@.service
@@ -1090,22 +1197,29 @@ Claude のレビューの Codex 高 1。読めない生きたプロセスを該�
 見つかっている。シェルでは systemd の設定を漏れなく数え上げられないので、第 27 版で、unit・ストア・プロセス・
 保留の検めを S1b 以後のバイナリの `uniqnode legacy-rollback-preflight`(方針 5 の「戻す前の検め」)へ移した。
 戻す道は S1b を入れた後にしか要らないので、検め手は定義から S1b 以後のバイナリで、判断は手で辿る代わりに
-cargo の試験の据え物で固定する(完了条件)。検めは、許しの一覧で走るものを数える代わりに、install の描く unit を
-install.rs と性質ごとに比べて一致するものだけを通し(描いたものに無い設定は 1 つでもあれば断る)、install が
-描かない unit は対象のバイナリを走らせないときだけ通す。ストアは通った unit の描かれた値からだけ取る。
+cargo の試験の据え物で固定する(完了条件)。検めは、install の描く unit を install.rs と性質ごとに比べて一致する
+ものだけを通し(描いたものに無い設定は 1 つでもあれば断る)、install が描かない unit は Exec* の道が realpath と
+inode で短い許しの一覧(vega では /usr/bin/curl だけ)に一致するときだけ通す(第 28 版。第 27 版の「対象の
+バイナリを走らせないときだけ」は拒みの一覧で、包みのスクリプトや env・symlink を漏らした)。unit は読み込みの
+状態に依らずに数え、命令の状態に記録された unit も数えに入れる(第 28 版。第 27 版は読み込み済みの unit だけを
+数え、止めて disable した `@default` などのストアを漏らした)。ストアは通った unit の描かれた値からだけ取る。
+実装は S1d に分け、本番への反映の前に入れる(「段取り」)。
 第 25 版までの、unit の中のプロセスの argv からストアを拾って残す形はやめたまま(拾い損ねると検めずに起こす
 道が残った)である。docs/mop/SYSTEMD.md の命令は、固定した退避の検め・状態の読み込み・検め・状態の和の書き込み・
-止める・止めた後の検め・差し替えと展開・展開した後の検め・起こすの 1 本に縮み、S1b がこの検めを実装するまでは
-手順の仕様として置く(S1b の実装と一緒に確定する)。打ち直しでも止めたものを起こし落とさないよう、
+止める・止めた後の検め・差し替えと展開・展開した後の検め・起こすの 1 本に縮み、各検めの後に起こす記録のある unit が
+検めの出力に全部あることを確かめる。S1d がこの検めを実装するまでは手順の仕様として置く(S1d の実装と一緒に確定する)。打ち直しでも止めたものを起こし落とさないよう、
 起こし直す unit は退避の隣の状態のディレクトリに和で残し、全部が active と確かめてから完了とする。この命令は
 まれな非常の道なので、普通でないものは扱わずにわざと断り、断りは操作者が手で直して打ち直す。やめるときは、
 どの段で止まっても同じ 1 つの手順をとる: 差し替えた後なら確かめた S1b 以後のバイナリを据え(旧い名の unit を
 展開した後なら、それを外して install を打ち直し)、止めたものを restart で起こし直し(旧いバイナリで起きている
-ものも替える)、1 つずつ active と、enable し直した `@default` が enabled と確かめてから状態を消す。S1b 以後の
+ものも替える)、enable と restart が成功し、1 つずつ active と、enable し直した `@default` が enabled と確かめて
+から状態と検め手を消す(第 28 版。第 27 版への Codex のレビューの中 2・低 5。手順は打つたびに状態を読み直す)。S1b 以後の
 バイナリはどの状態の印でも保留を守るので、始まったときのバイナリで起こし直す枝は持たない(第 26 版。第 25 版までは
 バイナリを時刻や inode で見分けて段ごとに案内を変えていて、その枝ごとに新しい端の形が見つかった)。一回走る service は起こし直す unit に入れず、終わりを待つだけにする
 (timer が次に起こす。同じレビューの Codex 中 2)。検め手は退避の外の /var/backups/uniqnode-legacy-checker に置き、
-無ければ今の共有のバイナリが退避と違うときだけ写す。検めの命令を知らない版(終了コード 2)は使わない。
+無ければ今の共有のバイナリが退避と違うときだけ候補として写し、最初の検めが 0 で終わって出力が読める形のとき
+だけ採る(第 28 版。第 27 版への Codex のレビューの中 3)。検めの命令を知らない版(終了コード 2)や走れない候補は
+使わない。検め手は戻し終えたときとやめ終えたときに消す(第 27 版への Claude のレビューの低 4)。
 3 なら起こさず、方針 5 の戻し方を済ませ、検めが 0 を返すようになってから戻す:
 同じ boot_id の `Running` と `Io` はホストの再起動で解ける。検めを通らない印は、ホストの再起動か、umount・fsck・
 mount し直して page cache を捨てた後に release-hold するか、検め済みの backup から戻す。再起動できずに umount・fsck・
@@ -1114,7 +1228,8 @@ mount し直したときも、その後の release-hold で戻す。どの印で
 ストアでない道を含む)と、4(どのストアも 1)と、2(検め手が命令を知らない、引数の誤り)も 0 でないので起こさない。
 旧いバイナリに検めを頼らない。既知の限界: 検めが見るのは今走っているプロセスと system の `uniqnode-*` の unit
 だけで、今走っていない書き手(`uniqnode-*` でない unit、user の unit、cron)は覆わない。それらが旧いバイナリを
-起こしうるなら、戻す前に操作者が止める。
+起こしうるなら、戻す前に操作者が止める。install が `--after` から描く `Wants=` の先(vega では wg-quick@wg1.service)も
+同じ種類で、起こすときに一緒に起きうるが検めない(第 27 版への Claude のレビューの低 7。方針 5 の「戻す前の検め」の決め)。
 docs/mop/SYSTEMD.md の旧い名の unit へ戻す命令はこの形で書いてある。
 
 旧いバイナリへ落ちる他の道(第 21 版への Codex と Claude のレビューの Claude 低):

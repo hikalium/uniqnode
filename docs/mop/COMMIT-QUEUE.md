@@ -4,7 +4,8 @@
 
 読み手は、uniqnode の変更を main へ入れたいセッション(送り手)と、それを main へ入れる
 Commit Queue(CQ)である。lamalium と sumi も同じ CQ が入れる。lamalium の側の手順は lamalium の
-docs/mop/WORKTREE.md の Integrate and deploy 節にある。
+docs/mop/WORKTREE.md の Integrate and deploy 節にある(別のリポジトリなので、#uuid の参照では
+指せない)。
 
 ## 誰が main へ入れるか
 
@@ -31,15 +32,26 @@ docs/mop/WORKTREE.md の Integrate and deploy 節にある。
 - CQ は変更の中身を直さずに差し戻す。直した変更を送り手が確かめないまま main へ入るのを避ける
   ためである。
 
-## 宛先
+## 宛先と経路
 
 CQ は、claude.ai の lamalium のプロジェクトのスレッド「Commit Queue(mainへの統合)」の
 セッションである(2026-10-01 時点)。ホストの Claude のセッションからは、SendMessage で
 `bridge:session_0121YxhvvFnBHVUwzPYgESRo` へ送るか、claude-code-remote の send_message で
 `session_0121YxhvvFnBHVUwzPYgESRo` へ送る。CQ はその送り手のセッションへ send_message で返す。
-Codex には SendMessage が無いので、同じホストの Claude のセッションに中継を頼む(頼み方は
-lamalium の docs/mop/WORKTREE.md の Integrate and deploy 節にある)。CQ のセッションが替わったら、プロジェクトの調整役が
-新しい宛先を送り手へ知らせる。
+CQ のセッションが替わったら、プロジェクトの調整役が新しい宛先を送り手へ知らせる。
+
+Codex には SendMessage が無い。crystal の Codex は、依頼の全文を
+`/home/lamalium/lamalium-install/coordination.md` に書き、crystal の Claude のセッション
+(`bridge:session_01MaBCbXUfCELqmukmhAB7wT`)へ turn/steer で知らせる。その Claude のセッションが
+全文を CQ へ送り、CQ の答えを同じファイルへ書き戻す(lamalium の CLAUDE.md の Codex の節にある
+分担の形である)。
+
+vega の検査(下の「送り手の手順」の 3)は、vega の Claude のセッション
+(`bridge:session_01EVEBXiTc3Wrjfoetpbkij2`、uniqnode のチェックアウトは
+`/work2/llm_playground_host_dir/uniqnode`)に頼む。頼む側は、リポジトリ、ブランチ、先頭の SHA を
+送る。vega のセッションは、その SHA を fetch して `cargo test --no-fail-fast` を回し、先頭の SHA、
+その親の SHA、落ちたテストの名前(無ければ無いこと)を、頼んだ側へ返す。vega のセッション自身が
+送り手なら、自分で回す。
 
 ## 合格の条件
 
@@ -50,16 +62,37 @@ lamalium の docs/mop/WORKTREE.md の Integrate and deploy 節にある)。CQ �
 - 落ちたテストが、下の「クラウドの CQ の手元で落ちるテスト」の表に名前のあるものだけである。
   vega で回したときは、落ちたテストが 1 つも無い。
 
+表に無いテストが落ちたら不合格である。回し直して通っても合格にしない。例外は 1 つだけで、
+説明の文書だけの変更(下の定義)のときに、CQ が同じコンテナで同じコマンドを `origin/main` に
+回し、同じテストが落ちることを確かめたときである。このとき CQ は、そのテストが変更の前から
+不安定であることを送り手と調整役へ知らせ、直す仕事を計画へ積む。
+
+説明の文書だけの変更とは、変えたファイルが全て、次のどれかに当たる変更である。
+
+- docs/ の下の Markdown のファイル。ただし docs/mop/systemd/ の下は除く(unit はバイナリに埋め
+  込まれる。node/src/install.rs)。
+- リポジトリの根の Markdown のファイル(README.md、CLAUDE.md、SPEC.md など)と policy/ の下の
+  Markdown のファイル。
+
+node/ の下のファイルは、Markdown でも説明の文書に当たらない。node/tests/assets/ の Markdown は
+評価のコーパスや試験の資材として読み込まれる(node/tests/eval.rs、node/tests/agent_door.rs)。
+
 ## 送り手の手順
 
-1. 最新の `origin/main` からブランチを切って変更を作り、コミットする。
-2. 合格の条件を満たすまで `cargo test --no-fail-fast` を回す。
-3. 変更が docs/ と Markdown 以外のファイル(コード、テスト、Cargo.toml、Cargo.lock)に触れる
-   ときは、vega で `cargo test --no-fail-fast` を回し、落ちたテストが 1 つも無いことを確かめる。
-   回すのは、送る時点の `origin/main` を親に持つ commit である。
-4. ブランチを origin へ push する。main へは push しない。
-5. CQ へ 1 通で送る。中身は、リポジトリ、ブランチ、commit id(40 桁)、目的、依存する変更、
-   検査の結果(どの機械で、どの commit で回し、どのテストが落ちたか)、統合の意思である。
+1. 最新の `origin/main` からブランチを切って変更を作り、コミットする。複数の commit でもよい。
+2. 合格の条件を満たすまで、手元で `cargo test --no-fail-fast` を回す。
+3. 説明の文書だけの変更でないときは、ブランチの先頭の commit を vega で回し、落ちたテストが
+   1 つも無いことを確かめる。このとき、ブランチは送る時点の `origin/main` を祖先に持たせる
+   (`git merge-base --is-ancestor origin/main <先頭>` が 0 で終わる)。
+4. 設計の変更・修正・実装は、README の「開発の作法」のとおり、異なる種類のモデルのレビューを
+   通してから送る。
+5. ブランチを origin へ push する。main へは push しない。
+6. CQ へ 1 通で送る。中身は次のとおりである。
+   - リポジトリ、ブランチ、先頭の commit id(40 桁)、基点(`origin/main` のどの commit から
+     切ったか)、目的、依存する変更、統合の意思。
+   - 検査の結果: どの機械で、どの SHA で回し、どのテストが落ちたか。手順 3 の vega の結果なら、
+     vega が返した先頭と親の SHA も写す。
+   - レビュー: どのモデルで、どの SHA に通したか。軽微で明確な変更として通していないなら、その旨。
 
 差し戻されたら、push 済みのブランチを書き換えない(must/0011)。最新の `origin/main` から新しい
 ブランチを切り、自分の変更を cherry-pick して直し、手順 2 からやり直す。
@@ -68,22 +101,25 @@ lamalium の docs/mop/WORKTREE.md の Integrate and deploy 節にある)。CQ �
 
 1. 送られたブランチを fetch し、先頭が送られた commit id と一致することを確かめる。一致しなければ
    積まずに送り手へ問い合わせる。
-2. CQ の手元の写しで、最新の `origin/main` の上へ送り手の commit を古い順に cherry-pick する。
-   送り手のブランチも main も書き換えないので、must/0011 の禁じる、push 済みの commit の書き換えには
-   当たらない。送り手の commit が既に `origin/main` の真上にあれば、cherry-pick せずにその commit
-   のまま進める。衝突したら、直さずに差し戻す。
-3. 変更が手順 3 の対象(コードなどに触れる)で、送り手が vega で回した commit の親が今の
-   `origin/main` でないときは、統合せずに差し戻し、新しい `origin/main` の上で vega で回し直して
-   もらう。CQ の手元では表のテストが落ちるので、vega での結果の代わりにならないからである。
-4. その木で `cargo test --no-fail-fast` を回す。表に無いテストが落ちたら、そのテストだけを 1 回
-   回し直す。2 回とも落ちたら赤である。2 回目に通ったら、同じ入力で結果が変わるテストがあると
-   いうことなので、テストの名前と 2 つの出力を送り手に知らせたうえで統合する。そのテストを直す
-   仕事は計画へ積む。
-5. 合格なら main を fast-forward で push し、main へ入った commit id を送り手へ知らせる。push までに
-   main が動いたら、手順 2 からやり直す。
-6. 赤なら push せず、送り手へ差し戻す。差し戻しには、赤の理由(衝突したファイル、ビルドの失敗、
-   走り終えなかったテストのバイナリ、落ちたテストの名前)と、出力の要点の行を本文に写して添える。
-   送り手は CQ の手元のログを読めないからである。
+2. 変更が説明の文書だけかどうかを、`git diff --name-only <基点> <先頭>` で決める。レビューの欄が
+   空のときは、統合せずに送り手へ問い合わせる。
+3. 説明の文書だけの変更でないとき:
+   - `origin/main` が先頭の祖先でなければ、統合せずに差し戻し、新しい `origin/main` の上で vega
+     で回し直してもらう。CQ の手元では表のテストが落ちるので、vega の結果の代わりにならない。
+   - vega の結果の先頭の SHA が、送られた先頭と一致することを確かめる。
+   - 統合する木は、送られた先頭そのものである。CQ は cherry-pick も rebase もせず、送られた先頭へ
+     main を fast-forward する。vega で検査した木と main に入る木が同じになる。
+4. 説明の文書だけの変更のときは、`origin/main` が先頭の祖先ならそのまま進める。祖先でなければ、
+   CQ の手元の写しで、`origin/main` の上へ送り手の commit を古い順に cherry-pick する。送り手の
+   ブランチも main も書き換えないので、must/0011 の禁じる、push 済みの commit の書き換えには
+   当たらない。衝突したら、直さずに差し戻す。
+5. 統合する木で `cargo test --no-fail-fast` を回し、合格の条件で判定する。
+6. 合格なら main を fast-forward で push する。push までに main が動いたら、手順 3 か 4 から
+   やり直す。統合の知らせには、リポジトリ、送られた先頭の SHA、main へ入った各 commit の SHA と
+   送られた commit との対応(cherry-pick したときは、元の SHA と新しい SHA の組を全て)を書く。
+7. 不合格なら push せず、送り手へ差し戻す。差し戻しには、リポジトリ、送られた先頭の SHA、赤の
+   理由(衝突したファイル、ビルドの失敗、走り終えなかったテストのバイナリ、落ちたテストの名前)、
+   出力の要点の行を本文に写して添える。送り手は CQ の手元のログを読めないからである。
 
 ## クラウドの CQ の手元で落ちるテスト
 
@@ -111,5 +147,8 @@ CQ の手元では `origin/main` でも落ちる(2026-10-01 に a8e287d と b9b3
 する変更は、表の行も消し、理由を目的に書く。表に無いテストが表の理由と同じ形で落ちたら、送り手か
 CQ が表を直す変更を送る。
 
-`a_node_that_is_not_registered_gets_no_answer` は、2026-10-01 に a8e287d で 1 回だけ落ち、次の回では
-通った。表には入れず、手順 4 の回し直しで扱う。
+`a_node_that_is_not_registered_gets_no_answer`(node/tests/distributed_search.rs)は、CQ の手元で
+ときどき落ちる。2026-10-01 に a8e287d でも落ち、単独で 5 回回すと 1 回落ちた。落ちたときは、
+ピアの応答の読み取りが `Resource temporarily unavailable (os error 11)` で時間切れになり、
+`"outcome":"timed_out"` が返る。変更の前から不安定なので表には入れず、落ちたら合格の条件のとおり
+不合格とし、説明の文書だけの変更なら、その節の例外の形で確かめる。直す仕事は計画へ積む。

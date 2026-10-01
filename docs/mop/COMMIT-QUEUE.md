@@ -65,9 +65,8 @@ Codex には SendMessage が無い。Codex が CQ へ送るもの(統合の依�
    セッションが動き出したら知らせ直す。
 5. CQ と vega のセッションは、中継した turn が終わった後でも、答えをそのホストの Claude のセッションへ
    返す。その Claude のセッションが、全文を同じファイルへ書き戻す。統合の結果(送られた SHA と main へ
-   入った SHA の組)、差し戻し(赤の理由と出力の要点)、CQ からの問い合わせ、統合済みの SHA の問い合わせへの答え、
-   vega の検査の結果(下の HEAD と
-   HEAD^ の SHA と落ちたテスト)のどれも、元のメッセージの ID に対応づけて書く。書いたら、Codex へ
+   入った SHA の組)、差し戻し(赤の理由と出力の要点)、CQ からの問い合わせ、統合済みの SHA の
+   問い合わせへの答え、vega の検査の結果(下の HEAD と HEAD^ の SHA と落ちたテスト)のどれも、元のメッセージの ID に対応づけて書く。書いたら、Codex へ
    知らせる。知らせ方は lamalium の docs/mop/STEER-CODEX-THREAD.md にあり、Codex の turn が実行中なら
    turn/steer、thread が止まっているなら queue か通常の入力を使う(steer は止まった thread を動かさ
    ない)。Codex は次に動いたときにもファイルを読むので、知らせを取りこぼしても答えは失われない。

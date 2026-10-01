@@ -20,7 +20,7 @@ pub const ALLOW_UID_FLAG: &str = "--main-allow-uid";
 /// 許す Host(authority)を足す serve の引数。
 pub const ALLOW_HOST_FLAG: &str = "--main-allow-host";
 
-/// テスト用の口の鍵: 下の 3 つのテスト用の口は、cfg(debug_assertions) のビルドで、かつこの
+/// テスト用の口の鍵: 下のテスト用の口(UNIQNODE_MAIN_ で始まる 4 つ)は、cfg(debug_assertions) のビルドで、かつこの
 /// 環境変数が `1` のときだけ読む(debug ビルドを常駐に置いても、環境変数 1 つの取り違えで
 /// 判定が変わらないように、2 つ揃って初めて効く)。release ビルドには入らない。使っている
 /// テスト用の口は起動時にログへ言う。
@@ -41,6 +41,10 @@ pub const PEER_UID_FILE_ENV: &str = "UNIQNODE_MAIN_PEER_UID_FILE";
 /// socket が EAFNOSUPPORT を返す)形を真似る。起動時の自己試験が理由を言って 2 で終わることを
 /// 試験で固めるため。
 pub const NETLINK_UNAVAILABLE_ENV: &str = "UNIQNODE_MAIN_NETLINK_UNAVAILABLE";
+
+/// テスト用の口: 値はミリ秒で、断りの読み捨ての期限(http::REFUSAL_DRAIN_TIME、既定 1 秒)を
+/// 置き換える。断りの枠を試験の間ずっと埋めたままにして、枠の数を決まった形で見るため。
+pub const REFUSAL_DRAIN_ENV: &str = "UNIQNODE_MAIN_REFUSAL_DRAIN_MS";
 
 /// テスト用の口の値(鍵が揃わなければ None)。
 fn test_hook(name: &str) -> Option<String> {
@@ -146,6 +150,7 @@ pub struct MainDoor {
     check_delay: Option<Duration>,
     peer_uid_file: Option<std::path::PathBuf>,
     netlink_unavailable: bool,
+    refusal_drain: Option<Duration>,
 }
 
 impl MainDoor {
@@ -184,7 +189,15 @@ impl MainDoor {
                 .map(Duration::from_millis),
             peer_uid_file: test_hook(PEER_UID_FILE_ENV).map(std::path::PathBuf::from),
             netlink_unavailable: test_hook(NETLINK_UNAVAILABLE_ENV).is_some_and(|v| v == "1"),
+            refusal_drain: test_hook(REFUSAL_DRAIN_ENV)
+                .and_then(|text| text.parse::<u64>().ok())
+                .map(Duration::from_millis),
         })
+    }
+
+    /// 断りの読み捨ての期限(ふつうは http::REFUSAL_DRAIN_TIME。テスト用の口で置き換えられる)。
+    pub fn refusal_drain(&self) -> Duration {
+        self.refusal_drain.unwrap_or(http::REFUSAL_DRAIN_TIME)
     }
 
     /// 効いているテスト用の口の名前(起動時のログに載せる。release ビルドでは常に空)。
@@ -198,6 +211,9 @@ impl MainDoor {
         }
         if self.netlink_unavailable {
             names.push(NETLINK_UNAVAILABLE_ENV);
+        }
+        if self.refusal_drain.is_some() {
+            names.push(REFUSAL_DRAIN_ENV);
         }
         names
     }
@@ -224,27 +240,48 @@ impl MainDoor {
     ///
     /// listening on の前なので、この間に届いた他人の接続は読まずに閉じる(待つ側は listening on
     /// を見てから繋ぐ取り決め)。
-    pub fn self_test(&self, listener: &std::net::TcpListener) -> Result<(), String> {
-        let fail = |reason: String| {
-            format!(
-                "起動時の自己試験: 主の口への自分の接続の uid を判定できない: {reason}。このまま\
-                 起こすと主の口はすべての接続を 403 で断るので起動しない(systemd の unit なら\
-                 RestrictAddressFamilies= に AF_NETLINK が要る)"
-            )
-        };
-        let bound = listener.local_addr().map_err(|e| fail(format!("束縛先を読めない: {e}")))?;
-        let client = TcpStream::connect_timeout(&bound, SELF_TEST_TIMEOUT)
-            .map_err(|e| fail(format!("{bound} へ繋げない: {e}")))?;
-        let client_address =
-            client.local_addr().map_err(|e| fail(format!("自分の接続の端を読めない: {e}")))?;
-        let accepted = accept_own(listener, client_address).map_err(fail)?;
-        let peer = accepted.peer_addr().map_err(|e| fail(format!("相手のアドレスを読めない: {e}")))?;
+    ///
+    /// 失敗は 2 種類に分ける(SelfTestError::exit_code)。設定が原因で起こし直しても直らないもの
+    /// (照会ソケットの socket() が EAFNOSUPPORT・EPERM・EACCES で失敗した、自分の uid が
+    /// overflowuid に見える)は 2 で、unit の RestartPreventExitStatus= が起こし直さない。それ
+    /// 以外(期限切れ、照会の一時の失敗など)は 3 で、unit の Restart=on-failure が起こし直す。
+    pub fn self_test(&self, listener: &std::net::TcpListener) -> Result<(), SelfTestError> {
+        let transient = |reason: String| SelfTestError { config: false, reason };
+        match self.probe_socket() {
+            Ok(()) => {}
+            Err(error) => {
+                const EPERM: i32 = 1;
+                const EACCES: i32 = 13;
+                const EAFNOSUPPORT: i32 = 97;
+                let config = matches!(error.raw_os_error(), Some(EPERM | EACCES | EAFNOSUPPORT));
+                return Err(SelfTestError { config, reason: sock_diag::socket_unavailable(&error) });
+            }
+        }
+        let bound = listener.local_addr().map_err(|e| transient(format!("束縛先を読めない: {e}")))?;
+        let (client, accepted) = connect_to_self(listener, bound).map_err(transient)?;
+        let peer =
+            accepted.peer_addr().map_err(|e| transient(format!("相手のアドレスを読めない: {e}")))?;
         let local =
-            accepted.local_addr().map_err(|e| fail(format!("自分のアドレスを読めない: {e}")))?;
+            accepted.local_addr().map_err(|e| transient(format!("自分のアドレスを読めない: {e}")))?;
         let expected = sock_diag::Endpoints { local: peer, remote: local };
-        let answers = self.lookup(expected).map_err(fail)?;
-        sock_diag::judge(&answers, expected, self.overflow_uid, &[self.euid]).map_err(fail)?;
-        Ok(())
+        let answers = self.lookup(expected).map_err(transient)?;
+        let judged = sock_diag::judge(&answers, expected, self.overflow_uid, &[self.euid]);
+        // 自分の接続が判定を終えるまで、自分の側の端を開けておく(閉じると ESTABLISHED でなくなる)。
+        drop(client);
+        judged.map(|_| ()).map_err(|reason| SelfTestError {
+            // 自分の uid が overflowuid に見えるのは user namespace の写しの設定で、一時の失敗ではない。
+            config: answers.iter().any(|answer| answer.uid == self.overflow_uid),
+            reason,
+        })
+    }
+
+    /// 照会ソケットを作れるか(テスト用の口 NETLINK_UNAVAILABLE_ENV が効いていれば EAFNOSUPPORT)。
+    fn probe_socket(&self) -> std::io::Result<()> {
+        if self.netlink_unavailable {
+            const EAFNOSUPPORT: i32 = 97;
+            return Err(std::io::Error::from_raw_os_error(EAFNOSUPPORT));
+        }
+        sock_diag::probe_socket()
     }
 
 
@@ -273,15 +310,94 @@ impl MainDoor {
     }
 }
 
-/// 自己試験の接続を accept する: 期限の内に、相手が client(自分の接続の端)である接続が来る
-/// まで accept し、他の接続は閉じる。listener の非ブロックは戻してから返す。
-fn accept_own(listener: &std::net::TcpListener, client: SocketAddr) -> Result<TcpStream, String> {
-    listener.set_nonblocking(true).map_err(|e| format!("束縛を非ブロックにできない: {e}"))?;
+/// 起動時の自己試験の失敗。
+#[derive(Debug)]
+pub struct SelfTestError {
+    /// 設定が原因で、起こし直しても直らない失敗か。
+    pub config: bool,
+    pub reason: String,
+}
+
+impl SelfTestError {
+    /// serve の終了コード: 設定の誤りは 2(unit は起こし直さない)、それ以外は 3(起こし直す)。
+    pub fn exit_code(&self) -> i32 {
+        match self.config {
+            true => 2,
+            false => 3,
+        }
+    }
+}
+
+impl std::fmt::Display for SelfTestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = &self.reason;
+        match self.config {
+            true => write!(
+                f,
+                "起動時の自己試験: 主の口への自分の接続の uid を判定できない: {reason}。このまま\
+                 起こすと主の口はすべての接続を 403 で断るので起動しない。設定の誤りなので 2 で\
+                 終わる(systemd の unit なら RestrictAddressFamilies= に AF_NETLINK が要る)"
+            ),
+            false => write!(
+                f,
+                "起動時の自己試験: 主の口への自分の接続の uid を判定できない: {reason}。このまま\
+                 起こすと主の口はすべての接続を 403 で断るので起動しない。一時の失敗でありうるので\
+                 3 で終わる(systemd の unit は起こし直す)"
+            ),
+        }
+    }
+}
+
+/// 自己試験の接続を作る: 自分の主の口への接続を裏のスレッドで始め、その完了を待つ間も accept
+/// を回して待ち行列を空ける(先に繋ぎ切ってから accept すると、待ち行列が他人の接続で埋まって
+/// いれば自分の SYN が落とされうる)。自分の接続の端が分かったら、相手がそれである接続を返し、
+/// 他人の接続は閉じる。期限は SELF_TEST_TIMEOUT。listener の非ブロックは戻してから返す。
+/// 返すのは (自分の側の端, accept した側の端)。
+fn connect_to_self(
+    listener: &std::net::TcpListener,
+    bound: SocketAddr,
+) -> Result<(TcpStream, TcpStream), String> {
     let deadline = std::time::Instant::now() + SELF_TEST_TIMEOUT;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("main-door-self-test".to_string())
+        .spawn(move || {
+            let _ = sender.send(TcpStream::connect_timeout(&bound, SELF_TEST_TIMEOUT));
+        })
+        .map_err(|e| format!("自己試験のスレッドを作れない: {e}"))?;
+    listener.set_nonblocking(true).map_err(|e| format!("束縛を非ブロックにできない: {e}"))?;
+    let mut client: Option<(TcpStream, SocketAddr)> = None;
+    // 自分の接続の端が分かる前に accept した接続(自分のものが混ざりうる)。
+    let mut pending: Vec<(TcpStream, SocketAddr)> = Vec::new();
     let result = loop {
+        if client.is_none() {
+            match receiver.try_recv() {
+                Ok(Ok(stream)) => match stream.local_addr() {
+                    Ok(address) => {
+                        if let Some(at) = pending.iter().position(|(_, peer)| *peer == address) {
+                            break Ok((stream, pending.swap_remove(at).0));
+                        }
+                        pending.clear();
+                        client = Some((stream, address));
+                    }
+                    Err(e) => break Err(format!("自分の接続の端を読めない: {e}")),
+                },
+                Ok(Err(e)) => break Err(format!("{bound} へ繋げない: {e}")),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    break Err("自己試験の接続のスレッドが答えずに終わった".to_string())
+                }
+            }
+        }
         match listener.accept() {
-            Ok((stream, peer)) if peer == client => break Ok(stream),
-            Ok((other, _)) => drop(other),
+            Ok((stream, peer)) => match &client {
+                Some((_, address)) if peer == *address => {
+                    let (own, _) = client.take().expect("client");
+                    break Ok((own, stream));
+                }
+                Some(_) => drop(stream),
+                None => pending.push((stream, peer)),
+            },
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if std::time::Instant::now() >= deadline {
                     break Err(format!("自分の接続を {SELF_TEST_TIMEOUT:?} の内に accept できない"));
@@ -292,11 +408,12 @@ fn accept_own(listener: &std::net::TcpListener, client: SocketAddr) -> Result<Tc
             Err(e) => break Err(format!("自分の接続を accept できない: {e}")),
         }
     };
+    drop(pending);
     let restored = listener.set_nonblocking(false).map_err(|e| format!("束縛をブロックに戻せない: {e}"));
-    let stream = result?;
+    let (own, accepted) = result?;
     restored?;
-    stream.set_nonblocking(false).map_err(|e| format!("接続をブロックに戻せない: {e}"))?;
-    Ok(stream)
+    accepted.set_nonblocking(false).map_err(|e| format!("接続をブロックに戻せない: {e}"))?;
+    Ok((own, accepted))
 }
 
 /// 道ごとの本文の型の決まり(主の口だけ。読み口と feed の口には広げない)。
@@ -485,12 +602,24 @@ mod tests {
     /// api.rs の道の字面(一致の腕 `("POST", "/v1/…")` と、`path.strip_prefix("/v1/…")` の接頭辞)を
     /// 全部拾い、本文の決まりの付け忘れを赤にする(Claude 低 4)。本文を読む道(POST・PUT)は
     /// Any でないか、本文を読まない道の一覧にあること。接頭辞の道は下の表に代表の道と決まりを
-    /// 置き、表に無い接頭辞が api.rs に現れたら赤にする(新しい道の決まりを決めさせる)。
+    /// 置き、表に無い接頭辞が api.rs に現れたら赤にする(新しい道の決まりを決めさせる)。入れ子の
+    /// 腕の字面(`("GET", "history")` など)と接尾辞(`strip_suffix("/fetch")`)も表と突き合わせ、
+    /// 表に無いものは黙って飛ばさずに赤にする(再レビューの Claude 低 3)。
     #[test]
     fn every_route_in_api_rs_has_a_body_rule() {
         let source = include_str!("api.rs");
         // 本文を読まない POST(型を問わない)。
         const NO_BODY: [(&str, &str); 1] = [("POST", "/v1/admin/shutdown")];
+        // 入れ子の腕: (method, api.rs の字面, 親の接頭辞, 代表の道)。代表の道の決まりを、全体の道の
+        // 腕と同じ規則(POST・PUT は Any でない、他は Any)で見る。
+        const NESTED: [(&str, &str, &str, &str); 5] = [
+            ("GET", "", "/v1/graphs/", "/v1/graphs/g/nodes/n"),
+            ("PUT", "", "/v1/graphs/", "/v1/graphs/g/nodes/n"),
+            ("DELETE", "", "/v1/graphs/", "/v1/graphs/g/nodes/n"),
+            ("GET", "history", "/v1/graphs/", "/v1/graphs/g/nodes/n/history"),
+            ("GET", "neighbors", "/v1/graphs/", "/v1/graphs/g/nodes/n/neighbors"),
+        ];
+        let mut nested_seen: Vec<(&str, &str)> = Vec::new();
         let mut arms = Vec::new();
         for method in ["GET", "POST", "PUT", "DELETE"] {
             let opener = format!("(\"{method}\", ");
@@ -505,11 +634,29 @@ mod tests {
                     token if token.starts_with("\"/") && token.ends_with('"') => {
                         token.trim_matches('"').to_string()
                     }
-                    // 入れ子の腕(`("PUT", "")` など)は接頭辞の表が受け持つ。
-                    _ => continue,
+                    // 入れ子の腕(`("PUT", "")` など)は、下の NESTED の表に無ければ赤にする。
+                    token if token.starts_with('"') && token.ends_with('"') && token.len() >= 2 => {
+                        let literal = &token[1..token.len() - 1];
+                        let known = NESTED.iter().find(|(m, l, _, _)| *m == method && *l == literal);
+                        let Some((_, _, parent, sample)) = known else {
+                            panic!(
+                                "api.rs の入れ子の腕 ({method}, {token}) の本文の決まりが NESTED の表に無い"
+                            );
+                        };
+                        assert!(sample.starts_with(parent), "{sample} は {parent} の下でない");
+                        nested_seen.push((method, literal));
+                        sample.to_string()
+                    }
+                    other => panic!("api.rs の腕 ({method}, {other}) の道を読めない(表に足す)"),
                 };
                 arms.push((method, path));
             }
+        }
+        for (method, literal, _, _) in NESTED {
+            assert!(
+                nested_seen.contains(&(method, literal)),
+                "NESTED の ({method}, {literal:?}) は api.rs にもう無い(表から消す)"
+            );
         }
         assert!(arms.len() >= 15, "api.rs の道の腕を拾えていない: {arms:?}");
         for (method, path) in &arms {
@@ -563,6 +710,45 @@ mod tests {
             for (method, path, rule) in samples.iter() {
                 assert_eq!(&body_rule(method, path), rule, "{method} {path}");
             }
+        }
+        // 接尾辞で分ける道(`rest.strip_suffix("/fetch")` など): 接尾辞 → (親の接頭辞、method、
+        // 代表の道、決まり)。表に無い接尾辞が api.rs に現れたら赤にする。
+        let suffixes: [(&str, &str, &str, &str, BodyRule); 4] = [
+            ("/citation", "/v1/objects/", "GET", "/v1/objects/s256:0/citation", BodyRule::Any),
+            ("/referrers", "/v1/objects/", "GET", "/v1/objects/s256:0/referrers", BodyRule::Any),
+            ("/rendition", "/v1/objects/", "GET", "/v1/objects/s256:0/rendition", BodyRule::Any),
+            ("/fetch", "/v1/collections/", "POST", "/v1/collections/c/fetch", BodyRule::Json),
+        ];
+        let opener = "strip_suffix(\"";
+        for (at, _) in source.match_indices(opener) {
+            let rest = &source[at + opener.len()..];
+            let suffix = &rest[..rest.find('"').expect("閉じの引用符")];
+            if !suffix.starts_with('/') {
+                continue;
+            }
+            assert!(
+                suffixes.iter().any(|(known, ..)| *known == suffix),
+                "api.rs の接尾辞の道 {suffix} の本文の決まりが表に無い"
+            );
+        }
+        for (suffix, parent, method, sample, rule) in &suffixes {
+            assert!(sample.starts_with(parent) && sample.ends_with(suffix), "{sample}");
+            assert_eq!(&body_rule(method, sample), rule, "{method} {sample}");
+        }
+        // method だけで分ける腕(`"PUT" => {` と `method != "POST"`)の数。本文を読む method の腕が
+        // 増えたら、その道を上の表に足してからここの数を直す(黙って Any に落とさない)。
+        let count = |needle: &str| source.matches(needle).count();
+        let method_arms = [
+            // /v1/refs/{name} の PUT と、/v1/graphs/{g}/edges/… の PUT。
+            ("\"PUT\" =>", 2),
+            ("\"POST\" =>", 0),
+            // /v1/collections/{c}/fetch。
+            ("method != \"POST\"", 1),
+            // /v1/collections/{c}/documents/{name}。
+            ("method != \"PUT\"", 1),
+        ];
+        for (needle, expected) in method_arms {
+            assert_eq!(count(needle), expected, "api.rs の {needle} の数が変わった(道の表を見直す)");
         }
     }
 }

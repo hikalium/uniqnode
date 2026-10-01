@@ -312,7 +312,34 @@ pub fn with_headers(
     headers: &[(&str, &str)],
     body: &[u8],
 ) -> HttpResponse {
-    let mut stream = TcpStream::connect(address).expect("connect");
+    let stream = TcpStream::connect(address).expect("connect");
+    exchange(stream, address, method, path, headers, body)
+}
+
+/// simple と同じだが、接続・書き・読みのそれぞれに within の期限を置く。期限が切れたら
+/// 理由を言って失敗する(呼び手の Server は Drop で子を止めて刈り取る)。
+pub fn simple_within(address: &str, method: &str, path: &str, body: &[u8], within: std::time::Duration) -> HttpResponse {
+    use std::net::ToSocketAddrs;
+    let target = address
+        .to_socket_addrs()
+        .expect("address")
+        .next()
+        .expect("address");
+    let stream = TcpStream::connect_timeout(&target, within)
+        .unwrap_or_else(|e| panic!("{address} へ {within:?} の内に繋げない: {e}"));
+    stream.set_read_timeout(Some(within)).expect("read timeout");
+    stream.set_write_timeout(Some(within)).expect("write timeout");
+    exchange(stream, address, method, path, &[], body)
+}
+
+fn exchange(
+    mut stream: TcpStream,
+    address: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> HttpResponse {
     let mut head = format!(
         "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()

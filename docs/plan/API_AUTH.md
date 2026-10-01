@@ -21,11 +21,17 @@ Codex の H1・H2・M1)を取り込んだ。viewer の扱い(3 と A3)は操作�
 node/tests/main_door.rs)。統括の指示で、Claude のレビューの中 6(断りの読み捨てを判定の枠から
 外し、別の断りの枠 8 に置く)と中 1(起動時の検査と束縛をすべてストアを開く前に済ませる)も
 入れた。実装へのレビュー(Claude と Codex)を受けて、起動時の自己試験を足した: 束縛の後、
-ストアを開く前に自分から主の口へ 1 本繋いで判定し、自分の uid を判定できなければ(unit が
-AF_NETLINK を塞いでいるなど)listening on を出さずに 2 で終わる(全部の接続を 403 で断るまま
-active で居座らない)。あわせて、netlink の答えの送り手(nl_pid 0)と切り詰め(MSG_TRUNC)と
-1 件の照会の答えの形を検め、断りの枠が埋まっているときはログも書かずに閉じて数だけを数え
-(/v1/status の main_door.refused_unlogged)、keep-alive の次の要求を待つのを 5 秒にした。
+ストアを開く前に自分から主の口へ 1 本繋いで判定し、自分の uid を判定できなければ
+listening on を出さずに終わる(全部の接続を 403 で断るまま active で居座らない)。設定が原因の
+失敗(unit が AF_NETLINK を塞いでいて照会のソケットを作れない、自分の uid が overflowuid に
+見える)は 2 で終わって起こし直さず、それ以外(照会の期限切れなど一時の失敗でありうるもの)は
+3 で終わって on-failure に起こし直させる。あわせて、netlink の答えの送り手(nl_pid 0)と
+切り詰め(MSG_TRUNC)と 1 件の照会の答えの形を検め(NLMSG_ERROR は nlmsgerr の全体を要し、
+ENOENT だけを「一致なし」とし、ACK は誤りとする)、照会の期限を送りと受けの全体に掛かる
+絶対の期限にし(EINTR で延びない)、断りの枠が埋まっているときはログも書かずに閉じて数だけを
+数え(/v1/status の main_door.refused_unlogged)、断りのログを待ち行列(256)越しの別スレッドで
+書いて、埋まっていれば書かずに数え(main_door.refusal_logs_dropped)、keep-alive の次の要求を
+待つのを 5 秒にした(主の口に限らずすべての待ち受けで同じ)。
 A3・A4 は未着手。実際の unit の制限の下での確認(完了条件)は、据え付け直しの後に
 操作者の sudo で行う。
 出所は lamalium の健全性点検(2026-09-30)の項目 12。SPEC.md §10 は「認証は当面固定トークン」と
@@ -173,6 +179,8 @@ distributed_search.rs の 185 行付近)。署名された要求者に対する�
     403 にする(第 8 版への Codex の再レビューの中)。A2 はこの unit の変更を含む。実装では、serve は
     束縛の後の自己試験(自分から主の口へ繋いで判定する)でこれを見つけ、listening on を出さずに
     2 で終わる(RestartPreventExitStatus= で起こし直さない。実装への Claude のレビューの高 1)。
+    自分の uid が overflowuid に見えるのも設定の問題なので 2 で、それ以外の自己試験の失敗は
+    一時のものでありうるので 3 で終わり、on-failure が起こし直す。
   - 対象は Linux だけである(sock_diag が要る)。他の OS では serve が起動時に理由を言って断る。
   - 起動時の断り(束縛先の字面、Linux 以外、許す集合に overflowuid、`--main-allow-uid` の字面の誤り)と
     主の口の束縛そのものは、`Store::open` より前に済ませる(第 10 版への Claude のレビューの中 1)。

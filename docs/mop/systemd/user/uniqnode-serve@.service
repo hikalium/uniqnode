@@ -41,7 +41,9 @@ StateDirectoryMode=0750
 # 落ちたら起こし直す。ストアのロックは抽象名前空間の unix socket なので、プロセスが死ねば
 # カーネルが解放し、次の起動は書き込み途中で裂かれていても fsck なしで回復する
 # (node/tests/crash.rs)。起動時に分かる誤りは再起動で直らないので、1 回で止めて理由を
-# journal に残す: 1 はアドレスが塞がっている・別プロセスがストアを開いている、2 は引数の誤り。
+# journal に残す: 1 はアドレスが塞がっている・別プロセスがストアを開いている、2 は引数の誤りと、
+# 主の口の起動時の自己試験の設定による失敗(AF_NETLINK が塞がれている、自分の uid が
+# overflowuid に見える)。自己試験のそれ以外の失敗(一時の失敗でありうる)は 3 で、起こし直す。
 # POST /v1/admin/shutdown による終了(0)は意図した停止なので起こし直さない。
 Restart=on-failure
 RestartSec=2s
@@ -51,7 +53,8 @@ RestartPreventExitStatus=1 2
 # AF_UNIX を残す。PrivateNetwork= は使わない(ロックはネットワーク名前空間ごとに別になり、
 # 外の CLI と二重起動を検出し合えなくなる。viewer と mcp も loopback で serve に届く必要がある)。
 # AF_NETLINK は主の口の uid の判定(接続の相手のソケットを NETLINK_SOCK_DIAG に照会する)に
-# 要る。無いと照会のソケットを作れず、正規の接続まで 403 になる(docs/plan/API_AUTH.md)。
+# 要る。無いと照会のソケットを作れない。serve は起動時の自己試験でそれを見つけ、listening on を
+# 出さずに 2 で終わる(docs/plan/API_AUTH.md)。
 # PrivateUsers=yes の下では、自分と root 以外の uid は overflowuid に写り、主の口に断られる。
 PrivateUsers=yes
 NoNewPrivileges=yes

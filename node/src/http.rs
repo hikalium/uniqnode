@@ -222,21 +222,32 @@ impl Drop for Slot {
     }
 }
 
-/// 主の口の 3 種類の枠と、断りの枠が埋まっていてログも 403 も書かずに閉じた断りの数。
+/// 主の口の 3 種類の枠と、断りの数え(断りの枠が埋まっていてログも 403 も書かずに閉じた断り、
+/// 断りのログの待ち行列が埋まっていて書かなかった断りのログ)と、断りの読み捨ての期限。
 pub struct DoorGauge {
     pub checking: Arc<Slots>,
     pub connected: Arc<Slots>,
     pub refusing: Arc<Slots>,
     pub refused_unlogged: std::sync::atomic::AtomicU64,
+    pub refusal_logs_dropped: std::sync::atomic::AtomicU64,
+    /// 断りの読み捨ての期限(ふつうは REFUSAL_DRAIN_TIME)。
+    pub refusal_drain: std::time::Duration,
 }
 
 impl DoorGauge {
     pub fn new() -> Arc<DoorGauge> {
+        DoorGauge::with_refusal_drain(REFUSAL_DRAIN_TIME)
+    }
+
+    /// 断りの読み捨ての期限を与えて組む(serve はテスト用の口の値を渡す。node/src/main_door.rs)。
+    pub fn with_refusal_drain(refusal_drain: std::time::Duration) -> Arc<DoorGauge> {
         Arc::new(DoorGauge {
             checking: Slots::new(CHECK_SLOTS),
             connected: Slots::new(CONNECTION_SLOTS),
             refusing: Slots::new(REFUSAL_SLOTS),
             refused_unlogged: std::sync::atomic::AtomicU64::new(0),
+            refusal_logs_dropped: std::sync::atomic::AtomicU64::new(0),
+            refusal_drain,
         })
     }
 }
@@ -248,7 +259,10 @@ pub type ConnectionCheck = dyn Fn(&TcpStream) -> Result<(), String> + Send + Syn
 const REFUSAL_HEAD_BYTES: usize = 8 * 1024;
 const REFUSAL_HEAD_TIME: std::time::Duration = std::time::Duration::from_millis(100);
 const REFUSAL_DRAIN_BYTES: usize = 64 * 1024;
-const REFUSAL_DRAIN_TIME: std::time::Duration = std::time::Duration::from_secs(1);
+pub const REFUSAL_DRAIN_TIME: std::time::Duration = std::time::Duration::from_secs(1);
+/// 断りのログの待ち行列の長さ。断る接続のスレッドはここへ待たずに積むだけで、書き出しは専用の
+/// スレッドが行う(標準エラーが詰まっても、断りの枠と接続を期限の外で持ち続けない)。
+pub const REFUSAL_LOG_QUEUE: usize = 256;
 
 /// 403 の本文の頭。試験はこの頭で断りを見分ける(must/0023)。
 pub const REFUSED_PREFIX: &str = "main door: この接続の相手を受け付けない: ";
@@ -263,19 +277,32 @@ pub const REFUSED_PREFIX: &str = "main door: この接続の相手を受け付�
 /// - 判定が断ったら、断りの枠を待たずに取り、取れたら判定の枠を返して 403 を最善努力で届け、
 ///   期限の内に閉じて断りの枠を返す。取れなければ 403 もログも書かずにすぐ閉じ、判定の枠を
 ///   返して、その数だけを数える(DoorGauge::refused_unlogged。/v1/status の main_door)。
-///   断りのログの書き出しは、断りの枠を持っている間にだけ行う。
+/// - 断りのログは、長さ REFUSAL_LOG_QUEUE の待ち行列へ待たずに積み、専用のスレッドが書き出す。
+///   待ち行列が埋まっていれば積まずに数だけを数える(DoorGauge::refusal_logs_dropped)。断る接続の
+///   スレッドは、ログの書き出し(標準エラーやファイル)で止まらない。
 pub fn serve_checked(
     listener: TcpListener,
     gauge: Arc<DoorGauge>,
     check: Arc<ConnectionCheck>,
     handler: Arc<PeerHandler>,
 ) -> ! {
+    let (refusal_log, refusal_log_lines) = std::sync::mpsc::sync_channel::<String>(REFUSAL_LOG_QUEUE);
+    let logger = std::thread::Builder::new().name("main-door-log".to_string()).spawn(move || {
+        for line in refusal_log_lines {
+            crate::log_line!("{line}");
+        }
+    });
+    // 書き出しのスレッドを作れなければ、積む側の try_send が失敗して数えるだけになる。
+    if let Err(e) = logger {
+        crate::log_line!("uniqnode: serve: 断りのログのスレッドを作れない(以後は数えるだけ): {e}");
+    }
     accept_loop(listener, |stream, peer| {
         let Some(check_slot) = gauge.checking.try_take() else {
             drop(stream);
             return;
         };
-        let (gauge, check, handler) = (gauge.clone(), check.clone(), handler.clone());
+        let (gauge, check, handler, refusal_log) =
+            (gauge.clone(), check.clone(), handler.clone(), refusal_log.clone());
         let spawned = std::thread::Builder::new()
             .name("main-door".to_string())
             .spawn(move || {
@@ -292,8 +319,11 @@ pub fn serve_checked(
                         return;
                     };
                     drop(check_slot);
-                    crate::log_line!("uniqnode: serve: 主の口が {peer} を断った: {reason}");
-                    refuse_connection(stream, &reason);
+                    let line = format!("uniqnode: serve: 主の口が {peer} を断った: {reason}");
+                    if refusal_log.try_send(line).is_err() {
+                        gauge.refusal_logs_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    refuse_connection(stream, &reason, gauge.refusal_drain);
                     drop(refusal_slot);
                     return;
                 }
@@ -318,7 +348,7 @@ pub fn serve_checked(
 /// (未読のデータを残して閉じると Linux は RST を送り、相手は 403 を読む前に ECONNRESET に
 /// なる)。守るのは「要求は実行されず、期限の内に閉じる」ことで、403 が届くのは小さな通常の
 /// 要求についてである。
-fn refuse_connection(mut stream: TcpStream, reason: &str) {
+fn refuse_connection(mut stream: TcpStream, reason: &str, drain_time: std::time::Duration) {
     let started = std::time::Instant::now();
     let mut head = Vec::new();
     let mut buffer = [0u8; 4096];
@@ -345,7 +375,7 @@ fn refuse_connection(mut stream: TcpStream, reason: &str) {
     let mut drained = 0usize;
     while drained < REFUSAL_DRAIN_BYTES {
         let Some(left) =
-            REFUSAL_DRAIN_TIME.checked_sub(drain_started.elapsed()).filter(|d| !d.is_zero())
+            drain_time.checked_sub(drain_started.elapsed()).filter(|d| !d.is_zero())
         else {
             break;
         };

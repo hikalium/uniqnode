@@ -420,8 +420,12 @@ uniqnode コアの上に応用層が載る。検索(RAG)層とその上の MCP �
 断る。送った後に書く側だけを閉じる(shutdown(SHUT_WR))クライアントは、相手のソケットが
 FIN_WAIT に移っているので 403 になる(curl と uniqnode 自身のクライアントはそうしない)。serve は
 束縛の後、ストアを開く前に自己試験として自分から主の口へ 1 本繋いで判定し、自分の uid を判定
-できなければ(照会の netlink ソケットを作れない unit など)listening on を出さずに理由を言って 2 で
-終わる。ブラウザからの要求は Host・Origin・Content-Type の検査で断る。網越しに届く口(読み口・viewer、
+できなければ listening on を出さずに理由を言って終わる。終了コードは、設定が原因の失敗(照会の
+netlink ソケットの作成が EAFNOSUPPORT・EPERM・EACCES で断られた unit、自分の uid が overflowuid に
+見える user namespace)なら 2(起こし直しても直らない)、それ以外なら 3(一時の失敗でありうるので
+起こし直してよい)である。keep-alive の接続は、応答の後 5 秒のうちに次の要求の最初のバイトが
+届かなければ閉じる(主の口に限らず、serve と viewer のすべての待ち受けで同じ。要求を読んでいる
+途中の読みの期限は 30 秒)。ブラウザからの要求は Host・Origin・Content-Type の検査で断る。網越しに届く口(読み口・viewer、
 設計中の書き口とピア口)は用途ごとの別の待ち受けで、各々の許可表の外を 403 で断る。詳細スキーマは
 実装マイルストーンで確定する。設計と完了条件は
 [docs/plan/API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771) にある。
@@ -429,7 +433,7 @@ FIN_WAIT に移っているので 403 になる(curl と uniqnode 自身のク�
 | Method/Path | 役割 |
 |---|---|
 | `GET /healthz` | 死活 |
-| `GET /v1/status` | 版・オブジェクト数・ピア到達性・seq・健全性集計(ALERT を含む)・主の口の枠の数(main_door: 判定中・接続中・断り中の今の数と最大、断りの枠が埋まっていて 403 もログも書かずに閉じた断りの数 refused_unlogged) |
+| `GET /v1/status` | 版・オブジェクト数・ピア到達性・seq・健全性集計(ALERT を含む)・主の口の枠の数(main_door: 判定中・接続中・断り中の今の数と最大、断りの枠が埋まっていて 403 もログも書かずに閉じた断りの数 refused_unlogged、断りのログの待ち行列が埋まっていて書かなかった断りのログの数 refusal_logs_dropped) |
 | `GET /v1/objects/{id}` | オブジェクト取得(ローカル。なければ 404 = ローカル不保持の言明) |
 | `GET /v1/objects/{id}/referrers` | 逆引き(この ID を参照する既知オブジェクトの一覧。自分の知る範囲の導出データで、空は不在の言明ではない) |
 | `GET /v1/objects/{id}/citation` | チャンクの出典(検索の各件と同じ形。見えに無いチャンクは null) |

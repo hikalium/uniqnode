@@ -117,8 +117,10 @@ unit ファイルは差し替えても drop-in は残る。
   (node/tests/crash.rs がそれを実プロセスで確かめている)。
 - RestartPreventExitStatus=1 2。起動時に分かる誤りは再起動で直らないので、1 回で止めて
   理由を journal に残す。1 はアドレスが塞がっている・別プロセスがストアを開いている、
-  2 は引数の誤りと、主の口の起動時の自己試験の失敗(自分の接続の uid を判定できない。
-  AF_NETLINK を塞いだ unit など)である。POST /v1/admin/shutdown による終了(0)は意図した停止なので、
+  2 は引数の誤りと、主の口の起動時の自己試験の設定による失敗(照会の netlink ソケットを
+  作れない。AF_NETLINK を塞いだ unit など。自分の uid が overflowuid に見える user namespace)
+  である。自己試験のそれ以外の失敗(照会の期限切れのような一時の失敗でありうるもの)は 3 で終わり、
+  on-failure が起こし直す。POST /v1/admin/shutdown による終了(0)は意図した停止なので、
   on-failure は起こし直さない(unit は inactive のまま。起こすなら `systemctl start`)。
 - 閉じ込めは書ける場所を StateDirectory= の下だけにし、/ と home を読むだけにする。
   RestrictAddressFamilies= に AF_UNIX を残しているのはロックが unix socket だからで、

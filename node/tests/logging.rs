@@ -88,7 +88,14 @@ fn the_log_rotates_by_size_and_keeps_a_bounded_number_of_generations() {
     let path = default_path(&server.dir, SERVE_ROLE);
     let first_line = {
         // 起動の記録は最初の世代に入る。回転が効いていれば、これは最後には消えている。
-        let logged = std::fs::read_to_string(&path).expect("read log");
+        // 起動の行だけで上限を越え、読む前に既に世代が送られていることがある(索引の
+        // 温めの行は listening on の後に書かれる)ので、今ある一番古い世代の先頭を読む。
+        let oldest = (1..=RETAINED_GENERATIONS)
+            .rev()
+            .map(|generation| generation_path(&path, generation))
+            .find(|old| old.exists())
+            .unwrap_or_else(|| path.clone());
+        let logged = std::fs::read_to_string(&oldest).expect("read log");
         logged.lines().next().expect("起動の記録").to_string()
     };
     assert!(first_line.contains("ログを"), "起動の記録が読めない: {first_line}");

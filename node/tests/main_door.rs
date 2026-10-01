@@ -204,8 +204,21 @@ struct Gauge {
     refused_unlogged: i64,
 }
 
+/// 1 回の読みの期限(gauge)。
+const GAUGE_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn gauge(address: &str) -> Gauge {
-    let status = simple(address, "GET", "/v1/status", b"");
+    gauge_by(address, Instant::now() + GAUGE_TIMEOUT)
+}
+
+/// deadline までの残りを、接続・書き・読みの期限にして読む。期限が切れたら失敗する(試験の
+/// Server は Drop で子を止めて刈り取る)。
+fn gauge_by(address: &str, deadline: Instant) -> Gauge {
+    let left = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero())
+        .unwrap_or_else(|| panic!("{address} の /v1/status を読む期限が切れた"));
+    let status = simple_within(address, "GET", "/v1/status", b"", left);
     assert_eq!(status.status, 200, "{}", body_text(&status));
     let text = body_text(&status);
     let field = |key: &str| json_integer_field(&text, key).unwrap_or_else(|| panic!("{key} が無い: {text}"));
@@ -225,7 +238,7 @@ fn gauge(address: &str) -> Gauge {
 fn wait_for_gauge(agent: &str, what: &str, within: Duration, wanted: impl Fn(&Gauge) -> bool) -> Gauge {
     let deadline = Instant::now() + within;
     loop {
-        let seen = gauge(agent);
+        let seen = gauge_by(agent, deadline);
         if wanted(&seen) {
             return seen;
         }
@@ -246,7 +259,7 @@ fn wait_for_gauge(agent: &str, what: &str, within: Duration, wanted: impl Fn(&Ga
 fn wait_until_idle(address: &str) -> Gauge {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let seen = gauge(address);
+        let seen = gauge_by(address, deadline);
         if seen.checking == 0 && seen.connections == 1 && seen.refusing == 0 {
             return seen;
         }
@@ -458,8 +471,13 @@ fn a_connection_beyond_the_check_slots_is_closed_without_a_response() {
 /// 断られる相手が 403 の読み捨てで粘っても許す相手は締め出されない(Claude 中 6): 判定の枠は
 /// 判定が決まった時点で返り、403 を届ける断りの枠(8)が埋まった後の断りは 403 を書かずにすぐ
 /// 閉じられる。断られる相手は PEER_UID_FILE_ENV で作る(別の uid の接続は root 無しには作れない)。
-/// should/0137: 断りの間も判定の枠を持ち続ける形に戻すと、16 本の断りが 1 秒ほど判定の枠を埋め、
-/// 許す相手の status が閉じられて赤になる。
+/// should/0137: 断りの間も判定の枠を持ち続ける形に戻すと、断りの枠の外の断りも 403 を受け取り
+/// (refused_unlogged が増えず)赤になる。
+///
+/// 時機は決まった形で作る(再レビューの Codex 中 2): 断りの読み捨ての期限をテスト用の口で 30 秒に
+/// 延ばし、最初の 8 本を 1 本ずつ繋いで 403 を受け取ったまま持つ(断りの枠が 8 本とも埋まる)。
+/// 残りの 40 本も 1 本ずつ繋ぎ、閉じられるのを見てから次へ進む(判定の枠が埋まって accept で閉じ
+/// られる形を作らない)。
 #[test]
 fn slow_refused_peers_do_not_shut_out_an_allowed_connection() {
     let flag = unique_dir("peer-uid-file");
@@ -467,48 +485,67 @@ fn slow_refused_peers_do_not_shut_out_an_allowed_connection() {
     let (server, agent) = start_with_agent(
         "refusal-slots",
         &[],
-        &[HOOKS_ON, (uniqnode::main_door::PEER_UID_FILE_ENV, flag.to_str().expect("utf-8"))],
+        &[
+            HOOKS_ON,
+            (uniqnode::main_door::PEER_UID_FILE_ENV, flag.to_str().expect("utf-8")),
+            (uniqnode::main_door::REFUSAL_DRAIN_ENV, "30000"),
+        ],
     );
-    // 頭を言い切って黙る相手。serve は 403 を書いた後、相手が閉じるのを最長 1 秒待って読み捨てる。
+    // 頭を言い切って黙る相手。serve は 403 を書いて書く側を閉じた後、相手が閉じるまで(最長 30 秒)
+    // 読み捨てる。
     let head = format!("GET /healthz HTTP/1.1\r\nHost: {}\r\n\r\n", server.address);
-    let mut held = Vec::new();
-    for _ in 0..(uniqnode::http::CHECK_SLOTS * 3) {
+    let total = uniqnode::http::CHECK_SLOTS * 3;
+    // 1 本繋いで頭を送り、serve が書く側を閉じるまでに届いたもの(403 か空)を読む。こちらの書く
+    // 側は開けたまま返す。
+    let knock = || {
         let mut stream = TcpStream::connect(&server.address).expect("connect");
         stream.write_all(head.as_bytes()).expect("head");
-        held.push(stream);
-    }
-    // 全部が判定を終えるのを読み口から待つ(条件待ち。Claude 中 1): 判定中が 0、断りの枠が 8 本
-    // 埋まり、残りの 40 本は 403 もログも書かずに閉じられた(refused_unlogged)。断りの枠は
-    // 読み捨ての 1 秒の間埋まったままなので、その内に見える。
-    let unlogged = (uniqnode::http::CHECK_SLOTS * 3 - uniqnode::http::REFUSAL_SLOTS) as i64;
-    wait_for_gauge(&agent, "判定中 0・断り中 8", Duration::from_millis(900), |g| {
-        g.checking == 0 && g.refusing == uniqnode::http::REFUSAL_SLOTS as i64 && g.refused_unlogged == unlogged
-    });
-    std::fs::remove_file(&flag).expect("remove the peer uid file");
-    let started = Instant::now();
-    let seen = gauge(&server.address);
-    assert!(started.elapsed() < Duration::from_millis(500), "status に {:?}", started.elapsed());
-    assert_eq!(seen.refusing, uniqnode::http::REFUSAL_SLOTS as i64, "断りの枠は埋まったまま");
-    assert!(seen.checking_peak <= uniqnode::http::CHECK_SLOTS as i64, "判定中の最大 {}", seen.checking_peak);
-    let (mut refused, mut closed) = (0, 0);
-    for mut stream in held {
-        stream.set_read_timeout(Some(Duration::from_secs(3))).expect("timeout");
+        stream.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
         let mut answer = Vec::new();
         let _ = stream.read_to_end(&mut answer);
-        let text = String::from_utf8_lossy(&answer);
+        (stream, String::from_utf8_lossy(&answer).into_owned())
+    };
+    let (mut refused, mut closed) = (0usize, 0usize);
+    let mut count = |text: &str| {
         if text.starts_with("HTTP/1.1 403") {
             assert!(text.contains(uniqnode::http::REFUSED_PREFIX), "{text}");
             refused += 1;
         } else {
-            assert!(answer.is_empty(), "403 でも空でもない: {text}");
+            assert!(text.is_empty(), "403 でも空でもない: {text}");
             closed += 1;
         }
+    };
+    let mut held = Vec::new();
+    for _ in 0..uniqnode::http::REFUSAL_SLOTS {
+        let (stream, text) = knock();
+        assert!(text.starts_with("HTTP/1.1 403"), "断りの枠が空いている間は 403: {text:?}");
+        count(&text);
+        held.push(stream);
     }
-    assert_eq!(refused, uniqnode::http::REFUSAL_SLOTS, "403 を届けたのは断りの枠の数だけ");
-    assert_eq!(closed, uniqnode::http::CHECK_SLOTS * 3 - uniqnode::http::REFUSAL_SLOTS);
+    wait_for_gauge(&agent, "断り中 8", Duration::from_secs(10), |g| {
+        g.refusing == uniqnode::http::REFUSAL_SLOTS as i64
+    });
+    for _ in uniqnode::http::REFUSAL_SLOTS..total {
+        let (stream, text) = knock();
+        count(&text);
+        drop(stream);
+    }
+    let seen = wait_for_gauge(&agent, "判定中 0", Duration::from_secs(10), |g| g.checking == 0);
+    assert_eq!(refused + closed, total, "どの接続も 403 か空で閉じられる");
+    assert!(refused >= uniqnode::http::REFUSAL_SLOTS, "403 は {refused} 本");
+    assert_eq!(seen.refused_unlogged as usize, closed, "枠の外の断りは 403 もログも書かずに数える");
+    assert!(closed > 0, "断りの枠が埋まった後の断りが無い");
+    // 断りの枠が埋まったままでも、許す相手は通る。
+    std::fs::remove_file(&flag).expect("remove the peer uid file");
+    let started = Instant::now();
+    let seen = gauge(&server.address);
+    assert!(started.elapsed() < Duration::from_secs(5), "status に {:?}", started.elapsed());
+    assert_eq!(seen.refusing, uniqnode::http::REFUSAL_SLOTS as i64, "断りの枠は埋まったまま");
+    assert!(seen.checking_peak <= uniqnode::http::CHECK_SLOTS as i64, "判定中の最大 {}", seen.checking_peak);
+    // 持っていた 8 本を閉じれば、serve の読み捨ては EOF で終わって断りの枠が戻る。
+    drop(held);
     let idle = wait_until_idle(&server.address);
     assert_eq!(idle.refusing_peak, uniqnode::http::REFUSAL_SLOTS as i64);
-    assert_eq!(idle.refused_unlogged, unlogged, "枠の外の断りは数える");
 }
 
 /// 認証後の接続の枠(64)。認証済みの接続を持ったまま次の接続が判定を通り、64 本を持った後の
@@ -552,7 +589,9 @@ fn authenticated_connections_are_capped_and_the_slot_returns_on_close() {
 /// 大量の接続(1,000 本)を同時に開いても、判定中の接続は 16、認証後の接続は 64 を超えない。
 #[test]
 fn a_thousand_connections_stay_within_the_slots() {
-    let server = start("thousand", "127.0.0.1:0", &[], &[]);
+    // 枠は読み口から読む。1,000 本を落とした直後の主の口は判定の枠が埋まっていて、
+    // 主の口への status の要求は応答なしで閉じられうる(負荷の高い全体のテストで起きた)。
+    let (server, agent) = start_with_agent("thousand", &[], &[]);
     let address = server.address.clone();
     let workers: Vec<_> = (0..20)
         .map(|_| {
@@ -572,7 +611,9 @@ fn a_thousand_connections_stay_within_the_slots() {
     let streams: Vec<TcpStream> = workers.into_iter().flat_map(|w| w.join().expect("join")).collect();
     assert!(streams.len() > 900, "接続できたのは {} 本", streams.len());
     drop(streams);
-    let idle = wait_until_idle(&server.address);
+    let idle = wait_for_gauge(&agent, "枠が戻る", Duration::from_secs(20), |g| {
+        g.checking == 0 && g.connections == 0 && g.refusing == 0
+    });
     assert!(idle.checking_peak <= uniqnode::http::CHECK_SLOTS as i64, "判定中の最大 {}", idle.checking_peak);
     assert!(
         idle.connections_peak <= uniqnode::http::CONNECTION_SLOTS as i64,

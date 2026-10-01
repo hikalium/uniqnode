@@ -2018,11 +2018,12 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 );
             }
             // 起動時の自己試験(束縛の後、ストアを開く前)。自分の接続の uid を判定できなければ、
-            // 起きても全部の接続を 403 で断るだけなので、理由を言って 2 で終わる(unit の
-            // Restart= では直らない設定の誤りである)。
-            if let Err(message) = main_door.self_test(&listener) {
-                uniqnode::log_line!("uniqnode: serve: {message}");
-                std::process::exit(2);
+            // 起きても全部の接続を 403 で断るだけなので、理由を言って終わる。設定の誤り
+            // (AF_NETLINK を塞いだ unit など)は 2 で unit は起こし直さず、それ以外は一時の
+            // 失敗でありうるので 3 で unit の Restart= に起こし直させる。
+            if let Err(error) = main_door.self_test(&listener) {
+                uniqnode::log_line!("uniqnode: serve: {error}");
+                std::process::exit(error.exit_code());
             }
             let data_dir = std::path::PathBuf::from(dir);
             let (capacity_bytes, health_params) = uniqnode::health::read_node_config(&data_dir);
@@ -2084,7 +2085,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 uniqnode::sock_diag::uid_list(main_door.allowed_uids()),
                 gate.allowed_hosts().join(", ")
             );
-            let gauge = uniqnode::http::DoorGauge::new();
+            let gauge = uniqnode::http::DoorGauge::with_refusal_drain(main_door.refusal_drain());
             let context = std::sync::Arc::new(uniqnode::api::ApiContext {
                 store,
                 engine,

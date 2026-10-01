@@ -146,15 +146,17 @@ pub fn uid_list(uids: &[u32]) -> String {
     uids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
 }
 
-/// 照会の期限。ループバックの 1 件の照会はカーネルの中で完結するので、ふつう 1 ms もかからない。
-/// 期限は壊れたときの網である。
+/// 照会の期限(lookup 1 回の全体。2 つの族への照会と、EINTR の再試行を含む)。ループバックの
+/// 1 件の照会はカーネルの中で完結するので、ふつう 1 ms もかからない。期限は壊れたときの網である。
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// 相手のソケット(expected。相手から見た向き)を照会し、答えを集める。IPv4 の接続は AF_INET と、
 /// IPv4 射影にした AF_INET6 の両方に問う(相手が AF_INET6 のソケットから ::ffff:127.0.0.1 で
 /// 繋いだなら、ソケットは AF_INET6 の側にある)。IPv6 の接続は AF_INET6 だけに問う。
-/// 見つからない(ENOENT)は答え 0 件で、照会そのものの失敗は Err。
+/// 見つからない(ENOENT)は答え 0 件で、照会そのものの失敗は Err。全体を 1 つの絶対の期限
+/// (今から QUERY_TIMEOUT)の内に収める。
 pub fn lookup(expected: Endpoints) -> Result<Vec<Answer>, String> {
+    let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
     let expected = expected.normalized();
     let mut answers = Vec::new();
     match (expected.local.ip(), expected.remote.ip()) {
@@ -163,15 +165,17 @@ pub fn lookup(expected: Endpoints) -> Result<Vec<Answer>, String> {
                 platform::AF_INET,
                 SocketAddr::new(IpAddr::V4(local), expected.local.port()),
                 SocketAddr::new(IpAddr::V4(remote), expected.remote.port()),
+                deadline,
             )?);
             answers.extend(query(
                 platform::AF_INET6,
                 SocketAddr::new(IpAddr::V6(local.to_ipv6_mapped()), expected.local.port()),
                 SocketAddr::new(IpAddr::V6(remote.to_ipv6_mapped()), expected.remote.port()),
+                deadline,
             )?);
         }
         (IpAddr::V6(_), IpAddr::V6(_)) => {
-            answers.extend(query(platform::AF_INET6, expected.local, expected.remote)?);
+            answers.extend(query(platform::AF_INET6, expected.local, expected.remote, deadline)?);
         }
         _ => {
             return Err(format!(
@@ -223,8 +227,8 @@ fn address_field(ip: IpAddr) -> [u8; 16] {
 
 /// 受け取った netlink の 1 データグラムを読む。1 件の照会(dump でない)の答えの形だけを通す:
 /// sequence の合う通知がちょうど 1 つで、それが NLM_F_MULTI の付かない SOCK_DIAG_BY_FAMILY
-/// (答えの inet_diag_msg)か NLMSG_ERROR(0 か ENOENT なら答え 0 件、他の誤りは Err)で
-/// あること。NLMSG_DONE は誤りの値が 0 のときだけ読み飛ばす(1 件の照会では来ないはずで、
+/// (答えの inet_diag_msg)か NLMSG_ERROR(nlmsgerr の全長を持ち、ENOENT なら答え 0 件、
+/// 誤りの値 0 の ACK と他の誤りは Err)であること。NLMSG_DONE は誤りの値が 0 のときだけ読み飛ばす(1 件の照会では来ないはずで、
 /// 来ても答えを足さない)。sequence の違う通知は読み飛ばす。NLM_F_MULTI の付いた通知、
 /// 誤りの値が 0 でない NLMSG_DONE、sequence の合う通知が 2 つ以上、末尾の端のバイト
 /// (整列の詰め物を除く)は Err にする。
@@ -235,6 +239,7 @@ pub fn parse_reply(bytes: &[u8], sequence: u32) -> Result<Vec<Answer>, String> {
     const SOCK_DIAG_BY_FAMILY: u16 = 20;
     const NLM_F_MULTI: u16 = 2;
     const ENOENT: i32 = 2;
+    const NLMSGERR_LEN: usize = 4 + HEADER;
     let word = |payload: &[u8], what: &str| -> Result<i32, String> {
         payload
             .get(..4)
@@ -279,13 +284,28 @@ pub fn parse_reply(bytes: &[u8], sequence: u32) -> Result<Vec<Answer>, String> {
                     if kind == SOCK_DIAG_BY_FAMILY {
                         answers.push(parse_message(payload)?);
                     } else {
+                        // struct nlmsgerr は誤りの値(int)と、元の要求の nlmsghdr(16 バイト)を
+                        // 持つ。それに満たない誤りの答えは断る。
+                        if payload.len() < NLMSGERR_LEN {
+                            return Err(format!(
+                                "netlink の誤りの答えが短い({} バイト。nlmsgerr は {NLMSGERR_LEN})",
+                                payload.len()
+                            ));
+                        }
                         let code = word(payload, "誤りの答え")?;
                         // i32::MIN の符号は返せない(checked_neg が None)。
                         let errno = code
                             .checked_neg()
                             .ok_or_else(|| format!("netlink の誤りの値が不正({code})"))?;
                         match errno {
-                            0 | ENOENT => {}
+                            // 見つからない、だけが答え 0 件である。
+                            ENOENT => {}
+                            // 誤りの値 0 は ACK で、NLM_F_ACK を頼んでいない 1 件の照会には来ない。
+                            0 => {
+                                return Err(
+                                    "netlink の答えが想定外の ACK(誤りの値 0)である".to_string()
+                                )
+                            }
                             errno => {
                                 return Err(format!(
                                     "sock_diag の照会が誤りを返した: {}",
@@ -354,9 +374,20 @@ pub fn socket_unavailable(error: &std::io::Error) -> String {
     )
 }
 
-/// 1 つの族に 1 件照会する。
-fn query(family: u8, local: SocketAddr, remote: SocketAddr) -> Result<Vec<Answer>, String> {
-    platform::exchange(family, local, remote)
+/// 1 つの族に 1 件照会する(deadline は lookup 全体の絶対の期限)。
+fn query(
+    family: u8,
+    local: SocketAddr,
+    remote: SocketAddr,
+    deadline: std::time::Instant,
+) -> Result<Vec<Answer>, String> {
+    platform::exchange(family, local, remote, deadline)
+}
+
+/// 照会ソケットを 1 つ作って閉じる(照会はしない)。serve の起動時の自己試験が、作れない理由
+/// (errno)で設定の誤りか一時の失敗かを分けるために使う。
+pub fn probe_socket() -> std::io::Result<()> {
+    platform::open_socket().map(drop)
 }
 
 #[cfg(target_os = "linux")]
@@ -366,6 +397,7 @@ mod platform {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::raw::{c_int, c_long, c_void};
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
 
     pub const AF_INET: u8 = 2;
     pub const AF_INET6: u8 = 10;
@@ -422,17 +454,30 @@ mod platform {
 
     static SEQUENCE: AtomicU32 = AtomicU32::new(1);
 
-    pub fn exchange(family: u8, local: SocketAddr, remote: SocketAddr) -> Result<Vec<Answer>, String> {
+    /// 照会ソケットを作る。
+    pub fn open_socket() -> std::io::Result<OwnedFd> {
         // SAFETY: 引数は定数で、返り値の fd は下で検めてから OwnedFd に渡す(閉じるのは OwnedFd)。
         let raw = unsafe { socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_SOCK_DIAG) };
         if raw < 0 {
-            return Err(super::socket_unavailable(&std::io::Error::last_os_error()));
+            return Err(std::io::Error::last_os_error());
         }
         // SAFETY: raw は socket が返した開いた fd で、他の誰も持っていない。
-        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+    }
+
+    /// 期限までの残り。過ぎていれば Err。
+    fn remaining(deadline: Instant, what: &str) -> Result<Duration, String> {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or_else(|| format!("sock_diag の照会が期限({QUERY_TIMEOUT:?})の内に終わらない({what})"))
+    }
+
+    /// 受けの期限(SO_RCVTIMEO)を残りの時間に置く。0 は「待ち続ける」になるので 1 µs に丸める。
+    fn set_receive_timeout(fd: &OwnedFd, left: Duration) -> Result<(), String> {
         let timeout = Timeval {
-            seconds: QUERY_TIMEOUT.as_secs() as c_long,
-            microseconds: QUERY_TIMEOUT.subsec_micros() as c_long,
+            seconds: left.as_secs() as c_long,
+            microseconds: (left.subsec_micros() as c_long).max(if left.as_secs() == 0 { 1 } else { 0 }),
         };
         // SAFETY: timeout は生きている構造体で、長さはその大きさ。
         let set = unsafe {
@@ -444,31 +489,55 @@ mod platform {
                 std::mem::size_of::<Timeval>() as u32,
             )
         };
-        if set != 0 {
-            return Err(format!("照会ソケットの期限を置けない: {}", std::io::Error::last_os_error()));
+        match set {
+            0 => Ok(()),
+            _ => Err(format!("照会ソケットの期限を置けない: {}", std::io::Error::last_os_error())),
         }
+    }
+
+    pub fn exchange(
+        family: u8,
+        local: SocketAddr,
+        remote: SocketAddr,
+        deadline: Instant,
+    ) -> Result<Vec<Answer>, String> {
+        let fd = open_socket().map_err(|error| super::socket_unavailable(&error))?;
         let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let request = request_bytes(family, local, remote, sequence);
         let kernel = SockaddrNetlink { family: AF_NETLINK as u16, pad: 0, pid: 0, groups: 0 };
-        // SAFETY: request と kernel は呼び出しの間生きていて、長さはそれぞれの大きさ。
-        let sent = unsafe {
-            sendto(
-                fd.as_raw_fd(),
-                request.as_ptr() as *const c_void,
-                request.len(),
-                0,
-                &kernel as *const SockaddrNetlink as *const c_void,
-                std::mem::size_of::<SockaddrNetlink>() as u32,
-            )
-        };
-        if sent < 0 || sent as usize != request.len() {
-            return Err(format!("sock_diag の照会を送れない: {}", std::io::Error::last_os_error()));
+        // 送りの EINTR は、期限の残りがある間だけ送り直す。
+        loop {
+            remaining(deadline, "送り")?;
+            // SAFETY: request と kernel は呼び出しの間生きていて、長さはそれぞれの大きさ。
+            let sent = unsafe {
+                sendto(
+                    fd.as_raw_fd(),
+                    request.as_ptr() as *const c_void,
+                    request.len(),
+                    0,
+                    &kernel as *const SockaddrNetlink as *const c_void,
+                    std::mem::size_of::<SockaddrNetlink>() as u32,
+                )
+            };
+            if sent < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(format!("sock_diag の照会を送れない: {error}"));
+            }
+            if sent as usize != request.len() {
+                return Err(format!("sock_diag の照会を送り切れない({sent} バイト)"));
+            }
+            break;
         }
         // 1 件の照会の答えは 1 データグラムに収まる(inet_diag_msg と少しの属性)。recvfrom に
         // MSG_TRUNC を渡すと、netlink は切り詰める前の長さを返す(buffer より長ければ切れた答え
         // なので断る)。送り手の sockaddr_nl も受け、カーネル(nl_pid 0)からでなければ断る。
         let mut buffer = vec![0u8; 8192];
         let (received, sender) = loop {
+            // 受けの EINTR も、期限の残りを受けの期限に置き直してから受け直す。
+            set_receive_timeout(&fd, remaining(deadline, "受け")?)?;
             let mut sender = SockaddrNetlink { family: 0, pad: 0, pid: u32::MAX, groups: 0 };
             let mut sender_length = std::mem::size_of::<SockaddrNetlink>() as u32;
             // SAFETY: buffer は書ける長さ buffer.len() の領域、sender と sender_length は呼び出しの
@@ -519,8 +588,17 @@ mod platform {
     pub const AF_INET: u8 = 2;
     pub const AF_INET6: u8 = 10;
 
-    pub fn exchange(_family: u8, _local: SocketAddr, _remote: SocketAddr) -> Result<Vec<Answer>, String> {
+    pub fn exchange(
+        _family: u8,
+        _local: SocketAddr,
+        _remote: SocketAddr,
+        _deadline: std::time::Instant,
+    ) -> Result<Vec<Answer>, String> {
         Err("sock_diag は Linux にしかない".to_string())
+    }
+
+    pub fn open_socket() -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 }
 
@@ -779,6 +857,18 @@ mod tests {
         let mut other_then_ours = other.clone();
         other_then_ours.extend_from_slice(&answer);
         assert_eq!(parse_reply(&other_then_ours, 5), Ok(vec![established(1000)]));
+    }
+
+    /// NLMSG_ERROR は nlmsgerr の全長(誤りの値と元の要求の頭)を持つときだけ読み、答え 0 件に
+    /// するのは ENOENT だけで、誤りの値 0 の ACK は断る(Codex 低 5)。
+    #[test]
+    fn an_error_reply_needs_the_full_nlmsgerr_and_an_ack_is_refused() {
+        let enoent = netlink_message(2, 0, 7, &error_payload(-2));
+        assert_eq!(parse_reply(&enoent, 7), Ok(Vec::new()));
+        let short = netlink_message(2, 0, 7, &(-2i32).to_ne_bytes());
+        assert!(parse_reply(&short, 7).expect_err("断る").contains("短い"));
+        let ack = netlink_message(2, 0, 7, &error_payload(0));
+        assert!(parse_reply(&ack, 7).expect_err("断る").contains("ACK"));
     }
 
     /// 誤りの値が i32::MIN でも符号の反転で溢れず、Err を返す(Claude 低 2)。

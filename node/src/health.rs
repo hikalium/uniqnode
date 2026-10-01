@@ -201,7 +201,18 @@ pub struct HealthEngine {
     /// 書き込みを伴う動作(伝播交換・修復・降格)を始めた記録(試験だけ)。書けない間に
     /// 飛ばしたことを、ストアが拒んだことと区別して観測する。
     #[cfg(test)]
-    actions: Mutex<Vec<String>>,
+    actions: Mutex<Vec<(WriterAction, String)>>,
+}
+
+/// 周期が始める、書き込みを伴う動作の種類(試験が始めた動作を記録して照らすための名)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriterAction {
+    /// 伝播交換(ピアの ref レコードの取り込み)。対象はピアの address。
+    Exchange,
+    /// 修復(取り寄せと保持表明)。対象は root。
+    Repair,
+    /// 降格(保持表明の取り下げ)。対象は root。
+    Demote,
 }
 
 /// ストアが書けない状態に入った遷移の記録の root と state(HealthEvent の欄を借りる)。
@@ -244,12 +255,12 @@ impl HealthEngine {
 
     /// 書き込みを伴う動作を始めたことを記録する(試験のビルドだけ。本番では何もしない)。
     #[cfg(test)]
-    fn note_action(&self, action: &str, subject: &str) {
-        self.actions.lock().expect("actions lock").push(format!("{action} {subject}"));
+    fn note_action(&self, action: WriterAction, subject: &str) {
+        self.actions.lock().expect("actions lock").push((action, subject.to_string()));
     }
 
     #[cfg(not(test))]
-    fn note_action(&self, _action: &str, _subject: &str) {}
+    fn note_action(&self, _action: WriterAction, _subject: &str) {}
 
     /// ストアが書けない状態か。入った遷移を 1 度だけ記録する(周期ごとには記録しない。
     /// 飛ばしたことは、この 1 行と /v1/status の writes_disabled が示す)。
@@ -394,7 +405,7 @@ impl HealthEngine {
             }
             // 書けない間は伝播交換(取り込み = 書き込み)を黙って飛ばす。
             if accepted && !self.writes_disabled() {
-                self.note_action("exchange", address);
+                self.note_action(WriterAction::Exchange, address);
                 let mut report = SyncReport::default();
                 if let Err(e) = sync::sync_records(&self.store, &peer, &mut report) {
                     crate::log_line!("uniqnode: 伝播交換({address}): {e}");
@@ -412,11 +423,11 @@ impl HealthEngine {
                 continue;
             }
             if assessment.repair_selected {
-                self.note_action("repair", &root);
+                self.note_action(WriterAction::Repair, &root);
                 self.execute_repair(&root, &peer_addresses);
             }
             if assessment.demote_selected {
-                self.note_action("demote", &root);
+                self.note_action(WriterAction::Demote, &root);
                 let mut store = self.store.lock().expect("store lock");
                 match store.set_attest(&root, false) {
                     Ok(_) => {
@@ -786,14 +797,9 @@ mod tests {
     /// - 降格の root: 自分と other が持ち、両方が保持を表明している。自分が min_replicas 1 で
     ///   pin しているので過剰で、自分が rendezvous の最下位になる root を選ぶので降格に選ばれる。
     ///
-    /// `disable` なら、据えた後に最初の pack の追記を失敗させて書けない状態に入れる。返り値は
-    /// (エンジン、ストア、偽のピアが受けた要求の道、修復の root、降格の root、消す場所)。
+    /// `disable` なら、据えた後に最初の pack の追記を失敗させて書けない状態に入れる。
     #[cfg(debug_assertions)]
-    #[allow(clippy::type_complexity)]
-    fn writer_fixture(
-        name: &str,
-        disable: bool,
-    ) -> (HealthEngine, Arc<Mutex<Store>>, Arc<Mutex<Vec<String>>>, String, String, PathBuf) {
+    fn writer_fixture(name: &str, disable: bool) -> WriterFixture {
         let base = std::env::temp_dir()
             .join(format!("uniqnode-health-unit-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -838,7 +844,42 @@ mod tests {
         let mut fixture_params = params();
         fixture_params.t_prop = Duration::ZERO;
         let engine = HealthEngine::new(Arc::clone(&store), dir, fixture_params);
-        (engine, store, paths, repair_root, demote_id, base)
+        WriterFixture {
+            engine,
+            store,
+            peer_address: address,
+            peer_requests: paths,
+            repair_root,
+            demote_root: demote_id,
+            base,
+        }
+    }
+
+    /// writer_fixture の据え物。
+    #[cfg(debug_assertions)]
+    struct WriterFixture {
+        engine: HealthEngine,
+        store: Arc<Mutex<Store>>,
+        /// 偽のピアの address(伝播交換の対象)。
+        peer_address: String,
+        /// 偽のピアが受けた要求の道。
+        peer_requests: Arc<Mutex<Vec<String>>>,
+        /// 修復に選ばれる root。
+        repair_root: String,
+        /// 降格に選ばれる root。
+        demote_root: String,
+        /// 据え物の全部を置いた場所(消す場所)。
+        base: PathBuf,
+    }
+
+    #[cfg(debug_assertions)]
+    impl WriterFixture {
+        /// エンジンとストアを閉じてから場所を消す。
+        fn remove(self) {
+            let base = self.base.clone();
+            drop(self);
+            let _ = std::fs::remove_dir_all(&base);
+        }
     }
 
     /// 書ける据え物では、1 周期が伝播交換・修復・降格を全部始める(据え物が書き手を要する
@@ -849,19 +890,17 @@ mod tests {
     #[test]
     #[cfg(debug_assertions)]
     fn a_disabled_store_skips_exchange_repair_and_demotion_and_is_recorded_once() {
-        let (engine, store, paths, repair_root, demote_root, base) =
-            writer_fixture("writers-enabled", false);
-        engine.tick();
-        let actions = engine.actions.lock().expect("actions lock").clone();
-        let address = crate::query::read_peer_entries(&base.join("self"))[0].address.clone();
+        let fixture = writer_fixture("writers-enabled", false);
+        fixture.engine.tick();
+        let actions = fixture.engine.actions.lock().expect("actions lock").clone();
         for wanted in [
-            format!("exchange {address}"),
-            format!("repair {repair_root}"),
-            format!("demote {demote_root}"),
+            (WriterAction::Exchange, fixture.peer_address.clone()),
+            (WriterAction::Repair, fixture.repair_root.clone()),
+            (WriterAction::Demote, fixture.demote_root.clone()),
         ] {
-            assert!(actions.contains(&wanted), "書ける据え物で {wanted} が始まらない: {actions:?}");
+            assert!(actions.contains(&wanted), "書ける据え物で {wanted:?} が始まらない: {actions:?}");
         }
-        let requested = paths.lock().expect("paths lock").clone();
+        let requested = fixture.peer_requests.lock().expect("paths lock").clone();
         assert!(
             requested.iter().any(|path| path == "/v1/replication/signers"),
             "交換が偽のピアに来ていない: {requested:?}"
@@ -870,17 +909,16 @@ mod tests {
             requested.iter().any(|path| path != "/v1/status" && path != "/v1/replication/signers"),
             "修復の取り寄せが偽のピアに来ていない: {requested:?}"
         );
-        drop(engine);
-        drop(store);
-        let _ = std::fs::remove_dir_all(&base);
+        fixture.remove();
 
-        let (engine, store, paths, _, _, base) = writer_fixture("writers-disabled", true);
-        let seq = store.lock().expect("lock").last_seq();
+        let fixture = writer_fixture("writers-disabled", true);
+        let engine = &fixture.engine;
+        let seq = fixture.store.lock().expect("lock").last_seq();
         engine.tick();
         engine.tick();
         let actions = engine.actions.lock().expect("actions lock").clone();
         assert!(actions.is_empty(), "書けない間に書き手が始まった: {actions:?}");
-        let requested = paths.lock().expect("paths lock").clone();
+        let requested = fixture.peer_requests.lock().expect("paths lock").clone();
         assert!(!requested.is_empty(), "生存確認は続く");
         assert!(
             requested.iter().all(|path| path == "/v1/status"),
@@ -894,9 +932,7 @@ mod tests {
         assert_eq!(recorded.len(), 1, "遷移の記録は 1 度だけ");
         assert_eq!(recorded[0].state, WRITES_DISABLED_EVENT_STATE);
         assert_eq!(recorded[0].reason.as_deref(), Some("io"));
-        assert_eq!(store.lock().expect("lock").last_seq(), seq, "周期は何も書かない");
-        drop(engine);
-        drop(store);
-        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(fixture.store.lock().expect("lock").last_seq(), seq, "周期は何も書かない");
+        fixture.remove();
     }
 }

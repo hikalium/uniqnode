@@ -96,11 +96,13 @@ unit として載せるなら同じ命令を sudo で `--system` 付きで打つ
 
 ## 開発の作法
 
-commit したら、指示を待たずにそのまま `git push` する(エージェントも人も同じ)。push する前に
-`cargo test` を通す。手元にだけ commit を溜めると、他の機械や別のセッションから見えず、
+commit したら、指示を待たずにそのまま `git push` する(エージェントも人も同じ)。push する前に、
+`cargo test --no-fail-fast` が docs/mop/COMMIT-QUEUE.md の合格の条件を満たすことを確かめる
+(クラウドなど vega の外では、その文書の表に載ったテストだけが落ちてよい)。手元にだけ commit を
+溜めると、他の機械や別のセッションから見えず、
 据え付けや移行の手順が古い版を前提に組まれてしまう(2026-09-29 の利用者の指示)。
 ただし、セッションが push するのは自分のブランチであり、main へ統合するのは Commit Queue の役の
-セッションの 1 エージェントだけである。緑のブランチの commit id と統合の意思を Commit Queue へ送り、
+セッションの 1 エージェントだけである。合格したブランチの commit id と統合の意思を Commit Queue へ送り、
 Commit Queue が PR を通さずに main へ線形に積む(2026-10-01 の利用者の指示。合格の条件と手順は
 [docs/mop/COMMIT-QUEUE.md](#1df91ea3-07a5-422f-9c9d-83c9f9a7b8ae))。
 

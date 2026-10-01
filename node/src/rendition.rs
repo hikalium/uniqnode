@@ -424,6 +424,7 @@ impl RenditionError {
             RenditionError::ToolMissing(_) => 503,
             RenditionError::PageMismatch(_) | RenditionError::Failed(_) => 500,
             RenditionError::Store(StoreError::Invalid(_)) => 400,
+            RenditionError::Store(StoreError::WritesDisabled(_)) => 503,
             RenditionError::Store(_) => 500,
         }
     }
@@ -513,6 +514,9 @@ pub enum RenditionOrigin {
     Replicated(String),
     /// 今作った。
     Generated,
+    /// 今作ったが、ストアが書けない状態なので保存していない(APPEND_FAILURE の方針 2。
+    /// 読み出しを続ける約束を、まだ作っていない写しの閲覧でも守る)。次の要求も作り直す。
+    Unstored,
 }
 
 /// 返す写し。
@@ -760,6 +764,14 @@ pub fn render(work: &RenditionWork) -> Result<Rendered> {
 /// なので普通は同じ ID になり、捨てても何も失われない。捨てたことは黙らない
 /// (must/0019)。
 pub fn commit(store: &mut Store, work: RenditionWork, rendered: Rendered) -> Result<Rendition> {
+    let unstored = |work: RenditionWork, rendered: Rendered| Rendition {
+        object_id: c1::id_for_bytes(&rendered.bytes),
+        recipe: work.recipe_name,
+        content_type: work.recipe.content_type(),
+        bytes: rendered.bytes,
+        origin: RenditionOrigin::Unstored,
+        page_check: rendered.page_check,
+    };
     if let Some((object_id, origin)) = lookup_existing(store, &work.path) {
         if let Some(bytes) = store.get_object(&object_id)? {
             crate::log_line!(
@@ -781,6 +793,9 @@ pub fn commit(store: &mut Store, work: RenditionWork, rendered: Rendered) -> Res
         }
         // ref だけ在って実体が無い(複製が途中)。今作ったものを返すが、ref は動かさない
         // (同じ鍵への書き込みは一度きり。名前が版を含むので、版が変われば別の鍵になる)。
+        if store.writes_disabled().is_some() {
+            return Ok(unstored(work, rendered));
+        }
         let (object_id, _is_new) = store.put_object(&rendered.bytes)?;
         return Ok(Rendition {
             object_id,
@@ -790,6 +805,11 @@ pub fn commit(store: &mut Store, work: RenditionWork, rendered: Rendered) -> Res
             origin: RenditionOrigin::Generated,
             page_check: rendered.page_check,
         });
+    }
+    // 書けない間は保存せずに返す。この保存そのものが最初の失敗になった場合は、その要求に
+    // WritesDisabled を返す(書けない状態に入れた要求自身にも 503 と案内を届ける)。
+    if store.writes_disabled().is_some() {
+        return Ok(unstored(work, rendered));
     }
     let (object_id, _is_new) = store.put_object(&rendered.bytes)?;
     store.set_ref(&work.path, Some(&object_id))?;
@@ -1658,6 +1678,38 @@ mod tests {
         };
         let Some(Value::Text(blob_id)) = map.get("source") else { panic!("source が無い") };
         blob_id.clone()
+    }
+
+    /// 書けない間も、まだ作っていない写しは作って返す。保存はせず、ref も張らない
+    /// (APPEND_FAILURE の方針 2: 読み出しを続ける約束を写しの閲覧でも守る)。
+    #[test]
+    fn renditions_are_returned_unstored_while_writes_are_disabled() {
+        require_poppler(Tool::Pdftoppm);
+        let dir = temp_dir("unstored");
+        let options = options_at(&dir);
+        let mut store = Store::open(StoreConfig::new(dir.join("store"))).expect("open");
+        let blob_id = ingest_pdf(&mut store, &three_pages(), None);
+
+        // 次の pack への追記を EIO で失敗させ、書けない状態に入れる。
+        store.inject_fault("before@pack:1").expect("inject");
+        let failed = store.put_object(b"this put fails");
+        assert!(matches!(failed, Err(StoreError::WritesDisabled(_))), "{failed:?}");
+        let objects_before = store.object_count();
+        let seq_before = store.last_seq();
+
+        let made = ensure(
+            &mut store,
+            &options,
+            &RenditionRequest { blob_id: &blob_id, page: 2, alias: "thumb" },
+        )
+        .expect("書けなくても写しは返る");
+        assert_eq!(made.origin, RenditionOrigin::Unstored);
+        assert_eq!(&made.bytes[..2], &[0xff, 0xd8], "JPEG の先頭ではない");
+        assert_eq!(made.object_id, c1::id_for_bytes(&made.bytes));
+        assert_eq!(store.object_count(), objects_before, "保存しない");
+        assert_eq!(store.last_seq(), seq_before, "ref を張らない");
+        let name = store.own_ref_name(&ref_path(&blob_id, 2, &made.recipe));
+        assert!(store.get_ref(&name).is_none(), "ref は無いまま");
     }
 
     /// 生成 → 保存 → 再利用の一巡。写しはレシピの名前で ref に載り、2 度目は作り直さず、

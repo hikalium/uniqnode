@@ -55,6 +55,10 @@ pub enum QueryOutcome {
     Found,
     ScopeEmpty,
     TimedOut,
+    /// 取ってきたオブジェクトをストアに置けない(書けない状態。APPEND_FAILURE の方針 2)。
+    /// 置けなければ答えの本文を渡せないので、保存したと偽らずに断る。理由は
+    /// QueryState::write_failure。
+    WritesDisabled,
 }
 
 impl QueryOutcome {
@@ -64,6 +68,7 @@ impl QueryOutcome {
             QueryOutcome::Found => "found",
             QueryOutcome::ScopeEmpty => "scope_empty",
             QueryOutcome::TimedOut => "timed_out",
+            QueryOutcome::WritesDisabled => "writes_disabled",
         }
     }
 }
@@ -109,6 +114,8 @@ pub struct QueryState {
     pub outcome: QueryOutcome,
     pub answers: Vec<QueryAnswer>,
     pub peers: Vec<PeerProgress>,
+    /// outcome が WritesDisabled のときの理由(HTTP は 503 と案内にする)。
+    pub write_failure: Option<crate::store::WriteFailure>,
 }
 
 pub struct QueryShared {
@@ -379,6 +386,7 @@ impl QueryEngine {
                 .iter()
                 .map(|address| PeerProgress { address: address.clone(), state: PeerState::Pending })
                 .collect(),
+            write_failure: None,
         };
 
         // 自分自身も参加者(ローカルの知識は即答)。
@@ -388,6 +396,11 @@ impl QueryEngine {
                 QueryKind::Object => {
                     if store.has_object(target) {
                         state.answers.push(QueryAnswer::Object { source: "local".into() });
+                        true
+                    } else if let Some(failure) = store.writes_disabled() {
+                        // 手元に無いものを取りに行っても置けないので、散布せずに断る。
+                        state.outcome = QueryOutcome::WritesDisabled;
+                        state.write_failure = Some(failure.clone());
                         true
                     } else {
                         false
@@ -424,10 +437,12 @@ impl QueryEngine {
             }
         }
 
-        // object がローカルで見つかったら散布は不要。
+        // object がローカルで見つかったら(か、書けなくて断るなら)散布は不要。
         if local_object_hit {
             let mut guard = shared.state.lock().expect("query state lock");
-            guard.outcome = QueryOutcome::Found;
+            if guard.outcome == QueryOutcome::Running {
+                guard.outcome = QueryOutcome::Found;
+            }
             drop(guard);
             shared.settled.notify_all();
             return shared;
@@ -472,6 +487,18 @@ fn peer_worker(
                         let put = store.lock().expect("store lock").put_object(&bytes);
                         match put {
                             Ok(_) => Ok(Some(QueryAnswer::Object { source: address.clone() })),
+                            Err(crate::store::StoreError::WritesDisabled(failure)) => {
+                                // 置けない(取得中に別の要求が書けない状態を立てたか、この
+                                // 保存が最初の失敗だった)。再試行をやめ、待つ側へ理由を渡す。
+                                let mut guard = shared.state.lock().expect("query state lock");
+                                if guard.outcome == QueryOutcome::Running {
+                                    guard.outcome = QueryOutcome::WritesDisabled;
+                                    guard.write_failure = Some(failure);
+                                }
+                                drop(guard);
+                                shared.settled.notify_all();
+                                return;
+                            }
                             Err(e) => {
                                 crate::log_line!("uniqnode: query の保存に失敗: {e}");
                                 Err(())
@@ -616,6 +643,17 @@ pub fn state_to_json(state: &QueryState) -> Vec<u8> {
         .collect();
     map.insert("peers".to_string(), c1::Value::Array(peers));
     c1::to_canonical_bytes(&c1::Value::Object(map))
+}
+
+/// クエリの状態を HTTP の応答にする(POST /v1/query と GET /v1/queries/{id} の 1 箇所)。
+/// 書けなくて決着したクエリは、ストアの誤りの変換(503 と案内)を通す。
+pub fn state_response(state: &QueryState) -> crate::http::Response {
+    match &state.write_failure {
+        Some(failure) => crate::api::store_error_response(
+            crate::store::StoreError::WritesDisabled(failure.clone()),
+        ),
+        None => crate::http::Response::json(200, state_to_json(state)),
+    }
 }
 
 #[cfg(test)]

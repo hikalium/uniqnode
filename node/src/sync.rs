@@ -77,6 +77,9 @@ pub fn sync_from_peer(
     store: &std::sync::Mutex<Store>,
     peer: &dyn PeerSource,
 ) -> Result<SyncReport, SyncError> {
+    // 書けない間は、差分を見る前に断る(差分が無いときも 503 と終了コード 1 にする。HTTP の
+    // POST /v1/sync と CLI の sync が共にここを通る。APPEND_FAILURE の「外から見える形」)。
+    store.lock().expect("store lock").check_writable()?;
     let mut report = SyncReport::default();
     sync_records(store, peer, &mut report)?;
 
@@ -388,8 +391,12 @@ pub fn handle_sync_request(store: &std::sync::Mutex<Store>, request: &Request) -
             );
             Response::json(200, c1::to_canonical_bytes(&c1::Value::Object(map)))
         }
-        // 相手に届かない・相手の応答が不正 → 502。ストア側の異常 → 500。
+        // 相手に届かない・相手の応答が不正 → 502。書けない状態はストアの誤りの唯一の変換
+        // (503 と案内)へ寄せる。他のストア側の異常 → 500。
         Err(SyncError::Peer(message)) => error_json(502, &message),
+        Err(SyncError::Store(e @ StoreError::WritesDisabled(_))) => {
+            crate::api::store_error_response(e)
+        }
         Err(SyncError::Store(e)) => error_json(500, &format!("{e}")),
     }
 }

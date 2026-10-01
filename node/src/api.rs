@@ -596,7 +596,7 @@ fn handle_query(context: &ApiContext, request: &Request) -> Response {
     };
     let shared = context.engine.start(kind, &target, budget_ms, scope);
     let state = if wait { shared.wait_settled() } else { shared.snapshot() };
-    Response::json(200, crate::query::state_to_json(&state))
+    crate::query::state_response(&state)
 }
 
 /// 検索要求(POST /v1/search のボディと、MCP の search ツールの引数は同じ形である)。
@@ -1845,9 +1845,13 @@ fn page_key(subject: &RenditionSubject) -> Option<(&str, u32)> {
 }
 
 /// 写しの層の誤りをそのまま HTTP にする。状態符号も文言も rendition.rs が決めていて、
-/// ここは既存の誤り応答の形({"error": …})に載せ替えるだけである。
+/// ここは既存の誤り応答の形({"error": …})に載せ替えるだけである。ストアの誤りだけは、
+/// 書けない状態の 503 と案内を含めて、ストアの誤りの変換の 1 箇所(store_error_response)に回す。
 fn rendition_error_response(error: crate::rendition::RenditionError) -> Response {
-    error_response(error.status(), &error.to_string())
+    match error {
+        crate::rendition::RenditionError::Store(e) => store_error_response(e),
+        other => error_response(other.status(), &other.to_string()),
+    }
 }
 
 /// 用意できた写しをそのまま返す。Content-Type はレシピ(恒等レシピだけは原本の中身)が
@@ -2187,7 +2191,7 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
             return error_response(405, "GET のみ");
         }
         return match context.engine.lookup(id) {
-            Some(shared) => Response::json(200, crate::query::state_to_json(&shared.snapshot())),
+            Some(shared) => crate::query::state_response(&shared.snapshot()),
             None => error_response(404, "unknown query handle"),
         };
     }

@@ -195,8 +195,14 @@ pub struct HealthEngine {
     contacts: Mutex<BTreeMap<String, PeerContact>>,
     roots: Mutex<BTreeMap<String, RootRuntime>>,
     events: Mutex<Vec<HealthEvent>>,
+    /// ストアが書けない状態に入ったことを記録したか(遷移で 1 度だけ記録する。should/0129)。
+    writes_disabled_recorded: Mutex<bool>,
     started: Instant,
 }
+
+/// ストアが書けない状態に入った遷移の記録の root と state(HealthEvent の欄を借りる)。
+pub const WRITES_DISABLED_EVENT_ROOT: &str = "store";
+pub const WRITES_DISABLED_EVENT_STATE: &str = "writes_disabled";
 
 fn state_name(state: RootStateKind) -> &'static str {
     match state {
@@ -225,7 +231,45 @@ impl HealthEngine {
             contacts: Mutex::new(BTreeMap::new()),
             roots: Mutex::new(BTreeMap::new()),
             events: Mutex::new(Vec::new()),
+            writes_disabled_recorded: Mutex::new(false),
             started: Instant::now(),
+        }
+    }
+
+    /// ストアが書けない状態か。入った遷移を 1 度だけ記録する(周期ごとには記録しない。
+    /// 飛ばしたことは、この 1 行と /v1/status の writes_disabled が示す)。
+    fn writes_disabled(&self) -> bool {
+        let kind = self
+            .store
+            .lock()
+            .expect("store lock")
+            .writes_disabled()
+            .map(|failure| failure.kind.name().to_string());
+        let Some(kind) = kind else {
+            return false;
+        };
+        let mut recorded = self.writes_disabled_recorded.lock().expect("recorded lock");
+        if !*recorded {
+            *recorded = true;
+            crate::log_line!(
+                "uniqnode: health: ストアが書けない状態({kind})なので、伝播交換・修復・降格の\
+                 書き込みを飛ばす"
+            );
+            self.push_event(HealthEvent {
+                elapsed_ms: self.started.elapsed().as_millis() as u64,
+                root: WRITES_DISABLED_EVENT_ROOT.to_string(),
+                state: WRITES_DISABLED_EVENT_STATE.to_string(),
+                reason: Some(kind),
+            });
+        }
+        true
+    }
+
+    fn push_event(&self, event: HealthEvent) {
+        let mut events = self.events.lock().expect("events lock");
+        events.push(event);
+        if events.len() > 1000 {
+            events.remove(0);
         }
     }
 
@@ -283,6 +327,9 @@ impl HealthEngine {
 
     /// 1周期: 生存確認と伝播交換 → 判断 → 修復・降格の実行 → 遷移の記録。
     pub fn tick(&self) {
+        // 書けない状態に入ったことは、ピアやピンの有無に依らず、入った後の最初の周期で記録する。
+        // 周期の途中で入った場合は、下の書き込みの前の確かめが同じ記録を残す。
+        self.writes_disabled();
         let peer_entries = crate::query::read_peer_entries(&self.data_dir);
         let peer_addresses: Vec<String> =
             peer_entries.iter().map(|entry| entry.address.clone()).collect();
@@ -330,7 +377,8 @@ impl HealthEngine {
                     }
                 }
             }
-            if accepted {
+            // 書けない間は伝播交換(取り込み = 書き込み)を黙って飛ばす。
+            if accepted && !self.writes_disabled() {
                 let mut report = SyncReport::default();
                 if let Err(e) = sync::sync_records(&self.store, &peer, &mut report) {
                     crate::log_line!("uniqnode: 伝播交換({address}): {e}");
@@ -343,6 +391,10 @@ impl HealthEngine {
         for (root, required) in pins {
             let assessment = self.assess_root(&root, required);
             self.record_transition(&root, &assessment);
+            // 修復と降格は保持表明を書くので、書けない間は飛ばす(判断と遷移の記録は続ける)。
+            if self.writes_disabled() {
+                continue;
+            }
             if assessment.repair_selected {
                 self.execute_repair(&root, &peer_addresses);
             }
@@ -444,16 +496,12 @@ impl HealthEngine {
         if runtime.state != assessment.state || runtime.reason != assessment.reason {
             runtime.state = assessment.state;
             runtime.reason = assessment.reason;
-            let mut events = self.events.lock().expect("events lock");
-            events.push(HealthEvent {
+            self.push_event(HealthEvent {
                 elapsed_ms: self.started.elapsed().as_millis() as u64,
                 root: root.to_string(),
                 state: state_name(assessment.state).to_string(),
                 reason: reason_name(assessment.reason),
             });
-            if events.len() > 1000 {
-                events.remove(0);
-            }
         }
     }
 
@@ -667,5 +715,34 @@ mod tests {
         let result = assess(&v, None, None, &p);
         assert_eq!(result.state, RootStateKind::Satisfied);
         assert!(!result.repair_selected && !result.demote_selected);
+    }
+
+    /// ストアが書けない状態に入ったら、周期は書き込みを飛ばし、入ったことを 1 度だけ記録する
+    /// (周期ごとに積まない)。
+    #[test]
+    fn a_disabled_store_is_recorded_once_and_the_tick_writes_nothing() {
+        let dir = std::env::temp_dir()
+            .join(format!("uniqnode-health-unit-{}-writes-disabled", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = Store::open(crate::store::StoreConfig::new(&dir)).expect("open");
+        store.inject_fault("before@pack:1").expect("inject");
+        assert!(store.put_object(b"fails").is_err());
+        let seq = store.last_seq();
+        let store = Arc::new(Mutex::new(store));
+        let engine = HealthEngine::new(Arc::clone(&store), dir.clone(), params());
+        engine.tick();
+        engine.tick();
+        let recorded: Vec<HealthEvent> = engine
+            .events_snapshot()
+            .into_iter()
+            .filter(|event| event.root == WRITES_DISABLED_EVENT_ROOT)
+            .collect();
+        assert_eq!(recorded.len(), 1, "遷移の記録は 1 度だけ");
+        assert_eq!(recorded[0].state, WRITES_DISABLED_EVENT_STATE);
+        assert_eq!(recorded[0].reason.as_deref(), Some("io"));
+        assert_eq!(store.lock().expect("lock").last_seq(), seq, "周期は何も書かない");
+        drop(engine);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

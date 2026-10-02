@@ -109,8 +109,8 @@ fast-forward で push してよい(コードの変更では、vega の上で回�
 vega の検査を経て main へ線形に積む。根拠は 2026-10-02T15:59Z と 16:26:33Z の利用者の指示で、
 main へ統合するのは Commit Queue だけとした 2026-10-01 の指示を置き換える(lamalium は同じ規則を
 自分の条項 project_policy/may/claude-commit-push.md に置いている)。このリポジトリの検査を GitHub が
-main に必須のステータスチェックとして強制するようになったら、この手順を書き直す。書き直しが入るまでは、
-この手順が効く。合格の条件と手順は
+main に必須のステータスチェックとして、迂回できる主体なしで強制するようになったら、この手順を書き直す。
+書き直しが入るまでは、必須になった後もこの手順が効く。合格の条件と手順は
 [docs/mop/COMMIT-QUEUE.md](#1df91ea3-07a5-422f-9c9d-83c9f9a7b8ae) にある。
 
 https で push して 403(Permission to hikalium/uniqnode.git denied)が返るのは、たいてい

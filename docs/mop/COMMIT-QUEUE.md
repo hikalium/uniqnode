@@ -1,24 +1,31 @@
-# COMMIT-QUEUE — uniqnode の変更を Commit Queue に main へ入れてもらう
+# COMMIT-QUEUE — uniqnode の変更を main へ入れる(直接の push と Commit Queue)
 
 <a id="1df91ea3-07a5-422f-9c9d-83c9f9a7b8ae"></a>
 
-読み手は、uniqnode の変更を main へ入れたいセッション(送り手)と、それを main へ入れる
-Commit Queue(CQ)である。lamalium と sumi も同じ CQ が入れる。lamalium の側の手順は lamalium の
-docs/mop/WORKTREE.md の Integrate and deploy 節にある(別のリポジトリなので、#uuid の参照では
-指せない)。
+読み手は、uniqnode の変更を main へ入れたいセッション(送り手)と、送り手が手元で検査を回せない
+変更を受けて main へ入れる Commit Queue(CQ)である。送り手は、検査を緑にした変更を自分で main へ
+push してもよい(下の「main へ直接 push する手順」)。lamalium と sumi も同じ CQ が入れる。
+lamalium の側の手順は lamalium の docs/mop/WORKTREE.md の Integrate and deploy 節にある(別の
+リポジトリなので、#uuid の参照では指せない)。
 
 ## 誰が main へ入れるか
 
-利用者の指示(2026-10-01 13:16Z、lamalium のプロジェクトのスレッドで)は次のとおりである:
-「各マシンセッションはmainへの統合作業を実施せず、このセッションの1エージェントのみがCommit Queue
-としての役割を果たす」「Commit Queue役が各セッションから来たコミットをmainに統合するという作業を
-無事に完了したらその旨送信元セッションに通知し、チェックの失敗などで当該パッチが取り込めないと
-判断された場合もその旨および失敗したチェック等の情報を添えて当該コミットを差し戻す」。ここで
-「このセッション」は、そのスレッド「Commit Queue(mainへの統合)」のセッションを指す。
+利用者の指示(2026-10-02T15:59Z と 16:26:33Z、lamalium のプロジェクトで)により、利用者から直接
+または間接の指示を受けたエージェント(ホストの Claude と Codex、プロジェクトのスレッド、
+サブエージェント)は、追加の承認を得ずに、uniqnode・lamalium・sumi の main へリニアなコミット列を
+push してよい。条件は、push が main に指させる最終の木で、そのリポジトリの検査が緑だと確かめた
+ことである。リニアとは main の fast-forward であり、マージコミットも、main が既に届く履歴の
+書き換えも含まない。uniqnode の検査は、下の「合格の条件」で判定した `cargo test --no-fail-fast`
+である。コミットはいつ行ってもよい。
 
-指示に由来する決まりは次の 4 つである。
+この指示は、main へ統合するのは CQ の 1 エージェントだけとした 2026-10-01 13:16Z の指示を置き換える。
+正典の条項は lamalium の project_policy/may/claude-commit-push.md にある(別のリポジトリなので、
+#uuid の参照では指せない)。uniqnode には同じ条項を置いていない。この規則は、GitHub が main に
+必須のステータスチェックを強制するまでのものである。
 
-- main へ統合するのは CQ の 1 エージェントだけで、ほかのセッションは main へ push しない。
+手元で検査を回せない変更(vega でしか通らないテストに関わる変更など)は、CQ へ送る。CQ は
+その受け口として残る。CQ へ送る変更には、2026-10-01 の指示に由来する次の 3 つの決まりが当たる。
+
 - 送り手は commit id と統合の意思を CQ へ送る。
 - 統合できたら、CQ は送り手へ知らせる。
 - 取り込めないときは、CQ は失敗した検査などの情報を添えて送り手へ差し戻す。
@@ -42,7 +49,8 @@ CQ のセッションが替わったら、プロジェクトの調整役が新�
 
 Codex には SendMessage が無い。Codex が CQ へ送るもの(統合の依頼、CQ の問い合わせへの答え、
 統合済みの SHA の問い合わせ)と、vega の検査の依頼は、同じホストの Claude Code のセッションが中継
-する。Codex が自分で main へ push することはない。中継は次のように行う。
+する。Codex が下の「main へ直接 push する手順」で自分で main へ push するときも、vega の検査の
+依頼はこの中継を通す。中継は次のように行う。
 
 1. Codex は、送るメッセージ 1 通ごとに全文をそのホストの調整のファイル(crystal では
    `/home/lamalium/lamalium-install/coordination.md`)に書く。各メッセージには、
@@ -111,14 +119,40 @@ node/ の下のファイルは、Markdown でも説明の文書に当たらな�
 判定は commit ごとに `git diff-tree --no-commit-id -r --no-renames --name-status <commit>` で行い、
 消した側と足した側の両方のパスを見る。名前の変更を 1 行にまとめると移動元が見えないからである。
 
+## main へ直接 push する手順
+
+送り手が自分で検査を緑にできる変更は、CQ へ送らずに次の手順で main へ入れてよい。
+
+1. 最新の `origin/main` からブランチを切って変更を作り、コミットする。merge commit は作らない。
+2. 設計の変更・修正・実装は、README の「開発の作法」のとおり、異なる種類のモデルのレビューを
+   統合の前に通す。
+3. `git fetch origin main` の後、先頭が `origin/main` を祖先に持つことを確かめる
+   (`git merge-base --is-ancestor origin/main <先頭>` が 0 で終わる)。この先頭が main の指す木になる。
+4. その先頭で合格の条件を満たす。説明の文書だけの変更なら、手元で回した結果を合格の条件で判定して
+   よい。そうでないときは、ブランチを origin へ push し、その先頭の SHA を vega で検査してもらい
+   (「宛先と経路」の形)、vega が返した HEAD の SHA が先頭と一致し、落ちたテストが 1 つも無いことを
+   確かめる。
+5. `git push origin <先頭の SHA>:refs/heads/main` で、main を検査したその先頭へ fast-forward する。
+   force push はしない。検査した先頭と違う commit を push しない。
+6. main が動いて push が拒まれたら、push 済みの commit を rebase しない(must/0011)。新しい
+   `origin/main` から新しいブランチを切り、自分の commit を古い順に `git cherry-pick -x` で積み直して、
+   手順 3 からやり直す。進んだ main を自分のブランチへ merge しない。
+7. push の後は、指示した側へ、main が指す commit id と検査の結果(どの機械で、どの SHA で回し、
+   どのテストが落ちたか)を知らせる。
+
+手順 4 を満たせない変更は、次の「送り手の手順」で CQ へ送る。
+
 ## 送り手の手順
+
+手元で検査を回せない変更を CQ へ送るときの手順である。
 
 1. 最新の `origin/main` からブランチを切って変更を作り、コミットする。複数の commit でもよいが、
    merge commit は作らない。
 2. 合格の条件を満たすまで、手元で `cargo test --no-fail-fast` を回す。
 3. 設計の変更・修正・実装は、README の「開発の作法」のとおり、異なる種類のモデルのレビューを
    通す。
-4. ブランチを origin へ push する。main へは push しない。説明の文書だけの変更でないときは、push
+4. ブランチを origin へ push する。CQ へ送る変更は、CQ と二重に入れないよう、自分で main へ
+   push しない。説明の文書だけの変更でないときは、push
    した先頭の SHA を vega で検査してもらい(「宛先と経路」の形)、落ちたテストが 1 つも無いことを
    確かめる。このとき、ブランチは送る時点の `origin/main` を祖先に持たせる
    (`git merge-base --is-ancestor origin/main <先頭>` が 0 で終わる)。

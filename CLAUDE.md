@@ -100,19 +100,25 @@ ssh-daemon の CPU 使用を下げる直しを orion と crystal へデプロイ
 利用者から直接または間接の指示を受けたエージェント(ホストの Claude と Codex、プロジェクトの
 スレッド、サブエージェント)は、追加の承認を得ずに、uniqnode・lamalium・sumi の main へリニアな
 コミット列を push してよい。条件は、push が main に指させる最終の木で、そのリポジトリの検査が緑だと
-確かめたことである。リニアとは main の fast-forward であり、マージコミットも、main が既に届く履歴の
-書き換えも含まない。uniqnode の検査は `cargo test --no-fail-fast` を合格の条件で判定したもので、
-コードの変更では vega で落ちたテストが 1 つも無いことを求める。main が動いて push が拒まれたら、
-push 済みの commit を rebase せず(must/0011)、新しい main から切ったブランチへ cherry-pick で
-積み直して検査をやり直す。異なるモデルのレビューは、従来どおり統合の前に通す。
+確かめたことである。リニアとは main の fast-forward であり、マージコミットも、main から既に届く
+履歴の書き換えも含まない。uniqnode の検査は `cargo test --no-fail-fast` を合格の条件で判定した
+もので、コードの変更では vega で落ちたテストが 1 つも無いことを求める。そのため、uniqnode の
+コードの変更を自分で main へ push できるのは、vega の上で動き、そこで検査を回したエージェント
+だけである。説明の文書だけの変更は、合格の条件の例外の規則で判定すれば、どの機械からでも push
+してよい。main が動いて push が拒まれたら、push 済みの commit を rebase せず(must/0011)、
+新しい main から切ったブランチへ cherry-pick で積み直して検査をやり直す。異なるモデルのレビューは、
+従来どおり統合の前に通す。
 
-手元で検査を回せない変更(vega でしか通らないテストに関わる変更など)は、Commit Queue(CQ)へ
-送る。CQ はその受け口として残り、検査が合格なら main へ fast-forward で入れて commit id を
-送り手へ知らせ、取り込めないときは失敗した検査と出力の要点を添えて差し戻す。直接 push する手順、
-合格の条件(クラウドの CQ の手元で落ちるテストの表を含む)、CQ の宛先と CQ へ送る手順は
-[docs/mop/COMMIT-QUEUE.md](#1df91ea3-07a5-422f-9c9d-83c9f9a7b8ae) にある。正典の条項は lamalium の
-project_policy/may/claude-commit-push.md で、uniqnode には同じ条項を置いていない。この規則は、
-GitHub が main に必須のステータスチェックを強制するまでのものである。
+自分の環境で検査を回せない変更(vega の外のエージェントが作った uniqnode のコードの変更など)は、
+Commit Queue(CQ)へ送る。CQ はその受け口として残る。送り手は回せた検査の結果と、回せなかった
+検査とその環境を添えて送り、CQ は vega のセッションにその SHA で検査を回してもらい、合格なら main へ
+fast-forward で入れて commit id を送り手へ知らせ、取り込めないときは失敗した検査と出力の要点を
+添えて差し戻す。直接 push する手順、合格の条件(クラウドの CQ の手元で落ちるテストの表を含む)、
+CQ の宛先と CQ へ送る手順は [docs/mop/COMMIT-QUEUE.md](#1df91ea3-07a5-422f-9c9d-83c9f9a7b8ae) に
+ある。このリポジトリの検査を GitHub が main に必須のステータスチェックとして強制するようになったら、
+この規則を書き直す。書き直しが入るまでは、この規則が効く。
 
-理由: 利用者の指示(2026-10-02T15:59Z と 16:26:33Z)。main へ統合するのは CQ の 1 エージェント
-だけとした 2026-10-01 13:16Z の指示を置き換える。
+理由: 利用者の指示(2026-10-02T15:59Z と 16:26:33Z)。uniqnode と sumi で main へ push してよい
+根拠はこの指示である。lamalium は同じ規則を自分の条項 project_policy/may/claude-commit-push.md に
+置いているが、その条項が覆うのは lamalium のリポジトリだけである。この指示は、main へ統合するのは
+CQ の 1 エージェントだけとした 2026-10-01 13:16Z の指示を置き換える。

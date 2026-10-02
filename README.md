@@ -103,11 +103,15 @@ commit したら、指示を待たずにそのまま `git push` する(エージ
 溜めると、他の機械や別のセッションから見えず、
 据え付けや移行の手順が古い版を前提に組まれてしまう(2026-09-29 の利用者の指示)。
 main へは、main に入る最終の木で合格の条件を確かめたセッションが、PR を通さずに自分で
-fast-forward で push してよい(コードの変更では、vega で落ちたテストが 1 つも無いことを求める)。
-手元で検査を回せない変更は、ブランチの commit id と統合の意思を Commit Queue へ送り、Commit Queue が
-main へ線形に積む(2026-10-02T15:59Z と 16:26:33Z の利用者の指示。main へ統合するのは Commit Queue
-だけとした 2026-10-01 の指示を置き換える。合格の条件と手順は
-[docs/mop/COMMIT-QUEUE.md](#1df91ea3-07a5-422f-9c9d-83c9f9a7b8ae))。
+fast-forward で push してよい(コードの変更では、vega の上で回して落ちたテストが 1 つも無いことを
+求めるので、自分で push できるのは vega のセッションだけである)。自分の環境で検査を回せない変更は、
+ブランチの commit id、回せた検査の結果、回せなかった検査を Commit Queue へ送り、Commit Queue が
+vega の検査を経て main へ線形に積む。根拠は 2026-10-02T15:59Z と 16:26:33Z の利用者の指示で、
+main へ統合するのは Commit Queue だけとした 2026-10-01 の指示を置き換える(lamalium は同じ規則を
+自分の条項 project_policy/may/claude-commit-push.md に置いている)。このリポジトリの検査を GitHub が
+main に必須のステータスチェックとして強制するようになったら、この手順を書き直す。書き直しが入るまでは、
+この手順が効く。合格の条件と手順は
+[docs/mop/COMMIT-QUEUE.md](#1df91ea3-07a5-422f-9c9d-83c9f9a7b8ae) にある。
 
 https で push して 403(Permission to hikalium/uniqnode.git denied)が返るのは、たいてい
 グローバルの `gh auth git-credential` が答えていて、その PAT にこのリポジトリへの書き込みが

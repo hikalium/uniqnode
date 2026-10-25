@@ -1,5 +1,9 @@
 //! クラッシュ耐性の統合テスト(M1 受け入れ基準: 書き込み中の kill -9 から
 //! 再起動でエラーなく回復し、fsck が全件パスする)。
+//!
+//! 書き込みを続ける子プロセス(uniqnode flood)は debug ビルドにしか無いので、
+//! `cargo test --release` では走らない。
+#![cfg(debug_assertions)]
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

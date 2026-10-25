@@ -196,7 +196,6 @@ fn usage_text() -> String {
                                       再照合され、根拠行つきの検証記録が付く。索引 ref\n\
                                       annotations/<collection> に訂正の項が足される。\n\
                                       serve 停止中のストア用)\n\
-           flood <dir>                書き込み続ける(クラッシュ試験用の内部コマンド)\n\
            install <dir> [--instance <名>] [--listen <addr>] [--viewer-listen <addr>]\n\
                          [--serve-options \"<引数列>\"] [--backup-dir <dir>] [--bin <path>]\n\
                          [--unit-dir <dir>] [--no-start] [--listen-agent <addr>]\n\
@@ -2269,9 +2268,11 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 std::process::exit(1);
             }
         }
+        // クラッシュ試験用: kill されるまで最速で書き続ける(fsync 済み書き込みの途中を kill -9 で
+        // 裂き、回復経路を実プロセスで検証するため。node/tests/crash.rs)。利用者の命令ではない
+        // ので、debug ビルドにだけ置き、使い方の一覧にも載せない。
+        #[cfg(debug_assertions)]
         "flood" => {
-            // クラッシュ試験用: kill されるまで最速で書き続ける(fsync 済み書き込みの
-            // 途中を kill -9 で裂き、回復経路を実プロセスで検証するため)。
             let mut store = open(dir);
             let mut counter: u64 = 0;
             loop {

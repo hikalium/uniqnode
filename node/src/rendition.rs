@@ -1717,7 +1717,7 @@ mod tests {
     /// 書き込みも増えない。
     #[test]
     fn renditions_are_generated_once_and_then_reused() {
-        require_poppler(Tool::Pdftoppm);
+        let pdftoppm = require_poppler(Tool::Pdftoppm);
         let dir = temp_dir("generate");
         let options = options_at(&dir);
         let mut store = Store::open(StoreConfig::new(dir.join("store"))).expect("open");
@@ -1734,7 +1734,7 @@ mod tests {
         assert_eq!(first.origin, RenditionOrigin::Generated);
         assert_eq!(first.content_type, "image/jpeg");
         assert_eq!(&first.bytes[..2], &[0xff, 0xd8], "JPEG の先頭ではない");
-        assert_eq!(first.recipe, "pdftoppm-22.02.0-jpeg-q60-w700-gray");
+        assert_eq!(first.recipe, format!("pdftoppm-{}-jpeg-q60-w700-gray", pdftoppm.version));
         assert!(first.page_check.as_ref().expect("照合した").agrees());
         assert_eq!(store.object_count(), objects_before + 1, "写しが 1 個増える");
         assert_eq!(store.last_seq(), seq_before + 1, "ref を 1 本張る");

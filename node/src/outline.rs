@@ -29,6 +29,7 @@
 //! 出し、しおり系統も同じページに同じ題を出す。uefi_2_9 p.400 の
 //! `10.3.5 Media Device Path` も一致する。独立な 2 手法が一致している。
 
+use crate::html::decode_entities;
 use crate::rendition::{located_tool, Tool, POPPLER_INSTALL_HINT};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -286,7 +287,7 @@ fn anchor_heading(rest: &str, level: usize) -> (Option<Heading>, &str) {
     };
     let Some(href) = attribute_text(tag, "href") else { return (None, after) };
     let Some(page) = page_of_href(&href) else { return (None, after) };
-    let title = normalize_title(&unescape_html(strip_tags(text)));
+    let title = normalize_title(&decode_entities(&strip_tags(text)));
     if title.is_empty() {
         return (None, after);
     }
@@ -306,7 +307,7 @@ fn attribute_text(tag: &str, name: &str) -> Option<String> {
     let key = format!("{name}=\"");
     let start = tag.find(&key)? + key.len();
     let end = tag[start..].find('"')? + start;
-    Some(unescape_html(tag[start..end].to_string()))
+    Some(decode_entities(&tag[start..end]))
 }
 
 /// 題の中に混ざる入れ子のタグ(`<i>` など)を落とす。
@@ -321,52 +322,6 @@ fn strip_tags(text: &str) -> String {
             _ => {}
         }
     }
-    out
-}
-
-/// HTML の実体参照を戻す。pdftohtml が出すのは `&amp; &lt; &gt; &quot; &#NN;` である。
-pub fn unescape_html(text: String) -> String {
-    if !text.contains('&') {
-        return text;
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text.as_str();
-    while let Some(index) = rest.find('&') {
-        out.push_str(&rest[..index]);
-        rest = &rest[index..];
-        let Some(end) = rest.find(';').filter(|end| *end <= 10) else {
-            out.push('&');
-            rest = &rest[1..];
-            continue;
-        };
-        let entity = &rest[1..end];
-        let decoded = match entity {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            "nbsp" => Some(' '),
-            _ => entity
-                .strip_prefix('#')
-                .and_then(|number| match number.strip_prefix('x').or(number.strip_prefix('X')) {
-                    Some(hex) => u32::from_str_radix(hex, 16).ok(),
-                    None => number.parse().ok(),
-                })
-                .and_then(char::from_u32),
-        };
-        match decoded {
-            Some(ch) => {
-                out.push(ch);
-                rest = &rest[end + 1..];
-            }
-            None => {
-                out.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    out.push_str(rest);
     out
 }
 
@@ -470,7 +425,7 @@ fn lines_of_words(body: &str) -> Vec<TextLine> {
             continue;
         };
         let word =
-            Word { x_min, x_max, y_min, y_max, text: unescape_html(text.to_string()) };
+            Word { x_min, x_max, y_min, y_max, text: decode_entities(text) };
         let same_line = current
             .first()
             .is_some_and(|first| (first.y_min - word.y_min).abs() <= LINE_TOLERANCE_PT);

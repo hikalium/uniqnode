@@ -6,6 +6,7 @@
 //! 検証されるため、トランスポートにも相手にも真正性を頼らない。相手が持っていない
 //! ものは欠けとして数えるだけでエラーにしない(開世界)。
 
+use crate::api::{error_response, parse_body};
 use crate::c1;
 use crate::http::{Request, Response};
 use crate::store::{Store, StoreError};
@@ -353,16 +354,13 @@ impl PeerSource for HttpPeer {
 /// POST /v1/sync のハンドラ本体(api.rs から呼ばれる)。ネットワーク待ちの間は
 /// ロックを持たないので、同期中も他の API は応答できる。
 pub fn handle_sync_request(store: &std::sync::Mutex<Store>, request: &Request) -> Response {
-    let body_text = match std::str::from_utf8(&request.body) {
-        Ok(t) => t,
-        Err(_) => return error_json(400, "ボディが UTF-8 でない"),
-    };
-    let peer_address = match c1::parse(body_text) {
+    let peer_address = match parse_body(&request.body) {
         Ok(c1::Value::Object(map)) => match map.get("peer") {
             Some(c1::Value::Text(t)) => t.clone(),
-            _ => return error_json(400, "peer がない"),
+            _ => return error_response(400, "peer がない"),
         },
-        _ => return error_json(400, "JSON オブジェクトを期待した"),
+        Ok(_) => return error_response(400, "JSON オブジェクトを期待した"),
+        Err(response) => return response,
     };
     let peer = HttpPeer::new(peer_address);
     match sync_from_peer(store, &peer) {
@@ -393,18 +391,12 @@ pub fn handle_sync_request(store: &std::sync::Mutex<Store>, request: &Request) -
         }
         // 相手に届かない・相手の応答が不正 → 502。書けない状態はストアの誤りの唯一の変換
         // (503 と案内)へ寄せる。他のストア側の異常 → 500。
-        Err(SyncError::Peer(message)) => error_json(502, &message),
+        Err(SyncError::Peer(message)) => error_response(502, &message),
         Err(SyncError::Store(e @ StoreError::WritesDisabled(_))) => {
             crate::api::store_error_response(e)
         }
-        Err(SyncError::Store(e)) => error_json(500, &format!("{e}")),
+        Err(SyncError::Store(e)) => error_response(500, &format!("{e}")),
     }
-}
-
-fn error_json(status: u16, message: &str) -> Response {
-    let mut map = std::collections::BTreeMap::new();
-    map.insert("error".to_string(), c1::Value::Text(message.to_string()));
-    Response::json(status, c1::to_canonical_bytes(&c1::Value::Object(map)))
 }
 
 #[cfg(test)]

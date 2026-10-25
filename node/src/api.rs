@@ -60,6 +60,12 @@ pub(crate) fn error_response(status: u16, message: &str) -> Response {
     )
 }
 
+/// 要求の本文を c1 として読む。読めなければ、そのまま返せる 400 の応答を返す。
+pub(crate) fn parse_body(body: &[u8]) -> std::result::Result<c1::Value, Response> {
+    let text = std::str::from_utf8(body).map_err(|_| error_response(400, "ボディが UTF-8 でない"))?;
+    c1::parse(text).map_err(|e| error_response(400, &format!("JSON が不正: {e}")))
+}
+
 /// 書けない状態の JSON の形(503 の本文の `writes_disabled` と /v1/status の欄が同じこれを
 /// 言う。APPEND_FAILURE の「外から見える形」)。
 pub(crate) fn writes_disabled_value(failure: &crate::store::WriteFailure) -> c1::Value {
@@ -247,13 +253,9 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
             Response::json(200, json_object(vec![("events", c1::Value::Array(events))]))
         }
         ("POST", "/v1/pins") => {
-            let body_text = match std::str::from_utf8(&request.body) {
-                Ok(t) => t,
-                Err(_) => return error_response(400, "ボディが UTF-8 でない"),
-            };
-            let value = match c1::parse(body_text) {
-                Ok(v) => v,
-                Err(e) => return error_response(400, &format!("JSON が不正: {e}")),
+            let value = match parse_body(&request.body) {
+                Ok(value) => value,
+                Err(response) => return response,
             };
             let (root, min_replicas) = match &value {
                 c1::Value::Object(map) => {
@@ -415,13 +417,9 @@ fn handle_admin_gc(context: &ApiContext, request: &Request) -> Response {
         dry_run: false,
     };
     if !request.body.is_empty() {
-        let body_text = match std::str::from_utf8(&request.body) {
-            Ok(t) => t,
-            Err(_) => return error_response(400, "ボディが UTF-8 でない"),
-        };
-        let value = match c1::parse(body_text) {
-            Ok(v) => v,
-            Err(e) => return error_response(400, &format!("JSON が不正: {e}")),
+        let value = match parse_body(&request.body) {
+            Ok(value) => value,
+            Err(response) => return response,
         };
         let c1::Value::Object(map) = &value else {
             return error_response(400, "ボディはオブジェクトであるべき");
@@ -540,13 +538,9 @@ fn gc_report_json(report: &crate::gc::GcReport) -> Vec<u8> {
 /// POST /v1/query。ボディ: {kind, target, budget_ms?, scope?, wait?}。
 /// budget は観測の打ち切りであり、wait:false ならハンドルを即返す(SPEC §7.2)。
 fn handle_query(context: &ApiContext, request: &Request) -> Response {
-    let body_text = match std::str::from_utf8(&request.body) {
-        Ok(t) => t,
-        Err(_) => return error_response(400, "ボディが UTF-8 でない"),
-    };
-    let value = match c1::parse(body_text) {
-        Ok(v) => v,
-        Err(e) => return error_response(400, &format!("JSON が不正: {e}")),
+    let value = match parse_body(&request.body) {
+        Ok(value) => value,
+        Err(response) => return response,
     };
     let map = match &value {
         c1::Value::Object(m) => m,
@@ -1313,13 +1307,9 @@ pub fn handle_search_within(
     request: &Request,
     share: &crate::search::CollectionScope,
 ) -> Response {
-    let body_text = match std::str::from_utf8(&request.body) {
-        Ok(t) => t,
-        Err(_) => return error_response(400, "ボディが UTF-8 でない"),
-    };
-    let value = match c1::parse(body_text) {
-        Ok(v) => v,
-        Err(e) => return error_response(400, &format!("JSON が不正: {e}")),
+    let value = match parse_body(&request.body) {
+        Ok(value) => value,
+        Err(response) => return response,
     };
     let search_request = match parse_search_request(&value) {
         Ok(request) => request,
@@ -2117,13 +2107,9 @@ fn ingest_outcome_fields(outcome: crate::ingest::IngestOutcome) -> Vec<(&'static
 /// ロックの規律(node/src/sync.rs・node/src/rendition.rs と同じ): curl と pdftotext を
 /// 待つあいだストアのロックを持たない。取ってから、ロックを取って書く。
 pub fn fetch_into(context: &ApiContext, collection: &str, body: &[u8]) -> Response {
-    let body_text = match std::str::from_utf8(body) {
-        Ok(t) => t,
-        Err(_) => return error_response(400, "ボディが UTF-8 でない"),
-    };
-    let value = match c1::parse(body_text) {
-        Ok(v) => v,
-        Err(e) => return error_response(400, &format!("JSON が不正: {e}")),
+    let value = match parse_body(body) {
+        Ok(value) => value,
+        Err(response) => return response,
     };
     let c1::Value::Object(map) = &value else {
         return error_response(400, "ボディはオブジェクトであるべき");
@@ -2395,13 +2381,9 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
             }
             // 自名前空間のパスへの書き込み。ボディ: {"target": "s256:…" | null}
             "PUT" => {
-                let body_text = match std::str::from_utf8(&request.body) {
-                    Ok(t) => t,
-                    Err(_) => return error_response(400, "ボディが UTF-8 でない"),
-                };
-                let value = match c1::parse(body_text) {
-                    Ok(v) => v,
-                    Err(e) => return error_response(400, &format!("JSON が不正: {e}")),
+                let value = match parse_body(&request.body) {
+                    Ok(value) => value,
+                    Err(response) => return response,
                 };
                 let target = match &value {
                     c1::Value::Object(map) => match map.get("target") {

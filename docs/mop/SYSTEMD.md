@@ -122,8 +122,7 @@ unit ファイルは差し替えても drop-in は残る。
   on-failure が起こし直す。POST /v1/admin/shutdown による終了(0)は意図した停止なので、
   on-failure は起こし直さない(unit は inactive のまま。起こすなら `systemctl start`)。
 - 閉じ込めは書ける場所を StateDirectory= の下だけにし、/ と home を読むだけにする。
-  RestrictAddressFamilies= に AF_UNIX を残しているのは、旧版の uniqnode が抽象名前空間の unix socket で
-  取るロックを探るためで(node/src/store.rs の legacy_lock_held)、全てのホストが新版に替われば要らない。
+  RestrictAddressFamilies= の AF_UNIX は、利用者の名前の解決(NSS)などが使う unix socket のために残す。
   PrivateNetwork= を使わないのは、viewer と mcp が loopback で serve に届く必要があるからである
   (ストアのロックはファイルへの flock なので、ネットワーク名前空間を分けても外の CLI と unit は
   互いのロックを見る)。serve の unit に AF_NETLINK を
@@ -1131,6 +1130,11 @@ sudo systemctl restart uniqnode-serve@default uniqnode-viewer@default
 install(1) は走っている実行ファイルを一度 unlink してから置くので、走行中に差し替えられる
 (cp は Text file busy で断られる。`uniqnode install` は隣に書いて rename する)。走っているプロセスは古いイメージのまま動き続けるので、
 restart で新しいものに替わる。restart は停止と同じく SIGTERM で落として起こし直す。
+
+2026-10-25 にストアのロックを抽象名前空間の unix socket からデータディレクトリの lock ファイルへの
+flock に替えた。それより前の版と後の版は互いのロックを見ないので、この境をまたいで更新するときは、
+serve を restart する前に、同じストアを開いているほかのプロセス(ストアを直接開く形の
+`uniqnode mcp`、手で走らせている CLI)を止めておく。止めずに新しい serve を起こすと、書き手が 2 つになる。
 
 ## ログの見方
 

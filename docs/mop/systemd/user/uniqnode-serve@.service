@@ -49,9 +49,8 @@ Restart=on-failure
 RestartSec=2s
 RestartPreventExitStatus=1 2
 
-# 閉じ込め。書けるのは StateDirectory の下だけになる。AF_UNIX を残すのは、旧版の uniqnode が
-# 抽象名前空間の unix socket で取るロックを探るためである(node/src/store.rs の legacy_lock_held。
-# 全てのホストが新版に替われば要らない)。PrivateNetwork= は使わない(viewer と mcp が loopback で
+# 閉じ込め。書けるのは StateDirectory の下だけになる。AF_UNIX は、利用者の名前の解決(NSS)などが
+# 使う unix socket のために残す。PrivateNetwork= は使わない(viewer と mcp が loopback で
 # serve に届く必要がある)。
 # AF_NETLINK は主の口の uid の判定(接続の相手のソケットを NETLINK_SOCK_DIAG に照会する)に
 # 要る。無いと照会のソケットを作れない。serve は起動時の自己試験でそれを見つけ、listening on を

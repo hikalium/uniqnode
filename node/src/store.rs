@@ -634,38 +634,12 @@ fn open_lock_file(dir: &Path) -> std::io::Result<std::fs::File> {
     }
 }
 
-/// 旧版(2026-10-25 より前)の uniqnode がこのディレクトリのストアを開いているか。旧版はロックを、
-/// データディレクトリの正規化した道の SHA-256 から名付けた抽象名前空間の unix socket で取り、
-/// lock ファイルを見ない。旧版のプロセスが残っているあいだに新版が開くと書き手が 2 つになるので、
-/// その socket へ connect して、繋がれば持ち主が居ると答える。全てのホストの uniqnode が新版に
-/// 替わったら、この探りと呼び手を消す。
-fn legacy_lock_held(dir: &Path) -> Result<bool> {
-    use std::os::linux::net::SocketAddrExt;
-    let canonical = std::fs::canonicalize(dir)?;
-    let name = format!(
-        "uniqnode-lock-{}",
-        sha2::hex(&sha2::sha256(canonical.as_os_str().as_encoded_bytes()))
-    );
-    let address = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())?;
-    match std::os::unix::net::UnixStream::connect_addr(&address) {
-        Ok(_holder) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => Ok(false),
-        Err(e) => Err(e.into()),
-    }
-}
-
 /// 別のプロセスがこのディレクトリのストアを開いている(ロックを持っている)か。共有のロックを
 /// 試して調べる: 取れなければ持ち主が居る、取れればすぐ放して居ないと答える(放すまでの一瞬に
 /// 開こうとした側は、acquire_lock の有界の再試行が吸収する)。ロックのファイルが無ければ誰も
-/// 開いていないので false(旧版のプロセスは legacy_lock_held で見る)。install が unit を起こす前に
-/// 「起こしても別プロセスが開いている、で落ちる」を先に言うために使う。
+/// 開いていないので false。install が unit を起こす前に「起こしても別プロセスが開いている、で
+/// 落ちる」を先に言うために使う。
 pub fn opened_by_another_process(dir: &Path) -> Result<bool> {
-    if !dir.exists() {
-        return Ok(false);
-    }
-    if legacy_lock_held(dir)? {
-        return Ok(true);
-    }
     if !dir.join(LOCK_NAME).exists() {
         return Ok(false);
     }
@@ -1063,16 +1037,7 @@ impl Store {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
         loop {
             match file.try_lock() {
-                Ok(()) => {
-                    // 旧版のプロセスは flock を取らないので、取れても別に確かめる。
-                    if legacy_lock_held(dir)? {
-                        return Err(StoreError::Invalid(format!(
-                            "{} は別プロセス(旧版の uniqnode)が開いている",
-                            dir.display()
-                        )));
-                    }
-                    return Ok(file);
-                }
+                Ok(()) => return Ok(file),
                 Err(std::fs::TryLockError::WouldBlock) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(StoreError::Invalid(format!(
@@ -2556,32 +2521,6 @@ mod tests {
         }
         drop(first);
         Store::open(small_config(&dir)).expect("解放後は開ける");
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    /// 旧版の uniqnode(抽象名前空間の socket でロックを取る)が開いているストアは、新版も開かない。
-    #[test]
-    fn a_store_held_by_the_old_socket_lock_is_not_opened() {
-        use std::os::linux::net::SocketAddrExt;
-        let dir = temp_dir("legacy-lock");
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        // 旧版と同じ名付け(正規化した道の SHA-256)で束縛する。
-        let canonical = std::fs::canonicalize(&dir).expect("canonicalize");
-        let name = format!(
-            "uniqnode-lock-{}",
-            sha2::hex(&sha2::sha256(canonical.as_os_str().as_encoded_bytes()))
-        );
-        let address =
-            std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).expect("name");
-        let old = std::os::unix::net::UnixListener::bind_addr(&address).expect("bind");
-        assert!(opened_by_another_process(&dir).expect("probe"), "旧版の持ち主を見る");
-        match Store::open(small_config(&dir)) {
-            Err(StoreError::Invalid(message)) => assert!(message.contains("旧版"), "{message}"),
-            Err(other) => panic!("Invalid になるべき: {other}"),
-            Ok(_) => panic!("旧版が開いているストアを開けてしまった"),
-        }
-        drop(old);
-        Store::open(small_config(&dir)).expect("旧版が去れば開ける");
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

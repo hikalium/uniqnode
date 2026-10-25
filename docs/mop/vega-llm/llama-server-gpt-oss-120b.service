@@ -1,0 +1,21 @@
+# vega の gpt-oss-120b (0.0.0.0:8082)。docs/mop/VEGA-LLM.md (uuid:71cc086a-cf00-4bb8-bddb-ef5aa68562fe)。
+# 利用者 hikalium の user 単位の unit で、~/.config/systemd/user/ に置く。linger が有効なので vega の起動で起動する。
+# 引数は /work2/llm/run-gptoss120b.sh が決める。HOST だけを 0.0.0.0 にする (2026-10-25 操作者の決定 C で、
+# 8082 は今のまま全アドレスで待ち受ける)。
+[Unit]
+Description=llama-server gpt-oss-120b (0.0.0.0:8082)
+StartLimitIntervalSec=30min
+StartLimitBurst=3
+
+[Service]
+Type=exec
+WorkingDirectory=/work2/llm
+Environment=HOST=0.0.0.0
+ExecStart=/bin/bash /work2/llm/run-gptoss120b.sh
+StandardOutput=append:/work2/llm/server-gptoss.log
+StandardError=inherit
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

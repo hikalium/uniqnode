@@ -1,0 +1,18 @@
+# vega の bge-m3 (127.0.0.1:8083、uniqnode serve の --embed)。docs/mop/VEGA-LLM.md (uuid:71cc086a-cf00-4bb8-bddb-ef5aa68562fe)。
+# 利用者 hikalium の user 単位の unit で、~/.config/systemd/user/ に置く。引数は /work2/llm/run-bge-m3.sh の既定のまま。
+[Unit]
+Description=llama-server bge-m3 (127.0.0.1:8083)
+StartLimitIntervalSec=30min
+StartLimitBurst=3
+
+[Service]
+Type=exec
+WorkingDirectory=/work2/llm
+ExecStart=/bin/bash /work2/llm/run-bge-m3.sh
+StandardOutput=append:/work2/llm/server-bge-m3.log
+StandardError=inherit
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

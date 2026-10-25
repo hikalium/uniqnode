@@ -1,0 +1,20 @@
+# vega の bge-reranker-v2-m3 (127.0.0.1:8084、uniqnode serve の --rerank)。docs/mop/VEGA-LLM.md (uuid:71cc086a-cf00-4bb8-bddb-ef5aa68562fe)。
+# 利用者 hikalium の user 単位の unit で、~/.config/systemd/user/ に置く。/work2/llm に起動のスクリプトが無いので、
+# 2026-08-18 から手で起動していた版 (docs/analysis/20261001-vega-gpu-vram.md) と同じ引数をここに書く。
+# LD_LIBRARY_PATH は要らない。バイナリの RUNPATH が $ORIGIN で、手で起動していた版も設定せずに同じ .so を読んでいた。
+[Unit]
+Description=llama-server bge-reranker-v2-m3 (127.0.0.1:8084)
+StartLimitIntervalSec=30min
+StartLimitBurst=3
+
+[Service]
+Type=exec
+WorkingDirectory=/work2/llm
+ExecStart=/work2/llm/vulkan/llama-b10025/llama-server --model /work2/llm/models/bge-reranker-v2-m3/bge-reranker-v2-m3-FP16.gguf --host 127.0.0.1 --port 8084 --reranking --pooling rank -ngl 99 --ctx-size 8192 --batch-size 2048 --ubatch-size 2048
+StandardOutput=append:/work2/llm/server-rerank.log
+StandardError=inherit
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

@@ -683,7 +683,7 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
        install.rs を唯一の正として、その unit の drop-in から Options を読み戻し(`drop_ins` の逆)、描き直したものと
        次を 1 つずつ比べ、全部が等しいときだけ通す。読み戻した Options は、install の `normalize`(install.rs の 945 行
        付近。`check_instance`・`check_listen`・`check_after_unit`・`check_agent_writable`・`check_agent_collection`・
-       `check_agent_graph`・`check_firewall_allow` などの install の検めを含む)を通り、かつ `normalize` を通しても
+       `check_agent_graph`・`firewall_allow_entries` などの install の検めを含む)を通り、かつ `normalize` を通しても
        変わらないことを求める(第 28 版。第 27 版への Claude のレビューの中 1。install が描きえない Options から描き
        直して一致させる道を閉じる)。`drop_ins` が Options の外から取る入力も読み戻しの対象として名を挙げる:
        `tool_path`(drop-in の `Environment=PATH=` の値。`tool_path()` の value の形でなければ断る)と

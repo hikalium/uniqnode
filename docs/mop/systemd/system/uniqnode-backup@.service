@@ -36,8 +36,8 @@ StateDirectoryMode=0750
 # 一回きりなので Restart= は無い。写せない・開けない(1)と検証の異常(3)は failed として
 # journal に残り、次の timer の刻みでまた走る。写しが壊れているときの直し方は BACKUP.md。
 
-# 閉じ込め(serve の unit と同じ行)。写し先を開いて検証するときのロックが unix socket なので
-# AF_UNIX を残す。
+# 閉じ込め(serve の unit と同じ行)。写し先を開いて検証するときに旧版の
+# uniqnode のロック(抽象名前空間の unix socket)を探るので AF_UNIX を残す。
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

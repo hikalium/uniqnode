@@ -1181,7 +1181,11 @@ mod tests {
         options: &RenditionOptions,
         request: &RenditionRequest,
     ) -> Result<Rendition> {
-        let chunk_texts = visible_page_chunk_texts(store, request.blob_id, request.page)?;
+        let chunk_texts = if options.verify_page {
+            visible_page_chunk_texts(store, request.blob_id, request.page)?
+        } else {
+            Vec::new()
+        };
         match prepare(store, options, request, &chunk_texts)? {
             Prepared::Ready(rendition) => Ok(rendition),
             Prepared::Work(work) => {

@@ -122,6 +122,8 @@ unit ファイルは差し替えても drop-in は残る。
   on-failure が起こし直す。POST /v1/admin/shutdown による終了(0)は意図した停止なので、
   on-failure は起こし直さない(unit は inactive のまま。起こすなら `systemctl start`)。
 - 閉じ込めは書ける場所を StateDirectory= の下だけにし、/ と home を読むだけにする。
+  RestrictAddressFamilies= に AF_UNIX を残しているのは、旧版の uniqnode が抽象名前空間の unix socket で
+  取るロックを探るためで(node/src/store.rs の legacy_lock_held)、全てのホストが新版に替われば要らない。
   PrivateNetwork= を使わないのは、viewer と mcp が loopback で serve に届く必要があるからである
   (ストアのロックはファイルへの flock なので、ネットワーク名前空間を分けても外の CLI と unit は
   互いのロックを見る)。serve の unit に AF_NETLINK を

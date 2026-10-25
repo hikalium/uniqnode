@@ -282,7 +282,7 @@ fn a_corrupted_sealed_pack_in_the_backup_turns_fsck_red_and_is_recopied_after_re
     std::fs::remove_dir_all(&destination).expect("cleanup");
 }
 
-/// (4) derived/ logs/ tmp/ は写さず、写さなかったことを言う。
+/// (4) derived/ logs/ tmp/ とロックのファイルは写さず、写さなかったことを言う。
 #[test]
 fn derived_data_logs_and_scratch_are_not_copied_and_are_named_in_the_report() {
     let source = temp_dir("not-copied-source");
@@ -310,7 +310,7 @@ fn derived_data_logs_and_scratch_are_not_copied_and_are_named_in_the_report() {
     );
     assert!(destination.join("peers.json").exists(), "設定は写す");
     assert!(
-        outcome.stdout.contains("not copied: derived logs tmp"),
+        outcome.stdout.contains("not copied: derived lock logs tmp"),
         "写さなかったものを言う: {}",
         outcome.stdout
     );

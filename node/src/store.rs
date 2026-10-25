@@ -252,9 +252,9 @@ pub struct Store {
     /// 失敗の注入(テスト用の口。node/src/fault.rs)。debug ビルドだけにある。
     #[cfg(debug_assertions)]
     fault: Option<crate::fault::Fault>,
-    /// 同一データディレクトリの二重オープン防止(プロセス終了で自動解放される
-    /// Linux 抽象名前空間ソケットをロックとして使う)。
-    _lock: std::os::unix::net::UnixListener,
+    /// 同一データディレクトリの二重オープン防止(データディレクトリの lock ファイルへの flock。
+    /// プロセスが終われば kill -9 でもカーネルが解放する)。
+    _lock: std::fs::File,
 }
 
 /// 封印済みセグメントの一覧を持つファイル(SPEC §5.2)。
@@ -607,34 +607,41 @@ fn atomic_write_steps(
         .map_err(|error| ("rename の後のディレクトリの sync", error))
 }
 
-/// ストアのロックの名前。データディレクトリの正規化した道の SHA-256 から名付けた抽象名前空間の
-/// unix socket で、同じディレクトリを指すどの道からでも(unit の中と外の CLI でも)同じロックに
-/// なる。ロックを取る側(Store::open)と、取らずに持ち主の有無だけを調べる側
-/// (opened_by_another_process)が同じ名前を見るための一箇所(should/0135)。
-fn lock_address(dir: &Path) -> Result<std::os::unix::net::SocketAddr> {
-    use std::os::linux::net::SocketAddrExt;
-    let canonical = std::fs::canonicalize(dir)?;
-    let name = format!(
-        "uniqnode-lock-{}",
-        sha2::hex(&sha2::sha256(canonical.as_os_str().as_encoded_bytes()))
-    );
-    Ok(std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())?)
+/// ストアのロックを取るファイルの名前(データディレクトリの直下)。ロックはこのファイルへの
+/// flock で、同じディレクトリを指すどの道からでも、別のネットワーク名前空間や bind mount の
+/// 中からでも同じ inode を見るので、同じロックになる。触れるのはディレクトリに入れる利用者だけである。
+pub const LOCK_NAME: &str = "lock";
+
+/// ロックのファイルを開く。在れば読むだけで開く(flock は読むだけの FD でも取れるので、別の
+/// 利用者、たとえば root が作ったファイルでも、読めれば同じロックを取れる)。無ければ作る。
+/// ロックを取る側(Store::open)と、取らずに持ち主の有無だけを調べる側
+/// (opened_by_another_process)が同じファイルを見るための一箇所(should/0135)。
+fn open_lock_file(dir: &Path) -> std::io::Result<std::fs::File> {
+    let path = dir.join(LOCK_NAME);
+    match std::fs::File::open(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path),
+        opened => opened,
+    }
 }
 
-/// 別のプロセスがこのディレクトリのストアを開いている(ロックを持っている)か。ロックを取らずに
-/// 調べる: ロックの socket へ connect し、繋がれば持ち主が居る(listen しているが accept は
-/// しないので、接続は backlog に載って成功する)、ECONNREFUSED なら居ない。ディレクトリが
-/// 無ければ誰も開けないので false。install が unit を起こす前に「起こしても別プロセスが
-/// 開いている、で落ちる」を先に言うために使う。
+/// 別のプロセスがこのディレクトリのストアを開いている(ロックを持っている)か。共有のロックを
+/// 試して調べる: 取れなければ持ち主が居る、取れればすぐ放して居ないと答える(放すまでの一瞬に
+/// 開こうとした側は、acquire_lock の有界の再試行が吸収する)。ロックのファイルが無ければ誰も
+/// 開いていないので false。install が unit を起こす前に「起こしても別プロセスが開いている、で
+/// 落ちる」を先に言うために使う。
 pub fn opened_by_another_process(dir: &Path) -> Result<bool> {
-    if !dir.exists() {
+    if !dir.join(LOCK_NAME).exists() {
         return Ok(false);
     }
-    let address = lock_address(dir)?;
-    match std::os::unix::net::UnixStream::connect_addr(&address) {
-        Ok(_holder) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => Ok(false),
-        Err(e) => Err(e.into()),
+    let file = open_lock_file(dir)?;
+    match file.try_lock_shared() {
+        Ok(()) => Ok(false),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
     }
 }
 
@@ -735,8 +742,8 @@ impl Store {
         let dir = config.data_dir.clone();
         #[cfg(debug_assertions)]
         let mut fault = crate::fault::Fault::from_env().map_err(StoreError::Invalid)?;
-        // 順は APPEND_FAILURE の方針 1a の末尾: データのディレクトリの mkdir(ロックの名は
-        // 正規化した道から作るので先に要る)→ ロック → packs/・reflog/・tmp/ の mkdir →
+        // 順は APPEND_FAILURE の方針 1a の末尾: データのディレクトリの mkdir(ロックのファイルを
+        // その中に置くので先に要る)→ ロック → packs/・reflog/・tmp/ の mkdir →
         // tmp/ の片付け → node_key → recover → 開くときの sync → 書き込みの受け付け。
         // 祖先は作らない(prepare_data_dir)。
         prepare_data_dir(&dir)?;
@@ -1010,21 +1017,21 @@ impl Store {
         Self::open(config)
     }
 
-    /// 二重オープンの防止。抽象名前空間ソケットはプロセス終了(kill -9 を含む)で
-    /// カーネルが解放するため、クラッシュ後にロックが残らない。
-    fn acquire_lock(dir: &Path) -> Result<std::os::unix::net::UnixListener> {
-        let address = lock_address(dir)?;
-        // AddrInUse は短い有界の再試行で判別する。子プロセス生成(Command)は fork→exec の
+    /// 二重オープンの防止。flock はプロセス終了(kill -9 を含む)でカーネルが解放するため、
+    /// クラッシュ後にロックが残らない。
+    fn acquire_lock(dir: &Path) -> Result<std::fs::File> {
+        let file = open_lock_file(dir)?;
+        // 塞がっているかは短い有界の再試行で判別する。子プロセス生成(Command)は fork→exec の
         // 窓の間、親の全FD(CLOEXEC 付きを含む)の複製を子に持たせるため(CLOEXEC が閉じるのは
-        // exec の瞬間)、同プロセスの別スレッドが spawn 中だと、直前に解放したロックの抽象
-        // ソケットが一瞬 AddrInUse に見える。実測: spawn 並行下の drop→即 bind で 1.4%、
+        // exec の瞬間)、同プロセスの別スレッドが spawn 中だと、直前に解放したロックが一瞬
+        // 塞がって見える(flock は複製した FD が全て閉じるまで残る)。実測: spawn 並行下の drop→即 bind で 1.4%、
         // 複製の解放まで最悪 3.6ms(docs/analysis/20260816-lock-inheritance-race.md)。
         // 本物の保持者は解放しないので、250ms 待っても塞がっていれば二重オープンと確定する。
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
         loop {
-            match std::os::unix::net::UnixListener::bind_addr(&address) {
-                Ok(listener) => return Ok(listener),
-                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(std::fs::TryLockError::WouldBlock) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(StoreError::Invalid(format!(
                             "{} は別プロセスが開いている",
@@ -1033,7 +1040,7 @@ impl Store {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-                Err(e) => return Err(e.into()),
+                Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
             }
         }
     }

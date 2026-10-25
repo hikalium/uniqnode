@@ -111,9 +111,8 @@ unit ファイルは差し替えても drop-in は残る。
   StateDirectoryMode=0750 なのは、node_key(DBノードの秘密鍵。自身は 0600)の入った
   ディレクトリを他の利用者に見せないため。
 - Restart=on-failure と RestartSec=2s。落ちたら 2 秒後に起こし直す。ストアのロックは
-  データディレクトリの道から名付けた抽象名前空間の unix socket で(node/src/store.rs の
-  acquire_lock)、プロセスが死ねば kill -9 でもカーネルが解放するので、ロックが残って再起動を
-  阻むことはない。書き込み途中で裂かれたストアは次の open が fsck なしで回復する
+  データディレクトリの lock ファイルへの flock で(node/src/store.rs の acquire_lock)、プロセスが
+  死ねば kill -9 でもカーネルが解放するので、ロックが残って再起動を阻むことはない。書き込み途中で裂かれたストアは次の open が fsck なしで回復する
   (node/tests/crash.rs がそれを実プロセスで確かめている)。
 - RestartPreventExitStatus=1 2。起動時に分かる誤りは再起動で直らないので、1 回で止めて
   理由を journal に残す。1 はアドレスが塞がっている・別プロセスがストアを開いている、
@@ -123,10 +122,9 @@ unit ファイルは差し替えても drop-in は残る。
   on-failure が起こし直す。POST /v1/admin/shutdown による終了(0)は意図した停止なので、
   on-failure は起こし直さない(unit は inactive のまま。起こすなら `systemctl start`)。
 - 閉じ込めは書ける場所を StateDirectory= の下だけにし、/ と home を読むだけにする。
-  RestrictAddressFamilies= に AF_UNIX を残しているのはロックが unix socket だからで、
-  PrivateNetwork= を使わないのは、抽象名前空間の socket がネットワーク名前空間ごとに別に
-  なり、外の CLI と unit が互いのロックを見られなくなる(二重起動を検出できなくなる)からで
-  ある。viewer と mcp が loopback で serve に届く必要もある。serve の unit に AF_NETLINK を
+  PrivateNetwork= を使わないのは、viewer と mcp が loopback で serve に届く必要があるからである
+  (ストアのロックはファイルへの flock なので、ネットワーク名前空間を分けても外の CLI と unit は
+  互いのロックを見る)。serve の unit に AF_NETLINK を
   足しているのは、主の口が接続の相手のソケットの uid を NETLINK_SOCK_DIAG に照会するからで、
   無いと照会のソケットを作れない。serve は束縛の後の自己試験(自分から主の口へ 1 本繋いで
   判定する)でこれを見つけ、listening on を出さずに理由を言って 2 で終わる(全部の接続を 403 で

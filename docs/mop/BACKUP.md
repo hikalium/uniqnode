@@ -88,14 +88,14 @@ copied packs/pack-000001.pack
 copied packs/pack-000002.pack (active)
 copied reflog/reflog-000001.log (active)
 copied node_key
-backup: sealed copied 1 unchanged 0, active 2, removed 0, settings 1, bytes 377389679, not copied: derived logs tmp
+backup: sealed copied 1 unchanged 0, active 2, removed 0, settings 1, bytes 377389679, not copied: derived lock logs tmp
 verify: objects 55433 refs 204 errors 0
 ```
 
 2 回目は `unchanged packs/pack-000001.pack` になり、写すのは未封印の 2 本と設定だけになる。
 回収の後の写しでは `removed packs/pack-000005.pack (not in source MANIFEST)` のように消した
 残骸が並び、集計の `removed` にその本数が出る。
-`not copied:` は写し元の直下にあって写さなかった項目の列挙で、derived・logs・tmp 以外の名前が
+`not copied:` は写し元の直下にあって写さなかった項目の列挙で、derived・lock・logs・tmp 以外の名前が
 並んだら、それはこの手順が知らないファイルである。
 
 終了コードは fsck 命令と同じ: 0 が緑、3 が検証に異常、1 が写せない・開けない。

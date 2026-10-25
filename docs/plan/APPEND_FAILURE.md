@@ -879,6 +879,11 @@ pin・保持表明、1198 行付近)、`ingest_ref_record`(複製の受け側、
 
 ## 命令ごとの開き方
 
+2026-10-25 の注: ストアのロックは抽象名前空間の unix socket から、データのディレクトリの `lock` ファイルへの
+flock に替わった(node/src/store.rs の acquire_lock)。この節と「段取り」の、ロックの socket で accept の輪を回して
+境界を答える形と、backup が写し先の `lock_address` の名で socket を束縛する形は、その socket が無くなったので、
+この計画の範囲を絞り直すときに作り直す。
+
 「書く CLI」がどれかを、名前でなく実際にストアを変えるかで決める(第 14 版への Claude のレビューの中 3)。
 今の main.rs は `open`(無ければ初期化)と `open_existing`(在るストアだけ)を分けている(667〜681
 行付近)が、この分け方は書くかどうかと一致しない: gc の CLI は `open_existing` で開いて書き(1645 行

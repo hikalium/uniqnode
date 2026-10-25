@@ -203,7 +203,8 @@ fn usage_text() -> String {
                          [--agent-collections <コレクション名>]...\n\
                          [--agent-graph <グラフ名>]... [--agent-graph-writable <グラフ名>]...\n\
                          [--system [--user <name>] [--after <unit>]...\n\
-                          [--take-over-user-units] [--firewall-allow <addr>[,<addr>]...]]\n\
+                          [--take-over-user-units] [--retire-legacy-units]\n\
+                          [--firewall-allow <addr>[,<addr>]...]]\n\
                                       serve・viewer・毎日の backup を systemd に据える\n\
                                       (docs/mop/SYSTEMD.md)。走っている自分自身を\n\
                                       --bin(既定 ~/.local/bin/uniqnode)へ写し、unit 4 本と\n\
@@ -255,6 +256,10 @@ fn usage_text() -> String {
                                       常駐しているなら --take-over-user-units で install に\n\
                                       止めて外させる(user 単位の 3 つの unit を disable --now\n\
                                       し、止まったこととロックが外れたことを見る)。\n\
+                                      旧い名の unit(テンプレートになる前の\n\
+                                      uniqnode-serve.service など)が残っているなら\n\
+                                      --retire-legacy-units で install に退避させてから\n\
+                                      外させる(/var/backups/uniqnode-legacy-<時刻>)。\n\
                                       --firewall-allow <addr> は <addr> からだけ読み口へ届く\n\
                                       (<addr> は IPv4 アドレスか CIDR。, で並べられる)\n\
                                       規則を入れて効果を見る(ufw が active なら ufw allow、\n\
@@ -1304,6 +1309,7 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
     let mut agent_graph: Vec<String> = Vec::new();
     let mut agent_graph_writable: Vec<String> = Vec::new();
     let mut take_over_user_units = false;
+    let mut retire_legacy_units = false;
     let mut firewall_allow: Option<String> = None;
     let mut listen: Option<String> = None;
     let mut viewer_listen: Option<String> = None;
@@ -1357,6 +1363,11 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
             uniqnode::install::FIREWALL_ALLOW_FLAG => firewall_allow = Some(value()),
             uniqnode::install::TAKE_OVER_FLAG => {
                 take_over_user_units = true;
+                at += 1;
+                continue;
+            }
+            uniqnode::install::RETIRE_LEGACY_FLAG => {
+                retire_legacy_units = true;
                 at += 1;
                 continue;
             }
@@ -1431,6 +1442,7 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
     options.agent_graph = agent_graph;
     options.agent_graph_writable = agent_graph_writable;
     options.take_over_user_units = take_over_user_units;
+    options.retire_legacy_units = retire_legacy_units;
     options.firewall_allow = firewall_allow;
     options
 }

@@ -171,6 +171,14 @@ pub const AGENT_GRAPH_WRITABLE_ENV: &str = "UNIQNODE_AGENT_GRAPH_WRITABLE";
 pub const AGENT_GRAPH_WRITABLE_FLAG: &str = "--agent-graph-writable";
 /// user 単位の常駐を install 自身が止めて外す指定(`--system` のときだけ)。
 pub const TAKE_OVER_FLAG: &str = "--take-over-user-units";
+/// テンプレート unit になる前の名の unit(LEGACY_UNITS)を、install 自身が退避してから外す指定
+/// (`--system` のときだけ)。打つことが、操作者が外すと決めたことになる(must/0022)。
+pub const RETIRE_LEGACY_FLAG: &str = "--retire-legacy-units";
+/// 外す前の旧い unit と実行ファイルを退避する置き場の親。/var/tmp は systemd-tmpfiles が掃除
+/// するので使わない。
+pub const LEGACY_ARCHIVE_ROOT: &str = "/var/backups";
+/// 旧い backup の終わりを待つ上限。
+pub const LEGACY_BACKUP_WAIT: Duration = Duration::from_secs(1800);
 /// 読み口へ届いてよい相手を firewall(ufw)に入れる指定(`--system` と `--listen-agent` の
 /// ときだけ)。値は相手のアドレス。
 pub const FIREWALL_ALLOW_FLAG: &str = "--firewall-allow";
@@ -542,6 +550,8 @@ pub struct Options {
     /// true なら、据える前に実行ユーザの user 単位の常駐(STARTED_TEMPLATES)を止めて外す
     /// (`--take-over-user-units`。system 単位だけ)。
     pub take_over_user_units: bool,
+    /// true なら、据える前に旧い名の unit を退避して外す(`--retire-legacy-units`。system 単位だけ)。
+    pub retire_legacy_units: bool,
     /// 読み口へ届いてよい相手(`--firewall-allow`。IPv4 アドレスか CIDR をカンマで並べる)。
     /// ufw が active ならその規則を入れ、載ったことを見る。system 単位で読み口があるときだけ。
     pub firewall_allow: Option<String>,
@@ -594,6 +604,7 @@ impl Options {
             agent_graph: Vec::new(),
             agent_graph_writable: Vec::new(),
             take_over_user_units: false,
+            retire_legacy_units: false,
             firewall_allow: None,
             firewall_backend: None,
         }
@@ -1009,6 +1020,12 @@ pub fn normalize(mut options: Options) -> Result<Options, String> {
              ときに、止めて外す段を install に含める指定)"
         ));
     }
+    if options.retire_legacy_units && !options.scope.is_system() {
+        return Err(format!(
+            "{RETIRE_LEGACY_FLAG} は --system のときだけ受け付ける(旧い名の unit は system 単位に\
+             だけ在る)"
+        ));
+    }
     if let Some(allow) = options.firewall_allow.take() {
         // 要素を揃えた形(`/32` を外し、重複を除き、, で詰める)で持つ。報告と規則の字句が揃う。
         let allow = firewall_allow_entries(&allow)?.join(",");
@@ -1060,6 +1077,7 @@ pub fn normalize(mut options: Options) -> Result<Options, String> {
         agent_graph: options.agent_graph,
         agent_graph_writable: options.agent_graph_writable,
         take_over_user_units: options.take_over_user_units,
+        retire_legacy_units: options.retire_legacy_units,
         firewall_allow: options.firewall_allow,
         firewall_backend: options.firewall_backend,
     })
@@ -2166,8 +2184,11 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     // 差し替えるので、旧い serve の次の起動(restart・再起動)が新しいバイナリを旧い unit
     // (ExecStop= も新しい制限も無い)で走らせる(APPEND_FAILURE の段取り。第 18 版への Claude の
     // レビューの中 5)。黙って外しはしない(操作者のものを止めるのは操作者の判断。must/0022)。
+    // 操作者が --retire-legacy-units を打ったときだけ、退避してから外して先へ進む。
     let legacy = legacy_units_present(&options.unit_dir);
-    if !legacy.is_empty() {
+    if !legacy.is_empty() && options.retire_legacy_units {
+        retire_legacy_units(&options, &legacy, out)?;
+    } else if !legacy.is_empty() {
         let conflict = if options.instance == DEFAULT_INSTANCE {
             format!(
                 "既定のインスタンス {DEFAULT_INSTANCE} を据えると、同じ主の口と同じストアを 2 つの \
@@ -2186,7 +2207,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
             "据え先 {} にテンプレートになる前の名の unit が残っている({})。{conflict}。\
              何も置かずに断る(バイナリも差し替えない)。先に外す\
              (SYSTEMD (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「旧い名の unit から移る」): {}。nft を使っているなら古い表も消す\
-             (nft delete table inet uniqnode)",
+             (nft delete table inet uniqnode)。{RETIRE_LEGACY_FLAG} を足すと、install が退避してから外す",
             options.unit_dir.display(),
             legacy.join(" "),
             legacy_units_removal_command(scope, &options.unit_dir, &legacy)
@@ -2608,6 +2629,137 @@ pub fn legacy_units_removal_command(scope: &Scope, unit_dir: &Path, units: &[&st
     )
 }
 
+/// 旧い名の unit のうち在るもの(unit のファイルと drop-in のディレクトリ)。退避と削除が同じ
+/// 一覧を使う。
+pub fn legacy_unit_paths(unit_dir: &Path, legacy: &[&str]) -> Vec<PathBuf> {
+    legacy
+        .iter()
+        .flat_map(|unit| [unit_dir.join(unit), unit_dir.join(format!("{unit}.d"))])
+        .filter(|path| path.symlink_metadata().is_ok())
+        .collect()
+}
+
+/// 旧い名の unit を退避してから外す(`--retire-legacy-units`。docs/mop/SYSTEMD.md の「旧い名の
+/// unit から移る」と同じこと)。順は、旧い timer を止めて走っている旧い backup の終わりを待つ →
+/// 在る unit と drop-in と実行ファイルを LEGACY_ARCHIVE_ROOT の下の新しいディレクトリへ写して
+/// 確かめる → disable --now と削除と daemon-reload → nft の旧い表 inet uniqnode を消す。外す前に
+/// 失敗したら何も外さずに断り、旧い timer を戻す命令を添える。戻すときは、退避の units.tar.gz を
+/// unit のディレクトリへ展開し、実行ファイルを据え直して enable --now する。
+fn retire_legacy_units(options: &Options, legacy: &[&str], out: &mut dyn Write) -> Result<(), String> {
+    let scope = &options.scope;
+    let say = |out: &mut dyn Write, line: &str| -> Result<(), String> {
+        writeln!(out, "install: {line}").map_err(|e| format!("標準出力に書けない: {e}"))
+    };
+    let timer_hint = format!(
+        "旧い timer は止めたままである。毎日の backup を戻すなら {}start uniqnode-backup.timer",
+        scope.systemctl_prefix()
+    );
+    if legacy.contains(&"uniqnode-backup.timer") {
+        systemctl_ok(scope, &["stop", "uniqnode-backup.timer"])?;
+    }
+    let started = Instant::now();
+    loop {
+        let state = unit_state(scope, "uniqnode-backup.service")?;
+        if !matches!(state.as_str(), "active" | "activating" | "deactivating" | "reloading") {
+            break;
+        }
+        if started.elapsed() >= LEGACY_BACKUP_WAIT {
+            return Err(format!(
+                "旧い uniqnode-backup.service が {} 秒たっても終わらない(状態 {state})。何も外さずに\
+                 断る。{timer_hint}",
+                LEGACY_BACKUP_WAIT.as_secs()
+            ));
+        }
+        say(out, &format!("旧い backup の終わりを待つ(状態 {state})"))?;
+        std::thread::sleep(Duration::from_secs(10));
+    }
+    let archive = archive_legacy_units(options, legacy)
+        .map_err(|e| format!("{e}。何も外さずに断る。{timer_hint}"))?;
+    say(
+        out,
+        &format!(
+            "退避: {}(unit と drop-in は units.tar.gz、実行ファイルは uniqnode)",
+            archive.display()
+        ),
+    )?;
+    let mut disable = vec!["disable", "--now"];
+    disable.extend(legacy.iter().copied().filter(|unit| *unit != "uniqnode-backup.service"));
+    systemctl_ok(scope, &disable).map_err(|e| format!("{e}。退避は {} にある", archive.display()))?;
+    for path in legacy_unit_paths(&options.unit_dir, legacy) {
+        let removed = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        removed.map_err(|e| {
+            format!("{} を消せない: {e}。退避は {} にある", path.display(), archive.display())
+        })?;
+    }
+    systemctl_ok(scope, &["daemon-reload"])?;
+    say(out, &format!("旧い名の unit を外した: {}", legacy.join(" ")))?;
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    if find_in_path("nft", &path_env).is_some() {
+        let tables = command_output("nft", &["list".to_string(), "tables".to_string()])?;
+        if tables.lines().any(|line| line.trim() == "table inet uniqnode") {
+            let delete = ["delete", "table", "inet", "uniqnode"].map(String::from);
+            command_output("nft", &delete)?;
+            say(out, "nft の旧い表 inet uniqnode を消した")?;
+        }
+    }
+    Ok(())
+}
+
+/// 旧い名の unit と drop-in を units.tar.gz に、実行ファイルを uniqnode に写して、全部が入った
+/// ことを確かめる。置き場は毎回新しく作り(在れば断る)、途中で失敗したら消す(不完全な退避を
+/// 残さない)。返すのは置き場の道。
+fn archive_legacy_units(options: &Options, legacy: &[&str]) -> Result<PathBuf, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    let archive = Path::new(LEGACY_ARCHIVE_ROOT)
+        .join(format!("uniqnode-legacy-{}", crate::clock::unix_now()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&archive)
+        .map_err(|e| format!("退避の置き場 {} を作れない: {e}", archive.display()))?;
+    let filled = (|| -> Result<(), String> {
+        let names: Vec<String> = legacy_unit_paths(&options.unit_dir, legacy)
+            .iter()
+            .filter_map(|path| path.file_name().map(|name| name.to_string_lossy().to_string()))
+            .collect();
+        let tarball = archive.join("units.tar.gz").to_string_lossy().to_string();
+        let mut create = vec![
+            "-czf".to_string(),
+            tarball.clone(),
+            "-C".to_string(),
+            options.unit_dir.to_string_lossy().to_string(),
+        ];
+        create.extend(names.iter().cloned());
+        command_output("tar", &create)?;
+        let listing = command_output("tar", &["-tzf".to_string(), tarball.clone()])?;
+        for name in &names {
+            let dir_entry = format!("{name}/");
+            if !listing.lines().any(|line| line == name || line == dir_entry) {
+                return Err(format!("退避の {tarball} に {name} が無い"));
+            }
+        }
+        if options.binary.exists() {
+            let copy = archive.join("uniqnode");
+            std::fs::copy(&options.binary, &copy).map_err(|e| {
+                format!("{} を {} へ写せない: {e}", options.binary.display(), copy.display())
+            })?;
+            let same = std::fs::read(&options.binary).ok() == std::fs::read(&copy).ok();
+            if !same {
+                return Err(format!("{} の写しが元と違う", copy.display()));
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = filled {
+        let _ = std::fs::remove_dir_all(&archive);
+        return Err(error);
+    }
+    Ok(archive)
+}
+
 /// user 単位の常駐を止めて外す命令(system 単位へ移るときに操作者が打つもの。文書と文言が
 /// 同じ字句を使う。must/0023)。
 pub fn user_units_disable_command(instance: &str) -> String {
@@ -2641,9 +2793,43 @@ mod tests {
             agent_graph: Vec::new(),
             agent_graph_writable: Vec::new(),
             take_over_user_units: false,
+            retire_legacy_units: false,
             firewall_allow: None,
             firewall_backend: None,
         }
+    }
+
+    /// 退避と削除の一覧は、在る unit のファイルと drop-in のディレクトリだけを並べる。
+    #[test]
+    fn the_legacy_paths_list_only_what_exists() {
+        let dir = std::env::temp_dir()
+            .join(format!("uniqnode-install-unit-{}-legacy-paths", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+        std::fs::create_dir_all(dir.join("uniqnode-serve.service.d")).expect("mkdir");
+        std::fs::write(dir.join("uniqnode-serve.service"), "[Unit]\n").expect("write");
+        std::fs::write(dir.join("uniqnode-backup.timer"), "[Unit]\n").expect("write");
+        let legacy = legacy_units_present(&dir);
+        assert_eq!(legacy, vec!["uniqnode-serve.service", "uniqnode-backup.timer"]);
+        assert_eq!(
+            legacy_unit_paths(&dir, &legacy),
+            vec![
+                dir.join("uniqnode-serve.service"),
+                dir.join("uniqnode-serve.service.d"),
+                dir.join("uniqnode-backup.timer"),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 退避して外す指定は system 単位のときだけ受け付ける。
+    #[test]
+    fn retiring_legacy_units_needs_the_system_scope() {
+        let mut options = sample_options();
+        options.retire_legacy_units = true;
+        let refused = normalize(options).err().expect("user 単位では断る");
+        assert!(refused.contains(RETIRE_LEGACY_FLAG), "{refused}");
     }
 
     fn sample_account() -> Account {

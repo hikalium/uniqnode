@@ -266,28 +266,48 @@ pub fn list_nodes(store: &Store, graph: &str) -> Result<Vec<NodeView>> {
     let refs = live_refs(store, |name| {
         node_ref_parts(name).and_then(|(g, n)| (g == graph).then(|| n.to_string()))
     });
-    let mut out = Vec::with_capacity(refs.len());
-    for (node, (target, ref_state)) in refs {
-        let Some(bytes) = store.get_object(target)? else {
-            return Err(StoreError::Invalid(format!(
-                "節点 {node} の状態 {target} をこのDBノードは持っていない"
-            )));
-        };
-        let Some((identity, attrs, _)) = read_state(&bytes) else {
-            return Err(StoreError::Invalid(format!(
-                "節点 {node} の状態 {target} が状態ノードの形ではない"
-            )));
-        };
-        out.push(NodeView {
-            name: node,
-            identity,
-            state: target.to_string(),
-            attrs,
-            seq: ref_state.seq,
-            at: ref_state.at,
-        });
-    }
-    Ok(out)
+    refs.into_iter()
+        .map(|(node, (target, ref_state))| node_view(store, node, target, ref_state))
+        .collect()
+}
+
+/// 節点 1 つの現在。無ければ None(tombstone も無いのと同じ扱いで、404 の材料になる)。
+/// 読むのはその節点の状態だけで、同じグラフのほかの節点が壊れていても読める。
+pub fn get_node(store: &Store, graph: &str, node: &str) -> Result<Option<NodeView>> {
+    let refs = live_refs(store, |name| {
+        node_ref_parts(name).and_then(|(g, n)| (g == graph && n == node).then_some(()))
+    });
+    refs.into_iter()
+        .next()
+        .map(|((), (target, ref_state))| node_view(store, node.to_string(), target, ref_state))
+        .transpose()
+}
+
+/// 節点の ref が指す状態ノードを読んで見えにする。読めなければ断る(list_nodes の理由)。
+fn node_view(
+    store: &Store,
+    node: String,
+    target: &str,
+    ref_state: &crate::store::RefState,
+) -> Result<NodeView> {
+    let Some(bytes) = store.get_object(target)? else {
+        return Err(StoreError::Invalid(format!(
+            "節点 {node} の状態 {target} をこのDBノードは持っていない"
+        )));
+    };
+    let Some((identity, attrs, _)) = read_state(&bytes) else {
+        return Err(StoreError::Invalid(format!(
+            "節点 {node} の状態 {target} が状態ノードの形ではない"
+        )));
+    };
+    Ok(NodeView {
+        name: node,
+        identity,
+        state: target.to_string(),
+        attrs,
+        seq: ref_state.seq,
+        at: ref_state.at,
+    })
 }
 
 /// グラフの辺を (型, from, to) の順に返す。
@@ -309,13 +329,6 @@ pub fn list_edges(store: &Store, graph: &str) -> Result<Vec<EdgeView>> {
         });
     }
     Ok(out)
-}
-
-/// 節点 1 つの現在。無ければ None(tombstone も無いのと同じ扱いで、404 の材料になる)。
-pub fn get_node(store: &Store, graph: &str, node: &str) -> Result<Option<NodeView>> {
-    Ok(list_nodes(store, graph)?
-        .into_iter()
-        .find(|view| view.name == node))
 }
 
 /// 版の鎖(現在から古い方へ)。previous が指す先をこのDBノードが持っていなければそこで
@@ -596,5 +609,31 @@ mod tests {
             c1::object_id(&edge),
             c1::object_id(&edge_value(&type_id, &to, &from))
         );
+    }
+
+    /// get_node が読むのは引いた節点だけである。同じグラフに壊れた節点が 1 つあっても、
+    /// ほかの節点は読める(一覧は従来どおり断る)。
+    #[test]
+    fn a_broken_node_does_not_hide_the_others() {
+        let dir = std::env::temp_dir()
+            .join(format!("uniqnode-graph-unit-{}-broken-node", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+        let mut store = Store::open(crate::store::StoreConfig::new(&dir)).expect("open");
+        let attrs = c1::parse(r#"{"state":"planned"}"#).expect("attrs");
+        put_node(&mut store, "plan", "n_a", &attrs).expect("put n_a");
+        put_node(&mut store, "plan", "n_b", &attrs).expect("put n_b");
+        // n_b の ref を状態ノードでないオブジェクトへ向け替える。
+        let (other, _) = store.put_object(br#"{"kind":"blob","v":1}"#).expect("put");
+        store.set_ref(&node_ref_path("plan", "n_b"), Some(&other)).expect("set_ref");
+
+        let a = get_node(&store, "plan", "n_a").expect("n_a は読める").expect("在る");
+        assert_eq!(a.name, "n_a");
+        assert!(get_node(&store, "plan", "n_b").is_err(), "壊れた節点そのものは断る");
+        assert!(get_node(&store, "plan", "n_c").expect("無い節点").is_none());
+        assert!(list_nodes(&store, "plan").is_err(), "一覧は欠けた形で返さない");
+        drop(store);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

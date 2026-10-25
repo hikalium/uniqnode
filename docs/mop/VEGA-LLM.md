@@ -40,6 +40,9 @@ systemd が起動し直す。
   手で起動していた版と同じである
   ([docs/analysis/20261001-vega-gpu-vram.md](#f24219ab-96b3-47af-9ea7-ef1ebb80fc47))。
 - 起動の順序は付けない。VRAM (RTX 2080、8 GiB) は 3 つの合計で約 4.1 GiB で、どの順でも収まる。
+- /work2 は fstab で nofail が付いているので、vega の起動で user 単位の unit が /work2 の mount より先に
+  起動することがある。その場合も、unit は 30 秒ごとに起動し直す (30 分に 3 回まで試す) ので、mount が約 1 分で
+  済めば戻る。
 - 落ちたら 30 秒後に起動し直し、30 分に 3 回失敗したら諦める (gpt-oss は 1 回の起動で 63 GB を読むため)。
 - 出力は /work2/llm の下のログへ追記する (server-gptoss.log、server-bge-m3.log、server-rerank.log)。
 
@@ -58,8 +61,11 @@ vega で hikalium として、uniqnode のチェックアウトの根から実�
    を実行する。
 4. 確かめる。`systemctl --user is-active` が 3 つとも active で、
    `curl -s http://127.0.0.1:<ポート>/health` が 200 を返すこと (gpt-oss は読み込みの間 503 を返し、
-   約 40 秒で 200 になる)。GPU を使っていることは、各ログに `ggml_vulkan: Found 1 Vulkan devices`
-   の行が出ていることで見る (Vulkan の機器が見えないと、llama-server は CPU で動いて 200 を返す)。
+   約 40 秒で 200 になる)。GPU を使っていることは、
+   `nvidia-smi --query-compute-apps=pid,used_memory --format=csv` で 3 つの unit の llama-server の pid が
+   VRAM を持っていることで見る (Vulkan の機器が見えないと、llama-server は CPU で動いて 200 を返す。
+   b10025 の llama-server はログに Vulkan の機器の行を出さない)。2026-10-25 の切り替えでは 3 つで
+   約 4.1 GiB を持っていた。
    `systemctl --user is-enabled` が 3 つとも enabled であれば、次の vega の起動でも起動する。
 
 ## 更新と停止

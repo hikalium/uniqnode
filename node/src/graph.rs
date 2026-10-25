@@ -236,13 +236,6 @@ fn read_state(bytes: &[u8]) -> Option<(String, Value, Option<String>)> {
     Some((identity.clone(), attrs, previous))
 }
 
-/// 辺のオブジェクトから型の ID を読む(members は ref の名前から分かるので読み直さない)。
-fn is_edge(bytes: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(bytes) else { return false };
-    let Ok(Value::Object(map)) = c1::parse(text) else { return false };
-    map.get("kind") == Some(&Value::Text("edge".to_string()))
-}
-
 /// グラフの名前の一覧(節点か辺を 1 つでも持つグラフ)。
 pub fn list_graphs(store: &Store) -> Vec<String> {
     let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -526,16 +519,6 @@ pub fn delete_edge(
     }
     store.set_ref(&edge_ref_path(graph, edge_type, from, to), None)?;
     Ok(true)
-}
-
-/// 辺が生きているかどうかを、辺オブジェクトの形からも確かめる(グラフ層の外から張られた
-/// 同名の ref を辺として読まないための検め。list_edges は ref の名前だけで組むので、
-/// 形の検めが要る場面ではこちらを呼ぶ)。
-pub fn edge_object_is_well_formed(store: &Store, id: &str) -> Result<bool> {
-    Ok(match store.get_object(id)? {
-        Some(bytes) => is_edge(&bytes),
-        None => false,
-    })
 }
 
 #[cfg(test)]

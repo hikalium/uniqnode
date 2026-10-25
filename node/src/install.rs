@@ -1101,13 +1101,8 @@ fn check_collection_flag(flag: &str, collection: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `--firewall-allow` の値は IPv4 アドレスか CIDR をカンマで並べたもの(名前は受けない。ufw と
-/// nft に渡す字句をここで固定する。読み口の側も `ip daddr` で書くので IPv4 に限る)。
-pub fn check_firewall_allow(allow: &str) -> Result<(), String> {
-    firewall_allow_entries(allow).map(|_| ())
-}
-
-/// `--firewall-allow` の値を要素に分ける(与えられた順、重複は 1 つにする)。各要素は nft と
+/// `--firewall-allow` の値(IPv4 アドレスか CIDR をカンマで並べたもの。名前は受けない。読み口の
+/// 側も `ip daddr` で書くので IPv4 に限る)を要素に分ける(与えられた順、重複は 1 つにする)。各要素は nft と
 /// ufw が表に書き戻す形に揃える: `/32` は素のアドレスにし、ホスト部が 0 でない CIDR は断る
 /// (nft は黙ってホスト部を落とすので、書いた字句と効く範囲が食い違う)。`/0` は誰でも許す
 /// ことになり規則の意味が無いので断る。

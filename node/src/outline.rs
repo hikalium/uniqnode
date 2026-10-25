@@ -149,7 +149,7 @@ const MIN_HEADINGS: usize = 5;
 // ---- 入口 ----
 
 /// PDF のバイト列から見出しの表を作る。一時ファイルへ書いてから
-/// outline_of_pdf_file を呼ぶ(poppler はどれも入力にファイルの道を要求する)。
+/// 見出しを読む(poppler はどれも入力にファイルの道を要求する)。
 ///
 /// page_count は、最後の見出しより後ろのページまで経路を伸ばすために使う。None なら
 /// 最後の見出しのページまでで止める(しおり系統は自分でページ数を知らない。高さ系統は
@@ -164,17 +164,6 @@ pub fn outline_of_pdf(pdf: &[u8], page_count: Option<u32>) -> Result<DocumentOut
         Ok(()) => outline_in_work_dir(&dir, &source, page_count),
         Err(error) => Err(error),
     };
-    remove_work_dir(&dir)?;
-    outcome
-}
-
-/// 既にファイルとして置いてある PDF から見出しの表を作る。
-pub fn outline_of_pdf_file(
-    path: &Path,
-    page_count: Option<u32>,
-) -> Result<DocumentOutline, String> {
-    let dir = work_dir()?;
-    let outcome = outline_in_work_dir(&dir, path, page_count);
     remove_work_dir(&dir)?;
     outcome
 }

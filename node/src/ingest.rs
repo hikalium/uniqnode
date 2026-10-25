@@ -500,8 +500,6 @@ pub const METHOD_MANUAL: &str = "manual";
 pub const ANNOTATES_TYPE_BODY: &str = "{\"contents\":\"annotates\",\"kind\":\"node\",\"v\":1}";
 /// corrects 型ノードの c1 正規形本文。この段では定数定義のみで、発行経路は訂正の段が足す。
 pub const CORRECTS_TYPE_BODY: &str = "{\"contents\":\"corrects\",\"kind\":\"node\",\"v\":1}";
-/// supersedes 型ノードの c1 正規形本文。この段では定数定義のみ(改版追随は将来の段)。
-pub const SUPERSEDES_TYPE_BODY: &str = "{\"contents\":\"supersedes\",\"kind\":\"node\",\"v\":1}";
 
 /// annotates 型ノードの ID。
 pub fn annotates_type_id() -> String {
@@ -511,11 +509,6 @@ pub fn annotates_type_id() -> String {
 /// corrects 型ノードの ID。
 pub fn corrects_type_id() -> String {
     c1::id_for_bytes(CORRECTS_TYPE_BODY.as_bytes())
-}
-
-/// supersedes 型ノードの ID。
-pub fn supersedes_type_id() -> String {
-    c1::id_for_bytes(SUPERSEDES_TYPE_BODY.as_bytes())
 }
 
 /// 判定側: この c1 値は annotates 型の辺か。生成側と同じ型定数を通る(must/0023)。
@@ -1549,11 +1542,7 @@ mod tests {
             corrects_type_id(),
             "s256:78d9189f91557b5bff27aefd61643ee333f54d63f9bb70a47b9fa18be40a8b4d"
         );
-        assert_eq!(
-            supersedes_type_id(),
-            "s256:7d6e8d3753bb00b3abecdac3875099b6b1f53683cc792b08c3e427f3206112e8"
-        );
-        for body in [ANNOTATES_TYPE_BODY, CORRECTS_TYPE_BODY, SUPERSEDES_TYPE_BODY] {
+        for body in [ANNOTATES_TYPE_BODY, CORRECTS_TYPE_BODY] {
             let value = c1::parse(body).expect("型ノード本文は c1");
             assert_eq!(c1::to_canonical_bytes(&value), body.as_bytes());
         }

@@ -16,14 +16,14 @@
 //! 鍵は文書名ではなく原本 blob の ID である。同じ PDF を別名で取り込んでも写しは共有
 //! され、文書名を変えても無効にならない。
 //!
-//! 写しをストアへ入れる道は ensure 一本だけにしてある(レシピから名前を組んで
+//! 写しをストアへ入れる道は commit 一本だけにしてある(レシピから名前を組んで
 //! put_object し set_ref する)。名前を付けずに入れる口が無いので、「レシピの欠けた
 //! 画像がストアに残る」ことは規律ではなく不可能である。
 //!
 //! 写しのオブジェクトは PNG/JPEG/PDF の生バイト列そのものである(c1 で包まない。
 //! 新しい kind を作らず、base64 で膨らませない)。
 
-use crate::c1::{self, Value};
+use crate::c1;
 use crate::search::terms_of;
 use crate::store::{Store, StoreError};
 use std::collections::BTreeSet;
@@ -572,15 +572,14 @@ fn looks_like_html(text: &str) -> bool {
 // 写しの生成は poppler との往復で、実測 0.4 秒かかる(page レシピ)。そのあいだストアの
 // ロックを握り続けると API 全体が止まるので、外部との往復のあいだはロックを持たない
 // (node/src/embed.rs のクエリ埋め込み、node/src/sync.rs のピアとの往復と同じ規律)。
-// そのために、もとは 1 本だった ensure を三段に割ってある:
+// そのために、写しの生成を三段に割ってある:
 //
 //   1. prepare  ロックを持つ。既に在る写しを探し、無ければ poppler に渡す材料を持ち出す。
 //   2. render   ロックを持たない。poppler を回し、ページ番号を照合する。
 //   3. commit   ロックを取り直す。put_object して set_ref する。
 //
-// ensure は三段を続けて呼ぶ薄い包みとして残してある(ロックを持ったまま一気に済ませてよい
-// 呼び手 — CLI と単体テスト — のため)。ロックを放して回す呼び手(node/src/api.rs)は三段を
-// 自分で並べる。
+// 呼び手(node/src/api.rs)は三段を自分で並べ、ページ番号の照合に使う本文を検索の索引から
+// 引いて prepare へ渡す。
 
 /// 第 1 段の答え。
 pub enum Prepared {
@@ -614,46 +613,14 @@ pub struct Rendered {
     page_check: Option<PageAgreement>,
 }
 
-/// 写しを 1 枚用意する(三段を続けて呼ぶ包み)。ストアのロックを持つ側で動く。
-///
-/// 1. 鍵から ref 名を組み、自分の署名者の ref を引く。有ればその target を返す。
-/// 2. 無ければ他署名者の同名 ref を探す。有ればその target を返す。
-/// 3. 無ければ生成し、照合してから put_object して set_ref する。
-///
-/// 同じ鍵について書き込みは一度きりで、既にあるものは上書きしない。
-pub fn ensure(
-    store: &mut Store,
-    options: &RenditionOptions,
-    request: &RenditionRequest,
-) -> Result<Rendition> {
-    match prepare(store, options, request, PageEvidence::ScanStore)? {
-        Prepared::Ready(rendition) => Ok(rendition),
-        Prepared::Work(work) => {
-            let rendered = render(&work)?;
-            commit(store, work, rendered)
-        }
-    }
-}
-
-/// ページ番号の照合に使う本文を、誰が集めるか。
-///
-/// 照合そのもの(何と何を比べ、どこで食い違いとするか)は page_agreement の一箇所に
-/// あり、この選択が変えるのは材料の集め方だけである(should/0135)。
-pub enum PageEvidence<'a> {
-    /// 呼び手が既に持っている本文を使う。検索の索引はチャンクごとに原本 ID とページ
-    /// 番号を持っているので、serve はそこから 1〜2 件を引くだけで済む。
-    Given(&'a [String]),
-    /// 呼び手が持っていないので、見えを走査して集める(索引を持たない CLI の道)。
-    ScanStore,
-}
-
 /// 第 1 段(ロックを持つ): 既に在る写しを返すか、作るための材料を持ち出す。要求そのものの
-/// 誤り(知らないレシピ・ページ 0・PDF でない原本・道具が無い)はここで断る。
+/// 誤り(知らないレシピ・ページ 0・PDF でない原本・道具が無い)はここで断る。chunk_texts は
+/// ページ番号の照合に使う、そのページのチャンクの本文で、呼び手が集めて渡す。
 pub fn prepare(
     store: &Store,
     options: &RenditionOptions,
     request: &RenditionRequest,
-    evidence: PageEvidence<'_>,
+    chunk_texts: &[String],
 ) -> Result<Prepared> {
     let recipe = recipe_of(request)?;
     let Some(source) = store.get_object(request.blob_id)? else {
@@ -698,21 +665,9 @@ pub fn prepare(
         }));
     }
 
-    // 3) 作る。照合の材料もロックを持っているこの段で集める(第 2 段はストアを見ない)。
-    //
-    // 材料の集め方は呼び手が選ぶ。検索の索引を持っている呼び手(serve)は、そこから
-    // 「この原本のこのページ」のチャンクを直接引ける: 索引はチャンクごとに原本 ID と
-    // ページ番号を RAM に持っているからである(node/src/search.rs)。持っていない呼び手
-    // (CLI)は見えを走査する。走査は文書のチャンクを全部開くので、大きな仕様書では
-    // 桁が違う: sdm_vol2(4,188 チャンク)で実測 5 秒に対し、索引から引けば道具の費用
-    // (pdftotext 0.05 秒 + pdftoppm 0.06 秒)だけになる。
-    let chunk_texts = match (options.verify_page, evidence) {
-        (false, _) => Vec::new(),
-        (true, PageEvidence::Given(texts)) => texts.to_vec(),
-        (true, PageEvidence::ScanStore) => {
-            visible_page_chunk_texts(store, request.blob_id, request.page)?
-        }
-    };
+    // 3) 作る。照合の材料は呼び手が渡す。serve は検索の索引から「この原本のこのページ」の
+    // チャンクを直接引く(node/src/api.rs の page_evidence_texts)。
+    let chunk_texts = if options.verify_page { chunk_texts.to_vec() } else { Vec::new() };
     Ok(Prepared::Work(RenditionWork {
         recipe,
         recipe_name,
@@ -1203,47 +1158,6 @@ fn extract_text(path: &Path, page: Option<u32>, request: &RenditionRequest) -> R
     })
 }
 
-/// 見え(collections/ 配下の ref が指す現行 doc_rev)のうち原本が blob_id のものから、
-/// そのページのチャンク本文を集める。見えだけを見るのは検索の索引と同じ理由である
-/// (ASSERTIONS の原理 5。旧版のチャンクは照合の相手にしない)。
-pub fn visible_page_chunk_texts(
-    store: &Store,
-    blob_id: &str,
-    page: u32,
-) -> crate::store::Result<Vec<String>> {
-    let mut texts = Vec::new();
-    for (name, state) in store.list_refs() {
-        let Some(target) = &state.target else { continue };
-        let Some((_signer, path)) = name.split_once('/') else { continue };
-        if !path.starts_with("collections/") {
-            continue;
-        }
-        let Some(Value::Object(doc_rev)) = read_c1(store, target)? else { continue };
-        if doc_rev.get("source") != Some(&Value::Text(blob_id.to_string())) {
-            continue;
-        }
-        let Some(Value::Array(chunk_ids)) = doc_rev.get("chunks") else { continue };
-        for chunk_ref in chunk_ids {
-            let Value::Text(chunk_id) = chunk_ref else { continue };
-            let Some(Value::Object(chunk)) = read_c1(store, chunk_id)? else { continue };
-            let Some(Value::Text(text)) = chunk.get("text") else { continue };
-            let Some(Value::Object(meta)) = chunk.get("meta") else { continue };
-            if meta.get("page") == Some(&Value::Integer(i64::from(page))) {
-                texts.push(text.clone());
-            }
-        }
-    }
-    Ok(texts)
-}
-
-/// ストア上のオブジェクトを c1 として読む。壊れた 1 個で照合全体を失敗させない
-/// (search.rs の同名の補助と同じ扱い)。入出力の失敗だけは伝える。
-fn read_c1(store: &Store, id: &str) -> crate::store::Result<Option<Value>> {
-    let Some(bytes) = store.get_object(id)? else { return Ok(None) };
-    let Ok(text) = String::from_utf8(bytes) else { return Ok(None) };
-    Ok(c1::parse(&text).ok())
-}
-
 /// 本文の先頭を 1 行に均した抜粋(誤りの本文に添える)。
 fn excerpt(text: &str) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1258,7 +1172,65 @@ fn excerpt(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::c1::Value;
     use crate::store::StoreConfig;
+
+    /// 写しを 1 枚用意する(三段を続けて呼ぶ)。照合の本文は見えを走査して集める。
+    fn ensure(
+        store: &mut Store,
+        options: &RenditionOptions,
+        request: &RenditionRequest,
+    ) -> Result<Rendition> {
+        let chunk_texts = visible_page_chunk_texts(store, request.blob_id, request.page)?;
+        match prepare(store, options, request, &chunk_texts)? {
+            Prepared::Ready(rendition) => Ok(rendition),
+            Prepared::Work(work) => {
+                let rendered = render(&work)?;
+                commit(store, work, rendered)
+            }
+        }
+    }
+
+    /// 見え(collections/ 配下の ref が指す現行 doc_rev)のうち原本が blob_id のものから、
+    /// そのページのチャンク本文を集める。見えだけを見るのは検索の索引と同じ理由である
+    /// (ASSERTIONS の原理 5。旧版のチャンクは照合の相手にしない)。
+    fn visible_page_chunk_texts(
+        store: &Store,
+        blob_id: &str,
+        page: u32,
+    ) -> crate::store::Result<Vec<String>> {
+        let mut texts = Vec::new();
+        for (name, state) in store.list_refs() {
+            let Some(target) = &state.target else { continue };
+            let Some((_signer, path)) = name.split_once('/') else { continue };
+            if !path.starts_with("collections/") {
+                continue;
+            }
+            let Some(Value::Object(doc_rev)) = read_c1(store, target)? else { continue };
+            if doc_rev.get("source") != Some(&Value::Text(blob_id.to_string())) {
+                continue;
+            }
+            let Some(Value::Array(chunk_ids)) = doc_rev.get("chunks") else { continue };
+            for chunk_ref in chunk_ids {
+                let Value::Text(chunk_id) = chunk_ref else { continue };
+                let Some(Value::Object(chunk)) = read_c1(store, chunk_id)? else { continue };
+                let Some(Value::Text(text)) = chunk.get("text") else { continue };
+                let Some(Value::Object(meta)) = chunk.get("meta") else { continue };
+                if meta.get("page") == Some(&Value::Integer(i64::from(page))) {
+                    texts.push(text.clone());
+                }
+            }
+        }
+        Ok(texts)
+    }
+
+    /// ストア上のオブジェクトを c1 として読む。壊れた 1 個で照合全体を失敗させない
+    /// (search.rs の同名の補助と同じ扱い)。入出力の失敗だけは伝える。
+    fn read_c1(store: &Store, id: &str) -> crate::store::Result<Option<Value>> {
+        let Some(bytes) = store.get_object(id)? else { return Ok(None) };
+        let Ok(text) = String::from_utf8(bytes) else { return Ok(None) };
+        Ok(c1::parse(&text).ok())
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()

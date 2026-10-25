@@ -1804,7 +1804,7 @@ fn rendition_subject(
 /// ページ番号を RAM に持っているので、同じ紙面のチャンク(実測で 1 ページあたり平均
 /// 1.8 件)だけをストアから読めばよい。
 ///
-/// 見えを走査して集める道(rendition::PageEvidence::ScanStore)は、その文書のチャンクを
+/// 見え(collections/ 配下の現行の doc_rev)を走査して集めると、その文書のチャンクを
 /// 全部開く。大きな仕様書では桁が違う: sdm_vol2(4,188 チャンク)で実測 5 秒に対し、
 /// 索引から引けば道具の費用(pdftotext 0.05 秒 + pdftoppm 0.06 秒)だけになる。索引を
 /// 持っている serve が走査に落ちる理由は無い。
@@ -2046,12 +2046,7 @@ fn handle_rendition(context: &ApiContext, chunk_id: &str, alias: &str) -> Respon
         } else {
             Vec::new()
         };
-        match crate::rendition::prepare(
-            &store,
-            &options,
-            &request,
-            crate::rendition::PageEvidence::Given(&evidence),
-        ) {
+        match crate::rendition::prepare(&store, &options, &request, &evidence) {
             Ok(prepared) => prepared,
             Err(e) => return rendition_error_response(e),
         }

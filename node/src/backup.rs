@@ -36,11 +36,6 @@ use std::path::{Path, PathBuf};
 /// node_key は必須(ストアを一度でも開けば在る)、残りは在れば写す。
 pub const SETTINGS_FILES: [&str; 4] = [NODE_KEY_NAME, "node.json", "peers.json", "groups.json"];
 
-/// 写さないデータディレクトリ直下の項目。derived/ は消しても作り直せる導出データ
-/// (埋め込みのキャッシュ、写しの作業ファイル)、logs/ は運用ログ、tmp/ は atomic
-/// rename の作業場である。
-pub const NOT_COPIED_DIRECTORIES: [&str; 3] = ["derived", "logs", "tmp"];
-
 /// 1 回のバックアップで何が起きたか。命令の出力はこれをそのまま並べる。
 #[derive(Debug, Default)]
 pub struct BackupReport {

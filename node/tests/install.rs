@@ -933,7 +933,7 @@ fn the_lock_probe_sees_a_store_held_by_a_serving_process() {
 #[test]
 fn the_take_over_and_firewall_steps_use_fixed_words_and_judge_by_effect() {
     use uniqnode::install::{
-        agent_ip_and_port, check_firewall_allow, firewall_allow_entries, normalize,
+        agent_ip_and_port, firewall_allow_entries, normalize,
         take_over_command,
         ufw_allow_arguments, ufw_rule_listed, ufw_status_of, unit_is_running, user_manager_flags,
         UfwStatus,
@@ -963,7 +963,7 @@ fn the_take_over_and_firewall_steps_use_fixed_words_and_judge_by_effect() {
     assert!(!ufw_rule_listed(listed, "10.10.128.5", "10.10.128.1:7441").expect("読める"));
     assert!(!ufw_rule_listed(listed, "10.10.128.4", "10.10.128.1:7442").expect("読める"));
 
-    assert!(check_firewall_allow("10.10.128.4").is_ok());
+    assert!(firewall_allow_entries("10.10.128.4").is_ok());
     // IPv4 アドレスか CIDR を , で並べる(2026-09-29: crystal への移行で 2 つの源を許す要が出た)。
     assert_eq!(
         firewall_allow_entries(" 10.10.128.4, 10.10.128.2 ,10.20.0.0/16,10.10.128.4,10.10.128.3/32")
@@ -972,9 +972,9 @@ fn the_take_over_and_firewall_steps_use_fixed_words_and_judge_by_effect() {
         "並びは保ち、重複は 1 つ、/32 は素のアドレスにする"
     );
     for refused in ["", "10.10.128.4,", "vega", "10.10.128.0/33", "0.0.0.0/0", "10.10.128.5/24", "::1"] {
-        assert!(check_firewall_allow(refused).is_err(), "{refused:?} は断る");
+        assert!(firewall_allow_entries(refused).is_err(), "{refused:?} は断る");
     }
-    let host_bits = check_firewall_allow("10.10.128.5/24").expect_err("ホスト部");
+    let host_bits = firewall_allow_entries("10.10.128.5/24").expect_err("ホスト部");
     assert!(host_bits.contains("10.10.128.0/24"), "直した形を言う: {host_bits}");
     let cidr = "Status: active\n\nTo                         Action      From\n--                         ------      ----\n10.10.128.1 7441/tcp       ALLOW       10.20.0.0/16\n";
     assert!(ufw_rule_listed(cidr, "10.20.0.0/16", "10.10.128.1:7441").expect("読める"));

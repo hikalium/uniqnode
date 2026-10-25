@@ -259,7 +259,8 @@ fn usage_text() -> String {
                                       旧い名の unit(テンプレートになる前の\n\
                                       uniqnode-serve.service など)が残っているなら\n\
                                       --retire-legacy-units で install に退避させてから\n\
-                                      外させる(/var/backups/uniqnode-legacy-<時刻>)。\n\
+                                      外させる(/var/backups/uniqnode-legacy-<時刻>。既定の\n\
+                                      インスタンスだけ)。\n\
                                       --firewall-allow <addr> は <addr> からだけ読み口へ届く\n\
                                       (<addr> は IPv4 アドレスか CIDR。, で並べられる)\n\
                                       規則を入れて効果を見る(ufw が active なら ufw allow、\n\

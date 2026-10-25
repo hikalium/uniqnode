@@ -237,13 +237,24 @@ graph_a・graph_b は既に `@` の名)。install は旧い名が据え先に残
 走らせる。黙って外しはしない(操作者のものを止めるのは操作者の判断。must/0022)。
 下の「テンプレートになる前の名の unit から移る」が同じ規則の一般形で、ここは vega の実物に当てた手順。
 
-2026-10-25 から、install に `--retire-legacy-units` を足すと、install 自身が下の外す命令の要の部分を行ってから据える。
-順は、旧い timer を止めて走っている旧い backup の終わりを 30 分まで待つ、在る旧い unit と drop-in を
-/var/backups/uniqnode-legacy-<時刻>/units.tar.gz へ、共有のバイナリを同じ置き場の uniqnode へ写して確かめる、
-旧い unit を `disable --now` して消し daemon-reload する、nft に旧い表 `inet uniqnode` があれば消す、である。
-外す前に失敗すれば何も外さずに断り、旧い timer を戻す命令を添える。外した後の据え付けが失敗したときは、
-出力の退避の道から units.tar.gz を unit のディレクトリへ展開し、実行ファイルを戻して `enable --now` する。
-退避を固定する symlink や戻す命令の自動の検めは持たない(簡素さを選んだ。下の手順はそれを持つ)。
+2026-10-25 から、既定のインスタンスの install に `--retire-legacy-units` を足すと、install 自身が下の外す命令の
+要の部分を行ってから据える(既定でないインスタンスと `--no-start` では断る。旧い unit は主のストアのもので、
+外した回に据え直すのは既定のインスタンスだけだから)。順は、旧い timer を止めて走っている旧い backup の終わりを
+30 分まで待つ、在る旧い unit と drop-in を /var/backups/uniqnode-legacy-<時刻>/units.tar.gz へ、共有のバイナリを
+同じ置き場の uniqnode へ写して確かめる、旧い unit を `disable --now` して消し daemon-reload する、nft に旧い表
+`inet uniqnode` があり `--firewall-allow` もあれば消す(無ければ、読み口を絞る規則を失わないよう残す)、である。
+外す前に失敗すれば何も外さずに断り、旧い timer を戻す命令を添える。外し始めた後の失敗には、その回の退避の道を
+添える(打ち直すと残った分だけの別の退避ができるので、戻すときは最初の退避を使う)。
+
+戻すときは、vega で次の順に行う。新しいインスタンスの unit が起きていれば、先に
+`sudo systemctl disable --now uniqnode-serve@default.service uniqnode-viewer@default.service
+uniqnode-backup@default.timer` で止める(旧い unit と同じ主の口とストアを取り合うため)。次に退避の units.tar.gz を
+`sudo tar -xzf <退避>/units.tar.gz -C /etc/systemd/system` で展開し、`sudo install -m 0755 -o hikalium -g hikalium
+<退避>/uniqnode /home/hikalium/.local/bin/uniqnode` で実行ファイルを戻し、`sudo systemctl daemon-reload` の後に
+旧い unit を `enable --now` する。nft の旧い表を消していたなら、展開した
+/etc/systemd/system/uniqnode-serve.service.d/agent-door.nft を `sudo nft -f` で入れ直す。退避を固定する symlink や
+戻す命令の自動の検めは持たない(簡素さを選んだ。下の手順はそれを持つ)。
+
 操作者が打つのは、下の「user 単位から移る」の install の行の `--take-over-user-units` を
 `--retire-legacy-units` に替えた 1 行である(user 単位の常駐が無いなら `--take-over-user-units` は要らない)。
 
@@ -982,7 +993,7 @@ uniqnode install <dir> [--listen <addr>] [--viewer-listen <addr>] [--serve-optio
 | `--user` | SUDO_USER | `--system` の実行ユーザ(unit の User=/Group=)。root は断る。`--system` のときだけ |
 | `--after` | 無し | drop-in の `[Unit]` に After= と Wants= で書く unit(複数可。`--system` のときだけ) |
 | `--take-over-user-units` | — | 据える前に実行ユーザの user 単位の常駐を止めて外す(`--system` のときだけ。上の「user 単位から移る」) |
-| `--retire-legacy-units` | — | 据える前に旧い名の unit を退避してから外す(`--system` のときだけ。上の「旧い名の unit から移る」) |
+| `--retire-legacy-units` | — | 据える前に旧い名の unit を退避してから外す(`--system` の既定のインスタンスで、`--no-start` が無いときだけ。上の「旧い名の unit から移る」) |
 | `--firewall-allow` | 無し | このアドレス(IPv4 アドレスか CIDR。カンマで並べられる)からだけ読み口へ届く規則を入れて効果を見る。ufw が active なら ufw allow、そうでなければ nft の表 inet uniqnode_<インスタンス>(規則ファイルを drop-in の隣に置き、serve の ExecStartPre=+nft -f が起動のたびに入れる)。`--system` で `--listen-agent` があるときだけ |
 
 出力は手順ごとに 1 行で、最後に確認した観測(serve と viewer 経由の /v1/status が返した

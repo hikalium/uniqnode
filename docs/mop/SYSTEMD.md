@@ -242,7 +242,8 @@ graph_a・graph_b は既に `@` の名)。install は旧い名が据え先に残
 外した回に据え直すのは既定のインスタンスだけだから)。順は、旧い timer を止めて走っている旧い backup の終わりを
 30 分まで待つ、在る旧い unit と drop-in を /var/backups/uniqnode-legacy-<時刻>/units.tar.gz へ、共有のバイナリを
 同じ置き場の uniqnode へ写して確かめる、旧い unit を `disable --now` して消し daemon-reload する、nft に旧い表
-`inet uniqnode` があり `--firewall-allow` もあれば消す(無ければ、読み口を絞る規則を失わないよう残す)、である。
+`inet uniqnode` があれば消す、である。旧い表があり読み口(`--listen-agent`)もあるのに `--firewall-allow` が無ければ、
+何かを止める前に断る(旧い表を起動のたびに入れていたのは旧い drop-in なので、外すと読み口がどこからでも届く)。
 外す前に失敗すれば何も外さずに断り、旧い timer を戻す命令を添える。外し始めた後の失敗には、その回の退避の道を
 添える(打ち直すと残った分だけの別の退避ができるので、戻すときは最初の退避を使う)。
 

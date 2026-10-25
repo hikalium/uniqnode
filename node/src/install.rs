@@ -2660,8 +2660,8 @@ pub fn legacy_unit_paths(unit_dir: &Path, legacy: &[&str]) -> Vec<PathBuf> {
 /// 旧い名の unit を退避してから外す(`--retire-legacy-units`。docs/mop/SYSTEMD.md の「旧い名の
 /// unit から移る」と同じこと)。順は、旧い timer を止めて走っている旧い backup の終わりを待つ →
 /// 在る unit と drop-in と実行ファイルを LEGACY_ARCHIVE_ROOT の下の新しいディレクトリへ写して
-/// 確かめる → disable --now と削除と daemon-reload → `--firewall-allow` があれば nft の旧い表
-/// inet uniqnode を消す(無ければ、読み口を絞る規則を失わないよう残す)。外す前に失敗したら何も
+/// 確かめる → disable --now と削除と daemon-reload → nft の旧い表 inet uniqnode を消す。読み口が
+/// あるのに `--firewall-allow` が無く、旧い表を消すと規則が無くなるなら、最初に断る。外す前に失敗したら何も
 /// 外さずに断り、旧い timer を戻す命令を添える。外し始めた後の失敗には退避の道を添える。戻し方は
 /// docs/mop/SYSTEMD.md にある。
 fn retire_legacy_units(options: &Options, legacy: &[&str], out: &mut dyn Write) -> Result<(), String> {
@@ -2669,6 +2669,22 @@ fn retire_legacy_units(options: &Options, legacy: &[&str], out: &mut dyn Write) 
     let say = |out: &mut dyn Write, line: &str| -> Result<(), String> {
         writeln!(out, "install: {line}").map_err(|e| format!("標準出力に書けない: {e}"))
     };
+    // 旧い表を起動のたびに入れていたのは旧い drop-in なので、外すと表は次の再起動で消える。
+    // 読み口を開くのに規則が無くなるなら、何かを止める前に断る。
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let old_table = match find_in_path("nft", &path_env) {
+        Some(_) => command_output("nft", &["list".to_string(), "tables".to_string()])?
+            .lines()
+            .any(|line| line.trim() == "table inet uniqnode"),
+        None => false,
+    };
+    if old_table && options.agent_listen.is_some() && options.firewall_allow.is_none() {
+        return Err(format!(
+            "nft の旧い表 inet uniqnode が読み口を絞っているが、{FIREWALL_ALLOW_FLAG} が無い。旧い unit を\
+             外すとその規則は次の起動から入らず、読み口がどこからでも届く。何も外さずに断る\
+             ({FIREWALL_ALLOW_FLAG} を足して打ち直す)"
+        ));
+    }
     if legacy.contains(&"uniqnode-backup.timer") {
         systemctl_ok(scope, &["stop", "uniqnode-backup.timer"])?;
     }
@@ -2724,25 +2740,10 @@ fn retire_legacy_units(options: &Options, legacy: &[&str], out: &mut dyn Write) 
     }
     systemctl_ok(scope, &["daemon-reload"]).map_err(after_removal)?;
     say(out, &format!("旧い名の unit を外した: {}", legacy.join(" ")))?;
-    let path_env = std::env::var("PATH").unwrap_or_default();
-    if find_in_path("nft", &path_env).is_some() {
-        let tables =
-            command_output("nft", &["list".to_string(), "tables".to_string()]).map_err(after_removal)?;
-        if tables.lines().any(|line| line.trim() == "table inet uniqnode") {
-            if options.firewall_allow.is_some() {
-                let delete = ["delete", "table", "inet", "uniqnode"].map(String::from);
-                command_output("nft", &delete).map_err(after_removal)?;
-                say(out, "nft の旧い表 inet uniqnode を消した(規則は新しい表が持つ)")?;
-            } else {
-                say(
-                    out,
-                    &format!(
-                        "nft の旧い表 inet uniqnode は残す({FIREWALL_ALLOW_FLAG} が無く、消すと読み口を\
-                         絞る規則が無くなる)"
-                    ),
-                )?;
-            }
-        }
+    if old_table {
+        let delete = ["delete", "table", "inet", "uniqnode"].map(String::from);
+        command_output("nft", &delete).map_err(after_removal)?;
+        say(out, "nft の旧い表 inet uniqnode を消した")?;
     }
     Ok(())
 }

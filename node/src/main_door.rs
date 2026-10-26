@@ -322,7 +322,7 @@ pub struct SelfTestError {
 }
 
 impl SelfTestError {
-    /// serve の終了コード: 設定の誤りは 2(unit は起こし直さない)、それ以外は 3(起こし直す)。
+    /// serve の終了コード: 設定の誤りは 2、それ以外は 3(一時の失敗でありうる)。
     pub fn exit_code(&self) -> i32 {
         match self.config {
             true => 2,
@@ -493,7 +493,7 @@ pub fn screen_content_type(request: &Request) -> Option<Response> {
 mod tests {
     use super::*;
 
-    /// 自己試験の失敗の終了コード: 設定の誤りは 2(起こし直さない)、それ以外は 3(起こし直す)。
+    /// 自己試験の失敗の終了コード: 設定の誤りは 2、それ以外は 3。
     #[test]
     fn a_transient_self_test_failure_exits_3_and_a_config_one_2() {
         let error = |config| SelfTestError { config, reason: String::new() };

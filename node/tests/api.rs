@@ -159,7 +159,7 @@ fn a_serve_that_cannot_take_the_store_lock_never_says_listening_on() {
     assert_eq!(
         second.status.code(),
         Some(1),
-        "ロックを取れない serve の終了コードは 1(unit は起こし直さない): stderr={stderr}"
+        "ロックを取れない serve の終了コードは 1: stderr={stderr}"
     );
     assert!(
         stderr.contains("別プロセスが開いている"),

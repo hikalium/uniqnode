@@ -58,8 +58,12 @@ pub fn run(file: &Path, log_dir: &Path, program: &Path) -> Result<PathBuf, Strin
         std::fs::read_to_string(file).map_err(|e| format!("{} を読めない: {e}", file.display()))?;
     let blocks = parse(&text)?;
     let stamp = crate::clock::format_unix_time(crate::clock::unix_now()).replace([':', '-'], "");
-    let log_path = log_dir.join(format!("uniqnode-apply-{stamp}.log"));
-    let log_file = std::fs::File::create(&log_path)
+    // 名には pid も入れ、既にある名なら断る(同じ秒の 2 回目が前のログを消さない)。
+    let log_path = log_dir.join(format!("uniqnode-apply-{stamp}-{}.log", std::process::id()));
+    let log_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&log_path)
         .map_err(|e| format!("{} を作れない: {e}", log_path.display()))?;
     let mut log = Log { file: log_file };
     log.line(&format!(
@@ -82,9 +86,14 @@ pub fn run(file: &Path, log_dir: &Path, program: &Path) -> Result<PathBuf, Strin
             .map_err(|e| format!("{} を起こせない: {e}", program.display()))?;
         // 親の手元の書き口を閉じないと、子が終わっても読み口が終わりを見ない。
         drop(command);
-        for line in std::io::BufReader::new(reader).lines() {
-            match line {
-                Ok(line) => log.line(&line),
+        // UTF-8 でないバイトがあっても読み続ける(読むのをやめると子が EPIPE で落ちる)。
+        let mut reader = std::io::BufReader::new(reader);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => break,
+                Ok(_) => log.line(String::from_utf8_lossy(&line).trim_end_matches(['\n', '\r'])),
                 Err(e) => {
                     log.line(&format!("apply: 子の出力を読めない: {e}"));
                     break;

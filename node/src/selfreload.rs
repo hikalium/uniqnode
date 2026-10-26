@@ -17,6 +17,9 @@ pub const SELF_RELOAD_ENV: &str = "UNIQNODE_SELF_RELOAD";
 /// Restart=on-failure が起こし直す 0 でない値にする(EX_TEMPFAIL)。
 pub const SELF_RELOAD_EXIT: i32 = 75;
 
+/// 名が外れた実行ファイルの /proc/self/exe の readlink に Linux が付ける印。
+const DELETED_SUFFIX: &str = " (deleted)";
+
 /// 見張りの間隔。
 pub const SELF_RELOAD_TICK: Duration = Duration::from_secs(5);
 
@@ -45,9 +48,15 @@ pub fn spawn_watcher(role: &str) {
     if std::env::var(SELF_RELOAD_ENV).as_deref() != Ok("1") {
         return;
     }
-    // パスは起動時に一度だけ取る。置き換えの後に取り直すと " (deleted)" が付いた名になる。
+    // パスは起動の最初に一度だけ取る(serve と viewer は引数を読んでログを開いた直後に呼ぶ)。
+    // それでも exec からここまでの間に置き換えられていれば、readlink の名に " (deleted)" が
+    // 付くので外す。外した道には新しい版があり、走っている版(/proc/self/exe)と違うので、
+    // 最初の見張りで終わる。
     let path: PathBuf = match std::env::current_exe() {
-        Ok(path) => path,
+        Ok(path) => match path.to_str().and_then(|text| text.strip_suffix(DELETED_SUFFIX)) {
+            Some(stripped) => PathBuf::from(stripped),
+            None => path,
+        },
         Err(error) => {
             crate::log_line!("uniqnode: {role}: 自分のバイナリの道が分からず、自己再起動を見張らない: {error}");
             return;
@@ -60,7 +69,6 @@ pub fn spawn_watcher(role: &str) {
             return;
         }
     };
-    // 起動から見張りを張るまでの間に置き換えられていても、ここで違いが分かる。
     let role = role.to_string();
     std::thread::spawn(move || loop {
         if replaced(&path, running) {

@@ -285,7 +285,7 @@ fn usage_text() -> String {
                                       ファイルの空行で区切った塊を 1 つずつ uniqnode の命令として\n\
                                       走らせ(塊の中は 1 行 1 引数)、最初の失敗で止まる。出力は\n\
                                       時刻つきで --log-dir(既定 /var/log)の\n\
-                                      uniqnode-apply-<時刻>.log にも残す(docs/mop/vega/vega.apply)\n\
+                                      uniqnode-apply-<時刻>-<pid>.log にも残す(docs/mop/vega/vega.apply)\n\
          \n\
          serve・mcp・viewer のログの指定(常駐する命令だけが持つ。既定は保存する):\n\
            --log <path>               保存先を変える(既定 <dir>/logs/<serve|mcp|viewer>.log。\n\
@@ -2119,8 +2119,12 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // ストアを開くより先にログを開く。「開けない」「そのアドレスを使えない」も
             // 残したい記録である。
             start_logging(dir, uniqnode::log::SERVE_ROLE, &options.log);
+            // 自動更新がバイナリを置き換えたら終わり、unit に新しい版で起こし直させる(unit が
+            // UNIQNODE_SELF_RELOAD=1 を立てたときだけ。node/src/selfreload.rs)。起動の最初に張る:
+            // 起動の途中で置き換えられても、走っている版との違いが分かるように。
+            uniqnode::selfreload::spawn_watcher(uniqnode::log::SERVE_ROLE);
             // 主の口の境界(docs/plan/API_AUTH.md の 1)。束縛先と uid の集合の誤りは引数の誤り
-            // なので、ストアを開く前に 2 で断る(unit は起こし直さない)。
+            // なので、ストアを開く前に 2 で断る。
             if let Err(message) = uniqnode::main_door::check_listen(address, "serve") {
                 uniqnode::log_line!("uniqnode: serve: {message}");
                 std::process::exit(2);
@@ -2166,8 +2170,8 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             }
             // 起動時の自己試験(束縛の後、ストアを開く前)。自分の接続の uid を判定できなければ、
             // 起きても全部の接続を 403 で断るだけなので、理由を言って終わる。設定の誤り
-            // (AF_NETLINK を塞いだ unit など)は 2 で unit は起こし直さず、それ以外は一時の
-            // 失敗でありうるので 3 で unit の Restart= に起こし直させる。
+            // (AF_NETLINK を塞いだ unit など)は 2、それ以外は一時の失敗でありうるので 3 で
+            // 終わる(unit はどちらも起こし直す。docs/mop/SYSTEMD.md)。
             if let Err(error) = main_door.self_test(&listener) {
                 uniqnode::log_line!("uniqnode: serve: {error}");
                 std::process::exit(error.exit_code());
@@ -2220,9 +2224,6 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // 標準出力の 1 行は起動スクリプトとの取り決めなので形を変えない。ログにも
             // 残すのは、後から「いつ、どのアドレスで起きたか」を読めるようにするため。
             uniqnode::log_line!("uniqnode: serve: {bound} で待ち受ける");
-            // 自動更新がバイナリを置き換えたら終わり、unit に新しい版で起こし直させる
-            // (unit が UNIQNODE_SELF_RELOAD=1 を立てたときだけ。node/src/selfreload.rs)。
-            uniqnode::selfreload::spawn_watcher(uniqnode::log::SERVE_ROLE);
             let mut main_hosts = uniqnode::main_door::default_hosts(bound);
             for host in &options.main_allow_host {
                 if !main_hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
@@ -2319,6 +2320,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             let address = rest.first().map(String::as_str).unwrap_or_else(|| usage());
             let options = parse_mcp_options(&rest[1..]);
             start_logging(dir, uniqnode::log::VIEWER_ROLE, &options.run.log);
+            uniqnode::selfreload::spawn_watcher(uniqnode::log::VIEWER_ROLE);
             refuse_misplaced_listen_agent(uniqnode::log::VIEWER_ROLE, &options.run);
             // ビューワは書き込みの口を持たない。mcp と読み手を共有しているので字面は
             // 通るが、効かせる先の無い指定は黙って捨てずに断る(must/0022 の同型)。
@@ -2363,7 +2365,6 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 "uniqnode: viewer: http://{bound} で待ち受ける(検索は {} へ転送する)",
                 viewer.serve_url()
             );
-            uniqnode::selfreload::spawn_watcher(uniqnode::log::VIEWER_ROLE);
             let handler: std::sync::Arc<uniqnode::http::Handler> =
                 std::sync::Arc::new(move |request| viewer.handle(request));
             uniqnode::http::serve(listener, handler);

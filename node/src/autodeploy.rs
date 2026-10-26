@@ -274,17 +274,21 @@ fn deploy(options: &Options, target: &str, record: &mut Record) -> Result<(), St
             }
             Ok(())
         }
-        Err(failure) => {
+        Err(failure) if failure.of_sha => {
             record.failed = Some(target.to_string());
             if failure.rolled_back {
                 record.rolled_back = Some(target.to_string());
             }
             write_record(options, record)?;
             journal.line(&format!(
-                "{target} を据えられない: {}。この SHA は試し直さない(手で試し直すなら {} を消す)",
+                "{target} を据えられない: {}。この SHA は試し直さない(手で試し直すなら {} の failed の行を消す)",
                 failure.message,
                 options.state_dir.join(RECORD_NAME).display()
             ));
+            Err(failure.message)
+        }
+        Err(failure) => {
+            journal.line(&format!("{target} を据えられない(記録せず、次の回にやり直す): {}", failure.message));
             Err(failure.message)
         }
     }
@@ -292,65 +296,83 @@ fn deploy(options: &Options, target: &str, record: &mut Record) -> Result<(), St
 
 struct Failure {
     message: String,
+    /// その SHA の失敗(ビルドか確かめ)か。そうでない失敗(systemctl や写しの一時の失敗)は
+    /// 記録せず、次の回にやり直す。
+    of_sha: bool,
     rolled_back: bool,
 }
 
 impl From<String> for Failure {
     fn from(message: String) -> Failure {
-        Failure { message, rolled_back: false }
+        Failure { message, of_sha: false, rolled_back: false }
     }
+}
+
+fn sha_failure(message: String) -> Failure {
+    Failure { message, of_sha: true, rolled_back: false }
 }
 
 fn build_and_replace(options: &Options, target: &str, journal: &mut Journal) -> Result<(), Failure> {
     git(&options.repo, &["merge", "--ff-only", "--quiet", target])?;
+    // 組んだものの置き場を決めておく(利用者の cargo の設定が target-dir を変えていても読み違えない)。
+    let target_dir = options.repo.join("target");
     journal.line("cargo build --release --locked -p uniqnode");
     let output = Command::new("cargo")
-        .args(["build", "--release", "--locked", "-p", "uniqnode"])
+        .args(["build", "--release", "--locked", "-p", "uniqnode", "--target-dir"])
+        .arg(&target_dir)
         .current_dir(&options.repo)
         .output()
         .map_err(|e| format!("cargo を起こせない: {e}"))?;
     journal.line(String::from_utf8_lossy(&output.stderr).trim_end());
     if !output.status.success() {
-        return Err(format!("cargo build が {} で終わった", output.status).into());
+        return Err(sha_failure(format!("cargo build が {} で終わった", output.status)));
     }
-    let built = options.repo.join("target").join("release").join("uniqnode");
+    let built = target_dir.join("release").join("uniqnode");
     let help = Command::new(&built)
         .arg("--help")
         .output()
         .map_err(|e| format!("{} を起こせない: {e}", built.display()))?;
     if !help.status.success() {
-        return Err(format!("{} --help が {} で終わった", built.display(), help.status).into());
-    }
-    let new_bytes = std::fs::read(&built).map_err(|e| format!("{} を読めない: {e}", built.display()))?;
-    if std::fs::read(&options.binary).is_ok_and(|old| old == new_bytes) {
-        journal.line(&format!("{} は中身が同じなので置き換えない(常駐は起こし直さない)", options.binary.display()));
-        return Ok(());
+        return Err(sha_failure(format!("{} --help が {} で終わった", built.display(), help.status)));
     }
     // 置き換える前に対象を挙げる。置き換えた後では古い版の /proc/<pid>/exe が " (deleted)" になる。
-    let units = watched_units()?;
+    // 対象は今の <bin> を走らせている unit だけ(別のバイナリで動く unit を待たない)。
+    let units = units_running(&options.binary)?;
     journal.line(&format!("確かめる unit: {}", if units.is_empty() { "無い".to_string() } else { units.join(" ") }));
+    let new_bytes = std::fs::read(&built).map_err(|e| format!("{} を読めない: {e}", built.display()))?;
+    if std::fs::read(&options.binary).is_ok_and(|old| old == new_bytes) {
+        // 置き換えない(常駐を起こし直さない)。前の回が確かめの途中で切れていても、ここで確かめる。
+        journal.line(&format!("{} は中身が同じなので置き換えない", options.binary.display()));
+        let elapsed = verify(&units, &options.binary).map_err(sha_failure)?;
+        journal.line(&format!("全ての unit がこの版で落ち着いている({} 秒)", elapsed.as_secs()));
+        return Ok(());
+    }
     let previous = previous_path(&options.binary);
     if options.binary.exists() {
         journal.line(&install::place_binary(&options.binary, &previous, None)?);
     }
     journal.line(&install::place_binary(&built, &options.binary, None)?);
-    match verify(&units, &options.binary) {
+    let message = match verify(&units, &options.binary) {
         Ok(elapsed) => {
             journal.line(&format!("全ての unit が新しい版で {} 秒落ち着いた({} 秒)", STABLE_FOR.as_secs(), elapsed.as_secs()));
-            Ok(())
+            return Ok(());
         }
-        Err(message) => {
-            if !previous.exists() {
-                return Err(Failure { message: format!("{message}。前の版が無いので戻さない"), rolled_back: false });
+        Err(message) => message,
+    };
+    if !previous.exists() {
+        return Err(sha_failure(format!("{message}。前の版が無いので戻さない")));
+    }
+    match install::place_binary(&previous, &options.binary, None) {
+        Ok(line) => {
+            journal.line(&format!("前の版へ戻した: {line}"));
+            // 戻した版で落ち着いたかはログに残すだけにする(戻した事実は変わらない)。
+            match verify(&units, &options.binary) {
+                Ok(elapsed) => journal.line(&format!("全ての unit が前の版で落ち着いた({} 秒)", elapsed.as_secs())),
+                Err(e) => journal.line(&format!("前の版でも落ち着かない: {e}")),
             }
-            match install::place_binary(&previous, &options.binary, None) {
-                Ok(line) => {
-                    journal.line(&format!("前の版へ戻した: {line}"));
-                    Err(Failure { message: format!("{message}。前の版へ戻した"), rolled_back: true })
-                }
-                Err(e) => Err(Failure { message: format!("{message}。前の版へ戻せない: {e}"), rolled_back: false }),
-            }
+            Err(Failure { message: format!("{message}。前の版へ戻した"), of_sha: true, rolled_back: true })
         }
+        Err(e) => Err(sha_failure(format!("{message}。前の版へ戻せない: {e}"))),
     }
 }
 
@@ -360,16 +382,27 @@ pub fn previous_path(binary: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// 動いている serve と viewer の unit(機械の systemd の)。
-fn watched_units() -> Result<Vec<String>, String> {
+/// 動いている serve と viewer の unit(機械の systemd の)のうち、MainPID が今の binary を
+/// 走らせているもの。別のバイナリで動く unit や、既に名の外れた古い版で動く unit は含めない。
+fn units_running(binary: &Path) -> Result<Vec<String>, String> {
+    let Ok(current) = identity(binary) else {
+        return Ok(Vec::new());
+    };
     let mut arguments = vec!["list-units", "--plain", "--no-legend", "--state=active"];
     arguments.extend(WATCHED_UNITS);
     let listing = systemctl(&arguments)?;
-    Ok(listing
-        .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .map(str::to_string)
-        .collect())
+    let mut units = Vec::new();
+    for unit in listing.lines().filter_map(|line| line.split_whitespace().next()) {
+        let shown = systemctl(&["show", "-p", "MainPID", unit])?;
+        let running = show_value(&shown, "MainPID")
+            .and_then(|pid| pid.parse::<u32>().ok())
+            .filter(|pid| *pid > 0)
+            .and_then(|pid| identity(Path::new(&format!("/proc/{pid}/exe"))).ok());
+        if running == Some(current) {
+            units.push(unit.to_string());
+        }
+    }
+    Ok(units)
 }
 
 fn systemctl(arguments: &[&str]) -> Result<String, String> {
@@ -420,9 +453,9 @@ fn unit_on_new_binary(unit: &str, new: FileIdentity) -> Result<u32, String> {
     // serve は主の口の /v1/status に答えるまで見る(同じ利用者なので主の口が通す)。
     if unit.starts_with("uniqnode-serve@") {
         let environment = show_value(&listing, "Environment").unwrap_or("");
-        if let Some(listen) = environment_value(environment, "UNIQNODE_LISTEN") {
-            install::status_node_id(listen).map_err(|e| format!("{unit} の /v1/status({listen}): {e}"))?;
-        }
+        let listen = environment_value(environment, "UNIQNODE_LISTEN")
+            .ok_or_else(|| format!("{unit} の Environment に UNIQNODE_LISTEN が無い"))?;
+        install::status_node_id(listen).map_err(|e| format!("{unit} の /v1/status({listen}): {e}"))?;
     }
     Ok(pid)
 }

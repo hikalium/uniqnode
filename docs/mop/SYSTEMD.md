@@ -1024,7 +1024,7 @@ install: 次の刻み: Sun 2026-09-06 00:00:00 JST 6h left … uniqnode-backup@d
 を打てばよい: 再実行は更新である(バイナリを写し直し、unit と drop-in を書き直し、
 daemon-reload して restart する)。ストアを別のプロセス(手で起こした serve や CLI)が
 開いていると、unit を起こす前に「別プロセスが開いている」と言って止まる(unit は exit 1 で
-起こし直さないので、起こしてから journal を読ませるより先に言う)。system 単位
+起こし直し続けるので、起こしてから journal を読ませるより先に言う)。system 単位
 (/etc/systemd/system)は同じ命令に `--system` を足す(上の「system 単位で起こす」)。
 
 ### 中で何をしているか(手で同じことをするなら)
@@ -1189,15 +1189,18 @@ vega では、uniqnode の main に入った版を、エージェントの手も
   3. checkout が main のブランチにあり、commit していない変更が無く、origin/main へ fast-forward
      できることを見る(違えば据えずに 1 で終わる。記録はしない)。fast-forward して
      `cargo build --release --locked -p uniqnode`、組んだバイナリの `--help` が 0 で終わることを見る。
-  4. 組んだバイナリの中身が `<path>` と同じなら置き換えない(文書だけの commit で常駐を起こし
-     直さない)。違えば、動いている uniqnode-serve@* と uniqnode-viewer@* を挙げてから、今の
-     `<path>` を `<path>.prev` へ、組んだバイナリを `<path>` へ、どちらも隣に書いて rename で置く。
+  4. 今の `<path>` を走らせている uniqnode-serve@* と uniqnode-viewer@* を挙げる(MainPID の
+     /proc/<pid>/exe で見る。別のバイナリで動く unit は対象にしない)。組んだバイナリの中身が
+     `<path>` と同じなら置き換えず(文書だけの commit で常駐を起こし直さない)、挙げた unit がこの版で
+     落ち着いていることだけを次の 5 で見る。違えば、今の `<path>` を `<path>.prev` へ、組んだバイナリを
+     `<path>` へ、どちらも隣に書いて rename で置く。
   5. 挙げた unit が全て、120 秒のうちに active になり、MainPID の /proc/<pid>/exe が新しい版を指し、
      serve は UNIQNODE_LISTEN の /v1/status に答え、そのまま 15 秒 MainPID が変わらないことを見る。
   6. 通れば記録の据えた SHA を進め、`--publish-branch`(vega では deployed_on_vega)へその SHA を
      push する。ビルドか確かめが失敗したら、`<path>.prev` を rename で戻し(常駐は自己再起動で前の版へ
-     戻る)、失敗した SHA と戻したことを記録して 1 で終わる。その SHA は試し直さない。main が進めば
-     次の SHA を試す。
+     戻る。戻した版で落ち着いたかはログに残す)、失敗した SHA と戻したことを記録して 1 で終わる。
+     その SHA は試し直さない。main が進めば次の SHA を試す。systemctl や写しの一時の失敗は記録せず、
+     次の回にやり直す。
   7. 何かを試した回だけ、置き場の `logs/<UTC 時刻>-<SHA>.log` に出力を残す。何もしない回は書かない。
 - `uniqnode-autodeploy.service` と `.timer`(docs/mop/systemd/system/)。service は Type=oneshot で、
   drop-in の User= の利用者で走る。timer は前の回が終わってから 1 分ごとに起こす。据えるのは
@@ -1214,7 +1217,7 @@ vega では、uniqnode の main に入った版を、エージェントの手も
 vega の据え付けは docs/mop/vega/vega.apply に書いてある。主の知識ストア・graph_b・graph_a の
 install と、install-autodeploy の 4 つの命令である。`uniqnode apply <ファイル>`(node/src/apply.rs)は
 空行で区切った塊を 1 つずつ、走っている自分自身(/proc/self/exe)を子にして走らせ、最初の失敗で止まり、
-出力を時刻つきで /var/log/uniqnode-apply-<時刻>.log にも残す。前提として、vega のセッションが
+出力を時刻つきで /var/log/uniqnode-apply-<時刻>-<pid>.log にも残す。前提として、vega のセッションが
 sudo 無しで、hikalium の持ち物のデプロイ用の checkout `/work2/llm_playground_host_dir/uniqnode-deploy` を
 main で用意し、そこで `cargo build --release -p uniqnode` を済ませておく。操作者が打つのは次の 1 行である:
 
@@ -1224,8 +1227,17 @@ sudo /work2/llm_playground_host_dir/uniqnode-deploy/target/release/uniqnode appl
 
 最初の 1 回は、旧い名の unit を退避して外し(`--retire-legacy-units`)、3 つのインスタンスを新しい
 unit(自己再起動つき)で据え直し、自動更新の timer を据える。再実行してよい。unit・drop-in・nft の
-規則・インスタンスの増減を変える変更は、vega.apply か unit のテンプレートを直して main に入れた後、
-同じ 1 行を操作者に渡す(checkout は autodeploy が main へ進めているので、そのまま打てる)。
+規則・インスタンスの増減を変える変更は、vega.apply か unit のテンプレートを直して main に入れ、
+deployed_on_vega がその commit に進んだのを見てから、据わった版のバイナリで打つ次の 1 行を
+操作者に渡す(デプロイ用の checkout の target/release には、確かめで落ちて戻した版が残りうるので
+使わない。ファイルは checkout の main の版で、autodeploy が main へ進めている):
+
+```
+sudo /home/hikalium/.local/bin/uniqnode apply /work2/llm_playground_host_dir/uniqnode-deploy/docs/mop/vega/vega.apply
+```
+
+apply の間に autodeploy が同じバイナリを置き換えると、install の写しと取り合う。渡す前に
+`touch ~/.local/state/uniqnode-autodeploy/hold` を置き、操作者が打ち終えたら消す。
 
 ### 確かめ方と止め方
 

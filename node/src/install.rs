@@ -1269,6 +1269,16 @@ pub fn install_binary(destination: &Path, owner: Option<&Account>) -> Result<Str
 pub fn place_binary(source: &Path, destination: &Path, owner: Option<&Account>) -> Result<String, String> {
     let new = std::fs::read(source).map_err(|e| format!("{} を読めない: {e}", source.display()))?;
     if std::fs::read(destination).is_ok_and(|old| old == new) {
+        // 写さなくても、所有者と許可ビットは写すときと同じに揃える(chown と chmod は inode を
+        // 替えないので、常駐を起こし直さない)。
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("{} の許可ビット: {e}", destination.display()))?;
+        }
+        if let Some(account) = owner {
+            chown_to(destination, account)?;
+        }
         return Ok(format!(
             "バイナリ {} は {} と中身が同じなので写さない",
             destination.display(),
@@ -2382,7 +2392,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         say(out, &line)?;
     }
 
-    // 起こす前にロックを探る。unit は exit 1 で起こし直さない設計なので、落ちてから journal
+    // 起こす前にロックを探る。unit は exit 1 で起こし直し続けるので、落ちてから journal
     // を読ませるより先に言う。system 単位への移行では、持ち主は user 単位の serve であることが
     // 多い: 止めて外す命令を添えるが、黙って止めはしない。
     if store::opened_by_another_process(&options.data_dir).map_err(|e| e.to_string())? {

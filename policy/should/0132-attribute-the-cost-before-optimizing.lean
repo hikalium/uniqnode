@@ -9,6 +9,8 @@ namespace AttributeTheCostBeforeOptimizing
 structure PerformanceChange where
   /-- 性能の仕事か。 -/
   isPerformanceWork : Bool
+  /-- ハーネス、viewer、ホストの道具のどれかの中の仕事か。 -/
+  inHarnessViewerOrHostTooling : Bool
   /-- 直しを書く前に、疑った機構を名指して直接測り、コストを帰属させたか。 -/
   costAttributedBeforeFix : Bool
   /-- 主な根拠の測定を稼働系の上で取ったか。 -/
@@ -24,9 +26,9 @@ structure PerformanceChange where
   /-- 主張がどの測定に基づくかを書いたか。 -/
   measurementNamed : Bool
 
-/-- 適用のテスト。性能の仕事。 -/
+/-- 適用のテスト。ハーネス、viewer、ホストの道具の中の性能の仕事。 -/
 def Applies (c : PerformanceChange) : Prop :=
-  c.isPerformanceWork = true
+  c.isPerformanceWork = true /\ c.inHarnessViewerOrHostTooling = true
 
 /-- 先に帰属させる。直しはコストを帰属させた後に選ぶ。 -/
 def AttributedFirst (c : PerformanceChange) : Prop :=
@@ -51,37 +53,41 @@ def Complies (c : PerformanceChange) : Prop :=
 
 /-- もっともらしい原因を測らずに直した変更は、要求を満たさない。 -/
 theorem fix_without_attribution_fails :
-    Not (Complies { isPerformanceWork := true, costAttributedBeforeFix := false,
+    Not (Complies { isPerformanceWork := true, inHarnessViewerOrHostTooling := true,
+                    costAttributedBeforeFix := false,
                     primaryFromLiveSystem := false, spreadWiderThanEffect := false,
                     modelsColdSituation := false, samplesSpacedCold := false,
                     regimeStated := true, measurementNamed := true }) := by
   intro h
-  have e : false = true := (h rfl).1
+  have e : false = true := (h (And.intro rfl rfl)).1
   cases e
 
 /-- 散らばりが効果より広い稼働系の測定を主な根拠にした変更は、要求を満たさない。 -/
 theorem noisy_live_probe_as_primary_fails :
-    Not (Complies { isPerformanceWork := true, costAttributedBeforeFix := true,
+    Not (Complies { isPerformanceWork := true, inHarnessViewerOrHostTooling := true,
+                    costAttributedBeforeFix := true,
                     primaryFromLiveSystem := true, spreadWiderThanEffect := true,
                     modelsColdSituation := false, samplesSpacedCold := false,
                     regimeStated := true, measurementNamed := true }) := by
   intro h
-  have e : true = false := (h rfl).2.1 rfl
+  have e : true = false := (h (And.intro rfl rfl)).2.1 rfl
   cases e
 
 /-- 冷えた状態を模すのに、続けて再読み込みして温かい数値を取った変更は、要求を満たさない。 -/
 theorem warm_samples_for_cold_situation_fails :
-    Not (Complies { isPerformanceWork := true, costAttributedBeforeFix := true,
+    Not (Complies { isPerformanceWork := true, inHarnessViewerOrHostTooling := true,
+                    costAttributedBeforeFix := true,
                     primaryFromLiveSystem := false, spreadWiderThanEffect := false,
                     modelsColdSituation := true, samplesSpacedCold := false,
                     regimeStated := true, measurementNamed := true }) := by
   intro h
-  have e : false = true := (h rfl).2.2.1.1 rfl
+  have e : false = true := (h (And.intro rfl rfl)).2.2.1.1 rfl
   cases e
 
 /-- 要求を満たす例。strace で項目ごとの stat に帰属させ、隔離した経路で冷えた状態を測った変更。 -/
 theorem strace_attributed_change_complies :
-    Complies { isPerformanceWork := true, costAttributedBeforeFix := true,
+    Complies { isPerformanceWork := true, inHarnessViewerOrHostTooling := true,
+               costAttributedBeforeFix := true,
                primaryFromLiveSystem := false, spreadWiderThanEffect := false,
                modelsColdSituation := true, samplesSpacedCold := true,
                regimeStated := true, measurementNamed := true } := by

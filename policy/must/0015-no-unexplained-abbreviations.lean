@@ -2,7 +2,7 @@
   must/0015-no-unexplained-abbreviations の Lean 版。
   条項の本文は同じ名前の .md にあり、食い違ったら .md が優先する。
   読み手が解読しなければならない 1 つの名前を主題にし、略語を作るなら理由をその場に記すことを Prop にする。
-  既存の名前は、周りのコードを組み直すときに完全な語へ改める。
+  既存の名前は、周りのコードを組み直すときに条項の対象に入る。
 -/
 namespace NoUnexplainedAbbreviations
 
@@ -44,7 +44,7 @@ def AbbreviationHasReason (n : Name) : Prop :=
 def Complies (n : Name) : Prop :=
   Applies n -> AbbreviationHasReason n
 
-/-- 記録された拘束力のある例。main.rs の分解で退けられた、理由の無い `sup` は要求を満たさない。 -/
+/-- 記録された、効力のある例。main.rs の分解で退けられた、理由の無い `sup` は要求を満たさない。 -/
 theorem sup_without_reason_fails :
     Not (Complies { readerMustDecode := true, form := Form.coinedAbbreviation,
                     reasonRecorded := false, preexisting := false,

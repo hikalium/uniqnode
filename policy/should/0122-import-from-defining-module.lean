@@ -2,7 +2,7 @@
   should/0122-import-from-defining-module の Lean 版。
   条項の本文は同じ名前の .md にあり、食い違ったら .md が優先する。
   Rust のコードの中の 1 つの `crate::X` 参照を主題にし、定義するモジュールのパスで参照し、
-  main.rs の import の一覧を通してだけ解決する別名を使わないことを Prop にする。
+  main.rs のインポートの一覧を通してだけ解決する別名を使わないことを Prop にする。
 -/
 namespace ImportFromDefiningModule
 
@@ -10,7 +10,7 @@ namespace ImportFromDefiningModule
 inductive Resolution where
   /-- 項目を定義するモジュールのパス (`use crate::task::task_field;`)。 -/
   | definingModule
-  /-- 別のモジュール (main.rs など) の import の一覧を通してだけ解決する `crate::X`。 -/
+  /-- 別のモジュール (main.rs など) のインポートの一覧を通してだけ解決する `crate::X`。 -/
   | importListAlias
 
 /-- Rust のコードの中の 1 つの項目への参照。 -/
@@ -24,11 +24,11 @@ structure Reference where
 def Applies (r : Reference) : Prop :=
   r.inNewOrRestructuredCode = true
 
-/-- 要求。項目は定義するモジュールのパスで参照する。import の掃除で止まった `crate::X` も同じ欠陥として直す。 -/
+/-- 要求。項目は定義するモジュールのパスで参照する。インポートの掃除で止まった `crate::X` も同じ欠陥として直す。 -/
 def Complies (r : Reference) : Prop :=
   Applies r -> r.resolution = Resolution.definingModule
 
-/-- main.rs の残った import を通して解決していた `crate::task_field` は、要求を満たさない。 -/
+/-- main.rs の残ったインポートを通して解決していた `crate::task_field` は、要求を満たさない。 -/
 theorem alias_through_main_fails :
     Not (Complies { inNewOrRestructuredCode := true,
                     resolution := Resolution.importListAlias }) := by

@@ -2,7 +2,7 @@
   should/0106-state-gauge-vs-event-log の Lean 版。uniqnode の条項には UUID の anchor が無い。
   条項の本文は同じ名前の .md にあり、食い違ったら .md が優先する。
   実行時の状態の 1 回の書き出しと 1 回の読み出しを主題にし、いまの状態は gauge に、
-  イベントログには変化と一度きりの出来事だけを、という要求を Prop にする。
+  イベントログには変化と一度きりの出来事だけを、という 2 種類のデータの厳密な分離を Prop にする。
 -/
 namespace StateGaugeVsEventLog
 
@@ -15,7 +15,7 @@ inductive Store where
 
 /-- 書き出す内容の種類。 -/
 inductive DataKind where
-  /-- いまの状態の再掲。前の tick で既に真だったこと。 -/
+  /-- いまの状態。前の tick で既に真だったことの再掲を含む。 -/
   | currentState
   /-- 状態の遷移 (idle から busy へ、paused になった、device が落ちた、エラー)。 -/
   | transition
@@ -34,9 +34,11 @@ structure Emission where
 /-- 適用のテスト。実行時の状態を記録する書き出し。 -/
 def Applies (e : Emission) : Prop := e.recordsRuntimeState = true
 
-/-- 要求。いまの状態の再掲は gauge に書き、イベントログには書かない。 -/
+/-- 要求。いまの状態は gauge にだけ書き、gauge にはいまの状態だけを書く。遷移と出来事はイベントログに行く。 -/
 def Complies (e : Emission) : Prop :=
-  Applies e -> e.kind = DataKind.currentState -> e.store = Store.gauge
+  Applies e ->
+    (e.kind = DataKind.currentState -> e.store = Store.gauge) /\
+    (e.store = Store.gauge -> e.kind = DataKind.currentState)
 
 /-- いまの状態を読む側の 1 回の読み出し。 -/
 structure Read where
@@ -56,7 +58,15 @@ theorem per_tick_snapshot_in_log_fails :
     Not (Complies { recordsRuntimeState := true, kind := DataKind.currentState,
                     store := Store.eventLog }) := by
   intro h
-  have e : Store.eventLog = Store.gauge := h rfl rfl
+  have e : Store.eventLog = Store.gauge := (h rfl).1 rfl
+  cases e
+
+/-- 一度きりの出来事を gauge に上書きで書くことは、要求を満たさない。 -/
+theorem event_in_gauge_fails :
+    Not (Complies { recordsRuntimeState := true, kind := DataKind.oneShotEvent,
+                    store := Store.gauge }) := by
+  intro h
+  have e : DataKind.oneShotEvent = DataKind.currentState := (h rfl).2 rfl
   cases e
 
 /-- UI がログを走査していまの状態を組み立て直すことは、要求を満たさない。 -/
@@ -70,15 +80,15 @@ theorem reconstructing_state_from_log_fails :
 theorem transition_in_log_complies :
     Complies { recordsRuntimeState := true, kind := DataKind.transition,
                store := Store.eventLog } := by
-  intro _ e
-  cases e
+  intro _
+  exact And.intro (fun e => by cases e) (fun e => by cases e)
 
 /-- 要求を満たす例。heartbeat を毎回 gauge に上書きする。 -/
 theorem heartbeat_gauge_complies :
     Complies { recordsRuntimeState := true, kind := DataKind.currentState,
                store := Store.gauge } := by
-  intro _ _
-  exact rfl
+  intro _
+  exact And.intro (fun _ => rfl) (fun _ => rfl)
 
 /-- 要求を満たす例。UI が gauge の snapshot からいまの状態を読む。 -/
 theorem ui_reads_gauge_complies :

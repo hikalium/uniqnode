@@ -1,89 +1,80 @@
 /-
-Lean version of policy/should/0141-text-a-program-emits-is-english-ascii.md. The Markdown file is
-the source of the rule. It is the same rule as lamalium's
-policy/should/text-a-program-emits-is-english-ascii.md (uuid 9b8d9c9b-b173-4ac1-b81b-4ec78e94679b),
-and this file restates its level, its applicability test and its requirement as definitions that
-type-check, so a reader can run a case through them.
+  should/0141-text-a-program-emits-is-english-ascii の Lean の版。条項の本文は同じ名前の .md にあり、
+  食い違ったら .md が優先する。lamalium の should/text-a-program-emits-is-english-ascii
+  (uuid 9b8d9c9b-b173-4ac1-b81b-4ec78e94679b) と同じ規則である。実行時の文言の読み手と出どころを
+  型で表し、適用のテストと要求を Prop にする。
 -/
+namespace TextAProgramEmitsIsEnglishAscii
 
-namespace Policy.P0141TextAProgramEmitsIsEnglishAscii
-
-/-- The RFC 2119 levels. -/
-inductive Level where
-  | must
-  | should
-  | may
-  deriving DecidableEq, Repr
-
-def level : Level := .should
-
-/-- Who reads the text while the program runs. -/
+/-- プログラムが動いているあいだに文言を読む相手。 -/
 inductive Reader where
-  /-- Standard output or standard error, read in a terminal. -/
+  /-- 端末で読む標準出力か標準エラー。 -/
   | terminal
-  /-- A log, such as the journal or a log file. -/
+  /-- journal やログのファイル。 -/
   | log
-  /-- A response body that a program or an agent reads. -/
+  /-- プログラムやエージェントが読む応答の本文。 -/
   | programOrAgent
-  /-- A prompt, a tool description or a tool result rendered for a model. -/
+  /-- モデルへ渡すプロンプト、ツールの説明、ツールの結果。 -/
   | model
-  /-- A page a browser shows to a person, with the messages that page displays. -/
+  /-- ブラウザーが人に見せるページと、そのページが出すメッセージ。 -/
   | personInBrowser
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
-/-- Where the wording comes from. -/
+/-- 文言の出どころ。 -/
 inductive Origin where
-  /-- The program's own wording. -/
+  /-- プログラム自身の文言。 -/
   | ownWording
-  /-- A file name, the contents of a file, a stored document or a model's answer. -/
+  /-- 素通しの文。ファイル名、ファイルの中身、保存した文書、モデルの答えなど。 -/
   | passedThrough
-  /-- Another party's words, such as a simulated request or a phrase a person is expected to say. -/
+  /-- 他者の言葉の代わりに置く文。利用者が言うと見込む言い回しなど。 -/
   | standsInForAnotherParty
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
+/-- 実行時に出す 1 つの文言と、それが置かれた場所。 -/
 structure RunTimeText where
   chars : List Char
   reader : Reader
   origin : Origin
+  /-- テストのコードの中のメッセージか。 -/
   inTestCode : Bool
-  /-- A deviation, such as judging text in another language, is noted with its reason. -/
+  /-- 逸脱 (別の言語の文を判定するプログラムがその言語の語を挙げるなど) を、理由とともに記したか。 -/
   notedDeviation : Bool
 
-/-- The characters the requirement admits: printable ASCII, line feed and tab. -/
+/-- 要求が認める文字。印字できる ASCII と、改行とタブ。 -/
 def admitted (c : Char) : Bool :=
   (0x20 <= c.toNat && c.toNat <= 0x7E) || c == '\n' || c == '\t'
 
-/-- The applicability test. -/
-def applies (t : RunTimeText) : Bool :=
-  t.reader != .personInBrowser && t.origin == .ownWording && !t.inTestCode
+/-- 適用のテスト。ブラウザーのページの外で、プログラム自身の文言で、テストのコードの外にあるもの。 -/
+def Applies (t : RunTimeText) : Prop :=
+  Not (t.reader = Reader.personInBrowser) /\ t.origin = Origin.ownWording /\ t.inTestCode = false
 
-/-- The requirement. Whether the wording is English is left to review, because no definition
-here decides it. The characters are decided. -/
-def complies (t : RunTimeText) : Bool :=
-  !applies t || t.notedDeviation || t.chars.all admitted
+/-- 要求。条項が当たる文言は、記した逸脱でなければ、認める文字だけで書く。英語かどうかはレビューが
+  判定し、ここでは文字だけを決める。 -/
+def Complies (t : RunTimeText) : Prop :=
+  Applies t -> t.notedDeviation = true \/ t.chars.all admitted = true
 
-/-- A terminal message in English passes. -/
-example : complies
-    { chars := "apply: ran 4 instructions".toList, reader := .terminal,
-      origin := .ownWording, inTestCode := false, notedDeviation := false } = true := by
+/-- 端末へ出す英語のメッセージは要求を満たす。 -/
+theorem english_terminal_message_complies :
+    Complies { chars := "apply: ran 4 instructions".toList, reader := .terminal,
+      origin := .ownWording, inTestCode := false, notedDeviation := false } := by
   decide
 
-/-- A log line in Japanese fails. -/
-example : complies
-    { chars := "命令を走らせる".toList, reader := .log,
-      origin := .ownWording, inTestCode := false, notedDeviation := false } = false := by
+/-- ログへ出す日本語の行は要求を満たさない。 -/
+theorem japanese_log_line_does_not_comply :
+    Not (Complies { chars := "命令を走らせる".toList, reader := .log,
+      origin := .ownWording, inTestCode := false, notedDeviation := false }) := by
   decide
 
-/-- A Japanese file name passed through is outside the policy. -/
-example : complies
-    { chars := "メモ.md".toList, reader := .terminal,
-      origin := .passedThrough, inTestCode := false, notedDeviation := false } = true := by
+/-- 素通しの日本語のファイル名は条項の外にあるので、要求を満たす。 -/
+theorem passed_through_file_name_complies :
+    Complies { chars := "メモ.md".toList, reader := .terminal,
+      origin := .passedThrough, inTestCode := false, notedDeviation := false } := by
   decide
 
-/-- A page shown to a person is outside the policy. -/
-example : complies
-    { chars := "検索".toList, reader := .personInBrowser,
-      origin := .ownWording, inTestCode := false, notedDeviation := false } = true := by
+/-- 人に見せるページの文言は条項の外にあるので、要求を満たす。 -/
+theorem browser_page_complies :
+    Complies { chars := "検索".toList, reader := .personInBrowser,
+      origin := .ownWording, inTestCode := false, notedDeviation := false } := by
   decide
 
-end Policy.P0141TextAProgramEmitsIsEnglishAscii
+end TextAProgramEmitsIsEnglishAscii

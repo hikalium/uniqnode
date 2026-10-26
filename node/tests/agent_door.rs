@@ -238,7 +238,7 @@ fn everything_outside_the_table_is_refused_with_403() {
         assert_eq!(response.status, 403, "{method} {path}: {}", body_text(&response));
         assert_eq!(
             body_text(&response),
-            format!("{{\"error\":\"agent door: {method} {path} は許可されていない\"}}"),
+            format!("{{\"error\":\"agent door: {method} {path} is not allowed\"}}"),
             "{method} {path}"
         );
     }
@@ -308,31 +308,31 @@ fn an_allowed_collection_takes_a_put_through_the_door_and_records_where_it_came_
     assert_eq!(other.status, 403, "{}", body_text(&other));
     assert_eq!(
         body_text(&other),
-        "{\"error\":\"agent door: コレクション other は書けない(--agent-writable で許したのは notes, scratch)\"}"
+        "{\"error\":\"agent door: collection other cannot be written (--agent-writable allows notes, scratch)\"}"
     );
     // fetch は許したコレクションでも表に無い(コンテナが網に出る道)。
     let fetch = simple(&door, "POST", "/v1/collections/notes/fetch", b"{\"url\":\"http://127.0.0.1:1/\"}");
     assert_eq!(fetch.status, 403, "{}", body_text(&fetch));
     assert_eq!(
         body_text(&fetch),
-        "{\"error\":\"agent door: POST /v1/collections/notes/fetch は許可されていない\"}"
+        "{\"error\":\"agent door: POST /v1/collections/notes/fetch is not allowed\"}"
     );
 
     // meta の形が違えば 400 で理由を言う(門は越えている: 本文は門の断りでない)。
     for (query, expected) in [
         (
             "meta.Agent=x",
-            "{\"error\":\"meta の鍵 \\\"Agent\\\" は [a-z0-9_] の 1..=32 字\"}",
+            "{\"error\":\"meta key \\\"Agent\\\" must be 1..=32 characters of [a-z0-9_]\"}",
         ),
         (
             "agent=x",
-            "{\"error\":\"query の鍵 \\\"agent\\\" は受け付けない(受け付けるのは meta.<key> だけ)\"}",
+            "{\"error\":\"query key \\\"agent\\\" is not accepted (only meta.<key> is)\"}",
         ),
-        ("meta.agent=", "{\"error\":\"meta.agent の値は 1..=200 字(与えられたのは 0 字)\"}"),
-        ("meta.name=x", "{\"error\":\"meta.name は取り込みが決める鍵(query では与えられない)\"}"),
+        ("meta.agent=", "{\"error\":\"the value of meta.agent must be 1..=200 characters (given 0)\"}"),
+        ("meta.name=x", "{\"error\":\"meta.name is a key set by ingest (it cannot be given in the query)\"}"),
         (
             "meta.agent=%zz",
-            "{\"error\":\"meta.agent の値 \\\"%zz\\\": 1 バイト目の % の後に 16 進 2 桁が無い\"}",
+            "{\"error\":\"the value of meta.agent \\\"%zz\\\": the % at byte 1 is not followed by 2 hex digits\"}",
         ),
     ] {
         let bad_path = format!("/v1/collections/notes/documents/bad.md?{query}");
@@ -357,7 +357,7 @@ fn an_allowed_collection_takes_a_put_through_the_door_and_records_where_it_came_
         .unwrap_or_else(|| panic!("PUT の行が無い: {log}"));
     assert!(put_line.contains(&format!(" PUT {path} 200 ")), "{put_line}");
     // 起動時に、読み口から書けるコレクションを 1 行で言う。
-    assert!(log.contains("読み口から書けるコレクション: notes, scratch"), "{log}");
+    assert!(log.contains("collections writable through the agent door: notes, scratch"), "{log}");
 }
 
 /// 読める集合(`--agent-collections`)の試験の資材。許していない側のコレクションに置く
@@ -413,7 +413,7 @@ fn a_search_that_names_an_allowed_collection_answers_through_the_door() {
     assert!(body_text(&citation).contains("\"collection\":\"notes\""), "{}", body_text(&citation));
     // 起動時に、読み口から読めるコレクションを 1 行で言う。
     let log = std::fs::read_to_string(server.server.dir.join("logs").join("serve.log")).expect("serve.log");
-    assert!(log.contains("読み口から読めるコレクション: notes"), "{log}");
+    assert!(log.contains("collections readable through the agent door: notes"), "{log}");
 }
 
 /// (b) 許していないコレクションを指した検索は、索引を引く前に 403 で断られ、許した一覧を
@@ -438,7 +438,7 @@ fn a_search_that_names_a_collection_outside_the_set_is_refused_with_403() {
     assert_eq!(refused.status, 403, "{}", body_text(&refused));
     assert_eq!(
         body_text(&refused),
-        "{\"error\":\"agent door: コレクション web は読めない(--agent-collections で許したのは notes, papers)\"}"
+        "{\"error\":\"agent door: collection web cannot be read (--agent-collections allows notes, papers)\"}"
     );
     // 主の口には掛からない(同じ検索が通り、web の件が返る)。
     let through_main = simple(
@@ -508,7 +508,7 @@ fn a_chunk_from_a_collection_outside_the_set_is_refused_even_by_id() {
         assert_eq!(refused.status, 403, "{path}: {}", body_text(&refused));
         assert_eq!(
             body_text(&refused),
-            "{\"error\":\"agent door: コレクション web は読めない(--agent-collections で許したのは notes)\"}",
+            "{\"error\":\"agent door: collection web cannot be read (--agent-collections allows notes)\"}",
             "{path}"
         );
         // 主の口は同じ ID を返す(門だけの制限であって、ストアの不在ではない)。
@@ -569,13 +569,13 @@ fn agent_collections_without_a_door_is_refused_with_exit_2() {
     let (code, stderr) = run(&["--agent-collections", "notes"]);
     assert_eq!(code, Some(2), "{stderr}");
     assert!(
-        stderr.contains("--agent-collections notes は --listen-agent があるときだけ"),
+        stderr.contains("--agent-collections notes is accepted only with --listen-agent"),
         "{stderr}"
     );
     assert!(!dir.exists(), "断るときはストアを作らない");
     let (code, stderr) = run(&["--listen-agent", "127.0.0.1:0", "--agent-collections", "a b"]);
     assert_eq!(code, Some(2), "{stderr}");
-    assert!(stderr.contains("--agent-collections はコレクション名"), "{stderr}");
+    assert!(stderr.contains("--agent-collections takes a collection name"), "{stderr}");
     assert!(!dir.exists(), "断るときはストアを作らない");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -599,13 +599,13 @@ fn agent_writable_without_a_door_is_refused_with_exit_2() {
     let (code, stderr) = run(&["--agent-writable", "notes"]);
     assert_eq!(code, Some(2), "{stderr}");
     assert!(
-        stderr.contains("--agent-writable notes は --listen-agent があるときだけ"),
+        stderr.contains("--agent-writable notes is accepted only with --listen-agent"),
         "{stderr}"
     );
     assert!(!dir.exists(), "断るときはストアを作らない");
     let (code, stderr) = run(&["--listen-agent", "127.0.0.1:0", "--agent-writable", "a/b"]);
     assert_eq!(code, Some(2), "{stderr}");
-    assert!(stderr.contains("--agent-writable はコレクション名"), "{stderr}");
+    assert!(stderr.contains("--agent-writable takes a collection name"), "{stderr}");
     assert!(!dir.exists(), "断るときはストアを作らない");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -623,7 +623,7 @@ fn a_search_that_names_peers_is_refused_with_400() {
     ] {
         let response = simple(&door, "POST", "/v1/search", body.as_bytes());
         assert_eq!(response.status, 400, "{body}: {}", body_text(&response));
-        assert_eq!(body_text(&response), "{\"error\":\"agent door: peers は使えない\"}", "{body}");
+        assert_eq!(body_text(&response), "{\"error\":\"agent door: peers cannot be used\"}", "{body}");
     }
     // peers を書かなければ通る(主の口と同じ答え)。
     let plain = simple(&door, "POST", "/v1/search", b"{\"query\":\"x\"}");
@@ -656,7 +656,7 @@ fn a_blob_is_refused_even_though_its_id_is_valid() {
         );
         assert_eq!(
             body_text(&through_door),
-            "{\"error\":\"agent door: チャンクでないオブジェクトは許可されていない\"}"
+            "{\"error\":\"agent door: objects that are not chunks are not allowed\"}"
         );
     }
     // 持っていない ID は主の口と同じ 404(門は在否を隠さない。不在の言明でもない)。
@@ -722,7 +722,7 @@ fn a_door_that_cannot_bind_does_not_stop_the_main_door() {
     );
     let log = std::fs::read_to_string(server.server.dir.join("logs").join("serve.log")).expect("serve.log");
     assert!(
-        log.contains(&format!("読み口 {blocked} に束縛できない")),
+        log.contains(&format!("cannot bind the agent door to {blocked}")),
         "束縛の失敗が記録されていない: {log}"
     );
     // 塞ぎを外すと、次の再試行で束縛できる。
@@ -859,7 +859,7 @@ fn a_task_name_outside_the_alphabet_is_refused_before_the_table() {
     assert_eq!(refused.status, 400, "{}", body_text(&refused));
     assert_eq!(
         body_text(&refused),
-        "{\"error\":\"agent door: X-Uniqnode-Task の値は [A-Za-z0-9_.:/-] の 1..=64 字\"}"
+        "{\"error\":\"agent door: the value of X-Uniqnode-Task must be 1..=64 characters of [A-Za-z0-9_.:/-]\"}"
     );
     // api::handle に届いていない: ストアには何も入っていない。
     let collections = simple(&main, "GET", "/v1/collections", b"");
@@ -874,7 +874,7 @@ fn a_task_name_outside_the_alphabet_is_refused_before_the_table() {
         assert_eq!(health.status, 400, "{name}={value:?}: {}", body_text(&health));
         assert_eq!(
             body_text(&health),
-            "{\"error\":\"agent door: X-Uniqnode-Agent の値は [A-Za-z0-9_.:/-] の 1..=64 字\"}",
+            "{\"error\":\"agent door: the value of X-Uniqnode-Agent must be 1..=64 characters of [A-Za-z0-9_.:/-]\"}",
             "{name}={value:?}"
         );
     }
@@ -901,7 +901,7 @@ fn mcp_and_viewer_refuse_the_flag_they_cannot_honour() {
             .expect("run");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(2), "{role}: {stderr}");
-        assert!(stderr.contains("--listen-agent は"), "{role}: {stderr}");
+        assert!(stderr.contains("--listen-agent is not an argument of"), "{role}: {stderr}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -969,14 +969,14 @@ fn an_allowed_graph_is_written_and_read_through_the_door() {
     assert_eq!(refused.status, 403, "{}", body_text(&refused));
     assert_eq!(
         body_text(&refused),
-        "{\"error\":\"agent door: グラフ plan-archive は書けない(--agent-graph-writable で許したのは lamalium-plan)\"}"
+        "{\"error\":\"agent door: graph plan-archive cannot be written (--agent-graph-writable allows lamalium-plan)\"}"
     );
     // 許していないグラフ: 読みも書きも 403 で、許した一覧を言う(書ける名は読める側にも出る)。
     let unseen = simple(&door, "GET", "/v1/graphs/other/nodes/n_a", b"");
     assert_eq!(unseen.status, 403, "{}", body_text(&unseen));
     assert_eq!(
         body_text(&unseen),
-        "{\"error\":\"agent door: グラフ other は読めない(--agent-graph で許したのは plan-archive, lamalium-plan)\"}"
+        "{\"error\":\"agent door: graph other cannot be read (--agent-graph allows plan-archive, lamalium-plan)\"}"
     );
     let unwritable = simple(&door, "PUT", "/v1/graphs/other/nodes/n_a", b"{}");
     assert_eq!(unwritable.status, 403, "{}", body_text(&unwritable));
@@ -985,7 +985,7 @@ fn an_allowed_graph_is_written_and_read_through_the_door() {
     assert_eq!(list.status, 403, "{}", body_text(&list));
     assert_eq!(
         body_text(&list),
-        "{\"error\":\"agent door: GET /v1/graphs は許可されていない\"}"
+        "{\"error\":\"agent door: GET /v1/graphs is not allowed\"}"
     );
     // 主の口では一覧が出る(閉じているのは読み口だけ)。
     let from_main = simple(&main, "GET", "/v1/graphs", b"");
@@ -1018,7 +1018,7 @@ fn without_the_graph_flags_the_door_does_not_show_the_graph_layer() {
         assert_eq!(response.status, 403, "{path}: {}", body_text(&response));
         assert_eq!(
             body_text(&response),
-            "{\"error\":\"agent door: グラフ plan は読めない(--agent-graph で許したグラフは無い)\"}",
+            "{\"error\":\"agent door: graph plan cannot be read (--agent-graph allows no graphs)\"}",
             "{path}"
         );
     }
@@ -1026,7 +1026,7 @@ fn without_the_graph_flags_the_door_does_not_show_the_graph_layer() {
     assert_eq!(put.status, 403, "{}", body_text(&put));
     assert_eq!(
         body_text(&put),
-        "{\"error\":\"agent door: グラフ plan は書けない(--agent-graph-writable で許したグラフは無い)\"}"
+        "{\"error\":\"agent door: graph plan cannot be written (--agent-graph-writable allows no graphs)\"}"
     );
     // 何も書かれていない(門で止まった)。
     let from_main = simple(&main, "GET", "/v1/graphs/plan/nodes/n_b", b"");
@@ -1052,11 +1052,11 @@ fn agent_graph_without_a_door_is_refused_with_exit_2() {
     for flag in ["--agent-graph", "--agent-graph-writable"] {
         let (code, stderr) = run(&[flag, "plan"]);
         assert_eq!(code, Some(2), "{flag}: {stderr}");
-        assert!(stderr.contains(&format!("{flag} plan は --listen-agent があるときだけ")), "{stderr}");
+        assert!(stderr.contains(&format!("{flag} plan is accepted only with --listen-agent")), "{stderr}");
         assert!(!dir.exists(), "断るときはストアを作らない");
         let (code, stderr) = run(&["--listen-agent", "127.0.0.1:0", flag, "a b"]);
         assert_eq!(code, Some(2), "{flag}: {stderr}");
-        assert!(stderr.contains(&format!("{flag} の値がグラフ名")), "{stderr}");
+        assert!(stderr.contains(&format!("{flag}: graph name")), "{stderr}");
         assert!(!dir.exists(), "断るときはストアを作らない");
     }
     let _ = std::fs::remove_dir_all(&dir);

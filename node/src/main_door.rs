@@ -78,8 +78,8 @@ pub const OVERFLOW_UID_PATH: &str = "/proc/sys/kernel/overflowuid";
 pub fn check_listen(listen: &str, what: &str) -> Result<SocketAddr, String> {
     let address: SocketAddr = listen.parse().map_err(|_| {
         format!(
-            "{what} {listen}: 主の口はループバックの IP リテラル(127.0.0.1:7440 や [::1]:7440)に\
-             だけ束縛する(名前は解決の結果が変わりうるので受けない)"
+            "{what} {listen}: the main door binds only to a loopback IP literal (such as 127.0.0.1:7440 or [::1]:7440) \
+             (names are refused because what they resolve to can change)"
         )
     })?;
     let loopback = match address.ip() {
@@ -89,9 +89,9 @@ pub fn check_listen(listen: &str, what: &str) -> Result<SocketAddr, String> {
     };
     if !loopback {
         return Err(format!(
-            "{what} {listen}: 主の口はループバック(127.0.0.0/8 か [::1])にだけ束縛する。\
-             主の口は認証を持たないので網へ出さない(網越しに要るものは読み口で受ける。\
-             docs/plan/API_AUTH.md)"
+            "{what} {listen}: the main door binds only to loopback (127.0.0.0/8 or [::1]); \
+             it has no authentication, so it is not exposed to the network (what is needed over the network goes through the agent door; \
+             see docs/plan/API_AUTH.md)"
         ));
     }
     Ok(address)
@@ -110,7 +110,7 @@ pub fn parse_uid_list(text: &str) -> Result<Vec<u32>, String> {
         let uid: u32 = part
             .trim()
             .parse()
-            .map_err(|_| format!("{ALLOW_UID_FLAG} {text}: uid は , で区切った非負整数"))?;
+            .map_err(|_| format!("{ALLOW_UID_FLAG} {text}: uids are non-negative integers separated by ,"))?;
         if !uids.contains(&uid) {
             uids.push(uid);
         }
@@ -131,7 +131,7 @@ pub fn check_allow_host(text: &str) -> Result<(), String> {
     match well_formed {
         true => Ok(()),
         false => Err(format!(
-            "{ALLOW_HOST_FLAG} {text}: Host の値を host:port の形で書く(例 localhost:17440)"
+            "{ALLOW_HOST_FLAG} {text}: write the Host value as host:port (for example localhost:17440)"
         )),
     }
 }
@@ -139,10 +139,10 @@ pub fn check_allow_host(text: &str) -> Result<(), String> {
 /// /proc/sys/kernel/overflowuid を読む。
 pub fn read_overflow_uid() -> Result<u32, String> {
     let text = std::fs::read_to_string(OVERFLOW_UID_PATH)
-        .map_err(|e| format!("{OVERFLOW_UID_PATH} を読めない: {e}"))?;
+        .map_err(|e| format!("cannot read {OVERFLOW_UID_PATH}: {e}"))?;
     text.trim()
         .parse()
-        .map_err(|_| format!("{OVERFLOW_UID_PATH} の値を読めない: {text:?}"))
+        .map_err(|_| format!("cannot read the value of {OVERFLOW_UID_PATH}: {text:?}"))
 }
 
 /// 主の口の uid の判定。
@@ -163,7 +163,7 @@ impl MainDoor {
     pub fn new(allowed: Option<Vec<u32>>, euid: u32, overflow_uid: u32) -> Result<MainDoor, String> {
         if !sock_diag::SUPPORTED {
             return Err(
-                "主の口の uid の判定は Linux の sock_diag に依る。この OS では serve を起こさない"
+                "the main door identifies uids with Linux sock_diag; serve does not start on this OS"
                     .to_string(),
             );
         }
@@ -171,14 +171,14 @@ impl MainDoor {
         let allowed_uids = allowed.unwrap_or_else(|| vec![euid]);
         if allowed_uids.contains(&overflow_uid) {
             return Err(format!(
-                "許す uid の集合 {} に overflowuid {overflow_uid} が入っている。写せない uid は\
-                 この値で表示されるので、認可に使えない({})",
+                "the set of allowed uids {} contains overflowuid {overflow_uid}; uids that cannot be mapped \
+                 show as this value, so it cannot be used for authorization ({})",
                 sock_diag::uid_list(&allowed_uids),
                 match explicit {
-                    true => format!("{ALLOW_UID_FLAG} で与えた"),
+                    true => format!("given with {ALLOW_UID_FLAG}"),
                     false => format!(
-                        "既定の集合は serve 自身の euid で、serve が uid を写せない user namespace で\
-                         走っている。{ALLOW_UID_FLAG} で集合を与える"
+                        "the default set is serve's own euid, and serve runs in a user namespace that cannot map \
+                         that uid; give the set with {ALLOW_UID_FLAG}"
                     ),
                 }
             ));
@@ -260,12 +260,12 @@ impl MainDoor {
                 return Err(SelfTestError { config, reason: sock_diag::socket_unavailable(&error) });
             }
         }
-        let bound = listener.local_addr().map_err(|e| transient(format!("束縛先を読めない: {e}")))?;
+        let bound = listener.local_addr().map_err(|e| transient(format!("cannot read the bound address: {e}")))?;
         let (client, accepted) = connect_to_self(listener, bound).map_err(transient)?;
         let peer =
-            accepted.peer_addr().map_err(|e| transient(format!("相手のアドレスを読めない: {e}")))?;
+            accepted.peer_addr().map_err(|e| transient(format!("cannot read the peer address: {e}")))?;
         let local =
-            accepted.local_addr().map_err(|e| transient(format!("自分のアドレスを読めない: {e}")))?;
+            accepted.local_addr().map_err(|e| transient(format!("cannot read the local address: {e}")))?;
         let expected = sock_diag::Endpoints { local: peer, remote: local };
         let answers = self.lookup(expected).map_err(transient)?;
         let judged = sock_diag::judge(&answers, expected, self.overflow_uid, &[self.euid]);
@@ -297,8 +297,8 @@ impl MainDoor {
         if let Some(delay) = self.check_delay {
             std::thread::sleep(delay);
         }
-        let peer = stream.peer_addr().map_err(|e| format!("相手のアドレスを読めない: {e}"))?;
-        let local = stream.local_addr().map_err(|e| format!("自分のアドレスを読めない: {e}"))?;
+        let peer = stream.peer_addr().map_err(|e| format!("cannot read the peer address: {e}"))?;
+        let local = stream.local_addr().map_err(|e| format!("cannot read the local address: {e}"))?;
         // 相手のソケットから見た向き: local が相手、remote が自分の束縛先。
         let expected = sock_diag::Endpoints { local: peer, remote: local };
         let mut answers = self.lookup(expected)?;
@@ -337,15 +337,15 @@ impl std::fmt::Display for SelfTestError {
         match self.config {
             true => write!(
                 f,
-                "起動時の自己試験: 主の口への自分の接続の uid を判定できない: {reason}。このまま\
-                 起こすと主の口はすべての接続を 403 で断るので起動しない。設定の誤りなので 2 で\
-                 終わる(systemd の unit なら RestrictAddressFamilies= に AF_NETLINK が要る)"
+                "startup self-test: cannot identify the uid of its own connection to the main door: {reason}; \
+                 not starting, because the main door would refuse every connection with 403; this is a configuration error, so exiting \
+                 with 2 (a systemd unit needs AF_NETLINK in RestrictAddressFamilies=)"
             ),
             false => write!(
                 f,
-                "起動時の自己試験: 主の口への自分の接続の uid を判定できない: {reason}。このまま\
-                 起こすと主の口はすべての接続を 403 で断るので起動しない。一時の失敗でありうるので\
-                 3 で終わる(systemd の unit は起こし直す)"
+                "startup self-test: cannot identify the uid of its own connection to the main door: {reason}; \
+                 not starting, because the main door would refuse every connection with 403; this may be a transient failure, so exiting \
+                 with 3 (a systemd unit restarts it)"
             ),
         }
     }
@@ -367,15 +367,15 @@ fn connect_to_self(
         .spawn(move || {
             let _ = sender.send(TcpStream::connect_timeout(&bound, SELF_TEST_TIMEOUT));
         })
-        .map_err(|e| format!("自己試験のスレッドを作れない: {e}"))?;
-    listener.set_nonblocking(true).map_err(|e| format!("束縛を非ブロックにできない: {e}"))?;
+        .map_err(|e| format!("cannot create the self-test thread: {e}"))?;
+    listener.set_nonblocking(true).map_err(|e| format!("cannot make the listener non-blocking: {e}"))?;
     let mut client: Option<(TcpStream, SocketAddr)> = None;
     // 自分の接続の端が分かる前に accept した接続(自分のものが混ざりうる)。
     let mut pending: Vec<(TcpStream, SocketAddr)> = Vec::new();
     let result = loop {
         // 期限は毎周に見る(他人の接続が途切れず届き続けても、WouldBlock を待たずに終わる)。
         if std::time::Instant::now() >= deadline {
-            break Err(format!("自分の接続を {SELF_TEST_TIMEOUT:?} の内に accept できない"));
+            break Err(format!("cannot accept its own connection within {SELF_TEST_TIMEOUT:?}"));
         }
         if client.is_none() {
             match receiver.try_recv() {
@@ -387,12 +387,12 @@ fn connect_to_self(
                         pending.clear();
                         client = Some((stream, address));
                     }
-                    Err(e) => break Err(format!("自分の接続の端を読めない: {e}")),
+                    Err(e) => break Err(format!("cannot read the end of its own connection: {e}")),
                 },
-                Ok(Err(e)) => break Err(format!("{bound} へ繋げない: {e}")),
+                Ok(Err(e)) => break Err(format!("cannot connect to {bound}: {e}")),
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    break Err("自己試験の接続のスレッドが答えずに終わった".to_string())
+                    break Err("the self-test connection thread ended without answering".to_string())
                 }
             }
         }
@@ -411,14 +411,14 @@ fn connect_to_self(
                 std::thread::sleep(Duration::from_millis(1));
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => break Err(format!("自分の接続を accept できない: {e}")),
+            Err(e) => break Err(format!("cannot accept its own connection: {e}")),
         }
     };
     drop(pending);
-    let restored = listener.set_nonblocking(false).map_err(|e| format!("束縛をブロックに戻せない: {e}"));
+    let restored = listener.set_nonblocking(false).map_err(|e| format!("cannot make the listener blocking again: {e}"));
     let (own, accepted) = result?;
     restored?;
-    accepted.set_nonblocking(false).map_err(|e| format!("接続をブロックに戻せない: {e}"))?;
+    accepted.set_nonblocking(false).map_err(|e| format!("cannot make the connection blocking again: {e}"))?;
     Ok((own, accepted))
 }
 
@@ -464,10 +464,10 @@ pub fn screen_content_type(request: &Request) -> Option<Response> {
         Some(Response::text(
             415,
             &format!(
-                "main door: {} {} の本文は {wanted} で送る(Content-Type: {})\n",
+                "main door: send the body of {} {} as {wanted} (Content-Type: {})\n",
                 request.method,
                 request.path,
-                media.as_deref().unwrap_or("無し")
+                media.as_deref().unwrap_or("none")
             ),
         ))
     };
@@ -483,7 +483,7 @@ pub fn screen_content_type(request: &Request) -> Option<Response> {
         },
         BodyRule::Raw => match media.as_deref() {
             Some(m) if !m.is_empty() && !http::SIMPLE_CONTENT_TYPES.contains(&m) => None,
-            _ => refuse("application/octet-stream か文書の種別を言う型"),
+            _ => refuse("application/octet-stream or a type that names the document's kind"),
         },
         BodyRule::Any => None,
     }
@@ -515,7 +515,7 @@ mod tests {
         ] {
             let error = check_listen(listen, "--listen").expect_err(listen);
             assert!(error.contains(listen), "{error}");
-            assert!(error.contains("ループバック"), "{error}");
+            assert!(error.contains("loopback"), "{error}");
         }
     }
 

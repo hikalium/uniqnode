@@ -300,7 +300,7 @@ MCP の fetch ツールも別経路ではなく、同じ store の呼び出し�
 // degraded は、要求した方式で答えられなかったときだけ載る。
 // filtered_low_information は、低情報として落とした件数(0 なら載らない)。
 // text は要求が full: true のときだけ載る(チャンクの全文)。
-{ "degraded": "埋め込みサーバが設定されていない(serve の --embed)",
+{ "degraded": "no embedding server is configured (--embed of serve)",
   "filtered_low_information": 2,
   "method": "bm25",
   "results": [

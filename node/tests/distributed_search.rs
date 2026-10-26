@@ -311,10 +311,10 @@ fn the_requester_filters_its_scope_by_trust_level() {
 fn a_malformed_scatter_request_is_refused() {
     let here = start_server("dsearch-malformed");
     for (body, expected) in [
-        ("{\"query\":\"世代\",\"peers\":\"yes\"}", "peers は真偽値かアドレス文字列の配列"),
-        ("{\"query\":\"世代\",\"peers\":[]}", "peers が空の配列"),
-        ("{\"query\":\"世代\",\"peers\":true,\"budget_ms\":900000}", "budget_ms は"),
-        ("{\"query\":\"世代\",\"peers\":true,\"min_trust_level\":\"高\"}", "min_trust_level は整数"),
+        ("{\"query\":\"世代\",\"peers\":\"yes\"}", "peers must be a boolean or an array of address strings"),
+        ("{\"query\":\"世代\",\"peers\":[]}", "peers is an empty array"),
+        ("{\"query\":\"世代\",\"peers\":true,\"budget_ms\":900000}", "budget_ms must be"),
+        ("{\"query\":\"世代\",\"peers\":true,\"min_trust_level\":\"高\"}", "min_trust_level must be an integer"),
     ] {
         let response = simple(&here.address, "POST", "/v1/search", body.as_bytes());
         assert_eq!(response.status, 400, "{body}");

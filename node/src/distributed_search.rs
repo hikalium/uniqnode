@@ -130,11 +130,11 @@ pub fn query_message(
 /// この後の answer_policy が行う。
 pub fn verify_query(bytes: &[u8], now: i64) -> Result<IncomingQuery, Rejection> {
     let text = std::str::from_utf8(bytes)
-        .map_err(|_| Rejection::new(400, "QUERY が UTF-8 でない"))?;
+        .map_err(|_| Rejection::new(400, "QUERY is not UTF-8"))?;
     let value =
-        c1::parse(text).map_err(|e| Rejection::new(400, format!("QUERY が JSON でない: {e}")))?;
+        c1::parse(text).map_err(|e| Rejection::new(400, format!("QUERY is not JSON: {e}")))?;
     let c1::Value::Object(map) = &value else {
-        return Err(Rejection::new(400, "QUERY がオブジェクトでない"));
+        return Err(Rejection::new(400, "QUERY is not an object"));
     };
     match map.get("kind") {
         Some(c1::Value::Text(kind)) if kind == "search" => {}
@@ -143,36 +143,36 @@ pub fn verify_query(bytes: &[u8], now: i64) -> Result<IncomingQuery, Rejection> 
             // 具体化)。この口は kind:search 専用である。
             return Err(Rejection::new(
                 400,
-                format!("kind {kind} はこの口では受けない(この口は search だけ)"),
+                format!("kind {kind} is not accepted here (this endpoint takes only search)"),
             ));
         }
-        _ => return Err(Rejection::new(400, "kind がない")),
+        _ => return Err(Rejection::new(400, "no kind")),
     }
     let Some(c1::Value::Text(query_id)) = map.get("query_id") else {
-        return Err(Rejection::new(400, "query_id がない"));
+        return Err(Rejection::new(400, "no query_id"));
     };
     let Some(c1::Value::Text(origin)) = map.get("origin") else {
-        return Err(Rejection::new(400, "origin がない"));
+        return Err(Rejection::new(400, "no origin"));
     };
     if !signature_is_valid(map, origin) {
-        return Err(Rejection::new(401, "QUERY の署名が origin の鍵で検証できない"));
+        return Err(Rejection::new(401, "the signature of QUERY does not verify with the key of origin"));
     }
     let at = match map.get("at") {
         Some(c1::Value::Integer(at)) => *at,
-        _ => return Err(Rejection::new(400, "at がない")),
+        _ => return Err(Rejection::new(400, "no at")),
     };
     if (now - at).abs() > QUERY_FRESHNESS_SECONDS {
         return Err(Rejection::new(
             401,
             format!(
-                "QUERY の at が {QUERY_FRESHNESS_SECONDS} 秒の窓の外(at {at}, こちらの今 \
-                 {now})。署名は再送を防がないので、古い封筒は受けない"
+                "the at of QUERY is outside the {QUERY_FRESHNESS_SECONDS}-second window (at {at}, our now \
+                 {now}); a signature does not prevent replay, so old envelopes are refused"
             ),
         ));
     }
-    let payload = map.get("payload").ok_or_else(|| Rejection::new(400, "payload がない"))?;
+    let payload = map.get("payload").ok_or_else(|| Rejection::new(400, "no payload"))?;
     let request = crate::api::parse_search_request(payload)
-        .map_err(|reason| Rejection::new(400, format!("payload が検索要求として読めない: {reason}")))?;
+        .map_err(|reason| Rejection::new(400, format!("payload cannot be read as a search request: {reason}")))?;
     Ok(IncomingQuery { query_id: query_id.clone(), origin: origin.clone(), request })
 }
 
@@ -187,15 +187,15 @@ pub fn answer_policy(entries: &[PeerEntry], origin: &str) -> Result<CollectionSc
         return Err(Rejection::new(
             403,
             format!(
-                "DBノード {origin} は peers.json に無い(答えるには、そのピアの \
-                 node_id を書いた項が要る)"
+                "DB node {origin} is not in peers.json (answering needs an entry \
+                 with that peer's node_id)"
             ),
         ));
     };
     if entry.trust_level <= 0 {
         return Err(Rejection::new(
             403,
-            format!("DBノード {origin} の trust_level は {} である", entry.trust_level),
+            format!("the trust_level of DB node {origin} is {}", entry.trust_level),
         ));
     }
     Ok(entry.share.clone())
@@ -263,68 +263,68 @@ pub fn verify_answer(
     query_id: &str,
     expected_node_id: Option<&str>,
 ) -> Result<PeerAnswer, String> {
-    let text = std::str::from_utf8(bytes).map_err(|_| "ANSWER が UTF-8 でない".to_string())?;
+    let text = std::str::from_utf8(bytes).map_err(|_| "ANSWER is not UTF-8".to_string())?;
     // 署名の検証は c1 の正規形の上で行い、中身の読み取りは小数を読める JSON
     // (node/src/json.rs)ではなく c1 を通す。応答は得点を載せないので c1 で足りる。
-    let value = c1::parse(text).map_err(|e| format!("ANSWER が JSON でない: {e}"))?;
+    let value = c1::parse(text).map_err(|e| format!("ANSWER is not JSON: {e}"))?;
     let c1::Value::Object(map) = &value else {
-        return Err("ANSWER がオブジェクトでない".to_string());
+        return Err("ANSWER is not an object".to_string());
     };
     let Some(c1::Value::Text(responder)) = map.get("responder") else {
-        return Err("ANSWER に responder がない".to_string());
+        return Err("ANSWER has no responder".to_string());
     };
     if !signature_is_valid(map, responder) {
-        return Err("ANSWER の署名が responder の鍵で検証できない".to_string());
+        return Err("the signature of ANSWER does not verify with the key of responder".to_string());
     }
     if let Some(expected) = expected_node_id {
         if expected != responder {
             return Err(format!(
-                "答えたのは {responder} で、peers.json が待っているのは {expected} である"
+                "{responder} answered, but peers.json expects {expected}"
             ));
         }
     }
     match map.get("query_id") {
         Some(c1::Value::Text(answered)) if answered == query_id => {}
         Some(c1::Value::Text(answered)) => {
-            return Err(format!("別の問い {answered} への答えである(こちらの問いは {query_id})"))
+            return Err(format!("the answer is to another query {answered} (ours is {query_id})"))
         }
-        _ => return Err("ANSWER に query_id がない".to_string()),
+        _ => return Err("ANSWER has no query_id".to_string()),
     }
     let Some(c1::Value::Object(payload)) = map.get("payload") else {
-        return Err("ANSWER に payload がない".to_string());
+        return Err("ANSWER has no payload".to_string());
     };
     let method = match payload.get("method") {
         Some(c1::Value::Text(method)) => method.clone(),
-        _ => return Err("ANSWER の payload に method がない".to_string()),
+        _ => return Err("the payload of ANSWER has no method".to_string()),
     };
     let degraded = match payload.get("degraded") {
         Some(c1::Value::Text(reason)) => Some(reason.clone()),
         _ => None,
     };
     let Some(c1::Value::Array(items)) = payload.get("results") else {
-        return Err("ANSWER の payload に results がない".to_string());
+        return Err("the payload of ANSWER has no results".to_string());
     };
     let mut hits = Vec::with_capacity(items.len());
     for item in items {
         let c1::Value::Object(entry) = item else {
-            return Err("results の要素がオブジェクトでない".to_string());
+            return Err("an element of results is not an object".to_string());
         };
         let Some(c1::Value::Text(id)) = entry.get("id") else {
-            return Err("results の要素に id がない".to_string());
+            return Err("an element of results has no id".to_string());
         };
         if !c1::is_object_id(id) {
-            return Err(format!("results の id {id} がオブジェクト ID の形でない"));
+            return Err(format!("id {id} in results is not an object ID"));
         }
         let snippet = match entry.get("snippet") {
             Some(c1::Value::Text(snippet)) => snippet.clone(),
-            _ => return Err("results の要素に snippet がない".to_string()),
+            _ => return Err("an element of results has no snippet".to_string()),
         };
         // 引用の読み手は REST と同じ citation_from_json である(読み方を二重に実装
         // しない。should/0135)。c1 の値をその読み手へ渡すために JSON へ通し直す。
         let citation_text = String::from_utf8(c1::to_canonical_bytes(
-            entry.get("citation").ok_or("results の要素に citation がない")?,
+            entry.get("citation").ok_or("an element of results has no citation")?,
         ))
-        .map_err(|_| "citation が UTF-8 でない".to_string())?;
+        .map_err(|_| "citation is not UTF-8".to_string())?;
         let citation = crate::api::citation_from_json(&Json::parse(&citation_text)?)?;
         hits.push(RemoteHit { id: id.clone(), snippet, citation });
     }
@@ -381,7 +381,7 @@ pub fn http_ask_peer(query_id: &str) -> AskPeer {
         let response = crate::http::post_json(&target.address, PEER_QUERY_PATH, message, timeout)?;
         if response.status != 200 {
             return Err(format!(
-                "{} が {} を返した: {}",
+                "{} returned {}: {}",
                 PEER_QUERY_PATH,
                 response.status,
                 crate::http::body_head(&response.body)
@@ -539,7 +539,7 @@ pub fn scatter(
         let _ = worker.join();
     }
     let state = Arc::try_unwrap(shared)
-        .unwrap_or_else(|_| unreachable!("worker を回収した後は所有者が 1 つ"))
+        .unwrap_or_else(|_| unreachable!("after the workers are joined there is one owner"))
         .0
         .into_inner()
         .expect("scatter state lock");
@@ -681,7 +681,7 @@ pub fn search_across_peers(
         if let (PeerState::Silent, Some(note)) = (peer.state, &peer.note) {
             // 沈黙は情報ゼロだが、その理由は運用者が直せることが多い(届かない・断られた・
             // 署名が合わない)。応答にも載るが、応答を読まない側にも見えるところへ出す。
-            crate::log_line!("uniqnode: 分散検索: ピア {} は沈黙した: {note}", peer.address);
+            crate::log_line!("uniqnode: distributed search: peer {} stayed silent: {note}", peer.address);
         }
     }
     let results = fuse(&local.results, &scattered.answers, request.top_k);

@@ -69,34 +69,34 @@ path の別の method(`POST /v1/status` など)。`fetch` は `--agent-writable`
 
 ## 断りの本文
 
-- 表に無い要求: 403 `{"error":"agent door: <METHOD> <path> は許可されていない"}`。method と
+- 表に無い要求: 403 `{"error":"agent door: <METHOD> <path> is not allowed"}`。method と
   path は要求の字面をそのまま言う(何を試して断られたかが、応答だけで分かる)。
   `--agent-writable` が 1 つも無いときの PUT もこれである。グラフの名の形が違う
   (`/v1/graphs/a b/…`)ときもこれである: 形の違う名はグラフの行に当たらない。
-- 許していないグラフの読み: 403 `{"error":"agent door: グラフ <g> は読めない(--agent-graph で
-  許したのは <一覧>)"}`。一覧は `--agent-graph` と `--agent-graph-writable` の合併(書ける名は
+- 許していないグラフの読み: 403 `{"error":"agent door: graph <g> cannot be read (--agent-graph
+  allows <一覧>)"}`。一覧は `--agent-graph` と `--agent-graph-writable` の合併(書ける名は
   読めもする)で、`--agent-graph` の与えられた順、その後に `--agent-graph-writable` だけの名を
   与えられた順、`, ` 区切り。1 つも許していなければ括弧の中は
-  `--agent-graph で許したグラフは無い`。
-- 許していないグラフへの書き: 403 `{"error":"agent door: グラフ <g> は書けない
-  (--agent-graph-writable で許したのは <一覧>)"}`。1 つも許していなければ同じく
-  `--agent-graph-writable で許したグラフは無い`。
-- 許していないコレクションへの PUT: 403 `{"error":"agent door: コレクション <c> は書けない
-  (--agent-writable で許したのは <c1>, <c2>)"}`。一覧は与えられた順、`, ` 区切り。
-- 読める集合の外を読もうとしたとき: 403 `{"error":"agent door: コレクション <c> は読めない
-  (--agent-collections で許したのは <c1>, <c2>)"}`。search の `collection` でも、objects と
+  `--agent-graph allows no graphs`。
+- 許していないグラフへの書き: 403 `{"error":"agent door: graph <g> cannot be written
+  (--agent-graph-writable allows <一覧>)"}`。1 つも許していなければ同じく
+  `--agent-graph-writable allows no graphs`。
+- 許していないコレクションへの PUT: 403 `{"error":"agent door: collection <c> cannot be written
+  (--agent-writable allows <c1>, <c2>)"}`。一覧は与えられた順、`, ` 区切り。
+- 読める集合の外を読もうとしたとき: 403 `{"error":"agent door: collection <c> cannot be read
+  (--agent-collections allows <c1>, <c2>)"}`。search の `collection` でも、objects と
   citation の出典でも同じ文言である(門から見ればどちらも同じ「集合の外を読もうとした」で
   ある)。文言を組むのは `agent_door::unreadable_refusal` の 1 箇所で、install の確認も
   そこから期待値を作る(must/0023)。
-- peers 付きの search: 400 `{"error":"agent door: peers は使えない"}`。散布は他のDBノードへ問いの
+- peers 付きの search: 400 `{"error":"agent door: peers cannot be used"}`。散布は他のDBノードへ問いの
   文を配る行為で、読み口の向こうのエージェントに選ばせない。鍵があれば値によらず断る
   (`false` や `null` を主の口と同じく「散布しない」と読み替えると、その解釈が変わったとき
   読み口だけ古い答えを出す)。本文が JSON として壊れているときは断らず委ね、主の口と同じ
   400 が返る。
-- チャンクでないオブジェクト: 403 `{"error":"agent door: チャンクでないオブジェクトは許可されて
-  いない"}`。
-- 記録に写せない申告のヘッダ: 400 `{"error":"agent door: X-Uniqnode-Task の値は
-  [A-Za-z0-9_.:/-] の 1..=64 字"}`(X-Uniqnode-Agent も同文)。下の「誰が要求したかの申告」。
+- チャンクでないオブジェクト: 403 `{"error":"agent door: objects that are not chunks are not
+  allowed"}`。
+- 記録に写せない申告のヘッダ: 400 `{"error":"agent door: the value of X-Uniqnode-Task must be
+  1..=64 characters of [A-Za-z0-9_.:/-]"}`(X-Uniqnode-Agent も同文)。下の「誰が要求したかの申告」。
 
 ## 読める集合(`--agent-collections`)
 
@@ -225,8 +225,8 @@ blob。LLM は幻覚の id や、検索結果からコピーする途中で切�
 行頭の印 `agent` は `agent_door::LOG_MARK` で、試験はこれで行を選ぶ(must/0023)。主の口への
 要求はこの行にならない。PUT も同じ 1 行で(path には `?meta.…` の query がそのまま載る)、
 誰が何を書いたかは doc_rev.meta と、この行の対で追える。起動時には
-`読み口から書けるコレクション: <c1>, <c2>` の 1 行を残す(`--agent-writable` があるときだけ)。
-`--agent-collections` があれば `読み口から読めるコレクション: <c1>, <c2>` の 1 行も同じように
+`collections writable through the agent door: <c1>, <c2>` の 1 行を残す(`--agent-writable` があるときだけ)。
+`--agent-collections` があれば `collections readable through the agent door: <c1>, <c2>` の 1 行も同じように
 残す(絞ったことが、後から記録だけで読める)。末尾の `task=` と `agent=` は要求ヘッダから
 写したもので、在るぶんだけ付く(上の「誰が要求したかの申告」)。
 

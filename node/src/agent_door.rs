@@ -55,7 +55,7 @@ pub const ERROR_PREFIX: &str = "agent door: ";
 
 /// peers 付きの search を断る 400 の本文。散布は他のDBノードへ問いの文を配る行為で、
 /// 読み口の向こうのエージェントに選ばせない。
-pub const PEERS_REFUSED: &str = "agent door: peers は使えない";
+pub const PEERS_REFUSED: &str = "agent door: peers cannot be used";
 
 /// 許可表の行。表そのものは admit の match で、文書(AGENT_DOOR.md の許可表)と同じ順に
 /// 並ぶ。応答側の検査(オブジェクトはチャンクだけ通す)が行を見るので、admit は通した
@@ -134,20 +134,20 @@ pub fn ungraphed_refusal(graph: &str, allowed: &Allowed) -> String {
     let names = allowed.readable_graphs();
     let flag = crate::install::AGENT_GRAPH_FLAG;
     let allowed = match names.is_empty() {
-        true => format!("{flag} で許したグラフは無い"),
-        false => format!("{flag} で許したのは {}", names.join(", ")),
+        true => format!("{flag} allows no graphs"),
+        false => format!("{flag} allows {}", names.join(", ")),
     };
-    format!("{ERROR_PREFIX}グラフ {graph} は読めない({allowed})")
+    format!("{ERROR_PREFIX}graph {graph} cannot be read ({allowed})")
 }
 
 /// 書けないグラフを断る本文。
 pub fn unwritable_graph_refusal(graph: &str, allowed: &Allowed) -> String {
     let flag = crate::install::AGENT_GRAPH_WRITABLE_FLAG;
     let allowed = match allowed.graphs_writable.is_empty() {
-        true => format!("{flag} で許したグラフは無い"),
-        false => format!("{flag} で許したのは {}", allowed.graphs_writable.join(", ")),
+        true => format!("{flag} allows no graphs"),
+        false => format!("{flag} allows {}", allowed.graphs_writable.join(", ")),
     };
-    format!("{ERROR_PREFIX}グラフ {graph} は書けない({allowed})")
+    format!("{ERROR_PREFIX}graph {graph} cannot be written ({allowed})")
 }
 
 /// 読めないコレクションを断る本文。要求が名指しした collection も、オブジェクトの出典の
@@ -155,7 +155,7 @@ pub fn unwritable_graph_refusal(graph: &str, allowed: &Allowed) -> String {
 /// ある)。install の確認は期待する本文をこの関数で組む(文言の家は 1 つ。must/0023)。
 pub fn unreadable_refusal(collection: &str, readable: &[String]) -> String {
     format!(
-        "{ERROR_PREFIX}コレクション {collection} は読めない({} で許したのは {})",
+        "{ERROR_PREFIX}collection {collection} cannot be read ({} allows {})",
         crate::install::AGENT_COLLECTIONS_FLAG,
         readable.join(", ")
     )
@@ -192,14 +192,14 @@ pub fn admit(
         // グラフ層。名指ししたグラフだけを見て、一覧の口(GET /v1/graphs)は開けない:
         // 許していないグラフの名を知らせないためである(docs/design/GRAPH.md)。
         ("GET", _) if graph_of(path).is_some() => {
-            let graph = graph_of(path).expect("直前に見た形");
+            let graph = graph_of(path).expect("the shape checked just above");
             if !allowed.reads_graph(graph) {
                 return Err(api::error_response(403, &ungraphed_refusal(graph, allowed)));
             }
             Row::Graph
         }
         ("PUT" | "DELETE", _) if graph_of(path).is_some() => {
-            let graph = graph_of(path).expect("直前に見た形");
+            let graph = graph_of(path).expect("the shape checked just above");
             if !allowed.writes_graph(graph) {
                 return Err(api::error_response(
                     403,
@@ -209,12 +209,12 @@ pub fn admit(
             Row::GraphWrite
         }
         ("PUT", _) if put_target.is_some() => {
-            let target = put_target.expect("直前に見た形");
+            let target = put_target.expect("the shape checked just above");
             if !writable.iter().any(|allowed| allowed == target.collection) {
                 return Err(api::error_response(
                     403,
                     &format!(
-                        "{ERROR_PREFIX}コレクション {} は書けない({} で許したのは {})",
+                        "{ERROR_PREFIX}collection {} cannot be written ({} allows {})",
                         target.collection,
                         crate::install::AGENT_WRITABLE_FLAG,
                         writable.join(", ")
@@ -226,7 +226,7 @@ pub fn admit(
         _ => {
             return Err(api::error_response(
                 403,
-                &format!("{ERROR_PREFIX}{method} {path} は許可されていない"),
+                &format!("{ERROR_PREFIX}{method} {path} is not allowed"),
             ))
         }
     };
@@ -329,7 +329,7 @@ pub fn screen(
         Fetched::Chunk { .. } => response,
         Fetched::Object { .. } | Fetched::Binary { .. } => api::error_response(
             403,
-            &format!("{ERROR_PREFIX}チャンクでないオブジェクトは許可されていない"),
+            &format!("{ERROR_PREFIX}objects that are not chunks are not allowed"),
         ),
     }
 }
@@ -355,8 +355,8 @@ pub fn recorded_tail(request: &Request) -> Result<String, Response> {
             return Err(api::error_response(
                 400,
                 &format!(
-                    "{ERROR_PREFIX}{name} の値は {RECORDED_VALUE_CHARS} の \
-                     1..={RECORDED_VALUE_MAX} 字"
+                    "{ERROR_PREFIX}the value of {name} must be \
+                     1..={RECORDED_VALUE_MAX} characters of {RECORDED_VALUE_CHARS}"
                 ),
             ));
         }
@@ -386,10 +386,10 @@ fn answer(context: &ApiContext, request: &Request, row: Row, allowed: &Allowed) 
                 // 出典を引けないのは門の断りではなくストア側の失敗である。黙って通さず、
                 // 500 で理由を言う(must/0022)。
                 Err(error) => {
-                    crate::log_line!("uniqnode: 読み口: {id} の出典を引けない: {error}");
+                    crate::log_line!("uniqnode: agent door: cannot look up the citation of {id}: {error}");
                     return api::error_response(
                         500,
-                        &format!("{ERROR_PREFIX}出典を引けない: {error}"),
+                        &format!("{ERROR_PREFIX}cannot look up the citation: {error}"),
                     );
                 }
             },
@@ -449,8 +449,8 @@ pub fn open(address: String, handler: Arc<PeerHandler>) {
                     let refusal = error.to_string();
                     if last_refusal.as_deref() != Some(refusal.as_str()) {
                         crate::log_line!(
-                            "uniqnode: serve: 読み口 {address} に束縛できない: {refusal}。\
-                             {} 秒ごとに再試行する(主の口はそのまま受け付ける)",
+                            "uniqnode: serve: cannot bind the agent door to {address}: {refusal}; \
+                             retrying every {} seconds (the main door keeps accepting)",
                             BIND_RETRY_INTERVAL.as_secs()
                         );
                         last_refusal = Some(refusal);
@@ -464,7 +464,7 @@ pub fn open(address: String, handler: Arc<PeerHandler>) {
             Err(error) => {
                 // 束縛はできている。表示に使う実アドレスが取れないだけなので、指定の
                 // 字面で言って待ち受けは続ける。
-                crate::log_line!("uniqnode: serve: 読み口の束縛先を読めない: {error}");
+                crate::log_line!("uniqnode: serve: cannot read the address the agent door is bound to: {error}");
                 address.clone()
             }
         };
@@ -476,10 +476,10 @@ pub fn open(address: String, handler: Arc<PeerHandler>) {
         if let Err(error) = writeln!(stdout, "listening on {bound}{LISTENING_LINE_SUFFIX}")
             .and_then(|()| stdout.flush())
         {
-            crate::log_line!("uniqnode: serve: 読み口の listening on を標準出力に書けない: {error}");
+            crate::log_line!("uniqnode: serve: cannot write the agent door's 'listening on' line to standard output: {error}");
         }
         drop(stdout);
-        crate::log_line!("uniqnode: serve: 読み口 {bound} で待ち受ける");
+        crate::log_line!("uniqnode: serve: agent door listening on {bound}");
         crate::http::serve_with_peer(listener, handler);
     });
 }
@@ -536,7 +536,7 @@ mod tests {
         assert_eq!(refused.status, 403);
         assert_eq!(
             body(&refused),
-            "{\"error\":\"agent door: POST /v1/admin/gc は許可されていない\"}"
+            "{\"error\":\"agent door: POST /v1/admin/gc is not allowed\"}"
         );
         // 同じ path でも method が違えば表に無い。
         assert_eq!(admit("POST", "/v1/status", b"", &read_only()).expect_err("表に無い").status, 403);
@@ -574,21 +574,21 @@ mod tests {
         assert_eq!(other.status, 403);
         assert_eq!(
             body(&other),
-            "{\"error\":\"agent door: コレクション other は書けない(--agent-writable で許したのは notes, web)\"}"
+            "{\"error\":\"agent door: collection other cannot be written (--agent-writable allows notes, web)\"}"
         );
         // 集合が空なら PUT は表に無い(第 1 段と同じ本文)。
         let read_only = admit("PUT", path, b"", &read_only()).expect_err("表に無い");
         assert_eq!(read_only.status, 403);
         assert_eq!(
             body(&read_only),
-            "{\"error\":\"agent door: PUT /v1/collections/notes/documents/memo.md は許可されていない\"}"
+            "{\"error\":\"agent door: PUT /v1/collections/notes/documents/memo.md is not allowed\"}"
         );
         // 許したコレクションでも fetch(網に出る道)と、documents/ の形でない PUT は表に無い。
         let fetch = admit("POST", "/v1/collections/notes/fetch", b"{}", &allowed).expect_err("表に無い");
         assert_eq!(fetch.status, 403);
         assert_eq!(
             body(&fetch),
-            "{\"error\":\"agent door: POST /v1/collections/notes/fetch は許可されていない\"}"
+            "{\"error\":\"agent door: POST /v1/collections/notes/fetch is not allowed\"}"
         );
         assert_eq!(admit("PUT", "/v1/collections/notes", b"", &allowed).expect_err("表に無い").status, 403);
         assert_eq!(admit("PUT", "/v1/refs/x", b"", &allowed).expect_err("表に無い").status, 403);
@@ -612,7 +612,7 @@ mod tests {
         assert_eq!(refused.status, 403);
         assert_eq!(
             body(&refused),
-            "{\"error\":\"agent door: コレクション web は読めない(--agent-collections で許したのは notes, papers)\"}"
+            "{\"error\":\"agent door: collection web cannot be read (--agent-collections allows notes, papers)\"}"
         );
         // 集合の中と、collection を省いた検索は通る(省略は share として run_search の交差へ)。
         assert_eq!(
@@ -636,7 +636,7 @@ mod tests {
         assert_eq!(outside.status, 403);
         assert_eq!(
             body(&outside),
-            "{\"error\":\"agent door: コレクション web は読めない(--agent-collections で許したのは notes, papers)\"}"
+            "{\"error\":\"agent door: collection web cannot be read (--agent-collections allows notes, papers)\"}"
         );
         let citation = screen(
             Row::Citation,
@@ -664,7 +664,7 @@ mod tests {
         ] {
             let refused = admit("POST", "/v1/search", body_text.as_bytes(), &read_only()).expect_err(body_text);
             assert_eq!(refused.status, 400, "{body_text}");
-            assert_eq!(body(&refused), "{\"error\":\"agent door: peers は使えない\"}");
+            assert_eq!(body(&refused), "{\"error\":\"agent door: peers cannot be used\"}");
         }
         assert_eq!(admit("POST", "/v1/search", b"{\"query\":\"x\",", &read_only()).ok(), Some(Row::Search));
     }
@@ -712,7 +712,7 @@ mod tests {
             assert_eq!(refused.status, 400, "{bad:?}");
             assert_eq!(
                 body(&refused),
-                "{\"error\":\"agent door: X-Uniqnode-Task の値は [A-Za-z0-9_.:/-] の 1..=64 字\"}",
+                "{\"error\":\"agent door: the value of X-Uniqnode-Task must be 1..=64 characters of [A-Za-z0-9_.:/-]\"}",
                 "{bad:?}"
             );
         }
@@ -721,7 +721,7 @@ mod tests {
             .expect("字種の外は断る");
         assert_eq!(
             body(&refused),
-            "{\"error\":\"agent door: X-Uniqnode-Agent の値は [A-Za-z0-9_.:/-] の 1..=64 字\"}"
+            "{\"error\":\"agent door: the value of X-Uniqnode-Agent must be 1..=64 characters of [A-Za-z0-9_.:/-]\"}"
         );
     }
 
@@ -737,7 +737,7 @@ mod tests {
         assert_eq!(blob.status, 403);
         assert_eq!(
             body(&blob),
-            "{\"error\":\"agent door: チャンクでないオブジェクトは許可されていない\"}"
+            "{\"error\":\"agent door: objects that are not chunks are not allowed\"}"
         );
         let doc_rev = screen(
             Row::Object,

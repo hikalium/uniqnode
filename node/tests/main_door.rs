@@ -282,7 +282,7 @@ fn serve_refuses_a_main_door_that_is_not_a_loopback_ip_literal() {
         let (stdout, stderr) = (&output.stdout, &output.stderr);
         assert_eq!(output.status.code(), Some(2), "{address}: {stderr}");
         assert!(!stdout.contains("listening on"), "{address}: {stdout}");
-        assert!(stderr.contains(address) && stderr.contains("ループバック"), "{address}: {stderr}");
+        assert!(stderr.contains(address) && stderr.contains("loopback"), "{address}: {stderr}");
     }
 }
 
@@ -297,7 +297,7 @@ fn a_main_door_that_cannot_bind_exits_before_opening_the_store() {
     let (stdout, stderr) = (&output.stdout, &output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(!stdout.contains("listening on"), "{stdout}");
-    assert!(stderr.contains("束縛できない"), "{stderr}");
+    assert!(stderr.contains("cannot bind"), "{stderr}");
 }
 
 /// 127.0.0.0/8 の別のアドレスと [::1] は通り、自分の uid の本物の接続が両方に通る(照合が
@@ -656,7 +656,7 @@ fn a_serve_that_cannot_query_sock_diag_exits_2_before_listening() {
     );
     assert_eq!(output.status.code(), Some(2), "{}", output.stderr);
     assert!(!output.stdout.contains("listening on"), "{}", output.stdout);
-    for needle in ["自己試験", "AF_NETLINK", "RestrictAddressFamilies"] {
+    for needle in ["self-test", "AF_NETLINK", "RestrictAddressFamilies"] {
         assert!(output.stderr.contains(needle), "{needle}: {}", output.stderr);
     }
 }
@@ -744,7 +744,7 @@ fn the_overflow_uid_refuses_to_start_and_an_unmapped_peer_gets_403() {
     );
     let stderr = &output.stderr;
     assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("自己試験") && stderr.contains("overflowuid"), "{stderr}");
+    assert!(stderr.contains("self-test") && stderr.contains("overflowuid"), "{stderr}");
     assert!(!output.stdout.contains("listening on"), "{}", output.stdout);
 
     let flag = unique_dir("peer-uid-overflow");
@@ -802,7 +802,7 @@ fn the_main_door_refuses_what_a_browser_would_send() {
 
 // ---- install ----
 
-/// install は serve と同じ束縛の判定を据え付けの前に当てる。
+/// install は serve と同じ bind の判定をデプロイの前に当てる。
 #[test]
 fn install_refuses_a_main_door_that_is_not_a_loopback_ip_literal() {
     let work = unique_dir("install-listen");
@@ -823,10 +823,10 @@ fn install_refuses_a_main_door_that_is_not_a_loopback_ip_literal() {
             .expect("install");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(1), "{listen}: {stderr}");
-        assert!(stderr.contains(listen) && stderr.contains("ループバック"), "{listen}: {stderr}");
+        assert!(stderr.contains(listen) && stderr.contains("loopback"), "{listen}: {stderr}");
         assert!(!work.join("units").exists(), "{listen}: 断るときは unit を置かない");
     }
-    // 通る側は normalize を直に呼ぶ(据え付けは systemctl を要る)。/tmp の下のストアは別の理由で
+    // 通る側は normalize を直に呼ぶ(デプロイは systemctl を要る)。/tmp の下のストアは別の理由で
     // 断られるので、道は /srv の形にする(何も作らない)。
     for listen in ["127.0.0.1:17440", "127.0.0.2:17440", "[::1]:17440"] {
         let mut options = uniqnode::install::Options::defaults(

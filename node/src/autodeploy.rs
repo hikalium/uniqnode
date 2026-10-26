@@ -44,7 +44,7 @@ pub const RECORD_NAME: &str = "record";
 pub const LOCK_NAME: &str = "lock";
 /// 試した回のログの置き場(状態の置き場の下)。
 pub const LOGS_NAME: &str = "logs";
-/// 置き換える前の版を残す名(`<bin>` の隣)。
+/// 置き換える前のバージョンを残す名(`<bin>` の隣)。
 pub const PREVIOUS_SUFFIX: &str = ".prev";
 /// 確かめの対象の unit。
 pub const WATCHED_UNITS: [&str; 2] = ["uniqnode-serve@*.service", "uniqnode-viewer@*.service"];
@@ -62,7 +62,7 @@ pub struct Record {
     pub published: Option<String>,
     /// 最後に失敗した SHA(試し直さない。main が進めば試す)。
     pub failed: Option<String>,
-    /// 失敗の後に前の版へ戻した SHA。
+    /// 失敗の後に以前のバージョンへ戻した SHA。
     pub rolled_back: Option<String>,
 }
 
@@ -188,7 +188,7 @@ fn write_record(options: &Options, record: &Record) -> Result<(), String> {
     std::fs::rename(&staging, &path).map_err(|e| format!("{} を置けない: {e}", path.display()))
 }
 
-/// 1 回のループ。Err は理由を言って 1 で終わる回(据えなかった、または前の版へ戻した)。
+/// 1 回のループ。Err は理由を言って 1 で終わる回(据えなかった、または以前のバージョンへ戻した)。
 pub fn run(options: &Options) -> Result<(), String> {
     std::fs::create_dir_all(&options.state_dir)
         .map_err(|e| format!("{} を作れない: {e}", options.state_dir.display()))?;
@@ -360,19 +360,19 @@ fn build_and_replace(options: &Options, target: &str, journal: &mut Journal) -> 
         Err(message) => message,
     };
     if !previous.exists() {
-        return Err(sha_failure(format!("{message}。前の版が無いので戻さない")));
+        return Err(sha_failure(format!("{message}。前のバージョンが無いので戻さない")));
     }
     match install::place_binary(&previous, &options.binary, None) {
         Ok(line) => {
-            journal.line(&format!("前の版へ戻した: {line}"));
+            journal.line(&format!("以前のバージョンへ戻した: {line}"));
             // 戻した版で落ち着いたかはログに残すだけにする(戻した事実は変わらない)。
             match verify(&units, &options.binary) {
-                Ok(elapsed) => journal.line(&format!("全ての unit が前の版で落ち着いた({} 秒)", elapsed.as_secs())),
-                Err(e) => journal.line(&format!("前の版でも落ち着かない: {e}")),
+                Ok(elapsed) => journal.line(&format!("全ての unit が以前のバージョンで落ち着いた({} 秒)", elapsed.as_secs())),
+                Err(e) => journal.line(&format!("以前のバージョンでも落ち着かない: {e}")),
             }
-            Err(Failure { message: format!("{message}。前の版へ戻した"), of_sha: true, rolled_back: true })
+            Err(Failure { message: format!("{message}。前のバージョンへ戻した"), of_sha: true, rolled_back: true })
         }
-        Err(e) => Err(sha_failure(format!("{message}。前の版へ戻せない: {e}"))),
+        Err(e) => Err(sha_failure(format!("{message}。前のバージョンへ戻せない: {e}"))),
     }
 }
 
@@ -448,7 +448,7 @@ fn unit_on_new_binary(unit: &str, new: FileIdentity) -> Result<u32, String> {
         .filter(|pid| *pid > 0)
         .ok_or_else(|| format!("{unit} の MainPID が無い"))?;
     if identity(Path::new(&format!("/proc/{pid}/exe")))? != new {
-        return Err(format!("{unit}(pid {pid})はまだ前の版"));
+        return Err(format!("{unit}(pid {pid})はまだ以前のバージョン"));
     }
     // serve は主の口の /v1/status に答えるまで見る(同じ利用者なので主の口が通す)。
     if unit.starts_with("uniqnode-serve@") {

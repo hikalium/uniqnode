@@ -906,7 +906,7 @@ fn mcp_and_viewer_refuse_the_flag_they_cannot_honour() {
     }
 }
 
-/// グラフ層(第 3 段): `--agent-graph-writable lamalium-plan` で lamalium-plan の節点と辺が
+/// グラフ層(第 3 段): `--agent-graph-writable lamalium-plan` で lamalium-plan のノードと辺が
 /// 読み口から書けて読み戻せ、`--agent-graph plan-archive` は読めるが書けない。許していない
 /// グラフは読みも書きも 403 で、断る本文が許した一覧を言う。グラフの一覧
 /// (GET /v1/graphs)は許可表に無い(許していないグラフの名を知らせない)。
@@ -930,7 +930,7 @@ fn an_allowed_graph_is_written_and_read_through_the_door() {
     let main = server.main().to_string();
     let door = server.door();
 
-    // 書けるグラフ: 節点 2 つと辺 1 本が門を越える。
+    // 書けるグラフ: ノード 2 つと辺 1 本が門を越える。
     for (node, attrs) in [("n_a", "{\"title\":\"調べる\"}"), ("n_b", "{\"title\":\"直す\"}")] {
         let put = simple(&door, "PUT", &format!("/v1/graphs/lamalium-plan/nodes/{node}"), attrs.as_bytes());
         assert_eq!(put.status, 200, "{}", body_text(&put));

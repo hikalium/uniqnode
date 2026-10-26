@@ -12,7 +12,7 @@ use uniqnode::log::{
     default_path, generation_path, MCP_ROLE, RETAINED_GENERATIONS, SERVE_ROLE,
 };
 
-/// 劣化を必ず 1 行残す検索(埋め込みを装備していない節点に融合を求める)。本番の
+/// 劣化を必ず 1 行残す検索(埋め込みを装備していないノードに融合を求める)。本番の
 /// 呼び手(MCP アダプタ・curl)が組むのと同じ POST /v1/search の本体である。
 const DEGRADING_SEARCH: &[u8] = br#"{"query":"log rotation","method":"hybrid","top_k":5}"#;
 

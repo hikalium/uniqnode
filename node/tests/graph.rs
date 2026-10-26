@@ -19,7 +19,7 @@ fn get(server: &Server, path: &str) -> common::HttpResponse {
     simple(&server.address, "GET", path, b"")
 }
 
-/// 節点は作れて読める。恒等ノードは版が変わっても同じで、状態ノードは変わる。この行を
+/// ノードは作れて読める。恒等ノードは版が変わっても同じで、状態ノードは変わる。この行を
 /// 消すと、可変な名前空間(ref)と不変な身元(恒等ノード)の分けが壊れても気づかない。
 #[test]
 fn a_node_keeps_its_identity_across_versions() {
@@ -70,7 +70,7 @@ fn writing_the_same_attributes_again_changes_nothing() {
     );
 }
 
-/// 辺は両端が在るときだけ張れ、節点の更新で張り替えなくてよい。この行を消すと、名前だけの
+/// 辺は両端が在るときだけ張れ、ノードの更新で張り替えなくてよい。この行を消すと、名前だけの
 /// 端を持つ辺が描画の入力に現れる。
 #[test]
 fn an_edge_needs_both_ends_and_survives_node_updates() {
@@ -79,7 +79,7 @@ fn an_edge_needs_both_ends_and_survives_node_updates() {
     let dangling = simple(&server.address, "PUT", "/v1/graphs/plan/edges/blocks/n_a/n_b", b"");
     assert_eq!(dangling.status, 400, "{}", body_text(&dangling));
     assert!(
-        body_text(&dangling).contains("節点 n_b がグラフ plan に無い"),
+        body_text(&dangling).contains("ノード n_b がグラフ plan に無い"),
         "何が足りないかを言う: {}",
         body_text(&dangling)
     );
@@ -130,7 +130,7 @@ fn neighbors_answer_what_waits_for_what() {
     assert_eq!(bad.status, 400, "{}", body_text(&bad));
 }
 
-/// 履歴は残り、着地の時刻が読める。この行を消すと、着地済みへの遷移が前の版を捨てても
+/// 履歴は残り、着地の時刻が読める。この行を消すと、着地済みへの遷移が以前のバージョンを捨てても
 /// 気づかない。
 #[test]
 fn history_keeps_every_version_with_its_time() {
@@ -147,7 +147,7 @@ fn history_keeps_every_version_with_its_time() {
     assert!(!history.contains("\"at\":null"), "各版に時刻が付く: {history}");
 }
 
-/// 消すのは tombstone で、辺が付いたままの節点は消せない。この行を消すと、辺が宙に浮く。
+/// 消すのは tombstone で、辺が付いたままのノードは消せない。この行を消すと、辺が宙に浮く。
 #[test]
 fn deleting_refuses_to_leave_an_edge_hanging() {
     let server = start_server("graph-delete");
@@ -174,7 +174,7 @@ fn deleting_refuses_to_leave_an_edge_hanging() {
     assert!(snapshot.contains("n_b"), "残りは残る: {snapshot}");
 }
 
-/// 全件は 1 本で返り、節点は名前順・辺は (型, from, to) 順である(描画の入力の決定性。
+/// 全件は 1 本で返り、ノードは名前順・辺は (型, from, to) 順である(描画の入力の決定性。
 /// should/0125)。この行を消すと、同じグラフから毎回違う HTML が出る。
 #[test]
 fn the_whole_graph_comes_back_in_one_request_in_a_fixed_order() {
@@ -188,7 +188,7 @@ fn the_whole_graph_comes_back_in_one_request_in_a_fixed_order() {
     let a = snapshot.find("\"name\":\"n_a\"").expect("n_a");
     let b = snapshot.find("\"name\":\"n_b\"").expect("n_b");
     let c = snapshot.find("\"name\":\"n_c\"").expect("n_c");
-    assert!(a < b && b < c, "節点は名前順: {snapshot}");
+    assert!(a < b && b < c, "ノードは名前順: {snapshot}");
     let first = snapshot.find("\"from\":\"n_a\"").expect("n_a の辺");
     let second = snapshot.find("\"from\":\"n_c\"").expect("n_c の辺");
     assert!(first < second, "辺は (型, from, to) 順: {snapshot}");
@@ -227,7 +227,7 @@ fn malformed_requests_are_refused_with_what_would_pass() {
     let server = start_server("graph-refusals");
     let bad_name = put_node(&server, "plan", "n%20a", "{}");
     assert_eq!(bad_name.status, 400, "{}", body_text(&bad_name));
-    assert!(body_text(&bad_name).contains("節点名"), "{}", body_text(&bad_name));
+    assert!(body_text(&bad_name).contains("ノード名"), "{}", body_text(&bad_name));
 
     let bad_body = put_node(&server, "plan", "n_a", "[1,2]");
     assert_eq!(bad_body.status, 400, "{}", body_text(&bad_body));
@@ -264,8 +264,8 @@ fn a_name_in_the_query_is_checked_like_a_name_in_the_path() {
     for (path, what) in [
         ("/v1/graphs/plan/nodes/n_a/neighbors?type=a/b", "辺の型"),
         ("/v1/graphs/plan/edges?type=a/b", "辺の型"),
-        ("/v1/graphs/plan/edges?from=n%20a", "節点名"),
-        ("/v1/graphs/plan/edges?to=n%20a", "節点名"),
+        ("/v1/graphs/plan/edges?from=n%20a", "ノード名"),
+        ("/v1/graphs/plan/edges?to=n%20a", "ノード名"),
     ] {
         let refused = get(&server, path);
         assert_eq!(refused.status, 400, "{path}: {}", body_text(&refused));

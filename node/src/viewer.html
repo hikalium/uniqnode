@@ -418,7 +418,7 @@ async function showFull(id, div, event) {
 }
 
 $("form").addEventListener("submit", search);
-// 戻る・進むでも同じ規律で復元する(道が状態の正典であり、履歴はその列である)。
+// 戻る・進むでも同じ規律で復元する(道が状態のソースであり、履歴はその列である)。
 window.addEventListener("popstate", () => { if (urlToForm()) search(null); else $("results").textContent = ""; });
 loadNode();
 // 道に問いが載っていれば、そのまま同じ検索をやり直す(リロードで画面が変わらない)。

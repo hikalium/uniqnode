@@ -1037,7 +1037,7 @@ pub fn run_search(
     share: &crate::search::CollectionScope,
 ) -> Result<SearchResults, StoreError> {
     // 既定は装備と top_k に従う(決め方の家は crate::embed::default_method。実データで
-    // 測った境目の根拠はそちらのコメントにある)。埋め込みを設定した節点で BM25 単独を
+    // 測った境目の根拠はそちらのコメントにある)。埋め込みを設定したノードで BM25 単独を
     // 既定にしないのは、方式の指定を知らない呼び手(CLI・MCP)が黙って語の一致だけに
     // 取り残されないためである。
     let requested = request
@@ -2675,7 +2675,7 @@ fn handle_graph_node(
         None => (rest, ""),
     };
     if !crate::graph::is_valid_name(node) {
-        return error_response(400, &crate::graph::invalid_name_refusal("節点名", node));
+        return error_response(400, &crate::graph::invalid_name_refusal("ノード名", node));
     }
     let store = &*context.store;
     match (method, tail) {
@@ -2808,7 +2808,7 @@ fn handle_graph_edge(context: &ApiContext, method: &str, graph: &str, rest: &str
     let [edge_type, from, to] = parts.as_slice() else {
         return error_response(404, "/v1/graphs/{g}/edges/{型}/{from}/{to} の形");
     };
-    for (what, name) in [("辺の型", edge_type), ("節点名", from), ("節点名", to)] {
+    for (what, name) in [("辺の型", edge_type), ("ノード名", from), ("ノード名", to)] {
         if !crate::graph::is_valid_name(name) {
             return error_response(400, &crate::graph::invalid_name_refusal(what, name));
         }
@@ -2860,7 +2860,7 @@ fn handle_graph_edge(context: &ApiContext, method: &str, graph: &str, rest: &str
     }
 }
 
-/// グラフ全体(節点と辺)。描画はこの 1 本で足りる。
+/// グラフ全体(ノードと辺)。描画はこの 1 本で足りる。
 fn graph_snapshot(context: &ApiContext, graph: &str) -> Response {
     let store = context.store.lock().expect("lock");
     let nodes = match crate::graph::list_nodes(&store, graph) {
@@ -2915,8 +2915,8 @@ fn graph_edge_list(context: &ApiContext, graph: &str, query: Option<&str>) -> Re
     }
     for (what, name) in [
         ("辺の型", edge_type.as_deref()),
-        ("節点名", from.as_deref()),
-        ("節点名", to.as_deref()),
+        ("ノード名", from.as_deref()),
+        ("ノード名", to.as_deref()),
     ] {
         if let Some(refusal) = name.and_then(|name| refuse_bad_query_name(what, name)) {
             return refusal;

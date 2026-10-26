@@ -184,7 +184,7 @@ pub fn lookup(expected: Endpoints) -> Result<Vec<Answer>, String> {
         .spawn(move || {
             let result = lookup_blocking(expected, deadline);
             // 数を戻してから答えを渡す(呼び手が答えを受けて枠を返し、次の接続が照会するときには
-            // もう数えられていない。逆順だと枠が満ちているときに偽の上限超えが起きうる)。
+            // もう数えられていない。逆順だと枠が満ちているときに誤った上限超えが起きうる)。
             drop(release);
             // 呼び手が期限で去っていれば、送りは失敗して答えは捨てられる。
             let _ = sender.send(result);

@@ -3094,7 +3094,7 @@ mod tests {
         assert!(message.contains("ポートは固定する"), "{message}");
     }
 
-    /// 偽の道具(実行できる空のファイル)を置いた一時ディレクトリ。
+    /// テスト用の道具(実行できる空のファイル)を置いた一時ディレクトリ。
     fn tool_dir(name: &str, binaries: &[&str]) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(

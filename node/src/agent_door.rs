@@ -322,7 +322,7 @@ pub fn screen(
     if row != Row::Object || response.status != 200 {
         return response;
     }
-    // classify_object は所有権を取るので写しを渡す。チャンクは数 KB で、写しの代価は
+    // classify_object は所有権を取るので写しを渡す。チャンクは数 KB で、写しのコストは
     // 小さい。blob は数 MB になりうるが、その写しは捨てる応答のためのもので、境界の
     // 外へは出ない。
     match api::classify_object(response.body.clone()) {

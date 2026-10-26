@@ -142,7 +142,7 @@ const RECIPES: &[RecipeSpec] = &[
         parameters: "pdf-native-color",
         args: &["-pdf"],
         note: Some(
-            "再描画であり、字形の写しは完全ではない。正典の本文は取り込み済みチャンクである",
+            "再描画であり、字形の写しは完全ではない。本文のソースは取り込み済みチャンクである",
         ),
     },
 ];

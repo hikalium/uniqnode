@@ -1787,7 +1787,7 @@ mod tests {
         outcome
     }
 
-    /// 訂正の段の本流: corrects 辺が正典仕様の形({v:1, kind:edge, type:<corrects>,
+    /// 訂正の段の本流: corrects 辺が正規の仕様の形({v:1, kind:edge, type:<corrects>,
     /// members:[新, 旧], meta:{reason, verification}})で発行され、検証記録は再照合の
     /// 根拠行を持ち、索引に訂正の項が足される。同じ訂正の再発行は完全な no-op。
     #[test]

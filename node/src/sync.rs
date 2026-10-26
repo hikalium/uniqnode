@@ -477,10 +477,10 @@ mod tests {
         let evil = EvilPeer { signer: origin_id, last_seq: 1, records };
         let report = sync_from_peer(&replica, &evil).expect("sync");
         assert_eq!(report.records_ingested, 1, "署名済みレコード自体は本物なので入る");
-        assert_eq!(report.hash_mismatches, 1, "偽のバイト列は数えられて捨てられる");
+        assert_eq!(report.hash_mismatches, 1, "改ざんしたバイト列は数えられて捨てられる");
         assert_eq!(report.objects_fetched, 0);
         let guard = replica.lock().expect("lock");
-        assert!(!guard.has_object(&id), "偽の内容は保存されない");
+        assert!(!guard.has_object(&id), "改ざんした内容は保存されない");
         assert!(guard.fsck().expect("fsck").errors.is_empty());
         drop(guard);
 

@@ -785,7 +785,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
-    /// 偽の内容を返すピアは沈黙と同じ扱いになり、保存もされない。
+    /// 改ざんした内容を返すピアは沈黙と同じ扱いになり、保存もされない。
     #[test]
     fn mislabeled_answer_counts_as_silence() {
         let (engine, dir) = temp_engine("mislabeled");

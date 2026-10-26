@@ -272,7 +272,7 @@ fn usage_text() -> String {
                                       利用者で走り、sudo を使わない)。<checkout> で origin の\n\
                                       main を追い、新しい SHA なら組み直して <path> を置き換え、\n\
                                       動いている serve と viewer が自己再起動で新しい版に替わる\n\
-                                      まで見る。落ち着かなければ前の版(<path>.prev)へ戻す。\n\
+                                      まで見る。落ち着かなければ以前のバージョン(<path>.prev)へ戻す。\n\
                                       据えたら --publish-branch へ SHA を push する。状態は\n\
                                       --state-dir(既定 ~/.local/state/uniqnode-autodeploy)に\n\
                                       置き、そこに hold があれば何もしない\n\
@@ -2395,7 +2395,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             }
         }
         // 自動更新の 1 回のループ(SYSTEMD (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「自動
-        // 更新」)。据えなかった回と前の版へ戻した回は理由を言って 1 で終わる。
+        // 更新」)。据えなかった回と前のバージョンへ戻した回は理由を言って 1 で終わる。
         "autodeploy" => {
             let options = parse_autodeploy_options(dir, rest);
             if let Err(message) = uniqnode::autodeploy::run(&options) {

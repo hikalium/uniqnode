@@ -746,7 +746,7 @@ mod tests {
         assert!(!result.repair_selected && !result.demote_selected);
     }
 
-    /// 偽のピア: 127.0.0.1 の一時のポートで待ち、来た要求の道を記録する。/v1/status には
+    /// テスト用のピア: 127.0.0.1 の一時のポートで待ち、来た要求の道を記録する。/v1/status には
     /// `node_id` を名乗り(容量は無制限)、/v1/replication/signers には空を返し、他は 404。
     #[cfg(debug_assertions)]
     fn fake_peer(node_id: String) -> (String, Arc<Mutex<Vec<String>>>) {
@@ -789,11 +789,11 @@ mod tests {
         (address, paths)
     }
 
-    /// 周期が伝播交換・修復・降格を全部始める据え物。ピアが 1 つ(偽のピア。名乗る node_id は
+    /// 周期が伝播交換・修復・降格を全部始める据え物。ピアが 1 つ(テスト用のピア。名乗る node_id は
     /// 別のストア other のもの)と、pin が 2 つある:
     /// - 修復の root: other が持ち、other が min_replicas 2 で pin して保持を表明している。
     ///   自分は持っていない。保持者は other だけで足りず、t_prop が 0 なので自分が修復に選ばれ、
-    ///   other(偽のピア)から取り寄せに行く。
+    ///   other(テスト用のピア)から取り寄せに行く。
     /// - 降格の root: 自分と other が持ち、両方が保持を表明している。自分が min_replicas 1 で
     ///   pin しているので過剰で、自分が rendezvous の最下位になる root を選ぶので降格に選ばれる。
     ///
@@ -860,9 +860,9 @@ mod tests {
     struct WriterFixture {
         engine: HealthEngine,
         store: Arc<Mutex<Store>>,
-        /// 偽のピアの address(伝播交換の対象)。
+        /// テスト用のピアの address(伝播交換の対象)。
         peer_address: String,
-        /// 偽のピアが受けた要求の道。
+        /// テスト用のピアが受けた要求の道。
         peer_requests: Arc<Mutex<Vec<String>>>,
         /// 修復に選ばれる root。
         repair_root: String,
@@ -883,7 +883,7 @@ mod tests {
     }
 
     /// 書ける据え物では、1 周期が伝播交換・修復・降格を全部始める(据え物が書き手を要する
-    /// ことの確かめ)。同じ据え物を書けない状態にすると、どれも始めず(偽のピアには生存確認の
+    /// ことの確かめ)。同じ据え物を書けない状態にすると、どれも始めず(テスト用のピアには生存確認の
     /// /v1/status しか来ない)、何も書かず、入ったことを 1 度だけ記録する(周期ごとに積まない)。
     /// ストアの拒否だけでは、交換と修復の通信と、降格の試みは止まらない。止めるのは周期の
     /// 飛ばしである。
@@ -903,11 +903,11 @@ mod tests {
         let requested = fixture.peer_requests.lock().expect("paths lock").clone();
         assert!(
             requested.iter().any(|path| path == "/v1/replication/signers"),
-            "交換が偽のピアに来ていない: {requested:?}"
+            "交換がテスト用のピアに来ていない: {requested:?}"
         );
         assert!(
             requested.iter().any(|path| path != "/v1/status" && path != "/v1/replication/signers"),
-            "修復の取り寄せが偽のピアに来ていない: {requested:?}"
+            "修復の取り寄せがテスト用のピアに来ていない: {requested:?}"
         );
         fixture.remove();
 

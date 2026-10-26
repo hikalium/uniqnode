@@ -107,7 +107,7 @@ fn install_without_start_places_the_binary_the_units_and_the_drop_ins() {
     let backup_dir = work.join("copy");
     let unit_dir = work.join("units");
     let binary = work.join("bin").join("uniqnode");
-    // 偽の pdftotext(実行できる空のファイル)を PATH の先頭のディレクトリに置く。install は
+    // テスト用の pdftotext(実行できる空のファイル)を PATH の先頭のディレクトリに置く。install は
     // これを見つけ、そのディレクトリを unit の PATH の前に足すはずである。
     let tools = work.join("tools");
     std::fs::create_dir_all(&tools).expect("mkdir");
@@ -201,7 +201,7 @@ fn install_without_start_places_the_binary_the_units_and_the_drop_ins() {
         "{serve}"
     );
     // unit の PATH は systemd の既定であり、install はその前に、自分の PATH で pdftotext を
-    // 見つけたディレクトリを足す。足す先頭のディレクトリは偽の pdftotext を置いた所。
+    // 見つけたディレクトリを足す。足す先頭のディレクトリはテスト用の pdftotext を置いた所。
     assert!(
         serve.contains(&format!(
             "\nEnvironment=PATH={}:",

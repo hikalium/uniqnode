@@ -189,8 +189,8 @@ pub fn is_low_information(text: &str) -> bool {
 }
 
 /// 見出しの語を本文の何回ぶんとして数えるか(重み)。見出しは本文より短く、同じ語を
-/// 繰り返さないので、重み 1(素直な連結)のままだと節の題を並べただけの目次の節に
-/// 定義の節が負ける。評価ハーネス(node/src/eval.rs)の固定コーパスで測ると、重み 1 は
+/// 繰り返さないので、重み 1(素直な連結)のままだとセクションの題を並べただけの目次のセクションに
+/// 定義のセクションが負ける。評価ハーネス(node/src/eval.rs)の固定コーパスで測ると、重み 1 は
 /// 目次の対を取りこぼし、重み 2 と重み 3 は同じ数値になった。同じ数値なら小さい方を
 /// 採る(重みを上げるほど見出しが文書長を占め、本文の語が薄まる)。
 const BREADCRUMB_WEIGHT: usize = 2;
@@ -203,7 +203,7 @@ const BREADCRUMB_WEIGHT: usize = 2;
 /// 見出し(meta.breadcrumbs)を含めるのは、見出しにしかない語で本文へ届くためである。
 /// チャンカーは見出し行を本文に残さず meta.breadcrumbs へ写す(INGEST
 /// (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の「チャンク分割」)ので、含めなければ
-/// 節の題だけにある語はどのチャンクからも消え、検索で到達できない。
+/// セクションの題だけにある語はどのチャンクからも消え、検索で到達できない。
 ///
 /// 重みは出現数を増やす形で与える。BM25 の tf と文書長の両方が同じ 1 本の語の列から
 /// 出るので、フィールドごとに別の長さを持たせる仕掛けが要らない(その形も測ったが、
@@ -250,7 +250,7 @@ fn snippet_of(text: &str) -> String {
 }
 
 /// 索引済みチャンク 1 件。引用は doc_rev 側から組む(INGEST
-/// (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の「文書モデル」節): document は
+/// (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の「文書モデル」セクション): document は
 /// ref パスから collections/<コレクション名>/ を除いた残り、position は chunks 列の
 /// 添字、見出しは meta.breadcrumbs、PDF はさらに meta.page。取得日時は、そのチャンクを
 /// 見えに置いている ref レコードの at である。
@@ -737,7 +737,7 @@ impl SearchIndex {
         scope: &CollectionScope,
         top_k: usize,
     ) -> LexicalRanking {
-        // 語のまとまり(ASCII の 1 語 / 非 ASCII の連なりから出た bigram の束)。被覆は
+        // 語のまとまり(ASCII の 1 語 / 非 ASCII の連なりから出た bigram の組)。被覆は
         // まとまり単位で数える(term_groups_of の理由を参照)。
         let groups = term_groups_of(query);
         let mut group_of: BTreeMap<String, usize> = BTreeMap::new();
@@ -875,7 +875,7 @@ mod tests {
     #[test]
     fn chunk_terms_repeat_the_heading_terms_by_their_weight() {
         // 見出しの語は BREADCRUMB_WEIGHT(2)回ぶん数える。本文の語は 1 回のまま。
-        assert_eq!(chunk_terms_of("本文", &["節".to_string()]), vec!["本文", "節", "節"]);
+        assert_eq!(chunk_terms_of("本文", &["概要".to_string()]), vec!["本文", "概要", "概要"]);
         // 見出しは 1 段ずつ切る: 段をつなぐと生まれる「代整」は索引語にならない。
         assert_eq!(
             chunk_terms_of("", &["世代".to_string(), "整合".to_string()]),
@@ -939,17 +939,17 @@ mod tests {
         assert!(is_low_information("RTL8139D(L)"));
         assert!(is_low_information("142"));
         assert!(is_low_information(""));
-        // 本文は残る。英語の一節は語が足りている。
+        // 本文は残る。英語の短い文章は語が足りている。
         let english = "The GetMemoryMap() function returns a copy of the current memory map. \
                        The map is an array of memory descriptors, each of which describes a \
                        contiguous block of memory.";
         assert_eq!(terms_of(english).len(), 28);
         assert!(!is_low_information(english));
-        // 日本語の短い一節も残る(文字 bigram なので語数が足りる)。
+        // 日本語の短い文章も残る(文字 bigram なので語数が足りる)。
         let japanese = "転置索引は導出データであり、世代の整合はオブジェクト数で確かめる。";
         assert!(japanese.chars().count() < THIN_CHAR_LIMIT);
         assert!(!is_low_information(japanese));
-        // 節番号の点は目次の点線ではない(割合が閾値に届かない)。落ちるとすれば、
+        // セクション番号の点は目次の点線ではない(割合が閾値に届かない)。落ちるとすれば、
         // 見出しだけで本文の無い薄いチャンクだからである。
         assert!(!is_low_information(&format!(
             "5.2.3.2 Generic Address Structure\n{english}"

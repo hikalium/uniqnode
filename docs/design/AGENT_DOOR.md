@@ -137,7 +137,7 @@ install は `--agent-collections <c>` を drop-in に
 無いのに与えれば serve は 2 で終わる)で許したコレクションへの
 `PUT /v1/collections/{c}/documents/{name}` は、主の口と同じ `api::put_document` に委ねられる。
 本文・拡張子・応答(doc_rev・new_objects・ref_updated・previous)は主の口の PUT と同じで、
-INGEST の「CLI と API」節にある。門はコレクション名だけを見る(path の分け方は
+INGEST の「CLI と API」セクションにある。門はコレクション名だけを見る(path の分け方は
 `api::document_path` の 1 箇所)。
 
 出所は PUT の query で渡す: `?meta.<key>=<value>`(複数可、`&` 区切り)。key は
@@ -202,9 +202,9 @@ blob。LLM は幻覚の id や、検索結果からコピーする途中で切�
 - 読み口は裏のスレッドで束縛する。失敗は log に残し(must/0022)、
   `agent_door::BIND_RETRY_INTERVAL`(5 秒)ごとに取りに行き続ける。同じ理由が続くあいだは
   同じ行を積まず、理由が変われば記す。
-- 束縛できたら標準出力に `listening on <addr> (agent door)` の 1 行を出す(末尾の印は
+- 束縛できたら標準出力に `listening on <addr> (agent door)` の 1 行を出す(末尾のマークは
   `agent_door::LISTENING_LINE_SUFFIX`。主の口の行と見分けるためのもので、起動スクリプトと
-  試験はこの印で 2 本目の行を選ぶ)。同じ行を log にも残す。標準出力が閉じていても読み口は
+  試験はこのマークで 2 本目の行を選ぶ)。同じ行を log にも残す。標準出力が閉じていても読み口は
   止めない(println! の panic ではなく log に倒す)。
 - `--listen-agent` は serve だけの引数である。mcp と viewer は読み手を共有しているので字面は
   通るが、効かせる先が無いので黙って捨てずに 2 で終わる(viewer の `--writable` と同じ扱い)。
@@ -222,7 +222,7 @@ blob。LLM は幻覚の id や、検索結果からコピーする途中で切�
 ```
 
 通した要求も断った要求も残す。誰が何を試したかは、通した要求と同じだけ読みたい記録である。
-行頭の印 `agent` は `agent_door::LOG_MARK` で、試験はこれで行を選ぶ(must/0023)。主の口への
+行頭のマーク `agent` は `agent_door::LOG_MARK` で、試験はこれで行を選ぶ(must/0023)。主の口への
 要求はこの行にならない。PUT も同じ 1 行で(path には `?meta.…` の query がそのまま載る)、
 誰が何を書いたかは doc_rev.meta と、この行の対で追える。起動時には
 `collections writable through the agent door: <c1>, <c2>` の 1 行を残す(`--agent-writable` があるときだけ)。

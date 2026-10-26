@@ -1,5 +1,5 @@
 //! RAG ビューワ(VIEWER (uuid:4cd4c71a-ecf3-44a8-a97b-bb2c8d8fe847))。1 枚の HTML を
-//! ブラウザへ出し、その頁が呼ぶ /v1/* を、走っている serve へ転送するだけの薄い被せ物で
+//! ブラウザへ出し、そのページが呼ぶ /v1/* を、走っている serve へ転送するだけの薄い被せ物で
 //! ある。
 //!
 //! 判断は何も持たない。検索の方式の既定・劣化の判断・引用の組み立ては serve の側
@@ -10,7 +10,7 @@
 //!
 //! 自分でストアを開かないので排他ロックを取らない。serve が常駐したままビューワを起こせる。
 //!
-//! 転送するのは頁が実際に使う口だけである。ここを「/v1/ で始まれば何でも通す」に
+//! 転送するのはページが実際に使う口だけである。ここを「/v1/ で始まれば何でも通す」に
 //! すると、ビューワの口がストア API 全体への素通しになる(書き込みの口も含めて)。
 
 use crate::http::{self, Request, Response};
@@ -67,8 +67,8 @@ impl Viewer {
 
     pub fn handle(&self, request: &Request) -> Response {
         let path = request.path.as_str();
-        // 問いは頁の道の問い合わせ部分に残る(`/?q=…`)。リロードで同じ画面が出るように
-        // するための頁側の仕掛けで、ビューワはその部分を読まない — 検索は頁が
+        // 問いはページの道の問い合わせ部分に残る(`/?q=…`)。リロードで同じ画面が出るように
+        // するためのページ側の仕掛けで、ビューワはその部分を読まない — 検索はページが
         // POST /v1/search で投げ直す。ここで落とすのは、道の照合を素の `/` と同じに
         // するためだけである。
         let path = path.split('?').next().unwrap_or(path);
@@ -78,7 +78,7 @@ impl Viewer {
                 content_type: "text/html; charset=utf-8",
                 body: PAGE.as_bytes().to_vec(),
                 shutdown_after: false,
-                // 頁は自分自身であって取り込んだ文書ではない。自分の生成元の /v1/* を
+                // ページは自分自身であって取り込んだ文書ではない。自分の生成元の /v1/* を
                 // 叩けなければ検索そのものが動かないので、砂場には入れない。
                 sandbox: false,
             },
@@ -115,7 +115,7 @@ impl Viewer {
 /// そのままブラウザに届く(理由を途中で握り潰さない。must/0022)。
 ///
 /// 種別も serve が名乗ったものを写す。ここで octet-stream に名乗り直すと、serve が
-/// image/jpeg と言った写しがブラウザに届く頃には型を失い、頁の <img> も PDF の埋め込みも
+/// image/jpeg と言った写しがブラウザに届く頃には型を失い、ページの <img> も PDF の埋め込みも
 /// 動かない。ビューワは運ぶだけの層なので、途中で名乗りを書き換えない。
 fn relay(response: http::ClientResponse) -> Response {
     let content_type = relayed_content_type(upstream_content_type(&response));
@@ -124,7 +124,7 @@ fn relay(response: http::ClientResponse) -> Response {
         content_type,
         body: response.body,
         shutdown_after: false,
-        // 取り込んだ紙面は、この生成元の権限を持たせずに描く(serve が同じ印を付ける
+        // 取り込んだ紙面は、この生成元の権限を持たせずに描く(serve が同じマークを付ける
         // のと同じ理由。node/src/http.rs の sandbox)。
         sandbox: content_type.starts_with("text/html"),
     }
@@ -176,7 +176,7 @@ fn not_found(path: &str) -> Response {
     )
 }
 
-/// GET で通すのは、頁が実際に引く 4 つの形だけである:
+/// GET で通すのは、ページが実際に引く 4 つの形だけである:
 ///   /v1/objects/{id}                     チャンクの全文(c1 JSON か原文 blob)
 ///   /v1/objects/{id}/citation            引用
 ///   /v1/objects/{id}/rendition           写しの目録(生成しない)
@@ -210,19 +210,19 @@ fn object_path(path: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// 頁は外部資源を参照しない(繋がっていない機械でも開ける)。問い合わせ先も同じ
+    /// ページは外部資源を参照しない(繋がっていない機械でも開ける)。問い合わせ先も同じ
     /// 生成元の /v1/* だけである。
     ///
-    /// 以前はここで `<img` の字面そのものを禁じていた。いまは頁が紙面のサムネを出すが、
+    /// 以前はここで `<img` の字面そのものを禁じていた。いまはページが紙面のサムネを出すが、
     /// その画像も同じ生成元の /v1/objects/{id}/rendition/thumb から来る。禁じたいのは
     /// 画像という要素ではなく外への参照なので、検査を意図の側に寄せ、参照先が /v1/ で
-    /// 始まることを見る(字面を禁じたままだと、意図を満たす頁も落ちてしまう)。
+    /// 始まることを見る(字面を禁じたままだと、意図を満たすページも落ちてしまう)。
     #[test]
     fn the_page_is_self_contained() {
         assert!(PAGE.starts_with("<!DOCTYPE html>"), "1 枚の HTML である");
         for forbidden in ["http://", "https://", "src=\"//", "href=\"//", "url(//", "//cdn"] {
-            // 転送先の既定 URL は Rust 側の定数で、頁には書かない。
-            assert!(!PAGE.contains(forbidden), "頁が外部資源 {forbidden} を参照している");
+            // 転送先の既定 URL は Rust 側の定数で、ページには書かない。
+            assert!(!PAGE.contains(forbidden), "ページが外部資源 {forbidden} を参照している");
         }
         // 参照先を字面で書いているところは、どれも同じ生成元の /v1/ で始まる(字面で
         // ないところ = 変数は renditionUrls が組み立てた道で、その形は
@@ -235,7 +235,7 @@ mod tests {
                 };
                 assert!(
                     literal.starts_with("/v1/") || literal.starts_with('#'),
-                    "頁が同じ生成元でない参照先を書いている: {}",
+                    "ページが同じ生成元でない参照先を書いている: {}",
                     &literal[..40.min(literal.len())]
                 );
             }
@@ -243,9 +243,9 @@ mod tests {
         assert!(PAGE.contains("fetch(\"/v1/status\")") || PAGE.contains("api(\"/v1/status\")"));
     }
 
-    /// 頁に流し込む値は、必ず escapeText を通してから innerHTML に入る。チャンクの本文も
+    /// ページに流し込む値は、必ず escapeText を通してから innerHTML に入る。チャンクの本文も
     /// 文書名も取り込んだ文書から来るので、`<script>` を含む本文を素通しにすると、
-    /// 取り込んだ文書が頁の上で走る。
+    /// 取り込んだ文書がページの上で走る。
     #[test]
     fn every_value_from_the_store_is_escaped_before_it_reaches_the_page() {
         for field in ["hit.snippet", "hit.id", "cite.collection", "cite.document", "crumbs"] {
@@ -267,7 +267,7 @@ mod tests {
 
     /// 入力欄と選択肢は、背景と文字を色の組で指定する。片方だけを指定すると、開いた
     /// 選択肢が地の色を失って白地に白文字になる(暗い配色で実際に起きた)。開いた選択肢は
-    /// 別の描画面に出て頁の色を継がないので、option にも同じ組を与える。
+    /// 別の描画面に出てページの色を継がないので、option にも同じ組を与える。
     #[test]
     fn form_controls_set_both_background_and_foreground() {
         assert!(
@@ -282,9 +282,9 @@ mod tests {
         assert!(PAGE.contains("color-scheme: light dark"), "配色の申告が無い");
     }
 
-    /// 問いは道の問い合わせ部分に載る(`/?q=…`)。頁はそこから入力欄を復元して同じ検索を
+    /// 問いは道の問い合わせ部分に載る(`/?q=…`)。ページはそこから入力欄を復元して同じ検索を
     /// やり直すので、リロードでも戻るでも画面が変わらない。ビューワ側は、その部分が付いた
-    /// 道でも素の `/` と同じく頁を返す(付いた瞬間に 404 になっては元も子もない)。
+    /// 道でも素の `/` と同じくページを返す(付いた瞬間に 404 になっては元も子もない)。
     #[test]
     fn the_page_is_served_with_a_query_string_too() {
         let viewer = Viewer::new("http://127.0.0.1:1", "/tmp/store").expect("組める");
@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(viewer.handle(&request).status, 404);
     }
 
-    /// 頁が道に写す欄と、道から読み戻す欄が同じであること。片方だけ足すと、その欄だけ
+    /// ページが道に写す欄と、道から読み戻す欄が同じであること。片方だけ足すと、その欄だけ
     /// リロードで消える(画面の状態は入力欄そのものであり、道はその写しである)。
     #[test]
     fn the_page_round_trips_the_search_form_through_the_query_string() {
@@ -330,7 +330,7 @@ mod tests {
         assert!(!PAGE.contains("params.set(\"results\""), "結果を道に残さない");
     }
 
-    /// 頁は全文をチャンク ID そのままの道で取る。この API のパスは生のまま扱う規約
+    /// ページは全文をチャンク ID そのままの道で取る。この API のパスは生のまま扱う規約
     /// (パーセントデコードしない。node/src/http.rs)なので、`s256:` のコロンを %3A に
     /// 直すと ID の形の検査に落ちて 404 になる(実際にそうなった)。
     #[test]
@@ -340,13 +340,13 @@ mod tests {
             !PAGE.contains("encodeURIComponent"),
             "パーセント符号化した ID は、受け側の形の検査を通らない"
         );
-        // 受け側が実際にその形を通すこと(頁と受け側が同じ形を見ている)。
+        // 受け側が実際にその形を通すこと(ページと受け側が同じ形を見ている)。
         let id = format!("s256:{}", "ab".repeat(32));
         assert_eq!(object_path(&format!("/v1/objects/{id}")), Some(format!("/v1/objects/{id}")));
         assert_eq!(object_path(&format!("/v1/objects/{}", id.replace(':', "%3A"))), None);
     }
 
-    /// 通す口は頁が引くものだけで、それ以外は 404 になる(素通しにしない)。
+    /// 通す口はページが引くものだけで、それ以外は 404 になる(素通しにしない)。
     #[test]
     fn only_the_endpoints_the_page_uses_are_forwarded() {
         let id = format!("s256:{}", "ab".repeat(32));
@@ -406,9 +406,9 @@ mod tests {
         assert_eq!(object_path("/v1/objects/s256:zz/rendition/thumb"), None);
     }
 
-    /// 頁は写しの道を自分で組み立てる。この形は serve 側の口の契約そのものなので、
-    /// 応答から来た道(source_url)は、頁が形を検めてから href に入る。検めないと、
-    /// `javascript:` を返す相手に繋いだ頁の上でそれが走る。
+    /// ページは写しの道を自分で組み立てる。この形は serve 側の口の契約そのものなので、
+    /// 応答から来た道(source_url)は、ページが形を検めてから href に入る。検めないと、
+    /// `javascript:` を返す相手に繋いだページの上でそれが走る。
     #[test]
     fn the_page_checks_the_shape_of_the_path_it_was_told() {
         assert!(
@@ -421,7 +421,7 @@ mod tests {
         );
     }
 
-    /// 字面で固定する(統合テストは頁の JavaScript を走らせないため、頁が
+    /// 字面で固定する(統合テストはページの JavaScript を走らせないため、ページが
     /// encodeURIComponent していた事故を一度見逃している。should/0138)。
     #[test]
     fn the_page_builds_the_rendition_paths_itself() {
@@ -432,13 +432,13 @@ mod tests {
             "`/v1/objects/${id}/rendition/page`",
             "`/v1/objects/${id}/rendition/pagepdf`",
         ] {
-            assert!(PAGE.contains(path), "頁が {path} を組み立てていない");
+            assert!(PAGE.contains(path), "ページが {path} を組み立てていない");
         }
         // 原本は当該ページを開く形で参照する(何も生成しないので必ず開く)。
         assert!(PAGE.contains("#page=${entry.page}"), "原本の当該ページへ行く道が無い");
         // サムネは見えたときに取りに行く(10 件ぶんの画像を一度に頼まない)。
         assert!(PAGE.contains("img.loading = \"lazy\""), "サムネが lazy でない");
-        // 受け側が実際にその形を通すこと(頁と受け側が同じ形を見ている)。
+        // 受け側が実際にその形を通すこと(ページと受け側が同じ形を見ている)。
         let id = format!("s256:{}", "ab".repeat(32));
         for alias in ["source", "thumb", "page", "pagepdf"] {
             let path = format!("/v1/objects/{id}/rendition/{alias}");
@@ -447,8 +447,8 @@ mod tests {
     }
 
     /// 目録から来た文言(出せない理由・注記)は、テキストの位置にしか入らない。理由の
-    /// 文言には取り込んだ文書の名前や外部コマンドの出力が混じるので、印付けの位置に
-    /// 入れると頁の上で走る。
+    /// 文言には取り込んだ文書の名前や外部コマンドの出力が混じるので、マーク付けの位置に
+    /// 入れるとページの上で走る。
     #[test]
     fn words_from_the_catalog_reach_the_page_as_text_only() {
         for (number, line) in PAGE.lines().enumerate() {
@@ -459,7 +459,7 @@ mod tests {
             }
             assert!(
                 line.contains("why(") || line.contains("textContent"),
-                "{} 行目: 目録の文言が印付けの位置に入っている: {line}",
+                "{} 行目: 目録の文言がマーク付けの位置に入っている: {line}",
                 number + 1
             );
         }
@@ -467,9 +467,9 @@ mod tests {
         assert!(PAGE.contains("div.textContent = `${label}: ${text"), "why が textContent でない");
     }
 
-    /// 目録の口が無い serve(旧版)に繋いだときは、頁は何も足さない。写しの箱を作るのは
+    /// 目録の口が無い serve(旧版)に繋いだときは、ページは何も足さない。写しの箱を作るのは
     /// 目録が返ってきた道の中だけなので、要求が通らなければ従来どおりの画面のままである
-    /// (壊れた見た目にしない)。頁の JavaScript は Rust からは走らせられないので、
+    /// (壊れた見た目にしない)。ページの JavaScript は Rust からは走らせられないので、
     /// ここで見るのは道の順序である(実際に 404 が返ることは統合テストが見る)。
     #[test]
     fn a_serve_without_the_catalog_leaves_the_page_as_it_was() {
@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(relayed_content_type(Some("application/json")), "application/json");
         assert_eq!(relayed_content_type(Some(" image/jpeg ")), "image/jpeg");
         assert_eq!(relayed_content_type(Some("IMAGE/JPEG")), "image/jpeg");
-        // 取り込んだ紙面は型を保って運ぶ(砂場の印は relay が付ける)。
+        // 取り込んだ紙面は型を保って運ぶ(砂場のマークは relay が付ける)。
         assert_eq!(
             relayed_content_type(Some("text/html; charset=utf-8")),
             "text/html; charset=utf-8"
@@ -541,7 +541,7 @@ mod tests {
         assert!(text.contains("uniqnode serve /tmp/store 127.0.0.1:1"), "{text}");
     }
 
-    /// 頁そのものは serve が無くても出る(まず画面が出て、届かないことは画面が言う)。
+    /// ページそのものは serve が無くても出る(まず画面が出て、届かないことは画面が言う)。
     #[test]
     fn the_page_is_served_without_asking_the_serve() {
         let viewer = Viewer::new("http://127.0.0.1:1", "/tmp/store").expect("組める");

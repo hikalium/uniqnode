@@ -17,7 +17,7 @@ pub const SELF_RELOAD_ENV: &str = "UNIQNODE_SELF_RELOAD";
 /// Restart=on-failure が起こし直す 0 でない値にする(EX_TEMPFAIL)。
 pub const SELF_RELOAD_EXIT: i32 = 75;
 
-/// 名が外れた実行ファイルの /proc/self/exe の readlink に Linux が付ける印。
+/// 名が外れた実行ファイルの /proc/self/exe の readlink に Linux が付けるマーク。
 const DELETED_SUFFIX: &str = " (deleted)";
 
 /// 見張りの間隔。

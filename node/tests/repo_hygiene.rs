@@ -1,6 +1,6 @@
 //! リポジトリ衛生検査。lamalium の
 //! check-policy / check-docs の uniqnode 版。機械的に検査できる範囲:
-//! - policy/ の形式(ファイル名・番号帯・Level 行と置き場所の一致・必須節・廃止スタブ)
+//! - policy/ の形式(ファイル名・番号帯・Level 行と置き場所の一致・必須のセクション・廃止スタブ)
 //! - policy 参照の解決(policy/ の外のファイルが存在しないポリシー番号を参照しない。
 //!   policy/ 本体は lamalium からの逐語コピーであり、未採用ポリシーへの相互参照を含む
 //!   ことが policy/README.md の Provenance に記録済みなので対象外)
@@ -152,7 +152,7 @@ fn the_policy_corpus_is_well_formed() {
             }
             for required in ["Scope:", "Rationale", "Enforcement"] {
                 if !text.lines().any(|l| l.starts_with(required)) {
-                    failures.push(format!("{}: {required} 節がない", display(&path)));
+                    failures.push(format!("{}: {required} セクションがない", display(&path)));
                 }
             }
         }
@@ -268,7 +268,7 @@ fn docs_anchors_are_defined_unique_and_resolvable() {
     markdown_files_under(&root.join("docs"), &mut docs_files);
 
     // 定義: docs/ の各文書は H1 の直後に <a id="uuid"></a> を持つ。加えて、参照される
-    // 節見出しの直下にも節アンカーを置ける(must/0013)。定義表は両方を集める。
+    // セクションの見出しの直下にもセクションアンカーを置ける(must/0013)。定義表は両方を集める。
     for path in &docs_files {
         let text = std::fs::read_to_string(path).expect("read doc");
         let mut head_anchor_found = false;

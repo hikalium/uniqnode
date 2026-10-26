@@ -1,25 +1,25 @@
-//! PDF の節見出しの表(物理ページ番号 → 節見出しの経路)。
+//! PDF のセクションの見出しの表(物理ページ番号 → セクションの見出しの経路)。
 //!
 //! Markdown のチャンクは見出しの入れ子(breadcrumbs)を持ち、索引はそれに本文の 2 倍の
 //! 重みを掛ける。PDF のチャンクだけがその構造を持っていない。この層は、PDF から
-//! 「そのページに効いている節見出しの経路」を作り、取り込み側が breadcrumbs に写せる形
+//! 「そのページに効いているセクションの見出しの経路」を作り、取り込み側が breadcrumbs に写せる形
 //! (`Vec<PageHeadings>`)で返す。
 //!
 //! なぜ要るか(実測 2026-08-17)。日本語「スクラッチパッド」で引くと、正解の
 //! xhci_1_2 p.334(本文が「4.20 Scratchpad Buffers / The Scratchpad Allocation
-//! mechanism of the xHCI ...」で始まる節)が上位に出ず、レジスタのビット定義が並ぶ
+//! mechanism of the xHCI ...」で始まるセクション)が上位に出ず、レジスタのビット定義が並ぶ
 //! p.434 が 1 位になる。両者の本文はどちらも Scratch/Pad/Buffer を含み、**区別できる
-//! 情報は節見出しにしかない**(p.334 は `4.20 Scratchpad Buffers`、p.434 は
+//! 情報はセクションの見出しにしかない**(p.334 は `4.20 Scratchpad Buffers`、p.434 は
 //! `5.7.2 VTIO Common Assignment Register 1`)。
 //!
 //! 2 系統ある。
 //!
-//! 1. しおり(`pdftohtml -f 1 -l 1 -c` が吐く `-outline.html`)。節番号・題・階層・
+//! 1. しおり(`pdftohtml -f 1 -l 1 -c` が吐く `-outline.html`)。セクション番号・題・階層・
 //!    物理ページ番号が文書全体ぶん揃っている。実測 0.6 秒/本。ただし写し取りを禁じた
 //!    PDF(xhci_1_2・hut1_12v2)では pdftohtml 自体が拒まれ、しおりの無い PDF も多い。
 //! 2. 語の高さ(`pdftotext -bbox`)。写し取りを禁じた PDF でも通る(実測: xhci 645
 //!    ページで 1.9 秒)。語ごとの yMax-yMin がフォントの大きさの代理になり、本文より
-//!    背の高い行のうち先頭語が節番号のものを見出しとみなす。
+//!    背の高い行のうち先頭語がセクション番号のものを見出しとみなす。
 //!
 //! しおりを先に試し、駄目なら高さで拾う。どちらを使ったかは返り値
 //! (`DocumentOutline::source`)に必ず入る。黙って劣化しない(must/0019 の同型)。
@@ -96,15 +96,15 @@ impl DocumentOutline {
 pub struct Heading {
     /// 物理ページ番号(1 始まり)。
     pub page: u32,
-    /// 1 始まりの階層。1 = 章、2 = 節、3 = 小節。
+    /// 1 始まりの階層。1 = 章、2 = セクション、3 = サブセクション。
     pub level: usize,
-    /// 節番号を含む題。例 `4.20 Scratchpad Buffers`。
+    /// セクション番号を含む題。例 `4.20 Scratchpad Buffers`。
     pub title: String,
 }
 
 // ---- 判定に使う定数 ----
 
-/// 見出しの経路の深さの上限。文書名 > 節 > 小節 の 3 段のうち、文書名は取り込み側が
+/// 見出しの経路の深さの上限。文書名 > セクション > サブセクション の 3 段のうち、文書名は取り込み側が
 /// 既に持っている(チャンクの ref パス)ので、この層が返すのは 2 段までである。
 /// 4 段以上に細かく切ると断片化で検索が劣化する、との報告に合わせてある。
 pub const HEADING_PATH_DEPTH: usize = 2;
@@ -468,9 +468,9 @@ fn line_of(words: &[Word]) -> Option<TextLine> {
 /// 題の字面をそろえる。改行しない空白(U+00A0)や連なった空白を普通の空白 1 つにして
 /// 前後を落とす。2 系統が同じ形の題を返すよう、両方がここを通る(should/0135)。
 ///
-/// 節番号の切り出しにも要る。pcie_40 のしおりは `4.\u{a0}Physical Layer Specification`
+/// セクション番号の切り出しにも要る。pcie_40 のしおりは `4.\u{a0}Physical Layer Specification`
 /// と、番号と題の間を U+00A0 で繋いでいる。そのままだと先頭の字句が
-/// `4.\u{a0}Physical` になり、節番号として読めない。
+/// `4.\u{a0}Physical` になり、セクション番号として読めない。
 pub fn normalize_title(text: &str) -> String {
     if !text.chars().any(|ch| ch.is_whitespace() && ch != ' ')
         && !text.contains("  ")
@@ -523,7 +523,7 @@ pub fn body_height_of(pages: &[TextPage]) -> f32 {
         .unwrap_or(0.0)
 }
 
-/// 節番号として通る字句か。返すのは階層の深さ。`4` は 1、`4.20` は 2。PCIe は節番号の
+/// セクション番号として通る字句か。返すのは階層の深さ。`4` は 1、`4.20` は 2。PCIe はセクション番号の
 /// 末尾にピリオドが付く(`5.5.3.3. L1.2.Exit`)ので、末尾の 1 つは剥がして数える。
 /// これを許さないと pcie_40 の 1053 ページが全滅する(実測)。
 pub fn section_number_depth(token: &str) -> Option<usize> {
@@ -555,7 +555,7 @@ pub fn in_margin_band(line: &TextLine, page_height: f32) -> bool {
 ///
 /// 空きを見るのは、見出しにも数字で終わるものがあるからである
 /// (`5.7.2 VTIO Common Assignment Register 1`)。末尾の数字だけで弾くと、その手の
-/// レジスタ名の節を全部落とす。逆に空きを見ないと ACPI の柱
+/// レジスタ名のセクションを全部落とす。逆に空きを見ないと ACPI の柱
 /// (`6.2. Device Configuration Objects 376`)が見出しとして通る。
 pub fn looks_like_running_head(text: &str, trailing_gap: f32) -> bool {
     if has_dot_leader(text) {
@@ -573,7 +573,7 @@ pub fn looks_like_running_head(text: &str, trailing_gap: f32) -> bool {
 }
 
 /// 点リーダ(目次の `.....`)を含むか。ピリオドが DOT_LEADER_RUN 個以上続く箇所を
-/// 探す。節番号の `5.5.3.3.` には連続したピリオドが無いので当たらない。
+/// 探す。セクション番号の `5.5.3.3.` には連続したピリオドが無いので当たらない。
 ///
 /// 要るのは、目次の行が空きではなく点で埋まっていて、末尾の空きを見る規則をすり抜ける
 /// からである(実測: uefi_2_9 の目次 p.46-49 が
@@ -620,7 +620,7 @@ pub fn heading_of_line(
 }
 
 /// 折り返した見出しの続きか。見出しと同じ高さで、行間が詰まっていて、それ自身が
-/// 節番号で始まらない行を続きとみなす。
+/// セクション番号で始まらない行を続きとみなす。
 ///
 /// 要るのは、2 行に渡る見出しが実在するからである(xhci の
 /// `4.25 USB Virtualization Based Trusted IO Management (USB` が 1 行目で途切れ、
@@ -823,7 +823,7 @@ fn remove_work_dir(dir: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// 節番号として通る字句。PCIe の末尾ピリオドを通し、年号めいた裸の語や
+    /// セクション番号として通る字句。PCIe の末尾ピリオドを通し、年号めいた裸の語や
     /// 版番号めいたものを落とす。
     #[test]
     fn section_numbers_allow_the_trailing_period_pcie_writes() {
@@ -887,7 +887,7 @@ mod tests {
         assert!(has_dot_leader(&contents.text));
         assert!(looks_like_running_head(&contents.text, contents.trailing_gap));
         assert_eq!(heading_of_line(&contents, 12.19, 792.0), None);
-        // 節番号の連なるピリオドは点リーダではない。
+        // セクション番号の連なるピリオドは点リーダではない。
         assert!(!has_dot_leader("5.5.3.3. L1.2.Exit"));
         // xhci p.434 の見出しは数字で終わるが、空きは語間ぶんしかないので残る。
         let real = line("5.7.2 VTIO Common Assignment Register 1", 100.0, 14.0);
@@ -906,7 +906,7 @@ mod tests {
         assert!(is_wrapped_continuation(&first, &second));
         // 本文の高さに戻った次行は続きではない。
         assert!(!is_wrapped_continuation(&first, &line("The USB-IO ...", 118.0, 12.2)));
-        // 次の見出しは、同じ高さでも節番号で始まるので続きにしない。
+        // 次の見出しは、同じ高さでもセクション番号で始まるので続きにしない。
         assert!(!is_wrapped_continuation(&first, &line("4.26 Next Section", 118.0, 17.2)));
         // 行が離れていれば続きにしない。
         assert!(!is_wrapped_continuation(&first, &line("-IO)", 300.0, 17.2)));
@@ -949,7 +949,7 @@ mod tests {
     }
 
     /// 改行しない空白を普通の空白にそろえる。そろえないと pcie_40 のしおりの
-    /// `4.\u{a0}Physical ...` から節番号を切り出せない。
+    /// `4.\u{a0}Physical ...` からセクション番号を切り出せない。
     #[test]
     fn titles_normalise_non_breaking_space_so_the_number_can_be_split_off() {
         assert_eq!(normalize_title("4.\u{a0}Physical Layer"), "4. Physical Layer");
@@ -1013,7 +1013,7 @@ mod tests {
         assert_eq!(attribute_headings_to_pages(&[], Some(10)), Vec::new());
     }
 
-    /// 同じページに複数の見出しがあるときは最後のものを採る(その節が紙面の残りを
+    /// 同じページに複数の見出しがあるときは最後のものを採る(そのセクションが紙面の残りを
     /// 占めているため)。
     #[test]
     fn the_last_heading_on_a_page_wins() {
@@ -1025,7 +1025,7 @@ mod tests {
         assert_eq!(pages, vec![PageHeadings { page: 10, path: vec!["1.2 Second".to_string()] }]);
     }
 
-    /// bbox の xml から行に畳む。xMin/yMin の実際の値(xhci p.334)を使う。節番号が
+    /// bbox の xml から行に畳む。xMin/yMin の実際の値(xhci p.334)を使う。セクション番号が
     /// ぶら下げインデントで x=76、題が x=141 に離れていても、yMin が同じなら 1 行に
     /// なる(素の pdftotext は `4.20` と `Scratchpad Buffers` を別の段落に割る)。
     #[test]
@@ -1053,7 +1053,7 @@ mod tests {
     /// する(docs/design/TESTING.md の外部コマンドの規約。飛ばして緑にすると、検証した
     /// のか検証を諦めたのかが結果から区別できなくなる)。
     ///
-    /// 使う PDF は 3 ページの試験用紙面で、しおりも節番号つきの見出しも持たない。
+    /// 使う PDF は 3 ページの試験用紙面で、しおりもセクション番号つきの見出しも持たない。
     /// つまりこれは「2 系統とも駄目だったときに、空と理由を返す」道の試験である。
     #[test]
     fn a_pdf_without_any_heading_reports_why_instead_of_guessing() {

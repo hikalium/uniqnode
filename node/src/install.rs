@@ -195,7 +195,7 @@ pub const NFT_RULES_NAME: &str = "agent-door.nft";
 /// serve は bind に失敗しても主の口を殺さず再試行するので、その分をここで待つ。上限は安全の
 /// 網で、条件が立った瞬間に進む(should/0104)。起動直後の serve は索引を裏で温め、その間
 /// ストアのロックを持つので /v1/status も待たされる(本番 55,452 オブジェクトで冷えた初回が
-/// 22 秒。docs/design/SEARCH.md の索引の構築の節)。30 秒ではその余裕が無いので 90 秒。
+/// 22 秒。docs/design/SEARCH.md の索引の構築のセクション)。30 秒ではその余裕が無いので 90 秒。
 pub const WAIT_BOUND: Duration = Duration::from_secs(90);
 
 /// PrivateTmp=yes の unit からは見えない置き場。ここにストアや写し先を指されたら断る
@@ -874,7 +874,7 @@ pub fn drop_ins(
                 if let Some(FirewallBackend::Nft(nft)) = &options.firewall_backend {
                     // 読み口の firewall は serve を起こすたびに入れ直す(nftables.service が
                     // 無効な機械でも再起動で消えない)。先頭の + は User= に関わらず root で
-                    // 走らせる印。
+                    // 走らせるマーク。
                     lines.push(format!(
                         "# limit who may reach the agent door with the nft table {} ({NFT_RULES_NAME} beside this file)\n\
                          ExecStartPre=+{} -f {}",

@@ -45,7 +45,7 @@ fn start_viewer(data_dir: &str, serve_url: &str) -> ViewerProcess {
     ViewerProcess { child, address }
 }
 
-/// 完了条件: ブラウザが頁を受け取り、その頁が呼ぶ口だけで検索から全文まで辿れる。
+/// 完了条件: ブラウザがページを受け取り、そのページが呼ぶ口だけで検索から全文まで辿れる。
 #[test]
 fn the_page_and_the_endpoints_it_uses_carry_a_search_from_query_to_full_text() {
     let server = start_server("viewer-serve");
@@ -54,17 +54,17 @@ fn the_page_and_the_endpoints_it_uses_carry_a_search_from_query_to_full_text() {
     let serve_url = format!("http://{}", server.address);
     let viewer = start_viewer(server.dir.to_str().expect("utf-8"), &serve_url);
 
-    // (1) 頁そのもの。1 枚の HTML が text/html で返る。
+    // (1) ページそのもの。1 枚の HTML が text/html で返る。
     let page = simple(&viewer.address, "GET", "/", b"");
     assert_eq!(page.status, 200);
     let html = body_text(&page);
     assert!(html.starts_with("<!DOCTYPE html>"), "{}", &html[..80.min(html.len())]);
     assert!(html.contains("uniqnode viewer"), "題が入っている");
-    // 頁が写しを引く道は、この頁の中に字面で入っている(ブラウザがこれを組み立てる)。
+    // ページが写しを引く道は、このページの中に字面で入っている(ブラウザがこれを組み立てる)。
     assert!(html.contains("`/v1/objects/${id}/rendition`"), "写しの目録を引く道");
     assert!(html.contains("`/v1/objects/${id}/rendition/thumb`"), "サムネを引く道");
 
-    // (2) 頁が起動時に読む二つ(素性とコレクションの一覧)。
+    // (2) ページが起動時に読む二つ(素性とコレクションの一覧)。
     let status = body_text(&simple(&viewer.address, "GET", "/v1/status", b""));
     assert!(status.contains("\"node_id\""), "{status}");
     let refs = body_text(&simple(&viewer.address, "GET", "/v1/refs", b""));
@@ -78,7 +78,7 @@ fn the_page_and_the_endpoints_it_uses_carry_a_search_from_query_to_full_text() {
     assert!(text.contains("\"document\":\"search_ja\""), "{text}");
     assert!(text.contains("\"score_semantics\""), "{text}");
 
-    // (4) 全文。頁の「全文」ボタンが引くのと同じ口。
+    // (4) 全文。ページの「全文」ボタンが引くのと同じ口。
     let id = json_text_field(&text, "id").expect("チャンク ID");
     let chunk = body_text(&simple(&viewer.address, "GET", &format!("/v1/objects/{id}"), b""));
     assert!(chunk.contains("世代の整合はオブジェクト数と署名者ごとの最終列番号"), "{chunk}");
@@ -87,7 +87,7 @@ fn the_page_and_the_endpoints_it_uses_carry_a_search_from_query_to_full_text() {
     assert!(citation.contains("\"document\":\"search_ja\""), "{citation}");
 }
 
-/// 通すのは頁が使う口だけである(ビューワの口がストア API の素通しにならない)。
+/// 通すのはページが使う口だけである(ビューワの口がストア API の素通しにならない)。
 /// 書き込みの口も、逆引きも、同期も、ここからは届かない。
 #[test]
 fn the_viewer_is_not_an_open_relay_to_the_store_api() {
@@ -125,7 +125,7 @@ fn the_viewer_is_not_an_open_relay_to_the_store_api() {
 ///
 /// 断ったのがビューワか serve かは本文で見分ける(ビューワの断り文には「ビューワの口では
 /// ない」が入る)。この試験は写しが実際に作れるかには依らない。ここで見たいのは
-/// 「頁が引く道だけが通ること」であって、poppler の有無や、その ID の写しが作れるか
+/// 「ページが引く道だけが通ること」であって、poppler の有無や、その ID の写しが作れるか
 /// どうかは serve 側の試験の持ち物である。
 #[test]
 fn the_viewer_forwards_the_rendition_paths_and_refuses_unknown_aliases() {
@@ -167,8 +167,8 @@ fn the_viewer_forwards_the_rendition_paths_and_refuses_unknown_aliases() {
     assert!(body_text(&bad).contains(refusal));
 }
 
-/// 取り込んだ紙面(HTML)は、ビューワを通しても型を保ち、砂場の印つきで届く。
-/// 型を失うとブラウザが紙面として開かず、印を失うと取り込んだ文書が同じ生成元で走る。
+/// 取り込んだ紙面(HTML)は、ビューワを通しても型を保ち、砂場のマークつきで届く。
+/// 型を失うとブラウザが紙面として開かず、マークを失うと取り込んだ文書が同じ生成元で走る。
 #[test]
 fn the_viewer_relays_a_stored_page_as_sandboxed_html() {
     let server = start_server("viewer-html");
@@ -202,15 +202,15 @@ fn the_viewer_relays_a_stored_page_as_sandboxed_html() {
     assert_eq!(relayed.content_security_policy, "sandbox allow-scripts");
     assert_eq!(relayed.body, page.as_bytes(), "原本そのものが届く");
 
-    // ビューワ自身の頁は砂場に入れない(自分の生成元の /v1/* を叩けないと検索が動かない)。
+    // ビューワ自身のページは砂場に入れない(自分の生成元の /v1/* を叩けないと検索が動かない)。
     let own = simple(&viewer.address, "GET", "/", b"");
     assert_eq!(own.content_type, "text/html; charset=utf-8");
-    assert_eq!(own.content_security_policy, "", "頁は取り込んだ文書ではない");
+    assert_eq!(own.content_security_policy, "", "ページは取り込んだ文書ではない");
 }
 
-/// 写しの口を持たない serve(旧版)に繋いだときも、頁と検索は従来どおり動く。頁は写しの
+/// 写しの口を持たない serve(旧版)に繋いだときも、ページと検索は従来どおり動く。ページは写しの
 /// 目録が 404 なら何も足さないので(単体試験 a_serve_without_the_catalog_leaves_the_page_as_it_was)、
-/// ここでは土台のほう — 目録が無くても頁と検索が壊れないこと — を見る。
+/// ここでは土台のほう — 目録が無くてもページと検索が壊れないこと — を見る。
 #[test]
 fn a_serve_without_renditions_still_answers_the_page_and_the_search() {
     let server = start_server("viewer-old-serve");
@@ -225,7 +225,7 @@ fn a_serve_without_renditions_still_answers_the_page_and_the_search() {
     let text = body_text(&found);
     let id = json_text_field(&text, "id").expect("チャンク ID");
 
-    // markdown 由来のチャンクには紙面が無い。目録の口があってもなくても、頁はこの件に
+    // markdown 由来のチャンクには紙面が無い。目録の口があってもなくても、ページはこの件に
     // 何も足さない(出せないものの席を作らない)。
     let catalog = simple(&viewer.address, "GET", &format!("/v1/objects/{id}/rendition"), b"");
     assert!(catalog.status == 404 || catalog.status == 200, "{}", body_text(&catalog));
@@ -233,13 +233,13 @@ fn a_serve_without_renditions_still_answers_the_page_and_the_search() {
         let catalog = body_text(&catalog);
         assert!(!catalog.contains("\"media\":\"pdf\""), "markdown の件が PDF を名乗った: {catalog}");
     }
-    // 頁と全文はどちらの serve でも同じように出る。
+    // ページと全文はどちらの serve でも同じように出る。
     assert_eq!(simple(&viewer.address, "GET", "/", b"").status, 200);
     let chunk = body_text(&simple(&viewer.address, "GET", &format!("/v1/objects/{id}"), b""));
     assert!(chunk.contains("世代の整合"), "{chunk}");
 }
 
-/// 転送先が死んでいても頁は出る。届かないことは、原因と起こし方を添えて言う。
+/// 転送先が死んでいてもページは出る。届かないことは、原因と起こし方を添えて言う。
 #[test]
 fn the_page_still_opens_when_the_serve_is_down() {
     let dir = unique_dir("viewer-down");
@@ -247,7 +247,7 @@ fn the_page_still_opens_when_the_serve_is_down() {
     // 何も待ち受けていない宛先。
     let viewer = start_viewer(dir.to_str().expect("utf-8"), "http://127.0.0.1:1");
 
-    assert_eq!(simple(&viewer.address, "GET", "/", b"").status, 200, "頁は出る");
+    assert_eq!(simple(&viewer.address, "GET", "/", b"").status, 200, "ページは出る");
     let status = simple(&viewer.address, "GET", "/v1/status", b"");
     assert_eq!(status.status, 502);
     let text = body_text(&status);

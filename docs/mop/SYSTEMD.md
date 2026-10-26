@@ -2,7 +2,7 @@
 
 <a id="7de68e4a-e6a6-4930-8cc7-a56f90f522e2"></a>
 
-読み手は、1 台の機械で uniqnode の serve(HTTP API)と viewer(ブラウザ用の 1 枚の頁)を
+読み手は、1 台の機械で uniqnode の serve(HTTP API)と viewer(ブラウザ用の 1 枚のページ)を
 起こしたままにし、ストアの写しを毎日取りたい運用者。unit ファイルの例は docs/mop/systemd/
 にあり、この文書はその読み方と、起動・停止・更新・ログ・二重起動の手順を書く。各命令の
 引数と既定の意味は
@@ -31,7 +31,7 @@ unit はテンプレートである。`@` の後がインスタンス名で、�
 | uniqnode-backup@default.timer | uniqnode-backup@default.service を毎日 0 時に起こす。Persistent=true なので逃した刻みは次の起動時に走る | — | — |
 
 viewer は serve の後に起こす(After= と Wants=)。Requires= にしないのは、serve が居なくても
-頁は出て、届かないことを 502 の本文で言うためである。serve を起こし直せばそのまま繋がる。
+ページは出て、届かないことを 502 の本文で言うためである。serve を起こし直せばそのまま繋がる。
 backup は serve に順序を持たない。ロックを取らないので serve が走っていても止まっていても同じ
 写しが取れる。
 
@@ -267,7 +267,7 @@ uniqnode-backup@default.timer` で止める(旧い unit と同じ主の口とス
 移らないと困るのは、これからの変更がテンプレートにだけ入るからである。API_AUTH の A2 は
 `uniqnode-serve@.service` の `RestrictAddressFamilies=` に `AF_NETLINK` を足し、APPEND_FAILURE の S1 は
 `ExecStop=` を足す。旧い名のままバイナリだけを差し替えると、A2 では照会のソケットを作れず主の口の全ての
-接続が 403 になり、S1 では restart のたびに印に `Running` が残りうる。install の打ち直し(下の「更新」)も
+接続が 403 になり、S1 では restart のたびにマークに `Running` が残りうる。install の打ち直し(下の「更新」)も
 旧い名が残る限り断られる。したがってこの移行は、A2 と S1 を本番へ入れる前提である
 ([docs/plan/API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771)・
 [docs/plan/APPEND_FAILURE.md](#d973833f-4e2b-4fc8-8a49-42f6821b6a7a) の段取り)。
@@ -426,7 +426,7 @@ EOF
     running|stopped --state <状態のディレクトリ>` に移す。戻す道は S1b を入れた後にしか要らないので、検め手は
     定義から S1b 以後のバイナリであり、その判断は手で辿る代わりに cargo の試験で固定できる。中身は
     APPEND_FAILURE の方針 5 の「戻す前の検め」に書く。この命令は S1b の後の別の段 S1d で実装し、S1d は本番への
-    反映の前に入る(第 28 版の APPEND_FAILURE の「段取り」)。S1d は S1b の印と hold-status の上に作るので、実装の順は
+    反映の前に入る(第 28 版の APPEND_FAILURE の「段取り」)。S1d は S1b のマークと hold-status の上に作るので、実装の順は
     S1a、S1b、その後に S1d である(第 30 版の APPEND_FAILURE。S1a も S1b もまだ実装していない)。本番にデプロイされる S1b 以後のバイナリは全部この命令を
     持つが、S1b と S1d の間の開発のビルドは持たず 2 を返すので、検め手には採らない。vega の install はどの
     インスタンスでも共有のバイナリを差し替えるので、S1b 以後で S1d より前のビルドは vega のどのインスタンスにも
@@ -557,7 +557,7 @@ EOF
     enable と restart の終了コードも捕らえ、どれかが失敗すれば状態を残して止まり、全部が通ったときだけ状態と
     検め手を消す(第 28 版。第 27 版は restart が失敗しても旧いプロセスが active なら状態を消し、案内を出した
     ときの一覧を命令に埋めていたので、restart から外しても 3 に効かなかった)。消すのに失敗したら、理由を言って
-    手で消す命令を出す。S1b 以後のバイナリはどの状態の印
+    手で消す命令を出す。S1b 以後のバイナリはどの状態のマーク
     でも保留を守るので、始まったときのバイナリで起こし直す理由は無い。状態がまだ無い回は何も変えていないので、
     直して打ち直すだけでよい。状態に記録が無ければ、そう言う。起きない unit をもう起こさないなら restart から、
     もう要らない `@default` なら default-enabled と default-active から外す命令も添える(第 29 版の低 3)。
@@ -619,7 +619,7 @@ on_failure() {
   esac
   if [ ! -d "$state" ]; then echo "この回は unit を何も止めず、バイナリも差し替えず、状態も作っていない。直してこの命令を打ち直す"; return; fi
   if [ "${#default_up[@]}" -eq 0 ] && [ "${#restart[@]}" -eq 0 ] && [ "${#default_on[@]}" -eq 0 ]; then echo "$state には、起こし直す unit も enable し直す @default も記録されていない"; fi
-  echo "直してこの命令を打ち直せば先へ進む。戻すのをやめるなら、どの段で止まっても次を 2・1・3 の順に打つ(S1b 以後のバイナリはどの形の印でも保留を守るので、元のバイナリで起こし直す理由は無い)"
+  echo "直してこの命令を打ち直せば先へ進む。戻すのをやめるなら、どの段で止まっても次を 2・1・3 の順に打つ(S1b 以後のバイナリはどの形のマークでも保留を守るので、元のバイナリで起こし直す理由は無い)"
   if [ "$checker_ok" -eq 1 ]; then put=$checker; fi
   for f in "${legacy_files[@]}"; do if [ -e "/etc/systemd/system/$f" ] || [ -L "/etc/systemd/system/$f" ]; then found=1; fi; done
   if [ "$found" -eq 1 ]; then
@@ -824,7 +824,7 @@ vega の上なら、sudo を使えるどの利用者がどのディレクトリ�
    (自分の IP も許すのは、install の確認が同じ機械から 10.10.128.1 を源に届くため)。iptables-nft や
    docker の表には触らない(base chain は表ごとに評価され、どれかの drop が勝つ)。serve の
    drop-in に `ExecStartPre=+/usr/sbin/nft -f <その道>` を足す(先頭の + は User= に関わらず
-   root で走らせる印)ので、nftables.service が無効な機械でも、serve を起こすたびに規則が入る。
+   root で走らせるマーク)ので、nftables.service が無効な機械でも、serve を起こすたびに規則が入る。
    ufw も nft も無ければその旨で赤。
 3. インストールと確認(上の「system 単位で起こす」と同じ。「check:」が 5 本。`--agent-writable`・
    `--agent-collections`・グラフの許し(`--agent-graph` か `--agent-graph-writable`)があれば

@@ -17,7 +17,7 @@ use crate::embed::{Embedder, HybridSearch, QueryEmbedding, SearchMethod};
 use crate::search::{CollectionScope, SearchIndex};
 
 /// 評価の中でチャンクを名指す名前(この作り方の家はここだけ。should/0135)。引用
-/// (INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の「文書モデル」節)の document と
+/// (INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の「文書モデル」セクション)の document と
 /// position から `<文書>#<chunks 列の添字>` を組む。
 ///
 /// チャンクのオブジェクト ID(内容ハッシュ)を使わないのは、コーパスの本文を一字直す

@@ -1,5 +1,5 @@
 //! URL からの取り込みの統合テスト(INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の
-//! 「URL からの取り込み」節)。網には出ない: テストの中で 127.0.0.1 の別ポートに小さな
+//! 「URL からの取り込み」セクション)。網には出ない: テストの中で 127.0.0.1 の別ポートに小さな
 //! HTTP サーバ(common::TestSite)を立て、固定の HTML・PDF・素文・転送・404 を返す。実プロセスの
 //! serve に生 HTTP/1.1 で POST /v1/collections/{c}/fetch を投げ(should/0138)、CLI は
 //! 実プロセスで起こす。curl と pdftotext は要る(無ければ導入手順を示して落ちる。
@@ -21,7 +21,7 @@ const THREE_PAGE_PDF: &[u8] = include_bytes!("assets/three_pages.pdf");
 const PAGE_HTML: &str = "<!DOCTYPE html>\n<html><head><title>紙面</title>\n\
     <link rel=\"stylesheet\" href=\"/style.css\">\n\
     <script src=\"/app.js\"></script>\n\
-    </head><body>\n<h2>節</h2>\n\
+    </head><body>\n<h2>概要</h2>\n\
     <p>取り込みの本文はここにある。</p>\n\
     <a href=\"/other\">相対リンク</a>\n\
     <img src=\"pic.png\" alt=\"絵\">\n\
@@ -138,7 +138,7 @@ fn fetch_html_ingests_the_page_with_provenance_and_it_is_searchable() {
     let chunk = get_object(&server, &chunk_id);
     assert!(chunk.contains("取り込みの本文はここにある。"), "{chunk}");
     assert!(
-        chunk.contains("\"breadcrumbs\":[\"紙面\",\"節\"]"),
+        chunk.contains("\"breadcrumbs\":[\"紙面\",\"概要\"]"),
         "{chunk}"
     );
     let search = body_text(&simple(
@@ -150,7 +150,7 @@ fn fetch_html_ingests_the_page_with_provenance_and_it_is_searchable() {
     assert!(search.contains(&chunk_id), "検索に本文が出るべき: {search}");
     assert!(search.contains("\"document\":\"page\""), "{search}");
 
-    // 原本(source レシピ)は text/html で、砂場の印つきで返る。
+    // 原本(source レシピ)は text/html で、砂場のマークつきで返る。
     let source = simple(
         &server.address,
         "GET",

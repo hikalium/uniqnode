@@ -239,7 +239,7 @@ fn roots(store: &Store) -> BTreeSet<String> {
     roots
 }
 
-/// 走っている回収の印。落ちるときに(成功でも失敗でも)ストアの gc_running を下ろす。
+/// 走っている回収のマーク。落ちるときに(成功でも失敗でも)ストアの gc_running を下ろす。
 /// ストアのロックを取るので、MutexGuard を持ったまま落としてはならない。
 struct RunningGuard<'a>(&'a Mutex<Store>);
 

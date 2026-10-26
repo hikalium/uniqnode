@@ -202,7 +202,7 @@ pub fn chunk_pdf_text(text: &str) -> Vec<Chunk> {
     chunks
 }
 
-// ---- 取り込み口(INGEST の「CLI と API」節) ----
+// ---- 取り込み口(INGEST の「CLI と API」セクション) ----
 
 /// 対象拡張子と media の対応。CLI と API が同じ判定を共用する(should/0135)。
 pub fn media_for_extension(extension: &str) -> Option<&'static str> {
@@ -227,13 +227,13 @@ pub fn chunk_for_media(media: &str, text: &str) -> Vec<Chunk> {
     }
 }
 
-/// 原本のバイト列も見て切る形。PDF のときだけ、節見出しの経路をチャンクの
+/// 原本のバイト列も見て切る形。PDF のときだけ、セクションの見出しの経路をチャンクの
 /// meta.breadcrumbs に載せる(node/src/outline.rs)。
 ///
 /// なぜ要るか: PDF のチャンクは見出しを持たず、索引語は本文だけから出ていた。Markdown の
 /// チャンクは見出しを持ち、その語は本文の 2 倍で数えられる(BREADCRUMB_WEIGHT)のに、
-/// 規格書だけが節の構造を捨てていた。実測では、同じ語が出る 2 つの紙面 —「4.20
-/// Scratchpad Buffers」という節そのものと、レジスタ欄でその語が 1 回出るだけの紙面 —
+/// 規格書だけがセクションの構造を捨てていた。実測では、同じ語が出る 2 つの紙面 —「4.20
+/// Scratchpad Buffers」というセクションそのものと、レジスタ欄でその語が 1 回出るだけの紙面 —
 /// を区別する情報が、見出しにしか無かった。
 ///
 /// 見出しが取れないときは黙って諦める(breadcrumbs 無しの、これまでと同じチャンク)。
@@ -247,7 +247,7 @@ pub fn chunk_for_media_with_source(
     if media != "pdf" {
         return (chunks, None);
     }
-    // ページ数は抽出した本文の改頁の数だけ確かに分かる(しおりは自分でページ数を
+    // ページ数は抽出した本文の改ページの数だけ確かに分かる(しおりは自分でページ数を
     // 知らないので、最後のしおり以降のページに経路が付かない)。
     let pages = chunks.iter().filter_map(|chunk| chunk.page).max();
     match crate::outline::outline_of_pdf(source, pages) {
@@ -268,7 +268,7 @@ pub fn chunk_for_media_with_source(
     }
 }
 
-// ---- PDF 抽出(INGEST の「PDF 抽出」節) ----
+// ---- PDF 抽出(INGEST の「PDF 抽出」セクション) ----
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -346,7 +346,7 @@ impl PdfExtractor {
     }
 }
 
-// ---- 書き込み経路(INGEST の「文書モデル」節) ----
+// ---- 書き込み経路(INGEST の「文書モデル」セクション) ----
 
 use crate::c1::{self, Value};
 use crate::store::{Result, Store, StoreError};
@@ -364,7 +364,7 @@ pub struct DocumentInput<'a> {
     /// 抽出器の名前と版(PDF のとき。例 "pdftotext 22.02")。
     pub extractor: Option<&'a str>,
     /// doc_rev.meta に足す鍵(URL からの取り込みの出所。組むのは node/src/fetch.rs で、
-    /// INGEST の「URL からの取り込み」節)。name・media・extractor と同じ鍵は上書き
+    /// INGEST の「URL からの取り込み」セクション)。name・media・extractor と同じ鍵は上書き
     /// できない。ファイルからの取り込みは空。
     pub extra_meta: &'a [(String, Value)],
 }
@@ -485,7 +485,7 @@ pub fn ingest_document(store: &mut Store, input: &DocumentInput) -> Result<Inges
     Ok(IngestOutcome { doc_rev_id, new_objects, ref_updated: true, previous: current_target })
 }
 
-// ---- 注釈の取り込み(INGEST の「注釈の取り込みと照合」節) ----
+// ---- 注釈の取り込み(INGEST の「注釈の取り込みと照合」セクション) ----
 
 use std::collections::BTreeSet;
 
@@ -518,7 +518,7 @@ pub fn is_annotates_edge(value: &Value) -> bool {
         && map.get("type") == Some(&text_value(&annotates_type_id()))
 }
 
-/// data.md の注釈 1 件(spec_id のページ page に節 title がある、という一次言明の素)。
+/// data.md の注釈 1 件(spec_id のページ page にセクション title がある、という一次言明の素)。
 /// page は PDF の物理ページ番号(1 始まりの通し番号。紙面の刷り番号ではない)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnotationEntry {
@@ -532,9 +532,9 @@ fn strip_enclosing_backticks(text: &str) -> &str {
     text.strip_prefix('`').and_then(|inner| inner.strip_suffix('`')).unwrap_or(text)
 }
 
-/// data.md の実形式(INGEST の「注釈の取り込みと照合」節)だけを受け付けるパーサ(must/0020):
+/// data.md の実形式(INGEST の「注釈の取り込みと照合」セクション)だけを受け付けるパーサ(must/0020):
 /// spec_id の見出し + 表題・形式・URL の 3 行コードブロック(形式が zip のときだけ
-/// 4 行目に書庫内パス)+「- p.N: 節タイトル」の箇条書き(タイトルはバッククォート
+/// 4 行目に書庫内パス)+「- p.N: セクションタイトル」の箇条書き(タイトルはバッククォート
 /// 囲みと裸の両方)。注釈が 1 件も無い見出しも正常。コードブロックの中身は使わない。
 pub fn parse_annotation_index(text: &str) -> std::result::Result<Vec<AnnotationEntry>, String> {
     /// 次に来てよいもの。見出しの後には必ずコードブロックが 1 個来る。
@@ -677,7 +677,7 @@ pub struct AnnotationMatch {
 
 /// 照合で数える「語」: 小文字化して英数字以外で分割し、数字だけの語を除く。同じ語の
 /// 繰り返しは 1 語と数える(重複を除く)。チャンカーの token_estimate(近似トークン数)
-/// とは別物である(INGEST の「注釈の取り込みと照合」節)。
+/// とは別物である(INGEST の「注釈の取り込みと照合」セクション)。
 fn annotation_tokens(text: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut tokens = Vec::new();
@@ -693,7 +693,7 @@ fn annotation_tokens(text: &str) -> Vec<String> {
     tokens
 }
 
-/// 注釈の照合(INGEST の「注釈の取り込みと照合」節の照合規則)。タイトル側の語の 6 割以上がページ
+/// 注釈の照合(INGEST の「注釈の取り込みと照合」セクションの照合規則)。タイトル側の語の 6 割以上がページ
 /// 本文の語の集合に含まれれば一致。根拠は、一致した各語を最初に含む本文行(ページ順・
 /// 重複なし)。取り込み時の検証と訂正のための再検証が共用する(should/0135)。
 /// 語が一つも残らないタイトルは空条件として一致になる(実データには存在しない)。
@@ -846,7 +846,7 @@ fn collect_page_lines(
     Ok(page_lines)
 }
 
-/// {v:1, kind:"node", contents:<text>} のノード(節タイトル用)。
+/// {v:1, kind:"node", contents:<text>} のノード(セクションタイトル用)。
 fn title_node_value(title: &str) -> Value {
     let mut object = BTreeMap::new();
     object.insert("v".to_string(), Value::Integer(1));
@@ -856,7 +856,7 @@ fn title_node_value(title: &str) -> Value {
 }
 
 /// 検証記録: 何を検証したかは持たず、どう検証し何を根拠にしたかだけを持つ
-/// (INGEST の「訂正の表現」節。ASSERTIONS の原理 2 と 4)。
+/// (INGEST の「訂正の表現」セクション。ASSERTIONS の原理 2 と 4)。
 fn verification_record_value(method: &str, evidence: &[String]) -> Value {
     let mut contents = BTreeMap::new();
     contents.insert("method".to_string(), text_value(method));
@@ -872,12 +872,12 @@ fn verification_record_value(method: &str, evidence: &[String]) -> Value {
 }
 
 /// 注釈を annotates 型の辺として取り込み、コレクションの索引を作り直して
-/// ref annotations/<コレクション名> を張る(INGEST の「注釈の取り込みと照合」節)。照合に一致した
+/// ref annotations/<コレクション名> を張る(INGEST の「注釈の取り込みと照合」セクション)。照合に一致した
 /// 注釈は method=token-match、機械照合に落ちても承認リストにある (spec_id, ページ) の
 /// 注釈は method=manual の検証記録付きで入る。どちらでもない不一致は取り込まず
 /// rejected で報告する。辺と検証記録の結びつけは索引の対だけが持つ(検証記録は言明を
 /// 指さず、言明も検証記録を持たない。どちらへ参照を張っても壊れる理由は INGEST の
-/// 「訂正の表現」節)。
+/// 「訂正の表現」セクション)。
 pub fn ingest_annotations(
     store: &mut Store,
     collection: &str,
@@ -1060,7 +1060,7 @@ fn write_annotation_index(
     Ok((index_id, ref_updated, new_objects))
 }
 
-// ---- 訂正の発行(INGEST の「訂正の発行」節) ----
+// ---- 訂正の発行(INGEST の「訂正の発行」セクション) ----
 
 /// 訂正 1 件の結果(報告の素)。matched_tokens / total_tokens は新しい言明の再照合の
 /// 一致率。
@@ -1077,7 +1077,7 @@ pub struct CorrectionOutcome {
     pub new_objects: usize,
 }
 
-/// annotates 辺の中身(節タイトルのノード ID・blob ID・ページ番号)。
+/// annotates 辺の中身(セクションタイトルのノード ID・blob ID・ページ番号)。
 struct AnnotatesParts {
     title_id: String,
     blob_id: String,
@@ -1139,7 +1139,7 @@ fn find_doc_rev_for_blob(
     Ok(None)
 }
 
-/// 訂正の発行(INGEST の「訂正の発行」節)。wrong_id の言明を誤りとし、new_id の言明が
+/// 訂正の発行(INGEST の「訂正の発行」セクション)。wrong_id の言明を誤りとし、new_id の言明が
 /// 代わることを主張する corrects 辺を発行する。新しい言明は取り込み時と同じトークン照合
 /// (match_annotation。should/0135)で再照合し、根拠行つきの検証記録(method=token-match)
 /// を作って辺の meta.verification から指す。meta 内の s256: 文字列も参照なので、訂正の
@@ -1157,7 +1157,7 @@ pub fn correct_statement(
             "the wrong statement and the new statement are the same ({wrong_id}); a statement cannot correct itself"
         )));
     }
-    // 訂正の対象は既にストアにある言明だけ(INGEST の「訂正の表現」節)。無ければ
+    // 訂正の対象は既にストアにある言明だけ(INGEST の「訂正の表現」セクション)。無ければ
     // 黙って進めず明示的に失敗する(must/0022)。
     for (role, id) in [("wrong statement", wrong_id), ("new statement", new_id)] {
         if !store.has_object(id) {
@@ -1228,7 +1228,7 @@ pub fn correct_statement(
         c1::to_canonical_bytes(&verification_record_value(METHOD_TOKEN_MATCH, &outcome.evidence));
     let (verification_id, is_new) = store.put_object(&record_bytes)?;
     new_objects += usize::from(is_new);
-    // corrects 辺。members は [新しい言明, 誤った言明] の順(INGEST の「訂正の表現」節)。
+    // corrects 辺。members は [新しい言明, 誤った言明] の順(INGEST の「訂正の表現」セクション)。
     let mut edge = BTreeMap::new();
     edge.insert("v".to_string(), Value::Integer(1));
     edge.insert("kind".to_string(), text_value("edge"));
@@ -1367,7 +1367,7 @@ mod tests {
 
     #[test]
     fn chunking_is_deterministic_and_empty_input_yields_nothing() {
-        let text = "# 章\n\n本文。\n\n## 節\n\n続き。\n";
+        let text = "# 章\n\n本文。\n\n## 概要\n\n続き。\n";
         assert_eq!(chunk_markdown(text), chunk_markdown(text));
         assert_eq!(chunk_markdown(""), Vec::new());
         assert_eq!(chunk_plain_text(""), Vec::new());
@@ -1882,7 +1882,7 @@ mod tests {
             .expect_err("自分自身の訂正で成功してはならない");
         assert!(error.to_string().contains("cannot correct itself"), "{error}");
 
-        // annotates 辺でない言明(節タイトルのノード)では再照合できない。
+        // annotates 辺でない言明(セクションタイトルのノード)では再照合できない。
         let title_id = c1::object_id(&title_node_value("Alpha Beta"));
         let error = correct_statement(&mut store, "specs", &wrong_id, &title_id, "理由")
             .expect_err("annotates 辺でない言明で成功してはならない");
@@ -1975,11 +1975,11 @@ mod tests {
         assert_eq!(media_for_extension("htm"), Some("html"));
         let page = "<!DOCTYPE html><html><head><title>題</title>\
                     <style>p { color: red }</style></head><body>\
-                    <h2>節</h2><p>本文&amp;続き</p><script>var a = 1;</script></body></html>";
+                    <h2>概要</h2><p>本文&amp;続き</p><script>var a = 1;</script></body></html>";
         let chunks = chunk_for_media("html", page);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "本文&続き");
-        assert_eq!(chunks[0].breadcrumbs, vec!["題".to_string(), "節".to_string()]);
+        assert_eq!(chunks[0].breadcrumbs, vec!["題".to_string(), "概要".to_string()]);
         assert!(chunks[0].page.is_none(), "HTML に紙面の番号は無い");
     }
 }

@@ -1,5 +1,5 @@
 //! URL からの取り込み(INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の「URL からの
-//! 取り込み」節)。取りに行く道具は curl への外部プロセス委譲である: 依存クレートを持たない
+//! 取り込み」セクション)。取りに行く道具は curl への外部プロセス委譲である: 依存クレートを持たない
 //! この木では TLS を自前で話せないので、pdftotext と同じ枠(Command で直接起動、シェルは
 //! 経由しない。must/0009)で curl に頼み、版を doc_rev.meta.fetcher に記録する。
 //!
@@ -454,7 +454,7 @@ pub struct FetchedDocument {
     pub content_type: Option<String>,
     /// HTML のとき、自足化で落としたものの数。
     pub dropped: Option<Dropped>,
-    /// PDF の節見出しについて outline が言ったこと(呼び手が記録に残す)。
+    /// PDF のセクションの見出しについて outline が言ったこと(呼び手が記録に残す)。
     pub outline_reason: Option<String>,
 }
 

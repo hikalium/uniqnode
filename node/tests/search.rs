@@ -5,16 +5,16 @@
 mod common;
 use common::*;
 
-/// 日本語文書(見出し 2 段。世代の整合の節が識別しやすい語を持つ)。
+/// 日本語文書(見出し 2 段。世代の整合のセクションが識別しやすい語を持つ)。
 const SEARCH_JA: &str = include_str!("assets/search_ja.md");
-/// 日本語文書の改版(世代の整合の節を削った版。見えの検証用)。
+/// 日本語文書の改版(世代の整合のセクションを削った版。見えの検証用)。
 const SEARCH_JA_V2: &str = include_str!("assets/search_ja_v2.md");
-/// 英語文書(識別子 token_estimate を持つ節と、token と estimate を別語で含む
-/// おとりの節)。
+/// 英語文書(識別子 token_estimate を持つセクションと、token と estimate を別語で含む
+/// おとりのセクション)。
 const SEARCH_EN: &str = include_str!("assets/search_en.md");
 /// テスト資材の最小 PDF(3 ページ。ingest の統合テストと共用)。
 const THREE_PAGE_PDF: &[u8] = include_bytes!("assets/three_pages.pdf");
-/// 目次の節(点線でページ番号をつないだ紙面)と本文の節を持つ日本語文書。低情報
+/// 目次のセクション(点線でページ番号をつないだ紙面)と本文のセクションを持つ日本語文書。低情報
 /// チャンクの後処理を確かめるための資材である。
 const SEARCH_LOWINFO: &str = include_str!("assets/search_lowinfo.md");
 
@@ -67,7 +67,7 @@ fn search_finds_japanese_english_and_identifier_chunks_with_citations() {
     assert!(body.contains("\"position\":0"), "{body}");
     assert!(body.contains("\"breadcrumbs\":[\"Retrieval notes\",\"Scoring\"]"), "{body}");
 
-    // (3) 識別子の完全一致。token と estimate を別語で含むおとりの節(position 1)は
+    // (3) 識別子の完全一致。token と estimate を別語で含むおとりのセクション(position 1)は
     // 一致しない(識別子は 1 語まるごと索引されるため)。
     let response = search(&server.address, "{\"query\":\"token_estimate\"}");
     assert_eq!(response.status, 200, "{}", body_text(&response));
@@ -91,7 +91,7 @@ fn a_revision_and_a_tombstone_remove_old_chunks_from_search() {
     let body = body_text(&search(&server.address, "{\"query\":\"世代の整合\"}"));
     let old_id = json_text_field(&body, "id").expect("旧版のチャンク ID");
 
-    // 改版: 世代の整合の節を削った v2 を同じ名前で取り込む。
+    // 改版: 世代の整合のセクションを削った v2 を同じ名前で取り込む。
     put_document(&server.address, "notes", "search_ja.md", SEARCH_JA_V2.as_bytes());
     let response = search(&server.address, "{\"query\":\"世代の整合\"}");
     assert_eq!(response.status, 200, "{}", body_text(&response));
@@ -138,7 +138,7 @@ fn pdf_search_citations_carry_the_page_number() {
 fn every_result_carries_the_way_to_the_whole_document() {
     let server = start_server("search-source-url");
     let page = "<!DOCTYPE html><html><head><title>紙面</title></head><body>\
-                <h2>節</h2><p>抜粋に出る本文。ここには紙面の主題が書いてあり、\
+                <h2>概要</h2><p>抜粋に出る本文。ここには紙面の主題が書いてあり、\
                 読み手は抜粋の周りを読むために原本へ行く。</p>\
                 <p>二つ目の段落。取り込みは札を落として本文だけを索引に載せる。</p>\
                 </body></html>";
@@ -178,7 +178,7 @@ fn a_collection_filter_narrows_the_search_scope() {
 }
 
 /// 意味検索の効き目を生産経路で確かめる(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580)):
-/// 言い換えのクエリ(索引語を一つも共有しない問い)が、POST /v1/search 越しに正解の節へ
+/// 言い換えのクエリ(索引語を一つも共有しない問い)が、POST /v1/search 越しに正解のセクションへ
 /// 届く。資材は評価ハーネスの語彙の隔たりの場を使い回す(対の由来を一箇所に保つ。
 /// should/0135)。
 ///
@@ -208,7 +208,7 @@ fn a_paraphrased_query_reaches_its_section_through_the_search_api() {
     );
     // 正解は eval_gap の 0 番(電源断からの復帰)。問いと索引語を一つも共有しないので、
     // BM25 では返らない(評価ハーネスの bm25_cannot_reach_any_vocabulary_gap_pair が
-    // 原理として確かめている対である)。本文の一節で名指しする。
+    // 原理として確かめている対である)。本文の一部で名指しする。
     let answer = "無停電電源が尽きて";
     let query = "{\"query\":\"急に電気が消えたときの立ち上げ\",\"top_k\":3";
     let body = body_text(&search(&server.address, &format!("{query},\"method\":\"bm25\"}}")));
@@ -327,23 +327,23 @@ fn hybrid_says_when_bm25_matched_nothing_and_the_fusion_was_one_sided() {
 fn low_information_chunks_leave_the_results_but_stay_in_the_store() {
     let server = start_server("search-lowinfo");
     put_document(&server.address, "notes", "search_lowinfo.md", SEARCH_LOWINFO.as_bytes());
-    // 「索引の構築」は目次の節と本文の節の両方に現れる句である。
+    // 「索引の構築」は目次のセクションと本文のセクションの両方に現れる句である。
     let query = "{\"query\":\"索引の構築\",\"top_k\":10";
 
-    // 既定では目次の節が落ち、本文の節だけが返る。落とした件数は応答が言う。
+    // 既定では目次のセクションが落ち、本文のセクションだけが返る。落とした件数は応答が言う。
     let body = body_text(&search(&server.address, &format!("{query}}}")));
-    assert_eq!(body.matches("\"id\":").count(), 1, "本文の節だけが返るべき: {body}");
-    assert!(body.contains("\"position\":1"), "残るのは本文の節(位置 1): {body}");
+    assert_eq!(body.matches("\"id\":").count(), 1, "本文のセクションだけが返るべき: {body}");
+    assert!(body.contains("\"position\":1"), "残るのは本文のセクション(位置 1): {body}");
     assert!(body.contains("\"filtered_low_information\":1"), "落とした件数を言うべき: {body}");
 
-    // include_low_information を立てれば、同じ問いで目次の節も戻る。
+    // include_low_information を立てれば、同じ問いで目次のセクションも戻る。
     let kept = body_text(&search(
         &server.address,
         &format!("{query},\"include_low_information\":true}}"),
     ));
-    assert_eq!(kept.matches("\"id\":").count(), 2, "目次の節も返るべき: {kept}");
+    assert_eq!(kept.matches("\"id\":").count(), 2, "目次のセクションも返るべき: {kept}");
     assert!(!kept.contains("filtered_low_information"), "落としていない: {kept}");
-    assert!(kept.contains("\"position\":0"), "目次の節(位置 0)が戻るべき: {kept}");
+    assert!(kept.contains("\"position\":0"), "目次のセクション(位置 0)が戻るべき: {kept}");
 
     // 索引から消したのではないので、チャンクの全文はいつでも引ける。
     let toc = kept.split("\"citation\"").nth(1).expect("1 件目");

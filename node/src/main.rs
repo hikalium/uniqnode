@@ -444,7 +444,7 @@ impl IngestTally {
     }
 }
 
-/// 取り込みの CLI 本体(INGEST の「CLI と API」節と「PDF 抽出」節)。対象外のファイルは
+/// 取り込みの CLI 本体(INGEST の「CLI と API」セクションと「PDF 抽出」セクション)。対象外のファイルは
 /// 黙って捨てず、最後に一覧で報告する(must/0022 の同型)。pdftotext の起動と版の取得は
 /// 最初の PDF に当たったとき一度だけ行い、以後の PDF で使い回す。
 fn run_ingest(
@@ -483,7 +483,7 @@ fn run_ingest(
                 }
             }
         };
-        // PDF は節見出しの経路も載せる(node/src/outline.rs)。取れなければ理由を出して、
+        // PDF はセクションの見出しの経路も載せる(node/src/outline.rs)。取れなければ理由を出して、
         // 見出しの無いチャンクとして続ける。
         let (chunks, outline_reason) =
             uniqnode::ingest::chunk_for_media_with_source(media, text, &bytes);
@@ -525,7 +525,7 @@ fn unsendable_in_path(text: &str) -> bool {
     text.chars().any(|c| c.is_whitespace() || c.is_control() || c == '?')
 }
 
-/// 転送する形の取り込み(`ingest … --serve-url`。INGEST の「CLI と API」節)。ストアを
+/// 転送する形の取り込み(`ingest … --serve-url`。INGEST の「CLI と API」セクション)。ストアを
 /// 開かず(ロックは serve が持っている)、選んだ文書を 1 件ずつ走っている serve の
 /// PUT /v1/collections/{c}/documents/{name} へ送る。選び方と文書名は直接開く形と同じ
 /// plan_ingest、種別の判定・PDF の抽出・チャンク分け・同一内容の判定は serve 側の
@@ -587,7 +587,7 @@ fn run_ingest_via_serve(
     Ok(())
 }
 
-/// git の木からの取り込み(`ingest-git`。INGEST の「git の木からの取り込み」節)。ref に
+/// git の木からの取り込み(`ingest-git`。INGEST の「git の木からの取り込み」セクション)。ref に
 /// 追跡されている --paths の下のファイルを一時の置き場へ書き出し(node/src/ingest_git.rs)、
 /// そこを起点に ingest と同じ 2 つの形のどちらかで取り込む。選び方・文書名・べき等は ingest
 /// と同じ 1 箇所(plan_ingest)を通る。置き場は成功しても失敗しても消える。
@@ -625,7 +625,7 @@ fn run_ingest_git(
     }
 }
 
-/// URL からの取り込みの CLI 本体(INGEST の「URL からの取り込み」節)。取る・見分ける・
+/// URL からの取り込みの CLI 本体(INGEST の「URL からの取り込み」セクション)。取る・見分ける・
 /// 名前を決めるは node/src/fetch.rs にあり、API の POST /v1/collections/{c}/fetch と同じ道を
 /// 通る(should/0135)。ストアを開くのは取ってからで、取れない URL でストアを作らない。
 fn run_fetch(
@@ -679,7 +679,7 @@ fn run_fetch(
     Ok(())
 }
 
-/// 注釈索引の取り込み CLI 本体(INGEST の「注釈の取り込みと照合」節)。一致した注釈だけを取り込み、
+/// 注釈索引の取り込み CLI 本体(INGEST の「注釈の取り込みと照合」セクション)。一致した注釈だけを取り込み、
 /// 不一致は取り込まずに一致率とともに報告する(どの注釈がどの一致率で落ちたか)。
 fn run_ingest_annotations(
     dir: &str,
@@ -2348,7 +2348,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             uniqnode::http::serve_checked(listener, gauge, check, handler);
         }
         // RAG ビューワ(VIEWER (uuid:4cd4c71a-ecf3-44a8-a97b-bb2c8d8fe847))。1 枚の HTML を
-        // 出し、その頁が呼ぶ /v1/* は走っている serve へ転送する。ストアを開かないので、
+        // 出し、そのページが呼ぶ /v1/* は走っている serve へ転送する。ストアを開かないので、
         // serve が常駐したまま起こせる。
         "viewer" => {
             let address = rest.first().map(String::as_str).unwrap_or_else(|| usage());

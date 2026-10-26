@@ -393,7 +393,7 @@ fn a_crash_after_rename_with_writes_since_seal_keeps_the_writes() {
             common::simple(&address, "POST", "/v1/admin/gc", b"{\"threshold\":\"0\"}")
         });
     });
-    // 条件待ち(should/0104): gc が B を終えて合図を待っている印。
+    // 条件待ち(should/0104): gc が B を終えて合図を待っているマーク。
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !ready.exists() {
         assert!(std::time::Instant::now() < deadline, "gc が B に達しない");

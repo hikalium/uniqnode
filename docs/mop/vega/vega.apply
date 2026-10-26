@@ -4,7 +4,7 @@
 #
 # 再実行してよい: install は更新になり、--retire-legacy-units は旧い名の unit が無ければ何もしない。
 # 中身を変えたら(インスタンスの増減、引数の変更)、main に入れた後に操作者がこの apply を打ち直す
-# (打ち直しは据わった版の ~/.local/bin/uniqnode で打つ。SYSTEMD.md の「据え付け」)。
+# (打ち直しはデプロイされた版の ~/.local/bin/uniqnode で打つ。SYSTEMD.md の「据え付け」)。
 # バイナリだけの変更は打ち直さなくてよい(uniqnode-autodeploy.timer が据える)。
 
 # 主の知識ストア(既定のインスタンス)。埋め込みと rerank は vega の llama-server(8083・8084)。

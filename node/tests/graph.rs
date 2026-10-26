@@ -70,7 +70,7 @@ fn writing_the_same_attributes_again_changes_nothing() {
     );
 }
 
-/// 辺は両端が在るときだけ張れ、ノードの更新で張り替えなくてよい。この行を消すと、名前だけの
+/// 辺は両端が在るときだけ付けられ、ノードの更新で付け替えなくてよい。この行を消すと、名前だけの
 /// 端を持つ辺が描画の入力に現れる。
 #[test]
 fn an_edge_needs_both_ends_and_survives_node_updates() {
@@ -104,7 +104,7 @@ fn an_edge_needs_both_ends_and_survives_node_updates() {
     // 端の状態を変えても、辺の ID は変わらない(members は恒等ノードを指している)。
     put_node(&server, "plan", "n_a", r#"{"state":"landed"}"#);
     let edges = body_text(&get(&server, "/v1/graphs/plan/edges"));
-    assert!(edges.contains(&edge_id), "辺は張り替え不要: {edges}");
+    assert!(edges.contains(&edge_id), "辺は付け替え不要: {edges}");
 }
 
 /// 「X は何を待つか」が引ける。この行を消すと、向き付きの隣接が壊れても気づかない。

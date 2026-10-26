@@ -1247,7 +1247,7 @@ fn the_default_copy_directory_is_split_per_instance() {
 /// 添える。既定のインスタンスは主の口とストアを取り合い、別の名のインスタンスも全インスタンスが共有する
 /// バイナリを差し替えるので、旧い serve の次の起動が新しいバイナリを旧い unit で走らせる(同じ文書の
 /// 「テンプレートになる前の名の unit から移る」)。断ったとき、据え先のバイナリのバイト列と mtime は前と同じである。旧い名を
-/// 外せば据わる(systemctl に触れないよう、経路の sync の後で止める口で確かめる)。
+/// 外せばインストールされる(systemctl に触れないよう、経路の sync の後で止める口で確かめる)。
 /// should/0137: legacy_units_present の判定を空の Vec に固定すると、1 つ目の assert が赤に
 /// なる(実験した)。
 #[test]
@@ -1316,7 +1316,7 @@ fn the_units_from_before_the_template_refuse_every_instance_and_keep_the_binary(
     let graph = run(&arguments("graph", 7490, "store-graph"));
     assert!(graph.stderr.contains("共有する"), "別の名のインスタンスの断りの理由: {}", graph.stderr);
 
-    // 旧い名を外せば据わる(経路の sync の後、daemon-reload の前で止める)。
+    // 旧い名を外せばインストールされる(経路の sync の後、daemon-reload の前で止める)。
     std::fs::remove_file(&legacy_unit).expect("rm");
     let outcome = run(&arguments("graph", 7490, "store-graph"));
     assert_eq!(outcome.status, 1, "{}\n{}", outcome.stdout, outcome.stderr);

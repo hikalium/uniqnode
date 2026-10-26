@@ -62,7 +62,7 @@ pub struct Record {
     pub published: Option<String>,
     /// 最後に失敗した SHA(試し直さない。main が進めば試す)。
     pub failed: Option<String>,
-    /// 失敗の後に以前のバージョンへ戻した SHA。
+    /// 失敗の後に前のバージョンへ戻した SHA。
     pub rolled_back: Option<String>,
 }
 
@@ -188,7 +188,7 @@ fn write_record(options: &Options, record: &Record) -> Result<(), String> {
     std::fs::rename(&staging, &path).map_err(|e| format!("{} を置けない: {e}", path.display()))
 }
 
-/// 1 回のループ。Err は理由を言って 1 で終わる回(据えなかった、または以前のバージョンへ戻した)。
+/// 1 回のループ。Err は理由を言って 1 で終わる回(据えなかった、または前のバージョンへ戻した)。
 pub fn run(options: &Options) -> Result<(), String> {
     std::fs::create_dir_all(&options.state_dir)
         .map_err(|e| format!("{} を作れない: {e}", options.state_dir.display()))?;
@@ -364,7 +364,7 @@ fn build_and_replace(options: &Options, target: &str, journal: &mut Journal) -> 
     }
     match install::place_binary(&previous, &options.binary, None) {
         Ok(line) => {
-            journal.line(&format!("以前のバージョンへ戻した: {line}"));
+            journal.line(&format!("前のバージョンへ戻した: {line}"));
             // 戻した版で落ち着いたかはログに残すだけにする(戻した事実は変わらない)。
             match verify(&units, &options.binary) {
                 Ok(elapsed) => journal.line(&format!("全ての unit が以前のバージョンで落ち着いた({} 秒)", elapsed.as_secs())),

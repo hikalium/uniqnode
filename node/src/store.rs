@@ -2160,7 +2160,7 @@ mod tests {
     }
 
     /// atomic_write の tmp 名は呼び出しごとに違う(同じプロセスの 2 つの書き手が取り合わない)。
-    /// 並べて書いても、どちらの中身も据わる。
+    /// 並べて書いても、どちらの中身も置かれる。
     #[test]
     fn atomic_write_uses_a_unique_tmp_name_per_call() {
         let dir = temp_dir("unique-tmp");

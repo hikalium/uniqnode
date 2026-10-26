@@ -182,7 +182,7 @@ fn reconcile_only_in_backup(
         }
     }
     if removed_any {
-        // 削除を MANIFEST の rename より先に永続化する(MANIFEST が据わった後に残骸だけ
+        // 削除を MANIFEST の rename より先に永続化する(MANIFEST が置かれた後に残骸だけ
         // 戻ってくる順序を作らない)。
         std::fs::File::open(destination.join(kind.directory))?.sync_all()?;
     }

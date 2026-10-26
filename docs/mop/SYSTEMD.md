@@ -1237,7 +1237,8 @@ sudo /home/hikalium/.local/bin/uniqnode apply /work2/llm_playground_host_dir/uni
 ```
 
 apply の間に autodeploy が同じバイナリを置き換えると、install の写しと取り合う。渡す前に
-`touch ~/.local/state/uniqnode-autodeploy/hold` を置き、操作者が打ち終えたら消す。
+`touch ~/.local/state/uniqnode-autodeploy/hold` を置き、操作者が打ち終えたら消す。hold を置いたセッションが、
+操作者の「done」を受けたその場で消す(消し忘れると、自動更新は理由を出すだけで止まり続ける)。
 
 ### 確かめ方と止め方
 

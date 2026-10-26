@@ -265,7 +265,7 @@ pub const REFUSAL_DRAIN_TIME: std::time::Duration = std::time::Duration::from_se
 pub const REFUSAL_LOG_QUEUE: usize = 256;
 
 /// 403 の本文の頭。試験はこの頭で断りを見分ける(must/0023)。
-pub const REFUSED_PREFIX: &str = "main door: この接続の相手を受け付けない: ";
+pub const REFUSED_PREFIX: &str = "main door: refusing the peer of this connection: ";
 
 /// 接続ごとに check を通してから handler に渡す(主の口。返らない)。
 ///
@@ -294,7 +294,7 @@ pub fn serve_checked(
     });
     // 書き出しのスレッドを作れなければ、積む側の try_send が失敗して数えるだけになる。
     if let Err(e) = logger {
-        crate::log_line!("uniqnode: serve: 断りのログのスレッドを作れない(以後は数えるだけ): {e}");
+        crate::log_line!("uniqnode: serve: cannot create the thread that logs refusals (only counting them from now on): {e}");
     }
     accept_loop(listener, |stream, peer| {
         let Some(check_slot) = gauge.checking.try_take() else {
@@ -319,7 +319,7 @@ pub fn serve_checked(
                         return;
                     };
                     drop(check_slot);
-                    let line = format!("uniqnode: serve: 主の口が {peer} を断った: {reason}");
+                    let line = format!("uniqnode: serve: the main door refused {peer}: {reason}");
                     if refusal_log.try_send(line).is_err() {
                         gauge.refusal_logs_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
@@ -338,7 +338,7 @@ pub fn serve_checked(
             });
         // スレッドを作れなければ、閉じた接続と枠は閉包と一緒に落ちて返る。
         if let Err(e) = spawned {
-            crate::log_line!("uniqnode: serve: 接続のスレッドを作れない: {e}");
+            crate::log_line!("uniqnode: serve: cannot create a connection thread: {e}");
         }
     })
 }
@@ -429,19 +429,19 @@ impl BrowserGate {
             return Some(Response::text(
                 421,
                 &format!(
-                    "main door: Host {host:?} はこの口の名ではない(許すのは {})\n",
+                    "main door: Host {host:?} is not a name of this door (allowed: {})\n",
                     self.allowed_hosts.join(", ")
                 ),
             ));
         }
         if request.header("origin").is_some() {
-            return Some(Response::text(403, "main door: Origin 付きの要求(ブラウザ)は受け付けない\n"));
+            return Some(Response::text(403, "main door: requests with Origin (from a browser) are not accepted\n"));
         }
         if let Some(site) = request.header("sec-fetch-site") {
             if !site.eq_ignore_ascii_case("same-origin") && !site.eq_ignore_ascii_case("none") {
                 return Some(Response::text(
                     403,
-                    &format!("main door: Sec-Fetch-Site {site} の要求(ブラウザ)は受け付けない\n"),
+                    &format!("main door: requests with Sec-Fetch-Site {site} (from a browser) are not accepted\n"),
                 ));
             }
         }
@@ -451,9 +451,9 @@ impl BrowserGate {
                 return Some(Response::text(
                     415,
                     &format!(
-                        "main door: Content-Type {media} は受け付けない(ブラウザが単純な要求で\
-                         送れる型。JSON は application/json、生のバイト列は \
-                         application/octet-stream で送る)\n"
+                        "main door: Content-Type {media} is not accepted (a browser can send this type in a simple request; \
+                         send JSON as application/json and raw bytes as \
+                         application/octet-stream)\n"
                     ),
                 ));
             }
@@ -529,7 +529,7 @@ fn read_request(
         let n = reader.read_line(&mut head)?;
         if n == 0 {
             return Ok(if lines.is_empty() { None } else {
-                Some(ReadOutcome::Bad(400, "リクエストが途中で切れた".into()))
+                Some(ReadOutcome::Bad(400, "the request was cut off".into()))
             });
         }
         let line = head.trim_end_matches(['\r', '\n']).to_string();
@@ -541,7 +541,7 @@ fn read_request(
         }
         lines.push(line);
         if lines.iter().map(|l| l.len()).sum::<usize>() > MAX_HEADER_BYTES {
-            return Ok(Some(ReadOutcome::Bad(400, "ヘッダが大きすぎる".into())));
+            return Ok(Some(ReadOutcome::Bad(400, "the header is too large".into())));
         }
     }
     let mut parts = lines[0].split(' ');
@@ -549,7 +549,7 @@ fn read_request(
     let path = parts.next().unwrap_or("").to_string();
     let version = parts.next().unwrap_or("");
     if method.is_empty() || path.is_empty() || !version.starts_with("HTTP/1.") {
-        return Ok(Some(ReadOutcome::Bad(400, "リクエストラインが不正".into())));
+        return Ok(Some(ReadOutcome::Bad(400, "invalid request line".into())));
     }
     let mut headers = Vec::new();
     for line in &lines[1..] {
@@ -557,23 +557,23 @@ fn read_request(
             Some((name, value)) => {
                 headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
             }
-            None => return Ok(Some(ReadOutcome::Bad(400, "ヘッダ行が不正".into()))),
+            None => return Ok(Some(ReadOutcome::Bad(400, "invalid header line".into()))),
         }
     }
     let request_head = Request { method, path, headers, body: Vec::new() };
 
     if request_head.header("transfer-encoding").is_some() {
-        return Ok(Some(ReadOutcome::Bad(501, "chunked 転送は未対応".into())));
+        return Ok(Some(ReadOutcome::Bad(501, "chunked transfer is not supported".into())));
     }
     let content_length = match request_head.header("content-length") {
         None => 0usize,
         Some(v) => match v.parse::<usize>() {
             Ok(n) => n,
-            Err(_) => return Ok(Some(ReadOutcome::Bad(400, "Content-Length が不正".into()))),
+            Err(_) => return Ok(Some(ReadOutcome::Bad(400, "invalid Content-Length".into()))),
         },
     };
     if content_length > MAX_BODY_BYTES {
-        return Ok(Some(ReadOutcome::Bad(413, "ボディが大きすぎる".into())));
+        return Ok(Some(ReadOutcome::Bad(413, "the body is too large".into())));
     }
     if matches!(request_head.header("expect"), Some(v) if v.eq_ignore_ascii_case("100-continue")) {
         writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
@@ -632,7 +632,7 @@ pub struct ClientResponse {
 pub fn body_head(body: &[u8]) -> String {
     let text = String::from_utf8_lossy(body);
     match text.char_indices().nth(200) {
-        Some((offset, _)) => format!("{}…", &text[..offset]),
+        Some((offset, _)) => format!("{}...", &text[..offset]),
         None => text.to_string(),
     }
 }
@@ -642,7 +642,7 @@ pub fn body_head(body: &[u8]) -> String {
 /// 80 番とみなす。
 pub fn split_http_url(url: &str) -> Result<(String, String), String> {
     if url.starts_with("https://") {
-        return Err(format!("{url}: https は未対応(TLS を実装していない)"));
+        return Err(format!("{url}: https is not supported (TLS is not implemented)"));
     }
     let rest = url.strip_prefix("http://").unwrap_or(url);
     let (authority, path) = match rest.find('/') {
@@ -650,7 +650,7 @@ pub fn split_http_url(url: &str) -> Result<(String, String), String> {
         None => (rest, "/"),
     };
     if authority.is_empty() {
-        return Err(format!("{url}: 接続先がない"));
+        return Err(format!("{url}: no address to connect to"));
     }
     let address = if authority.contains(':') {
         authority.to_string()
@@ -692,13 +692,13 @@ pub fn request(
     use std::net::ToSocketAddrs;
     let resolved = address
         .to_socket_addrs()
-        .map_err(|e| format!("{address} を解決できない: {e}"))?
+        .map_err(|e| format!("cannot resolve {address}: {e}"))?
         .next()
-        .ok_or_else(|| format!("{address} を解決できない"))?;
+        .ok_or_else(|| format!("cannot resolve {address}"))?;
     let stream = TcpStream::connect_timeout(&resolved, timeout)
-        .map_err(|e| format!("{address} に接続できない: {e}"))?;
-    stream.set_read_timeout(Some(timeout)).map_err(|e| format!("timeout 設定: {e}"))?;
-    stream.set_write_timeout(Some(timeout)).map_err(|e| format!("timeout 設定: {e}"))?;
+        .map_err(|e| format!("cannot connect to {address}: {e}"))?;
+    stream.set_read_timeout(Some(timeout)).map_err(|e| format!("setting the timeout: {e}"))?;
+    stream.set_write_timeout(Some(timeout)).map_err(|e| format!("setting the timeout: {e}"))?;
     let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
     // Connection: close なので、応答は1本だけ読めばよい(相手が長さを言わない場合の
     // 終端も接続の切断で決まる)。
@@ -710,11 +710,11 @@ pub fn request(
         ));
     }
     head.push_str("\r\n");
-    writer.write_all(head.as_bytes()).map_err(|e| format!("送信: {e}"))?;
+    writer.write_all(head.as_bytes()).map_err(|e| format!("sending: {e}"))?;
     if let Some((_, bytes)) = body {
-        writer.write_all(bytes).map_err(|e| format!("送信: {e}"))?;
+        writer.write_all(bytes).map_err(|e| format!("sending: {e}"))?;
     }
-    writer.flush().map_err(|e| format!("送信: {e}"))?;
+    writer.flush().map_err(|e| format!("sending: {e}"))?;
     let mut reader = BufReader::new(stream);
     read_client_response(&mut reader)
 }
@@ -723,23 +723,23 @@ pub fn request(
 /// 従う: chunked(Transfer-Encoding)、Content-Length、どちらも無ければ接続の切断まで。
 fn read_client_response(reader: &mut impl BufRead) -> Result<ClientResponse, String> {
     let mut status_line = String::new();
-    reader.read_line(&mut status_line).map_err(|e| format!("応答読み取り: {e}"))?;
+    reader.read_line(&mut status_line).map_err(|e| format!("reading the response: {e}"))?;
     if status_line.is_empty() {
-        return Err("応答が空(相手が何も返さずに切った)".to_string());
+        return Err("empty response (the peer closed without returning anything)".to_string());
     }
     let status: u16 = status_line
         .split(' ')
         .nth(1)
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| format!("応答ラインが不正: {status_line:?}"))?;
+        .ok_or_else(|| format!("invalid status line: {status_line:?}"))?;
     let mut content_length: Option<usize> = None;
     let mut chunked = false;
     let mut content_type: Option<String> = None;
     loop {
         let mut line = String::new();
-        let read = reader.read_line(&mut line).map_err(|e| format!("ヘッダ読み取り: {e}"))?;
+        let read = reader.read_line(&mut line).map_err(|e| format!("reading the header: {e}"))?;
         if read == 0 {
-            return Err("ヘッダの途中で切れた".to_string());
+            return Err("cut off in the middle of the header".to_string());
         }
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
@@ -750,7 +750,7 @@ fn read_client_response(reader: &mut impl BufRead) -> Result<ClientResponse, Str
             let value = value.trim();
             if name.eq_ignore_ascii_case("content-length") {
                 content_length = Some(
-                    value.parse().map_err(|_| format!("Content-Length が不正: {value:?}"))?,
+                    value.parse().map_err(|_| format!("invalid Content-Length: {value:?}"))?,
                 );
             } else if name.eq_ignore_ascii_case("transfer-encoding")
                 && value.to_ascii_lowercase().contains("chunked")
@@ -768,17 +768,17 @@ fn read_client_response(reader: &mut impl BufRead) -> Result<ClientResponse, Str
         read_chunked_body(reader)?
     } else if let Some(length) = content_length {
         if length > MAX_CLIENT_BODY_BYTES {
-            return Err(format!("応答ボディが大きすぎる({length} バイト)"));
+            return Err(format!("the response body is too large ({length} bytes)"));
         }
         let mut body = vec![0u8; length];
-        reader.read_exact(&mut body).map_err(|e| format!("ボディ読み取り: {e}"))?;
+        reader.read_exact(&mut body).map_err(|e| format!("reading the body: {e}"))?;
         body
     } else {
         let mut body = Vec::new();
         reader
             .take(MAX_CLIENT_BODY_BYTES as u64)
             .read_to_end(&mut body)
-            .map_err(|e| format!("ボディ読み取り: {e}"))?;
+            .map_err(|e| format!("reading the body: {e}"))?;
         body
     };
     Ok(ClientResponse { status, body, content_type })
@@ -790,35 +790,35 @@ fn read_chunked_body(reader: &mut impl BufRead) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
     loop {
         let mut line = String::new();
-        let read = reader.read_line(&mut line).map_err(|e| format!("チャンク長の読み取り: {e}"))?;
+        let read = reader.read_line(&mut line).map_err(|e| format!("reading a chunk length: {e}"))?;
         if read == 0 {
-            return Err("チャンクの途中で切れた".to_string());
+            return Err("cut off in the middle of a chunk".to_string());
         }
         let head = line.trim_end_matches(['\r', '\n']);
         let size_text = head.split(';').next().unwrap_or("").trim();
         let size = usize::from_str_radix(size_text, 16)
-            .map_err(|_| format!("チャンク長が16進でない: {size_text:?}"))?;
+            .map_err(|_| format!("the chunk length is not hexadecimal: {size_text:?}"))?;
         if size == 0 {
             loop {
                 let mut trailer = String::new();
                 let read = reader
                     .read_line(&mut trailer)
-                    .map_err(|e| format!("トレーラの読み取り: {e}"))?;
+                    .map_err(|e| format!("reading the trailer: {e}"))?;
                 if read == 0 || trailer.trim_end_matches(['\r', '\n']).is_empty() {
                     return Ok(body);
                 }
             }
         }
         if body.len() + size > MAX_CLIENT_BODY_BYTES {
-            return Err(format!("応答ボディが大きすぎる({} バイト超)", body.len() + size));
+            return Err(format!("the response body is too large (over {} bytes)", body.len() + size));
         }
         let start = body.len();
         body.resize(start + size, 0);
-        reader.read_exact(&mut body[start..]).map_err(|e| format!("チャンクの読み取り: {e}"))?;
+        reader.read_exact(&mut body[start..]).map_err(|e| format!("reading a chunk: {e}"))?;
         let mut crlf = [0u8; 2];
-        reader.read_exact(&mut crlf).map_err(|e| format!("チャンク末尾の読み取り: {e}"))?;
+        reader.read_exact(&mut crlf).map_err(|e| format!("reading the end of a chunk: {e}"))?;
         if &crlf != b"\r\n" {
-            return Err("チャンクの末尾が CRLF でない".to_string());
+            return Err("the chunk does not end with CRLF".to_string());
         }
     }
 }
@@ -917,13 +917,13 @@ mod tests {
     fn a_malformed_response_is_reported_not_swallowed() {
         let (address, handle) = canned_response(b"garbage\r\n\r\n");
         let error = get(&address, "/x", TIMEOUT).expect_err("状態行が不正なら失敗すべき");
-        assert!(error.contains("応答ライン"), "{error}");
+        assert!(error.contains("invalid status line"), "{error}");
         handle.join().expect("join");
 
         let (address, handle) =
             canned_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n");
         let error = get(&address, "/x", TIMEOUT).expect_err("チャンク長が不正なら失敗すべき");
-        assert!(error.contains("チャンク長"), "{error}");
+        assert!(error.contains("chunk length"), "{error}");
         handle.join().expect("join");
     }
 
@@ -934,7 +934,7 @@ mod tests {
         let error = get("127.0.0.1:1", "/x", std::time::Duration::from_millis(500))
             .expect_err("繋がらないはず");
         assert!(error.contains("127.0.0.1:1"), "{error}");
-        assert!(error.contains("接続できない"), "{error}");
+        assert!(error.contains("cannot connect to"), "{error}");
     }
 
     /// URL の割り方(期待値はリテラル。should/0137)。

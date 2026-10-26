@@ -136,7 +136,7 @@ fn expect_100_continue_is_honored() {
 /// ロックを取れない serve は `listening on` を一度も言わずに終わる。標準出力のこの 1 行は
 /// 「出たら要求を受け付ける」という起動スクリプトとの取り決めで、束縛してから開く順だと、
 /// ロックを持つ別のプロセスがいるときにこの行を出した後で exit 1 し、行を待つ側が騙される
-/// (2026-09-05 に systemd の据え付けで観測。docs/mop/SYSTEMD.md の二重起動の症状)。
+/// (2026-09-05 に systemd のデプロイで観測。docs/mop/SYSTEMD.md の二重起動の症状)。
 #[test]
 fn a_serve_that_cannot_take_the_store_lock_never_says_listening_on() {
     let holder = start_server("lock-holder");
@@ -162,7 +162,7 @@ fn a_serve_that_cannot_take_the_store_lock_never_says_listening_on() {
         "ロックを取れない serve の終了コードは 1: stderr={stderr}"
     );
     assert!(
-        stderr.contains("別プロセスが開いている"),
+        stderr.contains("is open in another process"),
         "ロックを取れなかった理由を言っていない: {stderr}"
     );
     // 終わった後に、渡したアドレスで何も受け付けていない(束縛したまま残していない)。
@@ -198,7 +198,7 @@ fn a_serve_with_a_bad_rerank_url_stops_before_it_says_listening_on() {
     );
     assert_eq!(output.status.code(), Some(2), "引数の誤りの終了コードは 2: stderr={stderr}");
     assert!(
-        stderr.contains("uniqnode: rerank:") && stderr.contains("https は未対応"),
+        stderr.contains("uniqnode: rerank:") && stderr.contains("https is not supported"),
         "装備できなかった理由を言っていない: {stderr}"
     );
     std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -297,7 +297,7 @@ fn the_meta_query_lands_in_the_doc_rev_through_the_main_door_too() {
 
     let refused = put("/v1/collections/notes/documents/o.md?meta.agent=a&meta.agent=b");
     assert_eq!(refused.status, 400, "{}", body_text(&refused));
-    assert_eq!(body_text(&refused), "{\"error\":\"meta.agent が 2 度ある\"}");
+    assert_eq!(body_text(&refused), "{\"error\":\"meta.agent appears twice\"}");
     let collections = simple(&server.address, "GET", "/v1/collections", b"");
     assert_eq!(
         body_text(&collections),

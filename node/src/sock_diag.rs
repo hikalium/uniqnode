@@ -94,7 +94,7 @@ pub fn judge(
         match same {
             Some(kept) if kept.uid != answer.uid || kept.state != answer.state => {
                 return Err(format!(
-                    "同じソケットの答えが食い違う(uid {} と {}、状態 {} と {})",
+                    "answers for the same socket disagree (uid {} vs {}, state {} vs {})",
                     kept.uid, answer.uid, kept.state, answer.state
                 ));
             }
@@ -105,35 +105,35 @@ pub fn judge(
     let socket = match sockets.as_slice() {
         [] => {
             return Err(format!(
-                "相手のソケット(local {} remote {})が照会の答えに無い",
+                "the peer's socket (local {} remote {}) is not in the answer to the query",
                 expected.local, expected.remote
             ))
         }
         [socket] => *socket,
         many => {
             return Err(format!(
-                "相手の 4 つ組に一致するソケットが {} 個ある(1 個でなければ断る)",
+                "{} sockets match the peer's 4-tuple (refused unless exactly 1)",
                 many.len()
             ))
         }
     };
     if socket.state != TCP_ESTABLISHED {
         return Err(format!(
-            "相手のソケットの状態が ESTABLISHED でない(状態 {}。閉じかけの接続は断る)",
+            "the peer's socket is not ESTABLISHED (state {}; closing connections are refused)",
             socket.state
         ));
     }
     if socket.inode == 0 {
-        return Err("相手のソケットの inode が 0(持ち主を読めない形)".to_string());
+        return Err("the peer's socket has inode 0 (its owner cannot be read)".to_string());
     }
     if socket.uid == overflow_uid {
         return Err(format!(
-            "相手の uid が overflowuid {overflow_uid}(この user namespace へ写せない uid)"
+            "the peer's uid is overflowuid {overflow_uid} (a uid that cannot be mapped into this user namespace)"
         ));
     }
     if !allowed.contains(&socket.uid) {
         return Err(format!(
-            "相手の uid {} は許す集合 {} に無い",
+            "the peer's uid {} is not in the allowed set {}",
             socket.uid,
             uid_list(allowed)
         ));
@@ -173,7 +173,7 @@ pub fn lookup(expected: Endpoints) -> Result<Vec<Answer>, String> {
     if IN_FLIGHT.fetch_add(1, Ordering::AcqRel) >= crate::http::CHECK_SLOTS {
         drop(Release);
         return Err(format!(
-            "走っている sock_diag の照会が上限({})に達している(期限を過ぎても戻らない照会がある)",
+            "running sock_diag queries reached the limit ({}) (some queries have not returned past their deadline)",
             crate::http::CHECK_SLOTS
         ));
     }
@@ -189,7 +189,7 @@ pub fn lookup(expected: Endpoints) -> Result<Vec<Answer>, String> {
             // 呼び手が期限で去っていれば、送りは失敗して答えは捨てられる。
             let _ = sender.send(result);
         })
-        .map_err(|e| format!("sock_diag の照会のスレッドを作れない: {e}"))?;
+        .map_err(|e| format!("cannot create the sock_diag query thread: {e}"))?;
     receive_before(&receiver, deadline)
 }
 
@@ -201,13 +201,13 @@ fn receive_before<T>(
     deadline: std::time::Instant,
 ) -> Result<T, String> {
     let left = deadline.saturating_duration_since(std::time::Instant::now());
-    let expired = || Err(format!("sock_diag の照会が期限({QUERY_TIMEOUT:?})の内に終わらない"));
+    let expired = || Err(format!("the sock_diag query did not finish within its deadline ({QUERY_TIMEOUT:?})"));
     match receiver.recv_timeout(left) {
         Ok(_) if std::time::Instant::now() >= deadline => expired(),
         Ok(result) => result,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => expired(),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            Err("sock_diag の照会のスレッドが答えずに終わった".to_string())
+            Err("the sock_diag query thread ended without answering".to_string())
         }
     }
 }
@@ -236,7 +236,7 @@ fn lookup_blocking(expected: Endpoints, deadline: std::time::Instant) -> Result<
         }
         _ => {
             return Err(format!(
-                "4 つ組の族が揃わない(local {} remote {})",
+                "the address families of the 4-tuple differ (local {} remote {})",
                 expected.local, expected.remote
             ))
         }
@@ -301,7 +301,7 @@ pub fn parse_reply(bytes: &[u8], sequence: u32) -> Result<Vec<Answer>, String> {
         payload
             .get(..4)
             .map(|b| i32::from_ne_bytes(b.try_into().expect("4")))
-            .ok_or_else(|| format!("netlink の {what} が短い"))
+            .ok_or_else(|| format!("netlink {what} is too short"))
     };
     let mut answers = Vec::new();
     let mut replies = 0usize;
@@ -309,7 +309,7 @@ pub fn parse_reply(bytes: &[u8], sequence: u32) -> Result<Vec<Answer>, String> {
     while offset < bytes.len() {
         if offset + HEADER > bytes.len() {
             return Err(format!(
-                "netlink の答えの末尾に半端なバイトが {} ある",
+                "the netlink answer ends with {} stray bytes",
                 bytes.len() - offset
             ));
         }
@@ -319,24 +319,24 @@ pub fn parse_reply(bytes: &[u8], sequence: u32) -> Result<Vec<Answer>, String> {
         let seen_sequence =
             u32::from_ne_bytes(bytes[offset + 8..offset + 12].try_into().expect("4"));
         if length < HEADER || length > bytes.len() - offset {
-            return Err(format!("netlink の答えの長さが不正({length})"));
+            return Err(format!("invalid netlink answer length ({length})"));
         }
         let payload = &bytes[offset + HEADER..offset + length];
         if seen_sequence == sequence {
             if flags & NLM_F_MULTI != 0 {
                 return Err(format!(
-                    "netlink の答えに NLM_F_MULTI が付いている(種類 {kind}。1 件の照会の答えではない)"
+                    "the netlink answer carries NLM_F_MULTI (type {kind}; not an answer to a single query)"
                 ));
             }
             match kind {
-                NLMSG_DONE => match word(payload, "終わりの通知")? {
+                NLMSG_DONE => match word(payload, "done message")? {
                     0 => {}
-                    code => return Err(format!("netlink の終わりの通知が誤りの値 {code} を持つ")),
+                    code => return Err(format!("the netlink done message carries error value {code}")),
                 },
                 NLMSG_ERROR | SOCK_DIAG_BY_FAMILY => {
                     replies += 1;
                     if replies > 1 {
-                        return Err("netlink の答えが 2 つ以上ある(1 件の照会の答えではない)".to_string());
+                        return Err("there are 2 or more netlink answers (not an answer to a single query)".to_string());
                     }
                     if kind == SOCK_DIAG_BY_FAMILY {
                         answers.push(parse_message(payload)?);
@@ -345,41 +345,41 @@ pub fn parse_reply(bytes: &[u8], sequence: u32) -> Result<Vec<Answer>, String> {
                         // 持つ。それに満たない誤りの答えは断る。
                         if payload.len() < NLMSGERR_LEN {
                             return Err(format!(
-                                "netlink の誤りの答えが短い({} バイト。nlmsgerr は {NLMSGERR_LEN})",
+                                "the netlink error answer is too short ({} bytes; nlmsgerr is {NLMSGERR_LEN})",
                                 payload.len()
                             ));
                         }
-                        let code = word(payload, "誤りの答え")?;
+                        let code = word(payload, "error answer")?;
                         // i32::MIN の符号は返せない(checked_neg が None)。
                         let errno = code
                             .checked_neg()
-                            .ok_or_else(|| format!("netlink の誤りの値が不正({code})"))?;
+                            .ok_or_else(|| format!("invalid netlink error value ({code})"))?;
                         match errno {
                             // 見つからない、だけが答え 0 件である。
                             ENOENT => {}
                             // 誤りの値 0 は ACK で、NLM_F_ACK を頼んでいない 1 件の照会には来ない。
                             0 => {
                                 return Err(
-                                    "netlink の答えが想定外の ACK(誤りの値 0)である".to_string()
+                                    "the netlink answer is an unexpected ACK (error value 0)".to_string()
                                 )
                             }
                             errno => {
                                 return Err(format!(
-                                    "sock_diag の照会が誤りを返した: {}",
+                                    "the sock_diag query returned an error: {}",
                                     std::io::Error::from_raw_os_error(errno)
                                 ))
                             }
                         }
                     }
                 }
-                other => return Err(format!("netlink の答えの種類が想定外({other})")),
+                other => return Err(format!("unexpected netlink answer type ({other})")),
             }
         }
         // NLMSG_ALIGN(4 バイト境界)。最後の通知の後の詰め物はデータグラムの外へはみ出してよい。
         offset = offset.saturating_add((length + 3) & !3);
     }
     if replies == 0 {
-        return Err("netlink の答えに照会への返事が無い".to_string());
+        return Err("the netlink answer has no reply to the query".to_string());
     }
     Ok(answers)
 }
@@ -387,7 +387,7 @@ pub fn parse_reply(bytes: &[u8], sequence: u32) -> Result<Vec<Answer>, String> {
 /// inet_diag_msg(72 バイト。後ろの属性は読まない)を読む。
 fn parse_message(payload: &[u8]) -> Result<Answer, String> {
     if payload.len() < 72 {
-        return Err(format!("inet_diag_msg が短い({} バイト)", payload.len()));
+        return Err(format!("inet_diag_msg is too short ({} bytes)", payload.len()));
     }
     let family = payload[0];
     let state = payload[1];
@@ -403,7 +403,7 @@ fn parse_message(payload: &[u8]) -> Result<Answer, String> {
                 let octets: [u8; 16] = field.try_into().expect("16");
                 Ok(IpAddr::V6(Ipv6Addr::from(octets)))
             }
-            other => Err(format!("inet_diag_msg の族が想定外({other})")),
+            other => Err(format!("unexpected inet_diag_msg address family ({other})")),
         }
     };
     let local = SocketAddr::new(ip(&id[4..20])?, source_port);
@@ -426,8 +426,8 @@ fn parse_message(payload: &[u8]) -> Result<Answer, String> {
 /// (node/src/main_door.rs の MainDoor::self_test)と接続ごとの判定が同じ文を使う。
 pub fn socket_unavailable(error: &std::io::Error) -> String {
     format!(
-        "sock_diag の照会ソケット(AF_NETLINK)を作れない: {error}(systemd の unit なら \
-         RestrictAddressFamilies= に AF_NETLINK が要る)"
+        "cannot create the sock_diag query socket (AF_NETLINK): {error} (a systemd unit needs \
+         AF_NETLINK in RestrictAddressFamilies=)"
     )
 }
 
@@ -527,7 +527,7 @@ mod platform {
         deadline
             .checked_duration_since(Instant::now())
             .filter(|left| !left.is_zero())
-            .ok_or_else(|| format!("sock_diag の照会が期限({QUERY_TIMEOUT:?})の内に終わらない({what})"))
+            .ok_or_else(|| format!("the sock_diag query did not finish within its deadline ({QUERY_TIMEOUT:?}) ({what})"))
     }
 
     /// 受けの期限(SO_RCVTIMEO)を残りの時間に置く。0 は「待ち続ける」になるので 1 µs に丸める。
@@ -548,7 +548,7 @@ mod platform {
         };
         match set {
             0 => Ok(()),
-            _ => Err(format!("照会ソケットの期限を置けない: {}", std::io::Error::last_os_error())),
+            _ => Err(format!("cannot set the timeout of the query socket: {}", std::io::Error::last_os_error())),
         }
     }
 
@@ -564,7 +564,7 @@ mod platform {
         let kernel = SockaddrNetlink { family: AF_NETLINK as u16, pad: 0, pid: 0, groups: 0 };
         // 送りの EINTR は、期限の残りがある間だけ送り直す。
         loop {
-            remaining(deadline, "送り")?;
+            remaining(deadline, "send")?;
             // SAFETY: request と kernel は呼び出しの間生きていて、長さはそれぞれの大きさ。
             let sent = unsafe {
                 sendto(
@@ -581,10 +581,10 @@ mod platform {
                 if error.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                return Err(format!("sock_diag の照会を送れない: {error}"));
+                return Err(format!("cannot send the sock_diag query: {error}"));
             }
             if sent as usize != request.len() {
-                return Err(format!("sock_diag の照会を送り切れない({sent} バイト)"));
+                return Err(format!("cannot send the whole sock_diag query ({sent} bytes)"));
             }
             break;
         }
@@ -594,7 +594,7 @@ mod platform {
         let mut buffer = vec![0u8; 8192];
         let (received, sender) = loop {
             // 受けの EINTR も、期限の残りを受けの期限に置き直してから受け直す。
-            set_receive_timeout(&fd, remaining(deadline, "受け")?)?;
+            set_receive_timeout(&fd, remaining(deadline, "receive")?)?;
             let mut sender = SockaddrNetlink { family: 0, pad: 0, pid: u32::MAX, groups: 0 };
             let mut sender_length = std::mem::size_of::<SockaddrNetlink>() as u32;
             // SAFETY: buffer は書ける長さ buffer.len() の領域、sender と sender_length は呼び出しの
@@ -614,24 +614,24 @@ mod platform {
                 if error.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                return Err(format!("sock_diag の答えを受けられない: {error}"));
+                return Err(format!("cannot receive the sock_diag answer: {error}"));
             }
             if (sender_length as usize) < std::mem::size_of::<SockaddrNetlink>() {
-                return Err(format!("sock_diag の答えの送り手の長さが不正({sender_length})"));
+                return Err(format!("invalid sender address length in the sock_diag answer ({sender_length})"));
             }
             break (received as usize, sender);
         };
         // 受けが成功しても、期限を過ぎていれば答えを使わない。
-        remaining(deadline, "受けの後")?;
+        remaining(deadline, "after receive")?;
         if sender.family != AF_NETLINK as u16 || sender.pid != 0 {
             return Err(format!(
-                "sock_diag の答えの送り手がカーネルでない(族 {}、nl_pid {})",
+                "the sender of the sock_diag answer is not the kernel (family {}, nl_pid {})",
                 sender.family, sender.pid
             ));
         }
         if received > buffer.len() {
             return Err(format!(
-                "sock_diag の答えが受け口({} バイト)より長い({received} バイト。切れた答えは読まない)",
+                "the sock_diag answer is longer than the buffer ({} bytes) ({received} bytes; a truncated answer is not read)",
                 buffer.len()
             ));
         }
@@ -653,7 +653,7 @@ mod platform {
         _remote: SocketAddr,
         _deadline: std::time::Instant,
     ) -> Result<Vec<Answer>, String> {
-        Err("sock_diag は Linux にしかない".to_string())
+        Err("sock_diag exists only on Linux".to_string())
     }
 
     pub fn open_socket() -> std::io::Result<()> {
@@ -733,7 +733,7 @@ mod tests {
             answer.local = at(local);
             answer.remote = at(remote);
             let error = judge(&[answer], expected(), OVERFLOW, &[1000]).expect_err("断る");
-            assert!(error.contains("答えに無い"), "{local} {remote}: {error}");
+            assert!(error.contains("is not in the answer"), "{local} {remote}: {error}");
         }
     }
 
@@ -773,7 +773,7 @@ mod tests {
         other.inode = 12346;
         let error =
             judge(&[established(1000), other], expected(), OVERFLOW, &[1000]).expect_err("断る");
-        assert!(error.contains("2 個"), "{error}");
+        assert!(error.contains("2 sockets"), "{error}");
     }
 
     /// 同じソケットが AF_INET と、IPv4 射影の AF_INET6 の両方から返る答えは 1 つにまとめて通す。
@@ -907,21 +907,21 @@ mod tests {
         // 誤りの値が 0 でない NLMSG_DONE。0 なら読み飛ばす。
         let mut done_error = answer.clone();
         done_error.extend_from_slice(&netlink_message(3, 0, 5, &(-13i32).to_ne_bytes()));
-        assert!(parse_reply(&done_error, 5).expect_err("断る").contains("終わりの通知"));
+        assert!(parse_reply(&done_error, 5).expect_err("断る").contains("done message"));
         let mut done_ok = answer.clone();
         done_ok.extend_from_slice(&netlink_message(3, 0, 5, &0i32.to_ne_bytes()));
         assert_eq!(parse_reply(&done_ok, 5), Ok(vec![established(1000)]));
         // 末尾の端のバイト(頭に満たない)と、長さの合わない通知。
         let mut trailing = answer.clone();
         trailing.extend_from_slice(&[1, 2, 3, 4, 5]);
-        assert!(parse_reply(&trailing, 5).expect_err("断る").contains("半端"));
+        assert!(parse_reply(&trailing, 5).expect_err("断る").contains("stray bytes"));
         let mut overlong = answer.clone();
         overlong.extend_from_slice(&netlink_message(20, 0, 5, &diag_payload())[..40]);
-        assert!(parse_reply(&overlong, 5).expect_err("断る").contains("長さ"));
+        assert!(parse_reply(&overlong, 5).expect_err("断る").contains("length"));
         // 返事が 2 つ(答えと答え、答えと誤り)。
         let mut two = answer.clone();
         two.extend_from_slice(&answer);
-        assert!(parse_reply(&two, 5).expect_err("断る").contains("2 つ以上"));
+        assert!(parse_reply(&two, 5).expect_err("断る").contains("2 or more"));
         let mut answer_and_error = answer.clone();
         answer_and_error.extend_from_slice(&netlink_message(2, 0, 5, &error_payload(-2)));
         assert!(parse_reply(&answer_and_error, 5).is_err());
@@ -941,7 +941,7 @@ mod tests {
         let enoent = netlink_message(2, 0, 7, &error_payload(-2));
         assert_eq!(parse_reply(&enoent, 7), Ok(Vec::new()));
         let short = netlink_message(2, 0, 7, &(-2i32).to_ne_bytes());
-        assert!(parse_reply(&short, 7).expect_err("断る").contains("短い"));
+        assert!(parse_reply(&short, 7).expect_err("断る").contains("too short"));
         let ack = netlink_message(2, 0, 7, &error_payload(0));
         assert!(parse_reply(&ack, 7).expect_err("断る").contains("ACK"));
     }
@@ -951,6 +951,6 @@ mod tests {
     fn an_error_code_of_i32_min_is_refused_without_overflow() {
         let reply = netlink_message(2, 0, 6, &error_payload(i32::MIN));
         let error = parse_reply(&reply, 6).expect_err("断る");
-        assert!(error.contains("不正"), "{error}");
+        assert!(error.contains("invalid"), "{error}");
     }
 }

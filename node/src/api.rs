@@ -62,8 +62,8 @@ pub(crate) fn error_response(status: u16, message: &str) -> Response {
 
 /// 要求の本文を c1 として読む。読めなければ、そのまま返せる 400 の応答を返す。
 pub(crate) fn parse_body(body: &[u8]) -> std::result::Result<c1::Value, Response> {
-    let text = std::str::from_utf8(body).map_err(|_| error_response(400, "ボディが UTF-8 でない"))?;
-    c1::parse(text).map_err(|e| error_response(400, &format!("JSON が不正: {e}")))
+    let text = std::str::from_utf8(body).map_err(|_| error_response(400, "the body is not UTF-8"))?;
+    c1::parse(text).map_err(|e| error_response(400, &format!("invalid JSON: {e}")))
 }
 
 /// 書けない状態の JSON の形(503 の本文の `writes_disabled` と /v1/status の欄が同じこれを
@@ -261,15 +261,15 @@ pub fn handle(context: &ApiContext, request: &Request) -> Response {
                 c1::Value::Object(map) => {
                     let root = match map.get("root") {
                         Some(c1::Value::Text(t)) => t.clone(),
-                        _ => return error_response(400, "root がない"),
+                        _ => return error_response(400, "no root"),
                     };
                     let min = match map.get("min_replicas") {
                         Some(c1::Value::Integer(n)) if (0..=1024).contains(n) => *n as u32,
-                        _ => return error_response(400, "min_replicas は 0..=1024 の整数"),
+                        _ => return error_response(400, "min_replicas must be an integer in 0..=1024"),
                     };
                     (root, min)
                 }
-                _ => return error_response(400, "ボディはオブジェクトであるべき"),
+                _ => return error_response(400, "the body must be an object"),
             };
             let mut store = store.lock().expect("lock");
             match store.set_pin(&root, min_replicas) {
@@ -422,7 +422,7 @@ fn handle_admin_gc(context: &ApiContext, request: &Request) -> Response {
             Err(response) => return response,
         };
         let c1::Value::Object(map) = &value else {
-            return error_response(400, "ボディはオブジェクトであるべき");
+            return error_response(400, "the body must be an object");
         };
         // c1 は小数を持たない(整数と文字列だけ)ので、割合は "0.25" のような文字列か、0 か 1 の
         // 整数で受ける。
@@ -436,13 +436,13 @@ fn handle_admin_gc(context: &ApiContext, request: &Request) -> Response {
             (None, _) => {}
             (Some(_), Some(value)) if (0.0..=1.0).contains(&value) => options.threshold = value,
             (Some(_), _) => {
-                return error_response(400, "threshold は 0 以上 1 以下の割合(\"0.25\" のような文字列)")
+                return error_response(400, "threshold must be a ratio from 0 to 1 (a string such as \"0.25\")")
             }
         }
         match map.get("dry_run") {
             None => {}
             Some(c1::Value::Bool(b)) => options.dry_run = *b,
-            Some(_) => return error_response(400, "dry_run は真偽値"),
+            Some(_) => return error_response(400, "dry_run must be a boolean"),
         }
     }
     let report = match crate::gc::run(&context.store, options) {
@@ -451,7 +451,7 @@ fn handle_admin_gc(context: &ApiContext, request: &Request) -> Response {
             return error_response(409, &m)
         }
         Err(e) => {
-            crate::log_line!("uniqnode: gc: 失敗: {e}");
+            crate::log_line!("uniqnode: gc: failed: {e}");
             return store_error_response(e);
         }
     };
@@ -544,30 +544,30 @@ fn handle_query(context: &ApiContext, request: &Request) -> Response {
     };
     let map = match &value {
         c1::Value::Object(m) => m,
-        _ => return error_response(400, "ボディはオブジェクトであるべき"),
+        _ => return error_response(400, "the body must be an object"),
     };
     let kind = match map.get("kind") {
         Some(c1::Value::Text(t)) if t == "object" => QueryKind::Object,
         Some(c1::Value::Text(t)) if t == "ref" => QueryKind::Ref,
-        _ => return error_response(400, "kind は \"object\" か \"ref\""),
+        _ => return error_response(400, "kind must be \"object\" or \"ref\""),
     };
     let target = match map.get("target") {
         Some(c1::Value::Text(t)) => t.clone(),
-        _ => return error_response(400, "target がない"),
+        _ => return error_response(400, "no target"),
     };
     match kind {
         QueryKind::Object if !c1::is_object_id(&target) => {
-            return error_response(400, "オブジェクトIDの形式が不正")
+            return error_response(400, "malformed object ID")
         }
         QueryKind::Ref if !target.contains('/') => {
-            return error_response(400, "ref は完全名(<node_id>/<path>)で指定する")
+            return error_response(400, "give the ref by its full name (<node_id>/<path>)")
         }
         _ => {}
     }
     let budget_ms = match map.get("budget_ms") {
         None => 2_000,
         Some(c1::Value::Integer(n)) if (0..=60_000).contains(n) => *n as u64,
-        Some(_) => return error_response(400, "budget_ms は 0..=60000 の整数"),
+        Some(_) => return error_response(400, "budget_ms must be an integer in 0..=60000"),
     };
     let scope = match map.get("scope") {
         None => context.engine.default_scope(),
@@ -576,17 +576,17 @@ fn handle_query(context: &ApiContext, request: &Request) -> Response {
             for item in items {
                 match item {
                     c1::Value::Text(address) => scope.push(address.clone()),
-                    _ => return error_response(400, "scope はアドレス文字列の配列"),
+                    _ => return error_response(400, "scope must be an array of address strings"),
                 }
             }
             scope
         }
-        Some(_) => return error_response(400, "scope はアドレス文字列の配列"),
+        Some(_) => return error_response(400, "scope must be an array of address strings"),
     };
     let wait = match map.get("wait") {
         None => true,
         Some(c1::Value::Bool(b)) => *b,
-        Some(_) => return error_response(400, "wait は真偽値"),
+        Some(_) => return error_response(400, "wait must be a boolean"),
     };
     let shared = context.engine.start(kind, &target, budget_ms, scope);
     let state = if wait { shared.wait_settled() } else { shared.snapshot() };
@@ -692,49 +692,49 @@ pub struct SearchResults {
 pub fn parse_search_request(value: &c1::Value) -> Result<SearchRequest, String> {
     let map = match value {
         c1::Value::Object(m) => m,
-        _ => return Err("要求はオブジェクトであるべき".to_string()),
+        _ => return Err("the request must be an object".to_string()),
     };
     let query = match map.get("query") {
         Some(c1::Value::Text(t)) if !t.is_empty() => t.clone(),
-        _ => return Err("query がない(空でない文字列)".to_string()),
+        _ => return Err("no query (a non-empty string)".to_string()),
     };
     let collection = match map.get("collection") {
         None | Some(c1::Value::Null) => None,
         Some(c1::Value::Text(t)) if !t.is_empty() => Some(t.clone()),
-        _ => return Err("collection は空でない文字列".to_string()),
+        _ => return Err("collection must be a non-empty string".to_string()),
     };
     let top_k = match map.get("top_k") {
         None | Some(c1::Value::Null) => 10usize,
         Some(c1::Value::Integer(n)) if (1..=1000).contains(n) => *n as usize,
-        _ => return Err("top_k は 1..=1000 の整数".to_string()),
+        _ => return Err("top_k must be an integer in 1..=1000".to_string()),
     };
     let method = match map.get("method") {
         None | Some(c1::Value::Null) => None,
         Some(c1::Value::Text(t)) => match crate::embed::SearchMethod::parse(t) {
             Some(method) => Some(method),
             None => {
-                return Err("method は \"bm25\"・\"embedding\"・\"hybrid\" のどれか".to_string())
+                return Err("method must be one of \"bm25\", \"embedding\" and \"hybrid\"".to_string())
             }
         },
-        _ => return Err("method は文字列".to_string()),
+        _ => return Err("method must be a string".to_string()),
     };
     let include_low_information = match map.get("include_low_information") {
         None | Some(c1::Value::Null) => false,
         Some(c1::Value::Bool(flag)) => *flag,
-        _ => return Err("include_low_information は真偽値".to_string()),
+        _ => return Err("include_low_information must be a boolean".to_string()),
     };
     let full = match map.get("full") {
         None | Some(c1::Value::Null) => false,
         Some(c1::Value::Bool(flag)) => *flag,
-        _ => return Err("full は真偽値".to_string()),
+        _ => return Err("full must be a boolean".to_string()),
     };
     // 全文を載せる要求は件数を絞る(node/tests/search.rs の
     // full_results_carry_the_whole_chunk_text が top_k=11 の 400 で見張る)。
     if full && top_k > FULL_TOP_K_LIMIT {
-        return Err(format!("top_k は full のとき 1..={FULL_TOP_K_LIMIT}"));
+        return Err(format!("with full, top_k must be in 1..={FULL_TOP_K_LIMIT}"));
     }
     if crate::search::terms_of(&query).is_empty() {
-        return Err("クエリに索引語が無い(英数字の語か、仮名・漢字などの文字が要る)".to_string());
+        return Err("the query has no index terms (it needs alphanumeric words or characters such as kana or kanji)".to_string());
     }
     Ok(SearchRequest { query, collection, top_k, method, include_low_information, full })
 }
@@ -764,7 +764,7 @@ fn with_current_index<T>(
         );
         *cache = Some(index);
     }
-    Ok(use_index(cache.as_ref().expect("直前に構築した")))
+    Ok(use_index(cache.as_ref().expect("built just above")))
 }
 
 /// 索引の温め(SEARCH (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580) の「索引の構築と世代」)
@@ -793,7 +793,7 @@ impl IndexWarmer {
         // 受け手が居ないのは serve が終わる途中だけであり、その索引はもう誰も引かない。
         // 黙って飲まず、一言残す(must/0022)。
         if self.sender.send(()).is_err() {
-            crate::log_line!("uniqnode: search: 索引の温めの受け手が居ない(終了中か)");
+            crate::log_line!("uniqnode: search: nobody receives the index warm-up (shutting down?)");
         }
     }
 }
@@ -834,7 +834,7 @@ pub fn start_index_warmer(context: Arc<ApiContext>) {
         // 合図の口が無い(組み立て側の誤り)か、既に起こしてある。黙って何もしないと
         // 「温まらない」が観測されるまで分からないので、記録に残す(must/0022)。
         crate::log_line!(
-            "uniqnode: search: 索引の温めを起こせない(ApiContext に合図の口が無いか、既に起きている)"
+            "uniqnode: search: cannot start the index warm-up (ApiContext has no signal channel, or it is already running)"
         );
         return;
     };
@@ -868,7 +868,7 @@ pub fn start_index_warmer(context: Arc<ApiContext>) {
 fn warm_search_index(context: &ApiContext) {
     let store = context.store.lock().expect("lock");
     if let Err(error) = with_current_index(context, &store, |_index| ()) {
-        crate::log_line!("uniqnode: search: 索引の温めに失敗した: {error}");
+        crate::log_line!("uniqnode: search: index warm-up failed: {error}");
     }
 }
 
@@ -899,7 +899,7 @@ fn warm_vector_index(context: &ApiContext) {
     });
     // 読めなければ理由を残して次の合図を待つ(次の検索が同じ失敗を degraded で言う)。
     if let Err(error) = outcome {
-        crate::log_line!("uniqnode: embed: ベクトルの索引の温めに失敗した: {error}");
+        crate::log_line!("uniqnode: embed: vector index warm-up failed: {error}");
     }
 }
 
@@ -972,7 +972,7 @@ fn nudge_vector_filler(filler: &Option<std::sync::mpsc::Sender<()>>) {
     let Some(filler) = filler else { return };
     // 受け手が居ないのは補完のスレッドが死んだときだけ(panic)。黙って飲まない(must/0022)。
     if filler.send(()).is_err() {
-        crate::log_line!("uniqnode: embed: ベクトルの補完の受け手が居ない(スレッドが止まった)");
+        crate::log_line!("uniqnode: embed: nobody receives the vector fill (the thread stopped)");
     }
 }
 
@@ -1010,9 +1010,9 @@ fn fill_missing_vectors(context: &ApiContext, last_refusal: &mut Option<String>)
             let refusal = error.to_string();
             if last_refusal.as_deref() != Some(refusal.as_str()) {
                 crate::log_line!(
-                    "uniqnode: embed: 無いベクトルを埋められない: {refusal}(埋めたのは \
-                     {embedded_so_far} 件。検索は BM25 に劣化して答える。次の書き込みの後に\
-                     また試し、同じ理由が続くあいだはこの行を繰り返さない)"
+                    "uniqnode: embed: cannot fill the missing vectors: {refusal} (filled \
+                     {embedded_so_far}; search degrades to BM25; retrying after the next write, \
+                     and this line is not repeated while the same reason persists)"
                 );
                 *last_refusal = Some(refusal);
             }
@@ -1049,7 +1049,7 @@ pub fn run_search(
     // 下の順位付けが BM25 だけに劣化して答える。
     let embedding = match requested {
         crate::embed::SearchMethod::Bm25 => {
-            crate::embed::QueryEmbedding::Unavailable("bm25 を要求された".to_string())
+            crate::embed::QueryEmbedding::Unavailable("bm25 was requested".to_string())
         }
         _ => crate::embed::QueryEmbedding::of(
             context.embedding.as_ref().map(|service| &service.embedder),
@@ -1103,7 +1103,7 @@ pub fn run_search(
         );
         if lexical_query != request.query {
             crate::log_line!(
-                "uniqnode: search: 語の一致のために問いを広げた: {:?} → {:?}",
+                "uniqnode: search: widened the query for word matching: {:?} -> {:?}",
                 request.query,
                 lexical_query
             );
@@ -1137,7 +1137,7 @@ pub fn run_search(
                     Some(Fetched::Chunk { text, .. }) => Some(text),
                     _ => {
                         return Err(StoreError::Corruption(format!(
-                            "索引にあるチャンク {} がストアにチャンクとして無い",
+                            "chunk {} in the index is not in the store as a chunk",
                             chunk.id
                         )))
                     }
@@ -1169,11 +1169,11 @@ pub fn run_search(
     // なく「見ていない」である。黙って空を返すと、この二つが読み手から区別できない
     // (must/0019 と同じ理由)。
     if scope.is_empty() {
-        let reason = "共有ポリシーが許すコレクションが無いので、どの索引も見ていない\
-                      (peers.json の share)"
+        let reason = "the sharing policy allows no collections, so no index was searched \
+                      (share in peers.json)"
             .to_string();
         outcome.degraded = Some(match outcome.degraded.take() {
-            Some(earlier) => format!("{earlier}。{reason}"),
+            Some(earlier) => format!("{earlier}. {reason}"),
             None => reason,
         });
     }
@@ -1210,13 +1210,13 @@ pub fn run_search(
     // 要求できるからである。
     if let (true, Some(reason)) = (context.reranker.is_some(), reranked.degraded) {
         outcome.degraded = Some(match outcome.degraded.take() {
-            Some(earlier) => format!("{earlier}。{reason}"),
+            Some(earlier) => format!("{earlier}. {reason}"),
             None => reason,
         });
     }
     if reranked.reranked {
         crate::log_line!(
-            "uniqnode: search: 上位 {} 件をリランカーで取り直した",
+            "uniqnode: search: reranked the top {}",
             reranked.rescored
         );
     }
@@ -1226,7 +1226,7 @@ pub fn run_search(
     outcome.results.truncate(request.top_k);
     if let Some(reason) = &outcome.degraded {
         crate::log_line!(
-            "uniqnode: search: {} を求められて {} で答えた: {reason}",
+            "uniqnode: search: asked for {} and answered with {}: {reason}",
             requested.as_str(),
             outcome.method.as_str()
         );
@@ -1235,8 +1235,8 @@ pub fn run_search(
     // 運用者にも見えるところへ 1 行出す。
     if outcome.filtered_low_information > 0 {
         crate::log_line!(
-            "uniqnode: search: 低情報チャンク {} 件を応答から落とした(目次の紙面・柱だけ・\
-             ページ番号だけ。残したいときは要求に include_low_information: true)",
+            "uniqnode: search: low-information chunks dropped from the response: {} (table-of-contents pages, running heads only, \
+             page numbers only; to keep them, put include_low_information: true in the request)",
             outcome.filtered_low_information
         );
     }
@@ -1349,7 +1349,7 @@ fn handle_peer_query(context: &ApiContext, request: &Request) -> Response {
     ) {
         Ok(incoming) => incoming,
         Err(rejection) => {
-            crate::log_line!("uniqnode: ピアの QUERY を受けない: {}", rejection.reason);
+            crate::log_line!("uniqnode: not accepting a peer's QUERY: {}", rejection.reason);
             return error_response(rejection.status, &rejection.reason);
         }
     };
@@ -1358,7 +1358,7 @@ fn handle_peer_query(context: &ApiContext, request: &Request) -> Response {
         Ok(share) => share,
         Err(rejection) => {
             crate::log_line!(
-                "uniqnode: DBノード {} の検索要求に答えない: {}",
+                "uniqnode: not answering the search request of DB node {}: {}",
                 incoming.origin,
                 rejection.reason
             );
@@ -1370,7 +1370,7 @@ fn handle_peer_query(context: &ApiContext, request: &Request) -> Response {
             // 他のDBノードが自分の索引を読んだことは記録に残す。断りだけを残すと、
             // 「誰も来なかった」と「来て答えた」が記録から区別できない(should/0111)。
             crate::log_line!(
-                "uniqnode: DBノード {} の検索要求に {} 件で答えた: {:?}",
+                "uniqnode: answered the search request of DB node {} with {} results: {:?}",
                 incoming.origin,
                 results.results.len(),
                 incoming.request.query
@@ -1395,7 +1395,7 @@ pub fn parse_scatter_options(
     value: &c1::Value,
 ) -> Result<Option<crate::distributed_search::ScatterOptions>, String> {
     let c1::Value::Object(map) = value else {
-        return Err("要求はオブジェクトであるべき".to_string());
+        return Err("the request must be an object".to_string());
     };
     let addresses = match map.get("peers") {
         None | Some(c1::Value::Null) | Some(c1::Value::Bool(false)) => return Ok(None),
@@ -1407,28 +1407,28 @@ pub fn parse_scatter_options(
                     c1::Value::Text(address) if !address.is_empty() => {
                         addresses.push(address.clone())
                     }
-                    _ => return Err("peers はアドレス文字列の配列".to_string()),
+                    _ => return Err("peers must be an array of address strings".to_string()),
                 }
             }
             if addresses.is_empty() {
                 return Err(
-                    "peers が空の配列である(宛先を書かずに散布するには peers: true)"
+                    "peers is an empty array (to scatter without naming destinations, use peers: true)"
                         .to_string(),
                 );
             }
             addresses
         }
-        Some(_) => return Err("peers は真偽値かアドレス文字列の配列".to_string()),
+        Some(_) => return Err("peers must be a boolean or an array of address strings".to_string()),
     };
     let budget_ms = match map.get("budget_ms") {
         None | Some(c1::Value::Null) => crate::distributed_search::DEFAULT_BUDGET_MS,
         Some(c1::Value::Integer(n)) if (0..=60_000).contains(n) => *n as u64,
-        Some(_) => return Err("budget_ms は 0..=60000 の整数".to_string()),
+        Some(_) => return Err("budget_ms must be an integer in 0..=60000".to_string()),
     };
     let min_trust_level = match map.get("min_trust_level") {
         None | Some(c1::Value::Null) => 0,
         Some(c1::Value::Integer(level)) => *level,
-        Some(_) => return Err("min_trust_level は整数".to_string()),
+        Some(_) => return Err("min_trust_level must be an integer".to_string()),
     };
     Ok(Some(crate::distributed_search::ScatterOptions { budget_ms, min_trust_level, addresses }))
 }
@@ -1438,7 +1438,7 @@ pub fn parse_scatter_options(
 /// 実装を増やさない(should/0135)。
 fn json_text(text: &str) -> String {
     String::from_utf8(c1::to_canonical_bytes(&c1::Value::Text(text.to_string())))
-        .expect("c1 直列化は UTF-8")
+        .expect("c1 serialization is UTF-8")
 }
 
 /// 検索応答の本文。results の各件は snippet(チャンク本文の先頭)・id(チャンク ID。
@@ -1574,7 +1574,7 @@ pub fn distributed_search_response_body(
 /// c1 の正規形を 1 行の文字列にする(c1 は JSON の部分集合なので、そのまま JSON の
 /// 一部として埋め込める)。
 fn json_line(value: &c1::Value) -> String {
-    String::from_utf8(c1::to_canonical_bytes(value)).expect("c1 直列化は UTF-8")
+    String::from_utf8(c1::to_canonical_bytes(value)).expect("c1 serialization is UTF-8")
 }
 
 // ---- REST の線の上の形(書き手と読み手を並べて置く) ----
@@ -1613,13 +1613,13 @@ pub fn citation_from_json(value: &Json) -> Result<Citation, String> {
             .field(name)
             .and_then(Json::text)
             .map(|found| found.to_string())
-            .ok_or_else(|| format!("citation の {name} がない(文字列)"))
+            .ok_or_else(|| format!("citation has no {name} (a string)"))
     };
     let integer = |name: &str| -> Result<i64, String> {
         value
             .field(name)
             .and_then(Json::integer)
-            .ok_or_else(|| format!("citation の {name} がない(整数)"))
+            .ok_or_else(|| format!("citation has no {name} (an integer)"))
     };
     let breadcrumbs = match value.field("breadcrumbs").and_then(Json::array) {
         Some(items) => items
@@ -1627,10 +1627,10 @@ pub fn citation_from_json(value: &Json) -> Result<Citation, String> {
             .map(|item| {
                 item.text()
                     .map(|title| title.to_string())
-                    .ok_or_else(|| "citation の breadcrumbs は文字列の配列".to_string())
+                    .ok_or_else(|| "breadcrumbs of citation must be an array of strings".to_string())
             })
             .collect::<Result<Vec<String>, String>>()?,
-        None => return Err("citation の breadcrumbs がない(配列)".to_string()),
+        None => return Err("citation has no breadcrumbs (an array)".to_string()),
     };
     let position = integer("position")?;
     let page = match value.field("page") {
@@ -1639,14 +1639,14 @@ pub fn citation_from_json(value: &Json) -> Result<Citation, String> {
             found
                 .integer()
                 .filter(|page| (0..=u32::MAX as i64).contains(page))
-                .ok_or_else(|| "citation の page が非負整数でない".to_string())?
+                .ok_or_else(|| "page of citation is not a non-negative integer".to_string())?
                 as u32,
         ),
     };
     Ok(Citation {
         collection: text("collection")?,
         document: text("document")?,
-        position: usize::try_from(position).map_err(|_| "citation の position が負".to_string())?,
+        position: usize::try_from(position).map_err(|_| "position of citation is negative".to_string())?,
         page,
         breadcrumbs,
         at: integer("at")?,
@@ -1684,19 +1684,19 @@ pub fn search_request_value(request: &SearchRequest) -> c1::Value {
 /// 検索応答を読む(search_response_body の裏返し)。score が小数なので c1 では読めず、
 /// 小数を読める最小の JSON(node/src/json.rs)を通す。
 pub fn parse_search_response(body: &[u8]) -> Result<SearchResults, String> {
-    let text = std::str::from_utf8(body).map_err(|_| "応答が UTF-8 でない".to_string())?;
+    let text = std::str::from_utf8(body).map_err(|_| "the response is not UTF-8".to_string())?;
     let value = Json::parse(text)?;
     let method = match value.field("method").and_then(Json::text) {
         Some(name) => crate::embed::SearchMethod::parse(name)
-            .ok_or_else(|| format!("応答の method が知らない方式: {name}"))?,
-        None => return Err("応答に method がない".to_string()),
+            .ok_or_else(|| format!("the response's method is unknown: {name}"))?,
+        None => return Err("the response has no method".to_string()),
     };
     let degraded = match value.field("degraded") {
         None | Some(Json::Null) => None,
         Some(found) => Some(
             found
                 .text()
-                .ok_or_else(|| "応答の degraded が文字列でない".to_string())?
+                .ok_or_else(|| "degraded in the response is not a string".to_string())?
                 .to_string(),
         ),
     };
@@ -1705,29 +1705,29 @@ pub fn parse_search_response(body: &[u8]) -> Result<SearchResults, String> {
         Some(found) => found
             .integer()
             .filter(|count| *count >= 0)
-            .ok_or_else(|| "応答の filtered_low_information が非負整数でない".to_string())?
+            .ok_or_else(|| "filtered_low_information in the response is not a non-negative integer".to_string())?
             as usize,
     };
-    let items = value.field("results").and_then(Json::array).ok_or("応答に results がない")?;
+    let items = value.field("results").and_then(Json::array).ok_or("the response has no results")?;
     let mut results = Vec::with_capacity(items.len());
     for item in items {
         let id = item
             .field("id")
             .and_then(Json::text)
-            .ok_or_else(|| "results の要素に id がない".to_string())?
+            .ok_or_else(|| "an element of results has no id".to_string())?
             .to_string();
         let score = item
             .field("score")
             .and_then(Json::number)
-            .ok_or_else(|| "results の要素に score がない".to_string())?;
+            .ok_or_else(|| "an element of results has no score".to_string())?;
         let snippet = item
             .field("snippet")
             .and_then(Json::text)
-            .ok_or_else(|| "results の要素に snippet がない".to_string())?
+            .ok_or_else(|| "an element of results has no snippet".to_string())?
             .to_string();
         let citation = match item.field("citation") {
             Some(found) => citation_from_json(found)?,
-            None => return Err("results の要素に citation がない".to_string()),
+            None => return Err("an element of results has no citation".to_string()),
         };
         // 相手が道を言わなければ載せない(こちらで組み立てると、手元に無いチャンクへの
         // 道を約束してしまう)。
@@ -1882,7 +1882,7 @@ fn view_value(
 /// 作る)・unavailable(作れない。理由つき)である。
 fn handle_rendition_catalog(context: &ApiContext, chunk_id: &str) -> Response {
     if !c1::is_object_id(chunk_id) {
-        return error_response(400, "オブジェクトIDの形式が不正");
+        return error_response(400, "malformed object ID");
     }
     let store = context.store.lock().expect("lock");
     let subject = match rendition_subject(context, &store, chunk_id) {
@@ -1891,7 +1891,7 @@ fn handle_rendition_catalog(context: &ApiContext, chunk_id: &str) -> Response {
         Ok(None) => {
             return error_response(
                 404,
-                "このチャンクは見えに無い(旧版か、このDBノードが持っていない)",
+                "this chunk is not in the current view (an old version, or this DB node does not hold it)",
             )
         }
         Err(e) => return store_error_response(e),
@@ -1919,7 +1919,7 @@ fn handle_rendition_catalog(context: &ApiContext, chunk_id: &str) -> Response {
             );
             map.insert(
                 "reason".to_string(),
-                c1::Value::Text("この文書の doc_rev に原本(source)が無い".to_string()),
+                c1::Value::Text("the doc_rev of this document has no original (source)".to_string()),
             );
             map.insert("url".to_string(), c1::Value::Text(format!("{base}/source")));
             views.push(c1::Value::Object(map));
@@ -1968,7 +1968,7 @@ fn handle_rendition_catalog(context: &ApiContext, chunk_id: &str) -> Response {
 pub const RENDITION_LOG_PREFIX: &str = "uniqnode: rendition: ";
 /// 写しを作った記録の行が、書けない状態なので保存しなかった(RenditionOrigin::Unstored)ことを
 /// 言う字句。
-pub const RENDITION_LOG_UNSTORED: &str = "書けない状態なので保存していない(Unstored)";
+pub const RENDITION_LOG_UNSTORED: &str = "not stored because the store cannot be written (Unstored)";
 
 /// GET /v1/objects/{chunk_id}/rendition/{alias}。無ければ作って足して返す。
 ///
@@ -1977,7 +1977,7 @@ pub const RENDITION_LOG_UNSTORED: &str = "書けない状態なので保存し�
 /// prepare / render / commit)、ロックを握るのは第 1 段と第 3 段だけである。
 fn handle_rendition(context: &ApiContext, chunk_id: &str, alias: &str) -> Response {
     if !c1::is_object_id(chunk_id) {
-        return error_response(400, "オブジェクトIDの形式が不正");
+        return error_response(400, "malformed object ID");
     }
     // 知らない別名は鍵を組む前に断る(許可表を知るのは rendition.rs)。
     let recipe = match crate::rendition::recipe_for_alias(alias) {
@@ -1994,7 +1994,7 @@ fn handle_rendition(context: &ApiContext, chunk_id: &str, alias: &str) -> Respon
             Ok(None) => {
                 return error_response(
                     404,
-                    "このチャンクは見えに無い(旧版か、このDBノードが持っていない)",
+                    "this chunk is not in the current view (an old version, or this DB node does not hold it)",
                 )
             }
             Err(e) => return store_error_response(e),
@@ -2007,19 +2007,19 @@ fn handle_rendition(context: &ApiContext, chunk_id: &str, alias: &str) -> Respon
                 return error_response(
                     400,
                     &format!(
-                        "チャンク {chunk_id} は PDF の紙面に結びついていない\
-                         (media={}、page={})ので {alias} の写しは作れない\
-                         (この鎖にあるのは source の席だけである)",
-                        subject.media.as_deref().unwrap_or("不明"),
+                        "chunk {chunk_id} is not tied to a PDF page \
+                         (media={}, page={}), so no {alias} rendition can be made \
+                         (this chain has only the source slot)",
+                        subject.media.as_deref().unwrap_or("unknown"),
                         match subject.page {
                             Some(page) => page.to_string(),
-                            None => "無し".to_string(),
+                            None => "none".to_string(),
                         }
                     ),
                 )
             }
             (None, _, None) => {
-                return error_response(404, "この文書の doc_rev に原本(source)が無い")
+                return error_response(404, "the doc_rev of this document has no original (source)")
             }
         };
         let request = crate::rendition::RenditionRequest {
@@ -2062,12 +2062,12 @@ fn handle_rendition(context: &ApiContext, chunk_id: &str, alias: &str) -> Respon
             // Unstored は次の要求でも作り直すので、同じ写しの行が繰り返し出る理由がここで読める。
             let origin = match &rendition.origin {
                 crate::rendition::RenditionOrigin::Unstored => RENDITION_LOG_UNSTORED.to_string(),
-                crate::rendition::RenditionOrigin::Generated => "保存した(Generated)".to_string(),
+                crate::rendition::RenditionOrigin::Generated => "stored (Generated)".to_string(),
                 other => format!("{other:?}"),
             };
             crate::log_line!(
-                "{RENDITION_LOG_PREFIX}{chunk_id} の {alias} を {elapsed_ms} ミリ秒で作った\
-                 ({} バイト、{}、{origin})",
+                "{RENDITION_LOG_PREFIX}made {alias} of {chunk_id} in {elapsed_ms} ms \
+                 ({} bytes, {}, {origin})",
                 rendition.bytes.len(),
                 rendition.recipe
             );
@@ -2112,16 +2112,16 @@ pub fn fetch_into(context: &ApiContext, collection: &str, body: &[u8]) -> Respon
         Err(response) => return response,
     };
     let c1::Value::Object(map) = &value else {
-        return error_response(400, "ボディはオブジェクトであるべき");
+        return error_response(400, "the body must be an object");
     };
     let url = match map.get("url") {
         Some(c1::Value::Text(url)) if !url.is_empty() => url.as_str(),
-        _ => return error_response(400, "url がない(空でない文字列)"),
+        _ => return error_response(400, "no url (a non-empty string)"),
     };
     let name = match map.get("name") {
         None | Some(c1::Value::Null) => None,
         Some(c1::Value::Text(name)) if !name.is_empty() => Some(name.as_str()),
-        _ => return error_response(400, "name は空でない文字列(省けば URL から導く)"),
+        _ => return error_response(400, "name must be a non-empty string (if omitted, it is derived from the URL)"),
     };
     let fetch_request = crate::fetch::FetchRequest {
         url,
@@ -2137,12 +2137,12 @@ pub fn fetch_into(context: &ApiContext, collection: &str, body: &[u8]) -> Respon
     let document = match crate::fetch::fetch_document(&fetch_request, &mut extract_pdf) {
         Ok(document) => document,
         Err(e) => {
-            crate::log_line!("uniqnode: fetch: {collection} ← {url}: {e}");
+            crate::log_line!("uniqnode: fetch: {collection} <- {url}: {e}");
             return error_response(e.status(), &e.to_string());
         }
     };
     if let Some(reason) = &document.outline_reason {
-        crate::log_line!("uniqnode: ingest: {collection}/{} の節見出し: {reason}", document.name);
+        crate::log_line!("uniqnode: ingest: section headings of {collection}/{}: {reason}", document.name);
     }
     let mut store = context.store.lock().expect("lock");
     let outcome = match crate::ingest::ingest_document(&mut store, &document.input(collection)) {
@@ -2153,7 +2153,7 @@ pub fn fetch_into(context: &ApiContext, collection: &str, body: &[u8]) -> Respon
     nudge_index_warmer(context);
     // 取ったことは記録に残す(何を、どこから、どの道具で。should/0111)。
     crate::log_line!(
-        "uniqnode: fetch: {collection}/{} ← {} ({}, {} バイト, chunks {}, {}, {} ミリ秒, {})",
+        "uniqnode: fetch: {collection}/{} <- {} ({}, {} bytes, chunks {}, {}, {} ms, {})",
         document.name,
         document.final_url,
         document.media,
@@ -2182,7 +2182,7 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
 
     if let Some(id) = path.strip_prefix("/v1/queries/") {
         if method != "GET" {
-            return error_response(405, "GET のみ");
+            return error_response(405, "GET only");
         }
         return match context.engine.lookup(id) {
             Some(shared) => crate::query::state_response(&shared.snapshot()),
@@ -2192,7 +2192,7 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
 
     if let Some(query) = path.strip_prefix("/v1/replication/refs?") {
         if method != "GET" {
-            return error_response(405, "GET のみ");
+            return error_response(405, "GET only");
         }
         let mut signer = None;
         let mut since = None;
@@ -2205,7 +2205,7 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
         }
         let (signer, since) = match (signer, since) {
             (Some(s), Some(n)) => (s, n),
-            _ => return error_response(400, "signer と since が必要"),
+            _ => return error_response(400, "signer and since are required"),
         };
         let store = store.lock().expect("lock");
         return match store.export_ref_records(&signer, since) {
@@ -2214,12 +2214,12 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
                 for payload in payloads {
                     let text = match std::str::from_utf8(&payload) {
                         Ok(t) => t,
-                        Err(_) => return error_response(500, "レコードが UTF-8 でない"),
+                        Err(_) => return error_response(500, "a record is not UTF-8"),
                     };
                     match c1::parse(text) {
                         Ok(value) => records.push(value),
                         Err(e) => {
-                            return error_response(500, &format!("レコードが c1 でない: {e}"))
+                            return error_response(500, &format!("a record is not c1: {e}"))
                         }
                     }
                 }
@@ -2237,10 +2237,10 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
         // 導出データであり、不在の言明ではない)。
         if let Some(id) = rest.strip_suffix("/citation") {
             if method != "GET" {
-                return error_response(405, "GET のみ");
+                return error_response(405, "GET only");
             }
             if !c1::is_object_id(id) {
-                return error_response(400, "オブジェクトIDの形式が不正");
+                return error_response(400, "malformed object ID");
             }
             let store = store.lock().expect("lock");
             return match citation_in_view(context, &store, id) {
@@ -2254,10 +2254,10 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
         // 逆引き(INGEST の「逆引き」節): この ID を参照している既知オブジェクトの一覧。
         if let Some(id) = rest.strip_suffix("/referrers") {
             if method != "GET" {
-                return error_response(405, "GET のみ");
+                return error_response(405, "GET only");
             }
             if !c1::is_object_id(id) {
-                return error_response(400, "オブジェクトIDの形式が不正");
+                return error_response(400, "malformed object ID");
             }
             let store = store.lock().expect("lock");
             let mut cache = context.referrers.lock().expect("lock");
@@ -2269,7 +2269,7 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
                     Err(e) => return store_error_response(e),
                 }
             }
-            let index = cache.as_ref().expect("直前に構築した");
+            let index = cache.as_ref().expect("built just above");
             // ローカルに無い ID も referrers 空の 200(逆引きは「自分の知る範囲」の
             // 導出データであり、空は不在の言明ではない)。
             let referrers: Vec<c1::Value> =
@@ -2285,22 +2285,22 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
         // 作って足す。判断はすべて rendition.rs にあり、ここは HTTP の被せ物である。
         if let Some(chunk_id) = rest.strip_suffix("/rendition") {
             if method != "GET" {
-                return error_response(405, "GET のみ");
+                return error_response(405, "GET only");
             }
             return handle_rendition_catalog(context, chunk_id);
         }
         if let Some((chunk_id, alias)) = rest.split_once("/rendition/") {
             if method != "GET" {
-                return error_response(405, "GET のみ");
+                return error_response(405, "GET only");
             }
             return handle_rendition(context, chunk_id, alias);
         }
         let id = rest;
         if method != "GET" {
-            return error_response(405, "GET のみ");
+            return error_response(405, "GET only");
         }
         if !c1::is_object_id(id) {
-            return error_response(400, "オブジェクトIDの形式が不正");
+            return error_response(400, "malformed object ID");
         }
         let store = store.lock().expect("lock");
         return match store.get_object(id) {
@@ -2312,10 +2312,10 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
 
     if let Some(id) = path.strip_prefix("/v1/closure/") {
         if method != "GET" {
-            return error_response(405, "GET のみ");
+            return error_response(405, "GET only");
         }
         if !c1::is_object_id(id) {
-            return error_response(400, "オブジェクトIDの形式が不正");
+            return error_response(400, "malformed object ID");
         }
         let store = store.lock().expect("lock");
         return match store.reachable_closure(id) {
@@ -2332,7 +2332,7 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
 
     if path == "/v1/refs" {
         if method != "GET" {
-            return error_response(405, "GET のみ");
+            return error_response(405, "GET only");
         }
         let store = store.lock().expect("lock");
         let refs: Vec<c1::Value> = store
@@ -2389,9 +2389,9 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
                     c1::Value::Object(map) => match map.get("target") {
                         Some(c1::Value::Text(t)) => Some(t.clone()),
                         Some(c1::Value::Null) => None,
-                        _ => return error_response(400, "target がない(文字列か null)"),
+                        _ => return error_response(400, "no target (a string or null)"),
                     },
-                    _ => return error_response(400, "ボディはオブジェクトであるべき"),
+                    _ => return error_response(400, "the body must be an object"),
                 };
                 let mut store = store.lock().expect("lock");
                 return match store.set_ref(rest, target.as_deref()) {
@@ -2411,7 +2411,7 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
                     Err(e) => store_error_response(e),
                 };
             }
-            _ => return error_response(405, "GET か PUT のみ"),
+            _ => return error_response(405, "GET or PUT only"),
         }
     }
 
@@ -2429,18 +2429,18 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
         // URL からの取り込み(INGEST の「URL からの取り込み」節。node/src/fetch.rs)。
         if let Some(collection) = rest.strip_suffix("/fetch") {
             if method != "POST" {
-                return error_response(405, "POST のみ");
+                return error_response(405, "POST only");
             }
             if collection.is_empty() || collection.contains('/') {
-                return error_response(400, "コレクション名が要る(/v1/collections/{c}/fetch)");
+                return error_response(400, "a collection name is required (/v1/collections/{c}/fetch)");
             }
             return fetch_into(context, collection, &request.body);
         }
         if method != "PUT" {
-            return error_response(405, "PUT のみ");
+            return error_response(405, "PUT only");
         }
         let Some(target) = document_path(path) else {
-            return error_response(404, "/v1/collections/{c}/documents/{name} の形");
+            return error_response(404, "the form is /v1/collections/{c}/documents/{name}");
         };
         // 出所の meta(?meta.<key>=<value>)。形が違えば取り込む前に 400 で理由を言う。
         let meta = match parse_meta_query(target.query) {
@@ -2493,30 +2493,30 @@ pub fn parse_meta_query(query: Option<&str>) -> Result<Vec<(String, c1::Value)>,
     let mut meta: Vec<(String, c1::Value)> = Vec::new();
     for segment in query.unwrap_or("").split('&').filter(|segment| !segment.is_empty()) {
         let Some((raw_key, raw_value)) = segment.split_once('=') else {
-            return Err(format!("query {segment:?} に = が無い(meta.<key>=<value> の形)"));
+            return Err(format!("query {segment:?} has no = (the form is meta.<key>=<value>)"));
         };
         let Some(key) = raw_key.strip_prefix(META_QUERY_PREFIX) else {
             return Err(format!(
-                "query の鍵 {raw_key:?} は受け付けない(受け付けるのは {META_QUERY_PREFIX}<key> だけ)"
+                "query key {raw_key:?} is not accepted (only {META_QUERY_PREFIX}<key> is)"
             ));
         };
         let key_is_plain =
             key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
         if key.is_empty() || key.len() > META_KEY_MAX_CHARS || !key_is_plain {
-            return Err(format!("meta の鍵 {key:?} は [a-z0-9_] の 1..={META_KEY_MAX_CHARS} 字"));
+            return Err(format!("meta key {key:?} must be 1..={META_KEY_MAX_CHARS} characters of [a-z0-9_]"));
         }
         if META_RESERVED_KEYS.contains(&key) {
-            return Err(format!("meta.{key} は取り込みが決める鍵(query では与えられない)"));
+            return Err(format!("meta.{key} is a key set by ingest (it cannot be given in the query)"));
         }
         if meta.iter().any(|(seen, _)| seen == key) {
-            return Err(format!("meta.{key} が 2 度ある"));
+            return Err(format!("meta.{key} appears twice"));
         }
         let value = percent_decode(raw_value)
-            .map_err(|reason| format!("meta.{key} の値 {raw_value:?}: {reason}"))?;
+            .map_err(|reason| format!("the value of meta.{key} {raw_value:?}: {reason}"))?;
         let chars = value.chars().count();
         if chars == 0 || chars > META_VALUE_MAX_CHARS {
             return Err(format!(
-                "meta.{key} の値は 1..={META_VALUE_MAX_CHARS} 字(与えられたのは {chars} 字)"
+                "the value of meta.{key} must be 1..={META_VALUE_MAX_CHARS} characters (given {chars})"
             ));
         }
         meta.push((key.to_string(), c1::Value::Text(value)));
@@ -2538,12 +2538,12 @@ fn percent_decode(text: &str) -> Result<String, String> {
         }
         let pair = bytes.get(at + 1..at + 3).and_then(|pair| std::str::from_utf8(pair).ok());
         let Some(byte) = pair.and_then(|pair| u8::from_str_radix(pair, 16).ok()) else {
-            return Err(format!("{} バイト目の % の後に 16 進 2 桁が無い", at + 1));
+            return Err(format!("the % at byte {} is not followed by 2 hex digits", at + 1));
         };
         decoded.push(byte);
         at += 3;
     }
-    String::from_utf8(decoded).map_err(|_| "デコードした値が UTF-8 でない".to_string())
+    String::from_utf8(decoded).map_err(|_| "the decoded value is not UTF-8".to_string())
 }
 
 /// PUT /v1/collections/{collection}/documents/{name} の本体。本文は生バイト列、種別は
@@ -2562,13 +2562,13 @@ pub fn put_document(
     meta: &[(String, c1::Value)],
 ) -> Response {
     if collection.is_empty() || name.is_empty() {
-        return error_response(400, "コレクション名と文書名が要る");
+        return error_response(400, "a collection name and a document name are required");
     }
     let Some((stem, extension)) = name.rsplit_once('.') else {
-        return error_response(400, "文書名に拡張子が要る(.md/.markdown/.txt/.html/.htm/.pdf)");
+        return error_response(400, "the document name needs an extension (.md/.markdown/.txt/.html/.htm/.pdf)");
     };
     let Some(media) = crate::ingest::media_for_extension(extension) else {
-        return error_response(400, "対象外の拡張子(.md/.markdown/.txt/.html/.htm/.pdf のみ)");
+        return error_response(400, "unsupported extension (only .md/.markdown/.txt/.html/.htm/.pdf)");
     };
     let extracted;
     let mut extractor_label = None;
@@ -2588,7 +2588,7 @@ pub fn put_document(
     } else {
         match std::str::from_utf8(body) {
             Ok(text) => text,
-            Err(_) => return error_response(400, "ボディが UTF-8 でない"),
+            Err(_) => return error_response(400, "the body is not UTF-8"),
         }
     };
     // PDF は節見出しの経路も載せる(node/src/outline.rs)。取れなければ理由を記録に
@@ -2596,7 +2596,7 @@ pub fn put_document(
     let (chunks, outline_reason) =
         crate::ingest::chunk_for_media_with_source(media, text, body);
     if let Some(reason) = outline_reason {
-        crate::log_line!("uniqnode: ingest: {collection}/{stem} の節見出し: {reason}");
+        crate::log_line!("uniqnode: ingest: section headings of {collection}/{stem}: {reason}");
     }
     let input = crate::ingest::DocumentInput {
         collection,
@@ -2635,17 +2635,17 @@ fn handle_graph(context: &ApiContext, method: &str, rest: &str, body: &[u8]) -> 
         None => (rest, ""),
     };
     if !crate::graph::is_valid_name(graph) {
-        return error_response(400, &crate::graph::invalid_name_refusal("グラフ名", graph));
+        return error_response(400, &crate::graph::invalid_name_refusal("graph name", graph));
     }
     if tail.is_empty() {
         if method != "GET" {
-            return error_response(405, "GET のみ");
+            return error_response(405, "GET only");
         }
         return graph_snapshot(context, graph);
     }
     if tail == "edges" {
         if method != "GET" {
-            return error_response(405, "GET のみ(1 本の辺は PUT / DELETE /v1/graphs/{g}/edges/{型}/{from}/{to})");
+            return error_response(405, "GET only (a single edge takes PUT / DELETE /v1/graphs/{g}/edges/{type}/{from}/{to})");
         }
         return graph_edge_list(context, graph, query);
     }
@@ -2657,8 +2657,8 @@ fn handle_graph(context: &ApiContext, method: &str, rest: &str, body: &[u8]) -> 
     }
     error_response(
         404,
-        "/v1/graphs/{g}・/v1/graphs/{g}/nodes/{n}[/history|/neighbors]・\
-         /v1/graphs/{g}/edges[/{型}/{from}/{to}] の形",
+        "the form is /v1/graphs/{g}, /v1/graphs/{g}/nodes/{n}[/history|/neighbors] or \
+         /v1/graphs/{g}/edges[/{type}/{from}/{to}]",
     )
 }
 
@@ -2675,7 +2675,7 @@ fn handle_graph_node(
         None => (rest, ""),
     };
     if !crate::graph::is_valid_name(node) {
-        return error_response(400, &crate::graph::invalid_name_refusal("ノード名", node));
+        return error_response(400, &crate::graph::invalid_name_refusal("node name", node));
     }
     let store = &*context.store;
     match (method, tail) {
@@ -2756,15 +2756,15 @@ fn handle_graph_node(
                 match segment.split_once('=') {
                     Some(("direction", value)) => match crate::graph::Direction::parse(value) {
                         Some(parsed) => direction = parsed,
-                        None => return error_response(400, "direction は in・out・both のどれか"),
+                        None => return error_response(400, "direction must be one of in, out and both"),
                     },
                     Some(("type", value)) => edge_type = Some(value.to_string()),
-                    _ => return error_response(400, "query は direction= と type= だけ"),
+                    _ => return error_response(400, "the query takes only direction= and type="),
                 }
             }
             if let Some(refusal) = edge_type
                 .as_deref()
-                .and_then(|name| refuse_bad_query_name("辺の型", name))
+                .and_then(|name| refuse_bad_query_name("edge type", name))
             {
                 return refusal;
             }
@@ -2797,18 +2797,18 @@ fn handle_graph_node(
                 Err(e) => store_error_response(e),
             }
         }
-        (_, "") => error_response(405, "GET・PUT・DELETE のみ"),
-        (_, "history" | "neighbors") => error_response(405, "GET のみ"),
-        _ => error_response(404, "/v1/graphs/{g}/nodes/{n}[/history|/neighbors] の形"),
+        (_, "") => error_response(405, "GET, PUT or DELETE only"),
+        (_, "history" | "neighbors") => error_response(405, "GET only"),
+        _ => error_response(404, "the form is /v1/graphs/{g}/nodes/{n}[/history|/neighbors]"),
     }
 }
 
 fn handle_graph_edge(context: &ApiContext, method: &str, graph: &str, rest: &str) -> Response {
     let parts: Vec<&str> = rest.split('/').collect();
     let [edge_type, from, to] = parts.as_slice() else {
-        return error_response(404, "/v1/graphs/{g}/edges/{型}/{from}/{to} の形");
+        return error_response(404, "the form is /v1/graphs/{g}/edges/{type}/{from}/{to}");
     };
-    for (what, name) in [("辺の型", edge_type), ("ノード名", from), ("ノード名", to)] {
+    for (what, name) in [("edge type", edge_type), ("node name", from), ("node name", to)] {
         if !crate::graph::is_valid_name(name) {
             return error_response(400, &crate::graph::invalid_name_refusal(what, name));
         }
@@ -2856,7 +2856,7 @@ fn handle_graph_edge(context: &ApiContext, method: &str, graph: &str, rest: &str
                 Err(e) => store_error_response(e),
             }
         }
-        _ => error_response(405, "PUT か DELETE のみ"),
+        _ => error_response(405, "PUT or DELETE only"),
     }
 }
 
@@ -2910,13 +2910,13 @@ fn graph_edge_list(context: &ApiContext, graph: &str, query: Option<&str>) -> Re
             Some(("type", value)) => edge_type = Some(value.to_string()),
             Some(("from", value)) => from = Some(value.to_string()),
             Some(("to", value)) => to = Some(value.to_string()),
-            _ => return error_response(400, "query は type=・from=・to= だけ"),
+            _ => return error_response(400, "the query takes only type=, from= and to="),
         }
     }
     for (what, name) in [
-        ("辺の型", edge_type.as_deref()),
-        ("ノード名", from.as_deref()),
-        ("ノード名", to.as_deref()),
+        ("edge type", edge_type.as_deref()),
+        ("node name", from.as_deref()),
+        ("node name", to.as_deref()),
     ] {
         if let Some(refusal) = name.and_then(|name| refuse_bad_query_name(what, name)) {
             return refusal;
@@ -2947,11 +2947,11 @@ fn graph_edge_list(context: &ApiContext, graph: &str, query: Option<&str>) -> Re
 /// PUT の本文を attrs として読む。オブジェクトに限るのは、読み手(描画器)が attrs.state の
 /// ように鍵で引く前提だからで、配列や裸の文字列を通すとその前提が黙って崩れる。
 fn parse_attrs(body: &[u8]) -> std::result::Result<c1::Value, String> {
-    let text = std::str::from_utf8(body).map_err(|_| "本文が UTF-8 でない".to_string())?;
-    let value = c1::parse(text).map_err(|e| format!("JSON が不正: {e}"))?;
+    let text = std::str::from_utf8(body).map_err(|_| "the body is not UTF-8".to_string())?;
+    let value = c1::parse(text).map_err(|e| format!("invalid JSON: {e}"))?;
     match value {
         c1::Value::Object(_) => Ok(value),
-        _ => Err("本文は attrs のオブジェクト({\"state\":…} の形)".to_string()),
+        _ => Err("the body must be an attrs object (of the form {\"state\":...})".to_string()),
     }
 }
 
@@ -3046,38 +3046,38 @@ mod tests {
         let refused = |query: &str| read(query).expect_err(query);
         assert_eq!(
             refused("meta.Agent=x"),
-            "meta の鍵 \"Agent\" は [a-z0-9_] の 1..=32 字"
+            "meta key \"Agent\" must be 1..=32 characters of [a-z0-9_]"
         );
-        assert_eq!(refused("meta.=x"), "meta の鍵 \"\" は [a-z0-9_] の 1..=32 字");
+        assert_eq!(refused("meta.=x"), "meta key \"\" must be 1..=32 characters of [a-z0-9_]");
         assert_eq!(
             refused(&format!("meta.{}=x", "k".repeat(33))),
-            format!("meta の鍵 {:?} は [a-z0-9_] の 1..=32 字", "k".repeat(33))
+            format!("meta key {:?} must be 1..=32 characters of [a-z0-9_]", "k".repeat(33))
         );
         assert_eq!(
             refused("agent=x"),
-            "query の鍵 \"agent\" は受け付けない(受け付けるのは meta.<key> だけ)"
+            "query key \"agent\" is not accepted (only meta.<key> is)"
         );
-        assert_eq!(refused("meta.agent"), "query \"meta.agent\" に = が無い(meta.<key>=<value> の形)");
-        assert_eq!(refused("meta.agent="), "meta.agent の値は 1..=200 字(与えられたのは 0 字)");
+        assert_eq!(refused("meta.agent"), "query \"meta.agent\" has no = (the form is meta.<key>=<value>)");
+        assert_eq!(refused("meta.agent="), "the value of meta.agent must be 1..=200 characters (given 0)");
         assert_eq!(
             refused(&format!("meta.agent={}", "v".repeat(201))),
-            "meta.agent の値は 1..=200 字(与えられたのは 201 字)"
+            "the value of meta.agent must be 1..=200 characters (given 201)"
         );
         assert_eq!(read(&format!("meta.agent={}", "v".repeat(200))).expect("上限ちょうど").len(), 1);
-        assert_eq!(refused("meta.name=x"), "meta.name は取り込みが決める鍵(query では与えられない)");
-        assert_eq!(refused("meta.media=x"), "meta.media は取り込みが決める鍵(query では与えられない)");
-        assert_eq!(refused("meta.agent=a&meta.agent=b"), "meta.agent が 2 度ある");
+        assert_eq!(refused("meta.name=x"), "meta.name is a key set by ingest (it cannot be given in the query)");
+        assert_eq!(refused("meta.media=x"), "meta.media is a key set by ingest (it cannot be given in the query)");
+        assert_eq!(refused("meta.agent=a&meta.agent=b"), "meta.agent appears twice");
         assert_eq!(
             refused("meta.agent=%zz"),
-            "meta.agent の値 \"%zz\": 1 バイト目の % の後に 16 進 2 桁が無い"
+            "the value of meta.agent \"%zz\": the % at byte 1 is not followed by 2 hex digits"
         );
         assert_eq!(
             refused("meta.agent=ab%4"),
-            "meta.agent の値 \"ab%4\": 3 バイト目の % の後に 16 進 2 桁が無い"
+            "the value of meta.agent \"ab%4\": the % at byte 3 is not followed by 2 hex digits"
         );
         assert_eq!(
             refused("meta.agent=%ff"),
-            "meta.agent の値 \"%ff\": デコードした値が UTF-8 でない"
+            "the value of meta.agent \"%ff\": the decoded value is not UTF-8"
         );
     }
 
@@ -3199,7 +3199,7 @@ mod tests {
             Ok(_) => panic!("citation の欠けた応答を通してはならない"),
             Err(message) => message,
         };
-        assert!(no_citation.contains("citation の"), "{no_citation}");
+        assert!(no_citation.contains("citation"), "{no_citation}");
     }
 
     /// 検索要求も、書いた本文がそのまま parse_search_request を通る(転送する形の MCP は
@@ -3236,7 +3236,7 @@ mod tests {
         let over = c1::parse("{\"query\":\"x\",\"full\":true,\"top_k\":11}").expect("c1");
         assert_eq!(
             parse_search_request(&over).err().as_deref(),
-            Some("top_k は full のとき 1..=10")
+            Some("with full, top_k must be in 1..=10")
         );
         let without_full = c1::parse("{\"query\":\"x\",\"top_k\":11}").expect("c1");
         assert_eq!(parse_search_request(&without_full).expect("full 無しは従来の上限").top_k, 11);

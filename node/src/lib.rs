@@ -2,7 +2,9 @@
 //! L0(単一DBノードのストア)から実装している。
 
 pub mod agent_door;
+pub mod apply;
 pub mod api;
+pub mod autodeploy;
 pub mod backup;
 pub mod c1;
 pub mod clock;
@@ -32,6 +34,7 @@ pub mod query;
 pub mod rendition;
 pub mod rerank;
 pub mod search;
+pub mod selfreload;
 pub mod sha2;
 pub mod sock_diag;
 pub mod store;

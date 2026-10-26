@@ -180,7 +180,7 @@ distributed_search.rs の 185 行付近)。署名された要求者に対する�
     AF_INET6` に `AF_NETLINK` を足す。無いと照会のソケットを作れず、据え付けた serve が正規の接続まで
     403 にする(第 8 版への Codex の再レビューの中)。A2 はこの unit の変更を含む。実装では、serve は
     束縛の後の自己試験(自分から主の口へ繋いで判定する)でこれを見つけ、listening on を出さずに
-    2 で終わる(RestartPreventExitStatus= で起こし直さない。実装への Claude のレビューの高 1)。
+    2 で終わる(実装への Claude のレビューの高 1。当時の unit は RestartPreventExitStatus= で 2 を起こし直さなかったが、2026-10-26 から自動更新のために起こし直す。docs/mop/SYSTEMD.md)。
     自分の uid が overflowuid に見えるのも設定の問題なので 2 で、それ以外の自己試験の失敗は
     一時のものでありうるので 3 で終わり、on-failure が起こし直す。
   - 対象は Linux だけである(sock_diag が要る)。他の OS では serve が起動時に理由を言って断る。

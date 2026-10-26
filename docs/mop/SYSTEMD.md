@@ -63,6 +63,7 @@ unit ファイルは差し替えても drop-in は残る。
 | UNIQNODE_VIEWER_LISTEN | viewer | 127.0.0.1:7450 | ブラウザが開く待ち受け |
 | UNIQNODE_SERVE_URL | viewer | http://127.0.0.1:7440 | 転送先。UNIQNODE_LISTEN を変えたらここも |
 | UNIQNODE_VIEWER_OPTIONS | viewer | 空 | 追加の引数(ログの指定など) |
+| UNIQNODE_SELF_RELOAD | serve と viewer | 1 | 1 ならバイナリの置き換えを見張り、置き換えられたら 75 で終わって新しい版で起こし直される(下の「自動更新」) |
 | UNIQNODE_BACKUP_DIR | backup | system: /var/backups/uniqnode/%i、user: %h/uniqnode-backup/%i | 写し先。変えるときは ReadWritePaths= も(下) |
 | UNIQNODE_AGENT_LISTEN | serve(install の `--listen-agent` だけが書く) | 無し | 読み口の待ち受け。unit の ExecStart= には無く、install が drop-in の ExecStart= の末尾に `--listen-agent ${UNIQNODE_AGENT_LISTEN}` を足す |
 | UNIQNODE_AGENT_WRITABLE | serve(install の `--agent-writable` だけが書く) | 無し | 読み口から書けるコレクションの集合(空白区切り。読み手のための写し)。ExecStart= には展開せず、install が drop-in の ExecStart= の末尾に `--agent-writable <c>` を集合の数だけ値のまま並べる |
@@ -110,16 +111,20 @@ unit ファイルは差し替えても drop-in は残る。
   読むだけである。
   StateDirectoryMode=0750 なのは、node_key(DBノードの秘密鍵。自身は 0600)の入った
   ディレクトリを他の利用者に見せないため。
-- Restart=on-failure と RestartSec=2s。落ちたら 2 秒後に起こし直す。ストアのロックは
+- Restart=on-failure と RestartSec=5s。落ちたら 5 秒後に起こし直す。ストアのロックは
   データディレクトリの lock ファイルへの flock で(node/src/store.rs の acquire_lock)、プロセスが
   死ねば kill -9 でもカーネルが解放するので、ロックが残って再起動を阻むことはない。書き込み途中で裂かれたストアは次の open が fsck なしで回復する
   (node/tests/crash.rs がそれを実プロセスで確かめている)。
-- RestartPreventExitStatus=1 2。起動時に分かる誤りは再起動で直らないので、1 回で止めて
-  理由を journal に残す。1 はアドレスが塞がっている・別プロセスがストアを開いている、
-  2 は引数の誤りと、主の口の起動時の自己試験の設定による失敗(照会の netlink ソケットを
-  作れない。AF_NETLINK を塞いだ unit など。自分の uid が overflowuid に見える user namespace)
-  である。自己試験のそれ以外の失敗(照会の期限切れのような一時の失敗でありうるもの)は 3 で終わり、
-  on-failure が起こし直す。POST /v1/admin/shutdown による終了(0)は意図した停止なので、
+- 起動時の誤りでも起こし直し、回数に上限を置かない(StartLimitIntervalSec=0)。1 はアドレスが
+  塞がっている・別プロセスがストアを開いている、2 は引数の誤りと、主の口の起動時の自己試験の
+  設定による失敗(照会の netlink ソケットを作れない。AF_NETLINK を塞いだ unit など。自分の uid が
+  overflowuid に見える user namespace)、3 は自己試験の一時の失敗で、どれも理由をそのたびに journal に
+  残して 5 秒後に起こし直す。2026-10-26 までは 1 と 2 を RestartPreventExitStatus= で 1 回で止めて
+  いた。起こし直し続ける形に替えたのは、下の「自動更新」が壊れた版を前の版へ戻したとき、sudo 無しで
+  常駐が戻るようにするためである。代価は、直らない誤りでも 5 秒ごとに起こし直して journal が伸びる
+  ことと、`uniqnode install` が起動の失敗を報告するまで、unit が failed に落ちるのを待てずに
+  確認の上限(90 秒)まで待つことである。75 は自己再起動(下の「自動更新」)で、これも起こし直す。
+  POST /v1/admin/shutdown による終了(0)は意図した停止なので、
   on-failure は起こし直さない(unit は inactive のまま。起こすなら `systemctl start`)。
 - 閉じ込めは書ける場所を StateDirectory= の下だけにし、/ と home を読むだけにする。
   RestrictAddressFamilies= の AF_UNIX は、利用者の名前の解決(NSS)などが使う unix socket のために残す。
@@ -1139,8 +1144,12 @@ backup を止めるのは timer である(`systemctl --user stop uniqnode-backup
 
 ## 更新
 
-ビルドしてから同じ引数で `uniqnode install` を打ち直す(バイナリを写し直し、unit と
-drop-in を書き直し、restart し、確認まで通す)。system 単位なら同じく sudo で
+自動更新を据えた機械(vega)では、バイナリだけの変更に手は要らない。main に入れれば、下の
+「自動更新」が数分のうちに常駐を新しい版へ替える。unit・drop-in・nft の規則・インスタンスの増減の
+ように /etc を変える変更だけ、main に入れた後に操作者が `apply` を打ち直す(下の「自動更新」)。
+
+自動更新を据えていない機械では、ビルドしてから同じ引数で `uniqnode install` を打ち直す(バイナリを
+写し直し、unit と drop-in を書き直し、restart し、確認まで通す)。system 単位なら同じく sudo で
 `… install … --system … 2>&1 | tee /tmp/uniqnode-install-system.log`。install を使わず
 専用ユーザーで置いた形なら手で:
 
@@ -1158,6 +1167,90 @@ restart で新しいものに替わる。restart は停止と同じく SIGTERM �
 flock に替えた。それより前の版と後の版は互いのロックを見ないので、この境をまたいで更新するときは、
 serve を restart する前に、同じストアを開いているほかのプロセス(ストアを直接開く形の
 `uniqnode mcp`、手で走らせている CLI)を止めておく。止めずに新しい serve を起こすと、書き手が 2 つになる。
+
+## 自動更新
+
+vega では、uniqnode の main に入った版を、エージェントの手も操作者の手も借りずに常駐へ届ける
+(2026-10-26 の操作者の指示。lamalium の crystal の自動デプロイと同じ形)。日々の更新の経路は常駐と
+同じ利用者(vega では hikalium)だけで走り、sudo を使わない。root を使うのは、据え付けと /etc を
+変える変更のときに操作者が打つ `apply` だけである。
+
+仕組みは 3 つの部品からなる。
+
+- 自己再起動。serve と viewer の unit は `UNIQNODE_SELF_RELOAD=1` を立てる。立っていると、常駐は
+  起動時の自分のバイナリの (dev, inode) を覚え、5 秒ごとに同じ道のファイルと比べる。置き換えられて
+  いれば理由をログに書いて 75 で終わり、Restart=on-failure が新しい版で起こし直す
+  (node/src/selfreload.rs)。手で走らせた serve やテストは見張らない。
+- `uniqnode autodeploy <checkout> --bin <path>`(1 回のループ。node/src/autodeploy.rs)。
+  1. 状態の置き場(既定 ~/.local/state/uniqnode-autodeploy)に `hold` があれば何もしない。
+  2. `git fetch origin main`。origin/main が、記録(置き場の `record`)の据えた SHA か失敗した SHA と
+     同じなら何もしない(据えたのに publish branch への push が残っていれば、それだけやり直す)。
+     fetch の失敗は記録せず、次の回にやり直す。
+  3. checkout が main のブランチにあり、commit していない変更が無く、origin/main へ fast-forward
+     できることを見る(違えば据えずに 1 で終わる。記録はしない)。fast-forward して
+     `cargo build --release --locked -p uniqnode`、組んだバイナリの `--help` が 0 で終わることを見る。
+  4. 組んだバイナリの中身が `<path>` と同じなら置き換えない(文書だけの commit で常駐を起こし
+     直さない)。違えば、動いている uniqnode-serve@* と uniqnode-viewer@* を挙げてから、今の
+     `<path>` を `<path>.prev` へ、組んだバイナリを `<path>` へ、どちらも隣に書いて rename で置く。
+  5. 挙げた unit が全て、120 秒のうちに active になり、MainPID の /proc/<pid>/exe が新しい版を指し、
+     serve は UNIQNODE_LISTEN の /v1/status に答え、そのまま 15 秒 MainPID が変わらないことを見る。
+  6. 通れば記録の据えた SHA を進め、`--publish-branch`(vega では deployed_on_vega)へその SHA を
+     push する。ビルドか確かめが失敗したら、`<path>.prev` を rename で戻し(常駐は自己再起動で前の版へ
+     戻る)、失敗した SHA と戻したことを記録して 1 で終わる。その SHA は試し直さない。main が進めば
+     次の SHA を試す。
+  7. 何かを試した回だけ、置き場の `logs/<UTC 時刻>-<SHA>.log` に出力を残す。何もしない回は書かない。
+- `uniqnode-autodeploy.service` と `.timer`(docs/mop/systemd/system/)。service は Type=oneshot で、
+  drop-in の User= の利用者で走る。timer は前の回が終わってから 1 分ごとに起こす。据えるのは
+  `uniqnode install-autodeploy <checkout> --user <name>`(root で一回)で、checkout がその利用者の
+  持ち物で `.git` と `Cargo.toml` を持ち、cargo がその利用者の ~/.cargo/bin か PATH にあることだけを
+  見る(root では git を走らせない。利用者の書ける .git/config を root で実行しないため)。
+
+起こし直しの設定もこの仕組みの一部である。serve と viewer の unit は、起動時の誤り(1 と 2)でも
+起こし直し、回数に上限を置かない(上の「unit の読み方」)。壊れた版が起動で落ちても、autodeploy が
+前の版へ戻せば、sudo 無しで常駐が戻る。
+
+### 据え付け(vega で一回)と、/etc を変える変更
+
+vega の据え付けは docs/mop/vega/vega.apply に書いてある。主の知識ストア・graph_b・graph_a の
+install と、install-autodeploy の 4 つの命令である。`uniqnode apply <ファイル>`(node/src/apply.rs)は
+空行で区切った塊を 1 つずつ、走っている自分自身(/proc/self/exe)を子にして走らせ、最初の失敗で止まり、
+出力を時刻つきで /var/log/uniqnode-apply-<時刻>.log にも残す。前提として、vega のセッションが
+sudo 無しで、hikalium の持ち物のデプロイ用の checkout `/work2/llm_playground_host_dir/uniqnode-deploy` を
+main で用意し、そこで `cargo build --release -p uniqnode` を済ませておく。操作者が打つのは次の 1 行である:
+
+```
+sudo /work2/llm_playground_host_dir/uniqnode-deploy/target/release/uniqnode apply /work2/llm_playground_host_dir/uniqnode-deploy/docs/mop/vega/vega.apply
+```
+
+最初の 1 回は、旧い名の unit を退避して外し(`--retire-legacy-units`)、3 つのインスタンスを新しい
+unit(自己再起動つき)で据え直し、自動更新の timer を据える。再実行してよい。unit・drop-in・nft の
+規則・インスタンスの増減を変える変更は、vega.apply か unit のテンプレートを直して main に入れた後、
+同じ 1 行を操作者に渡す(checkout は autodeploy が main へ進めているので、そのまま打てる)。
+
+### 確かめ方と止め方
+
+- 据わった版: `git ls-remote origin deployed_on_vega`(どの機械からでも)。vega では
+  `cat ~/.local/state/uniqnode-autodeploy/record`(deployed・published・failed・rolled_back)。
+- 回の出力: `journalctl -u uniqnode-autodeploy.service`、試した回のログは
+  ~/.local/state/uniqnode-autodeploy/logs/。
+- 止める: `touch ~/.local/state/uniqnode-autodeploy/hold`(消せば再開する)。手で checkout や
+  バイナリを触る間に置く。
+- 失敗した SHA を試し直す: 原因を直したうえで record の `failed` の行を消す(次の回が試す)。
+- 手で前の版へ戻す: `~/.local/bin/uniqnode.prev` を隣へ写してから rename で `~/.local/bin/uniqnode` へ
+  置く(cp で上書きすると Text file busy で断られる)。常駐は自己再起動で戻る。直しは main へ積む。
+
+### 代価と残る危険
+
+- バイナリが変わる更新のたびに、全てのインスタンスの serve と viewer が起き直す。止まっている時間と、
+  その後の索引の温め直しの時間は、最初の自動更新で測ってここに書く。
+- 直らない起動の誤り(引数の誤りなど)でも 5 秒ごとに起こし直して journal が伸びる。`uniqnode install` は
+  unit が failed に落ちなくなったので、起動の失敗を報告するまで確認の上限(90 秒)を待つ。
+- uniqnode の main は GitHub で検査を強制していない。コードの変更は vega で cargo test を通したもの
+  だけを入れる規則(CLAUDE.md、docs/mop/COMMIT-QUEUE.md)は約束であり、破った変更も 1 分で vega に
+  届く。起動が壊れれば確かめで前の版へ戻るが、起動した後の誤りは戻らない。文書だけの変更でバイナリに
+  入るのは unit のテンプレート(効くのは apply の後)と使い方の文だけで、中身が同じなら置き換えない。
+- 自動更新は常駐と同じ利用者で走ることが前提である(違う利用者の常駐は、バイナリを置き換えられず、
+  /proc/<pid>/exe も読めない)。user 単位の常駐は対象にしない。
 
 ## ログの見方
 
@@ -1207,9 +1300,9 @@ a_serve_that_cannot_take_the_store_lock_never_says_listening_on)。
 - ロックはデータディレクトリの正規化した道から名付けるので、unit と CLI、unit と別の unit の
   どの組でも互いに検出する。閉じ込めの中で走る unit と外の CLI の間でも同じである
   (実測: user 単位、PrivateUsers=yes、どちらが先でも)。
-- unit の側が 2 本目だったときは、exit 1 なので RestartPreventExitStatus= により起こし直さ
-  ず、`systemctl status` が failed (Result: exit-code) を示す。先に走っていた方を止めてから
-  `systemctl reset-failed uniqnode-serve@default` と `systemctl start uniqnode-serve@default`。
+- unit の側が 2 本目だったときは、exit 1 で終わり、5 秒ごとに起こし直しては同じ理由で終わる
+  (`systemctl status` は activating (auto-restart) を示し、journal に理由が並ぶ)。先に走っていた方を
+  止めれば、次の起こし直しでそのまま起きる。
 - viewer はロックを取らないので、同じストアに何本でも起こせる。衝突するのはアドレスだけである。
 - serve が走っている間に CLI の ingest・embed・sync を叩くと、同じ「別プロセスが開いて
   いる」で断られる。REST を使うか、serve を止めてから行う(上の「system 単位で起こす」)。

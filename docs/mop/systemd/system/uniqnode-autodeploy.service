@@ -1,0 +1,33 @@
+# uniqnode の main を追って、組み直したバイナリへ置き換える一回きりの service(自動更新)。
+# 置き場は /etc/systemd/system/。読み方と手順は docs/mop/SYSTEMD.md
+# (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2)の「自動更新」。uniqnode-autodeploy.timer が
+# 前の回が終わってから 1 分ごとに起こす。据えるのは `uniqnode install-autodeploy`(root で一回)。
+#
+# 常駐(serve と viewer)と同じ利用者で走り、sudo を使わない。置き換えたバイナリは、常駐が
+# 自分で見つけて終わり(UNIQNODE_SELF_RELOAD)、Restart= が新しい版で起こし直す。
+
+[Unit]
+Description=uniqnode autodeploy (follow main, build, replace the binary)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 運用者が変えるものは環境変数にしてある。install-autodeploy が drop-in に書く。
+#   UNIQNODE_AUTODEPLOY_REPO     main を追う checkout(常駐の利用者の持ち物)。
+#   UNIQNODE_AUTODEPLOY_OPTIONS  追加の引数(--bin、--publish-branch)。空なら引数 0 個に消える。
+Environment=UNIQNODE_AUTODEPLOY_REPO=
+Environment=UNIQNODE_AUTODEPLOY_OPTIONS=
+# git が資格情報を端末で尋ねて止まらないように。
+Environment=GIT_TERMINAL_PROMPT=0
+ExecStart=/usr/local/bin/uniqnode autodeploy ${UNIQNODE_AUTODEPLOY_REPO} $UNIQNODE_AUTODEPLOY_OPTIONS
+
+User=uniqnode
+Group=uniqnode
+
+# git や cargo が止まっても、回が終わらずに timer が二度と回らない形にしない。
+TimeoutStartSec=2h
+# 組み直しが日々の利用(同じ機械の LLM のサーバーなど)と CPU を取り合わないように。
+Nice=10
+CPUWeight=20
+NoNewPrivileges=yes

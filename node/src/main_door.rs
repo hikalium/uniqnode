@@ -246,8 +246,8 @@ impl MainDoor {
     ///
     /// 失敗は 2 種類に分ける(SelfTestError::exit_code)。設定が原因で起こし直しても直らないもの
     /// (照会ソケットの socket() が EAFNOSUPPORT・EPERM・EACCES で失敗した、自分の uid が
-    /// overflowuid に見える)は 2 で、unit の RestartPreventExitStatus= が起こし直さない。それ
-    /// 以外(期限切れ、照会の一時の失敗など)は 3 で、unit の Restart=on-failure が起こし直す。
+    /// overflowuid に見える)は 2 で、journal で設定の誤りと分かる。それ
+    /// 以外(期限切れ、照会の一時の失敗など)は 3 である。unit はどちらも起こし直す(SYSTEMD.md)。
     pub fn self_test(&self, listener: &std::net::TcpListener) -> Result<(), SelfTestError> {
         let transient = |reason: String| SelfTestError { config: false, reason };
         match self.probe_socket() {

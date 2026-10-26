@@ -1,0 +1,98 @@
+# vega の uniqnode の据え付け。`sudo <bin> apply <このファイル>` が上から順に走らせる
+# (docs/mop/SYSTEMD.md の「自動更新」。ファイルの形は node/src/apply.rs)。空行で区切った塊が
+# 1 つの uniqnode の命令で、塊の中は 1 行 1 引数(引用符を解釈しない)。
+#
+# 再実行してよい: install は更新になり、--retire-legacy-units は旧い名の unit が無ければ何もしない。
+# 中身を変えたら(インスタンスの増減、引数の変更)、main に入れた後に操作者がこの apply を打ち直す。
+# バイナリだけの変更は打ち直さなくてよい(uniqnode-autodeploy.timer が据える)。
+
+# 主の知識ストア(既定のインスタンス)。埋め込みと rerank は vega の llama-server(8083・8084)。
+# 読み口 10.10.128.1:7441 は wg1 の上で、lamalium の crystal(10.10.128.2)と orion(10.10.128.4)からだけ届く。
+install
+/work2/llm_playground_host_dir/uniqnode-store
+--system
+--user
+hikalium
+--retire-legacy-units
+--serve-options
+--embed http://127.0.0.1:8083/v1/embeddings --rerank http://127.0.0.1:8084/v1/rerank
+--viewer-listen
+0.0.0.0:7450
+--backup-dir
+/home/hikalium/uniqnode-backup
+--listen-agent
+10.10.128.1:7441
+--agent-writable
+lamalium-notes
+--agent-collections
+articles
+--agent-collections
+papers
+--agent-collections
+seccamp
+--agent-collections
+specs
+--agent-collections
+trial
+--agent-collections
+web
+--agent-collections
+lamalium-notes
+--after
+wg-quick@wg1.service
+--firewall-allow
+10.10.128.4,10.10.128.2
+
+# lamalium の計画のグラフの書き手(graph_b)。
+install
+/work2/llm_playground_host_dir/uniqnode-graph
+--instance
+graph_b
+--system
+--user
+hikalium
+--listen
+127.0.0.1:7442
+--viewer-listen
+127.0.0.1:7452
+--backup-dir
+/home/hikalium/uniqnode-backup/graph_b
+--listen-agent
+10.10.128.1:7443
+--agent-graph-writable
+lamalium-plan
+--after
+wg-quick@wg1.service
+--firewall-allow
+10.10.128.4,10.10.128.2
+
+# graph_b のグラフの写し(graph_a。uniqnode-graph-pull.timer が毎分 7442 から写す)。
+install
+/work2/llm_playground_host_dir/uniqnode-graph-replica
+--instance
+graph_a
+--system
+--user
+hikalium
+--listen
+127.0.0.1:7444
+--viewer-listen
+127.0.0.1:7454
+--backup-dir
+/home/hikalium/uniqnode-backup/graph_a
+--listen-agent
+10.10.128.1:7445
+--agent-graph
+lamalium-plan
+--after
+wg-quick@wg1.service
+--firewall-allow
+10.10.128.4,10.10.128.2
+
+# 自動更新。main を追う checkout は hikalium の持ち物で、据えた版を deployed_on_vega へ進める。
+install-autodeploy
+/work2/llm_playground_host_dir/uniqnode-deploy
+--user
+hikalium
+--publish-branch
+deployed_on_vega

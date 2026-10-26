@@ -267,6 +267,25 @@ fn usage_text() -> String {
                                       そうでなければ nft の表 inet uniqnode_<名> を serve の\n\
                                       ExecStartPre= が起動のたびに入れる。--system と\n\
                                       --listen-agent のときだけ)。手順は SYSTEMD.md の移行\n\
+           autodeploy <checkout> --bin <path> [--state-dir <dir>] [--publish-branch <name>]\n\
+                                      自動更新の 1 回(SYSTEMD.md の「自動更新」。常駐と同じ\n\
+                                      利用者で走り、sudo を使わない)。<checkout> で origin の\n\
+                                      main を追い、新しい SHA なら組み直して <path> を置き換え、\n\
+                                      動いている serve と viewer が自己再起動で新しい版に替わる\n\
+                                      まで見る。落ち着かなければ前の版(<path>.prev)へ戻す。\n\
+                                      据えたら --publish-branch へ SHA を push する。状態は\n\
+                                      --state-dir(既定 ~/.local/state/uniqnode-autodeploy)に\n\
+                                      置き、そこに hold があれば何もしない\n\
+           install-autodeploy <checkout> [--user <name>] [--bin <path>]\n\
+                              [--publish-branch <name>] [--unit-dir <dir>] [--no-start]\n\
+                                      autodeploy を 1 分ごとに起こす system 単位の service と\n\
+                                      timer を据える(root で走らせる。利用者は --user か\n\
+                                      SUDO_USER、--bin の既定は ~/.local/bin/uniqnode)\n\
+           apply <ファイル> [--log-dir <dir>]\n\
+                                      ファイルの空行で区切った塊を 1 つずつ uniqnode の命令として\n\
+                                      走らせ(塊の中は 1 行 1 引数)、最初の失敗で止まる。出力は\n\
+                                      時刻つきで --log-dir(既定 /var/log)の\n\
+                                      uniqnode-apply-<時刻>.log にも残す(docs/mop/vega/vega.apply)\n\
          \n\
          serve・mcp・viewer のログの指定(常駐する命令だけが持つ。既定は保存する):\n\
            --log <path>               保存先を変える(既定 <dir>/logs/<serve|mcp|viewer>.log。\n\
@@ -1294,6 +1313,95 @@ fn parse_mcp_options(rest: &[String]) -> McpOptions {
     McpOptions { serve_url, writable, run: parse_run_options(&others) }
 }
 
+/// `--flag 値` の対だけを受ける命令(autodeploy・install-autodeploy・apply)の引数を読む。
+/// 知らない旗と値の欠けは usage で断る。値を取らない旗は switches に挙げる。
+fn parse_flag_pairs(
+    rest: &[String],
+    flags: &[&str],
+    switches: &[&str],
+) -> std::collections::BTreeMap<String, String> {
+    let mut found = std::collections::BTreeMap::new();
+    let mut at = 0;
+    while at < rest.len() {
+        let flag = rest[at].as_str();
+        if switches.contains(&flag) {
+            found.insert(flag.to_string(), String::new());
+            at += 1;
+            continue;
+        }
+        if !flags.contains(&flag) {
+            usage();
+        }
+        let value = rest.get(at + 1).cloned().unwrap_or_else(|| usage());
+        found.insert(flag.to_string(), value);
+        at += 2;
+    }
+    found
+}
+
+fn parse_autodeploy_options(dir: &str, rest: &[String]) -> uniqnode::autodeploy::Options {
+    let found = parse_flag_pairs(rest, &["--bin", "--state-dir", "--publish-branch"], &[]);
+    let home = std::env::var_os("HOME").filter(|home| !home.is_empty());
+    let state_dir = match (found.get("--state-dir"), &home) {
+        (Some(dir), _) => std::path::PathBuf::from(dir),
+        (None, Some(home)) => std::path::Path::new(home).join(uniqnode::autodeploy::STATE_SUBDIR),
+        (None, None) => {
+            eprintln!("uniqnode: autodeploy: HOME が無いので --state-dir の既定を決められない");
+            std::process::exit(2);
+        }
+    };
+    let binary = match found.get("--bin") {
+        Some(binary) => std::path::PathBuf::from(binary),
+        None => {
+            eprintln!("uniqnode: autodeploy: 置き換えるバイナリを --bin で指す");
+            std::process::exit(2);
+        }
+    };
+    uniqnode::autodeploy::Options {
+        repo: std::path::PathBuf::from(dir),
+        binary,
+        state_dir,
+        publish_branch: found.get("--publish-branch").cloned(),
+    }
+}
+
+fn parse_install_autodeploy_options(dir: &str, rest: &[String]) -> uniqnode::autodeploy::InstallOptions {
+    let found = parse_flag_pairs(
+        rest,
+        &["--user", "--bin", "--publish-branch", "--unit-dir"],
+        &["--no-start"],
+    );
+    let fail = |message: String| -> ! {
+        eprintln!("uniqnode: install-autodeploy: {message}");
+        std::process::exit(1);
+    };
+    let euid = uniqnode::install::effective_uid().unwrap_or_else(|e| fail(e));
+    // 据え先と利用者の決め方は install --system と同じ(root で走らせ、--user か SUDO_USER)。
+    let scope = uniqnode::install::scope(
+        true,
+        found.get("--user").cloned(),
+        std::env::var("SUDO_USER").ok(),
+        euid,
+    )
+    .unwrap_or_else(|e| fail(e));
+    let account = scope.account().cloned().unwrap_or_else(|| fail("利用者が決まらない".to_string()));
+    let binary = found
+        .get("--bin")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| account.home.join(".local").join("bin").join("uniqnode"));
+    uniqnode::autodeploy::InstallOptions {
+        repo: std::path::PathBuf::from(dir),
+        binary,
+        publish_branch: found.get("--publish-branch").cloned(),
+        unit_dir: found
+            .get("--unit-dir")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(uniqnode::install::SYSTEM_UNIT_DIR)),
+        start: !found.contains_key("--no-start"),
+        account,
+    }
+}
+
 /// install の指定。既定は home の下(node/src/install.rs の Options::defaults。--system なら
 /// 実行ユーザの home)。知らない引数は黙って捨てず usage で落とす。据え先(user/system と
 /// 実行ユーザ)の判断は install::scope にあり、ここは環境(HOME・SUDO_USER・実効 uid)を
@@ -2112,6 +2220,9 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // 標準出力の 1 行は起動スクリプトとの取り決めなので形を変えない。ログにも
             // 残すのは、後から「いつ、どのアドレスで起きたか」を読めるようにするため。
             uniqnode::log_line!("uniqnode: serve: {bound} で待ち受ける");
+            // 自動更新がバイナリを置き換えたら終わり、unit に新しい版で起こし直させる
+            // (unit が UNIQNODE_SELF_RELOAD=1 を立てたときだけ。node/src/selfreload.rs)。
+            uniqnode::selfreload::spawn_watcher(uniqnode::log::SERVE_ROLE);
             let mut main_hosts = uniqnode::main_door::default_hosts(bound);
             for host in &options.main_allow_host {
                 if !main_hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
@@ -2252,6 +2363,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 "uniqnode: viewer: http://{bound} で待ち受ける(検索は {} へ転送する)",
                 viewer.serve_url()
             );
+            uniqnode::selfreload::spawn_watcher(uniqnode::log::VIEWER_ROLE);
             let handler: std::sync::Arc<uniqnode::http::Handler> =
                 std::sync::Arc::new(move |request| viewer.handle(request));
             uniqnode::http::serve(listener, handler);
@@ -2278,6 +2390,39 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             let options = parse_install_options(dir, rest);
             if let Err(message) = uniqnode::install::run(options, &mut std::io::stdout()) {
                 eprintln!("uniqnode: install: {message}");
+                std::process::exit(1);
+            }
+        }
+        // 自動更新の 1 回のループ(SYSTEMD (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「自動
+        // 更新」)。据えなかった回と前の版へ戻した回は理由を言って 1 で終わる。
+        "autodeploy" => {
+            let options = parse_autodeploy_options(dir, rest);
+            if let Err(message) = uniqnode::autodeploy::run(&options) {
+                eprintln!("uniqnode: autodeploy: {message}");
+                std::process::exit(1);
+            }
+        }
+        "install-autodeploy" => {
+            let options = parse_install_autodeploy_options(dir, rest);
+            if let Err(message) =
+                uniqnode::autodeploy::install_units(&options, &mut std::io::stdout())
+            {
+                eprintln!("uniqnode: install-autodeploy: {message}");
+                std::process::exit(1);
+            }
+        }
+        "apply" => {
+            let found = parse_flag_pairs(rest, &["--log-dir"], &[]);
+            let log_dir = found
+                .get("--log-dir")
+                .cloned()
+                .unwrap_or_else(|| uniqnode::apply::DEFAULT_LOG_DIR.to_string());
+            if let Err(message) = uniqnode::apply::run(
+                std::path::Path::new(dir),
+                std::path::Path::new(&log_dir),
+                std::path::Path::new(uniqnode::install::RUNNING_BINARY),
+            ) {
+                eprintln!("uniqnode: apply: {message}");
                 std::process::exit(1);
             }
         }

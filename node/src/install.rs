@@ -717,7 +717,7 @@ pub fn unit_word(text: &str) -> Result<String, String> {
 }
 
 /// `Environment=KEY=value` の 1 行。
-fn environment_line(key: &str, value: &str) -> Result<String, String> {
+pub fn environment_line(key: &str, value: &str) -> Result<String, String> {
     Ok(format!(
         "Environment={}",
         unit_word(&format!("{key}={value}"))?
@@ -1229,7 +1229,7 @@ pub fn paths_not_owned_by(dir: &Path, uid: u32) -> Result<Vec<PathBuf>, String> 
     Ok(found)
 }
 
-fn write_file(path: &Path, content: &str) -> Result<(), String> {
+pub(crate) fn write_file(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("{} を作れない: {e}", parent.display()))?;
@@ -1237,15 +1237,18 @@ fn write_file(path: &Path, content: &str) -> Result<(), String> {
     std::fs::write(path, content).map_err(|e| format!("{} を書けない: {e}", path.display()))
 }
 
-/// 走っている自分自身を destination に写す。隣に書いてから rename で据えるので、走行中の
-/// 実行ファイルを上書きせず(Text file busy にならず)、途中で止まっても半分のファイルが
-/// その名前で残らない。destination が自分自身なら写さない。owner があれば(system 単位。
-/// root が写す)据える前にその所有にする。返り値は報告の 1 行。
+/// 走っている自分自身の実体。/proc/self/exe は、走行中にその名のファイルが置き換えられても
+/// (apply の最中に checkout が組み直されても)走っている版を読ませる。
+pub const RUNNING_BINARY: &str = "/proc/self/exe";
+
+/// 走っている自分自身を destination に写す(install の (1))。
 pub fn install_binary(destination: &Path, owner: Option<&Account>) -> Result<String, String> {
-    let current = std::env::current_exe()
-        .and_then(std::fs::canonicalize)
-        .map_err(|e| format!("自分自身の実行ファイルが分からない: {e}"))?;
-    if destination.exists() {
+    // 走っている自分のファイルが既に置き換えられていれば(apply の最中に checkout が組み直された)
+    // 道を正規化できない。そのときは自分自身ではないので、中身を比べて写す。
+    if let (Ok(current), true) = (
+        std::env::current_exe().and_then(std::fs::canonicalize),
+        destination.exists(),
+    ) {
         let existing = std::fs::canonicalize(destination)
             .map_err(|e| format!("{} を正規化できない: {e}", destination.display()))?;
         if existing == current {
@@ -1254,6 +1257,23 @@ pub fn install_binary(destination: &Path, owner: Option<&Account>) -> Result<Str
                 destination.display()
             ));
         }
+    }
+    place_binary(Path::new(RUNNING_BINARY), destination, owner)
+}
+
+/// source を destination に写す。隣に書いてから rename で据えるので、走行中の実行ファイルを
+/// 上書きせず(Text file busy にならず)、途中で止まっても半分のファイルがその名前で残らない。
+/// 中身が既に同じなら写さない: rename は inode を替え、自己再起動(selfreload)を見張る常駐を
+/// 要らずに起こし直させるからである。owner があれば(system 単位。root が写す)据える前に
+/// その所有にする。返り値は報告の 1 行。
+pub fn place_binary(source: &Path, destination: &Path, owner: Option<&Account>) -> Result<String, String> {
+    let new = std::fs::read(source).map_err(|e| format!("{} を読めない: {e}", source.display()))?;
+    if std::fs::read(destination).is_ok_and(|old| old == new) {
+        return Ok(format!(
+            "バイナリ {} は {} と中身が同じなので写さない",
+            destination.display(),
+            source.display()
+        ));
     }
     let parent = destination
         .parent()
@@ -1264,8 +1284,7 @@ pub fn install_binary(destination: &Path, owner: Option<&Account>) -> Result<Str
         .ok_or_else(|| format!("{} にファイル名が無い", destination.display()))?
         .to_string_lossy();
     let staging = parent.join(format!(".{name}.install-{}", std::process::id()));
-    let bytes = std::fs::copy(&current, &staging)
-        .map_err(|e| format!("{} へ写せない: {e}", staging.display()))?;
+    std::fs::write(&staging, &new).map_err(|e| format!("{} へ写せない: {e}", staging.display()))?;
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))
@@ -1282,15 +1301,16 @@ pub fn install_binary(destination: &Path, owner: Option<&Account>) -> Result<Str
         )
     })?;
     Ok(format!(
-        "バイナリ {} ← {}({bytes} bytes)",
+        "バイナリ {} ← {}({} bytes)",
         destination.display(),
-        current.display()
+        source.display(),
+        new.len()
     ))
 }
 
 /// systemctl(user 単位なら --user 付き)を 1 命令 1 exec で呼ぶ。見つからない・呼べないは
 /// Err。終了コードと出力は呼び手が読む(is-active のように非 0 が答えである命令があるため)。
-fn systemctl(scope: &Scope, arguments: &[&str]) -> Result<std::process::Output, String> {
+pub(crate) fn systemctl(scope: &Scope, arguments: &[&str]) -> Result<std::process::Output, String> {
     Command::new("systemctl")
         .args(scope.manager_flags())
         .args(arguments)
@@ -1308,7 +1328,7 @@ fn systemctl(scope: &Scope, arguments: &[&str]) -> Result<std::process::Output, 
 }
 
 /// 成功(終了 0)を要する systemctl。失敗は標準エラーを添えて言う。
-fn systemctl_ok(scope: &Scope, arguments: &[&str]) -> Result<String, String> {
+pub(crate) fn systemctl_ok(scope: &Scope, arguments: &[&str]) -> Result<String, String> {
     let output = systemctl(scope, arguments)?;
     if !output.status.success() {
         return Err(format!(

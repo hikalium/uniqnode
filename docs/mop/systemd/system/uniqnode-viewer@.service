@@ -8,6 +8,7 @@
 
 [Unit]
 Description=uniqnode viewer (RAG viewer, one HTML page forwarding to serve) [%i]
+StartLimitIntervalSec=0
 # serve の後に起こす。Requires= にしないのは、serve が居なくても頁は出て、届かないことを
 # 502 の本文で言うため(serve を起こし直したら、そのまま繋がる)。
 After=network.target uniqnode-serve@%i.service
@@ -24,6 +25,7 @@ Environment=UNIQNODE_DATA_DIR=%S/uniqnode/%i
 Environment=UNIQNODE_VIEWER_LISTEN=127.0.0.1:7450
 Environment=UNIQNODE_SERVE_URL=http://127.0.0.1:7440
 Environment=UNIQNODE_VIEWER_OPTIONS=
+Environment=UNIQNODE_SELF_RELOAD=1
 ExecStart=/usr/local/bin/uniqnode viewer ${UNIQNODE_DATA_DIR} ${UNIQNODE_VIEWER_LISTEN} --serve-url ${UNIQNODE_SERVE_URL} $UNIQNODE_VIEWER_OPTIONS
 
 User=uniqnode
@@ -32,10 +34,10 @@ Group=uniqnode
 StateDirectory=uniqnode/%i
 StateDirectoryMode=0750
 
-# serve と同じ方針。viewer はロックを取らないので、起こし直しに条件はない。
+# serve と同じ方針(起動時の誤りでも、自己再起動の 75 でも起こし直す)。viewer はロックを
+# 取らないので、起こし直しに条件はない。
 Restart=on-failure
-RestartSec=2s
-RestartPreventExitStatus=1 2
+RestartSec=5s
 
 NoNewPrivileges=yes
 ProtectSystem=strict

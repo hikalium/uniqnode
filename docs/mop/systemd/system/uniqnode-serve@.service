@@ -8,6 +8,7 @@
 
 [Unit]
 Description=uniqnode serve (knowledge store HTTP API) [%i]
+StartLimitIntervalSec=0
 After=network.target
 
 [Service]
@@ -24,6 +25,7 @@ Type=exec
 Environment=UNIQNODE_DATA_DIR=%S/uniqnode/%i
 Environment=UNIQNODE_LISTEN=127.0.0.1:7440
 Environment=UNIQNODE_SERVE_OPTIONS=
+Environment=UNIQNODE_SELF_RELOAD=1
 ExecStart=/usr/local/bin/uniqnode serve ${UNIQNODE_DATA_DIR} ${UNIQNODE_LISTEN} $UNIQNODE_SERVE_OPTIONS
 
 User=uniqnode
@@ -35,14 +37,15 @@ StateDirectoryMode=0750
 
 # 落ちたら起こし直す。ストアのロックはデータディレクトリの lock ファイルへの flock なので、
 # プロセスが死ねばカーネルが解放し、次の起動は書き込み途中で裂かれていても fsck なしで回復する
-# (node/tests/crash.rs)。起動時に分かる誤りは再起動で直らないので、1 回で止めて理由を
-# journal に残す: 1 はアドレスが塞がっている・別プロセスがストアを開いている、2 は引数の誤りと、
-# 主の口の起動時の自己試験の設定による失敗(AF_NETLINK が塞がれている、自分の uid が
-# overflowuid に見える)。自己試験のそれ以外の失敗(一時の失敗でありうる)は 3 で、起こし直す。
+# (node/tests/crash.rs)。起動時の誤り(1 はアドレスが塞がっている・別プロセスがストアを開いている、
+# 2 は引数の誤りと主の口の自己試験の設定による失敗、3 は自己試験の一時の失敗)も起こし直し、
+# 理由はそのたびに journal に残る。止めずに起こし直し続けるのは、自動更新(SYSTEMD.md の
+# 「自動更新」)が壊れた版を前の版へ戻したとき、sudo 無しで常駐が戻るようにするためである
+# (StartLimitIntervalSec=0 で起こし直しの回数に上限を置かない)。75 は自己再起動
+# (UNIQNODE_SELF_RELOAD。バイナリが置き換えられたら終わる)で、これも起こし直す。
 # POST /v1/admin/shutdown による終了(0)は意図した停止なので起こし直さない。
 Restart=on-failure
-RestartSec=2s
-RestartPreventExitStatus=1 2
+RestartSec=5s
 
 # 閉じ込め。書けるのは StateDirectory の下だけになる。AF_UNIX は、利用者の名前の解決(NSS)などが
 # 使う unix socket のために残す。PrivateNetwork= は使わない(viewer と mcp が loopback で

@@ -1,0 +1,17 @@
+# uniqnode-autodeploy.service を、前の回が終わってから 1 分ごとに起こす timer。置き場は
+# /etc/systemd/system/。読み方と手順は docs/mop/SYSTEMD.md
+# (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2)の「自動更新」。
+# OnUnitInactiveSec= だけでは、service が一度も走っていないときに基準の時刻が無く、一度も
+# 発火しない。OnBootSec= が起動の後の最初の 1 回を、OnActiveSec= が timer を据えた直後の
+# 最初の 1 回を起こす。
+
+[Unit]
+Description=Run uniqnode autodeploy every minute
+
+[Timer]
+OnBootSec=2min
+OnActiveSec=1min
+OnUnitInactiveSec=1min
+
+[Install]
+WantedBy=timers.target

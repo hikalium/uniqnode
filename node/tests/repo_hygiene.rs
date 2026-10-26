@@ -101,6 +101,11 @@ fn the_policy_corpus_is_well_formed() {
         for entry in entries {
             let path = entry.expect("entry").path();
             let name = path.file_name().expect("name").to_string_lossy().to_string();
+            // 各条項の隣には、同じ名前で拡張子が .lean の Lean 版を置く(操作者の指示)。
+            // 形式の検査は Markdown の本文だけに当てる。
+            if name.ends_with(".lean") {
+                continue;
+            }
             let number = match name.split('-').next().and_then(|n| n.parse::<u32>().ok()) {
                 Some(n) if name.ends_with(".md") && name.split('-').next().expect("head").len() == 4 => n,
                 _ => {
@@ -415,4 +420,275 @@ fn systemd_doc_carries_the_legacy_units_removal_command() {
         "{} に install の外す命令と同じ字句の行が無い:\n{command}",
         display(&path)
     );
+}
+
+// ---- 実行時の文言は英語の ASCII(should/0141) ----
+//
+// node/src の検査対象のソースの文字列リテラルを走査し、印字できる ASCII と改行とタブの外の
+// 字を含むものを拒む。コメントは日本語のままでよい(should/0107)ので走査しない。lamalium の
+// container/tests/run_time_text.rs と同じ字句解析である。
+//
+// 条項の範囲の外のリテラルは 2 つの形で除く。`RUN_TIME_TEXT_EXEMPT_MARK` をコメントに持つ行と、
+// その次の行は飛ばす。リテラルが全て範囲の外にあるファイルは、理由と共に
+// `RUN_TIME_TEXT_EXEMPT_FILES` に載せる。
+
+/// 自分の行と次の行を除くコメントの印。後ろに理由を書く。
+const RUN_TIME_TEXT_EXEMPT_MARK: &str = "run-time-text-exempt:";
+
+/// 文字列リテラルが条項の範囲の外にあるファイルと、その理由。
+const RUN_TIME_TEXT_EXEMPT_FILES: &[(&str, &str)] = &[(
+    "translit.rs",
+    "transliteration tables: a program whose job is handling Japanese text",
+)];
+
+/// ソースの中で見つけた文字列リテラル。始まる行とその中身。
+struct Literal {
+    line: usize,
+    text: String,
+}
+
+/// `#[cfg(test)]` の下の項目(テストのコード)のバイト範囲。
+fn test_regions(src: &str) -> Vec<(usize, usize)> {
+    let mut regions = Vec::new();
+    let mut from = 0;
+    while let Some(found) = src[from..].find("#[cfg(test)]") {
+        let start = from + found;
+        let end = item_end(src, start + "#[cfg(test)]".len());
+        regions.push((start, end));
+        from = end.max(start + 1);
+    }
+    regions
+}
+
+/// `from` で始まる項目の終わり。最初の波括弧に対応する閉じ括弧か、それより先に来る最初の
+/// セミコロン。リテラルとコメントの中の括弧は数えない。
+fn item_end(src: &str, from: usize) -> usize {
+    let mut depth = 0usize;
+    let mut end = src.len();
+    lex(&src[from..], |event| match event {
+        Event::Open => {
+            depth += 1;
+            true
+        }
+        Event::Close(at) => {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                end = from + at + 1;
+                return false;
+            }
+            true
+        }
+        Event::Semicolon(at) if depth == 0 => {
+            end = from + at + 1;
+            false
+        }
+        _ => true,
+    });
+    end
+}
+
+enum Event {
+    Literal { start: usize, text: String },
+    Open,
+    Close(usize),
+    Semicolon(usize),
+}
+
+/// Rust のソースの小さな字句解析。文字列リテラル(ふつうのもの、バイト列、raw)と波括弧と
+/// セミコロンを知らせ、コメントと文字リテラルを飛ばす。`visit` が false を返すと止まる。
+fn lex(src: &str, mut visit: impl FnMut(Event) -> bool) {
+    let chars: Vec<(usize, char)> = src.char_indices().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let (at, c) = chars[i];
+        let next = chars.get(i + 1).map(|&(_, n)| n);
+        if c == '/' && next == Some('/') {
+            while i < chars.len() && chars[i].1 != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && next == Some('*') {
+            let mut depth = 0;
+            while i < chars.len() {
+                let here = chars[i].1;
+                let after = chars.get(i + 1).map(|&(_, n)| n);
+                if here == '/' && after == Some('*') {
+                    depth += 1;
+                    i += 2;
+                } else if here == '*' && after == Some('/') {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        let ident_before = i > 0 && (chars[i - 1].1.is_alphanumeric() || chars[i - 1].1 == '_');
+        if (c == 'r' || (c == 'b' && next == Some('r'))) && !ident_before {
+            let mut j = if c == 'b' { i + 2 } else { i + 1 };
+            let mut hashes = 0;
+            while j < chars.len() && chars[j].1 == '#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < chars.len() && chars[j].1 == '"' {
+                let body_start = j + 1;
+                let mut k = body_start;
+                loop {
+                    if k >= chars.len() {
+                        break;
+                    }
+                    if chars[k].1 == '"'
+                        && (1..=hashes).all(|h| chars.get(k + h).map(|&(_, n)| n) == Some('#'))
+                    {
+                        break;
+                    }
+                    k += 1;
+                }
+                let text: String =
+                    chars[body_start..k.min(chars.len())].iter().map(|&(_, ch)| ch).collect();
+                if !visit(Event::Literal { start: at, text }) {
+                    return;
+                }
+                i = k + 1 + hashes;
+                continue;
+            }
+        }
+        if c == '"' {
+            let mut k = i + 1;
+            let mut text = String::new();
+            while k < chars.len() && chars[k].1 != '"' {
+                if chars[k].1 == '\\' {
+                    k += 1;
+                }
+                if k < chars.len() {
+                    text.push(chars[k].1);
+                }
+                k += 1;
+            }
+            if !visit(Event::Literal { start: at, text }) {
+                return;
+            }
+            i = k + 1;
+            continue;
+        }
+        if c == '\'' {
+            if next == Some('\\') {
+                let mut k = i + 2;
+                while k < chars.len() && chars[k].1 != '\'' {
+                    k += 1;
+                }
+                i = k + 1;
+                continue;
+            }
+            if chars.get(i + 2).map(|&(_, n)| n) == Some('\'') {
+                i += 3;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        let keep_going = match c {
+            '{' => visit(Event::Open),
+            '}' => visit(Event::Close(at)),
+            ';' => visit(Event::Semicolon(at)),
+            _ => true,
+        };
+        if !keep_going {
+            return;
+        }
+        i += 1;
+    }
+}
+
+/// `src` のテストのコードの外にある文字列リテラル。
+fn non_test_literals(src: &str) -> Vec<Literal> {
+    let regions = test_regions(src);
+    let mut out = Vec::new();
+    lex(src, |event| {
+        if let Event::Literal { start, text } = event {
+            if !regions.iter().any(|&(a, b)| a <= start && start < b) {
+                let line = src[..start].matches('\n').count() + 1;
+                out.push(Literal { line, text });
+            }
+        }
+        true
+    });
+    out
+}
+
+/// 実行時の文言に許す字: 印字できる ASCII と改行とタブ。
+fn admitted_in_run_time_text(c: char) -> bool {
+    (' '..='~').contains(&c) || c == '\n' || c == '\t'
+}
+
+fn rust_sources_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|e| e.expect("dir entry").path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            rust_sources_under(&path, out);
+        } else if path.extension().is_some_and(|x| x == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// 名前からテストのコードだけを持つと分かるファイル。
+fn is_test_file(name: &str) -> bool {
+    name.ends_with("tests.rs") || name.ends_with("_test.rs") || name == "testsupport.rs"
+}
+
+#[test]
+fn run_time_text_is_ascii() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    rust_sources_under(&root.join("node/src"), &mut files);
+    let mut failures = Vec::new();
+    for path in &files {
+        let name = path.file_name().expect("name").to_string_lossy().to_string();
+        if is_test_file(&name) || RUN_TIME_TEXT_EXEMPT_FILES.iter().any(|&(f, _)| f == name) {
+            continue;
+        }
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let lines: Vec<&str> = src.lines().collect();
+        for literal in non_test_literals(&src) {
+            if literal.text.chars().all(admitted_in_run_time_text) {
+                continue;
+            }
+            let marked = |n: usize| {
+                n >= 1 && lines.get(n - 1).is_some_and(|l| l.contains(RUN_TIME_TEXT_EXEMPT_MARK))
+            };
+            if marked(literal.line) || marked(literal.line - 1) {
+                continue;
+            }
+            failures.push(format!("{}:{}: {:?}", display(path), literal.line, literal.text));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "テストの外のコードの文字列リテラル {} 件が ASCII の外の字を含む。プログラム自身の文言は英語で\
+         書く(should/0141)。条項の範囲の外のリテラルには `{RUN_TIME_TEXT_EXEMPT_MARK} <理由>` の\
+         コメントを付ける:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn the_run_time_text_scan_finds_literals_and_skips_comments_and_test_code() {
+    let src = "fn a() { println!(\"\u{65e5}\"); } // \"\u{672c}\"\n\
+               #[cfg(test)]\nmod tests { fn b() { let _ = \"\u{8a9e}\"; } }\n\
+               fn c() { let _ = r#\"x\u{3042}\"#; let _ = 'y'; }\n";
+    let found: Vec<(usize, String)> =
+        non_test_literals(src).into_iter().map(|l| (l.line, l.text)).collect();
+    assert_eq!(found, vec![(1, "\u{65e5}".to_string()), (4, "x\u{3042}".to_string())]);
 }

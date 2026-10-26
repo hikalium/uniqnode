@@ -120,7 +120,7 @@ unit ファイルは差し替えても drop-in は残る。
   設定による失敗(照会の netlink ソケットを作れない。AF_NETLINK を塞いだ unit など。自分の uid が
   overflowuid に見える user namespace)、3 は自己試験の一時の失敗で、どれも理由をそのたびに journal に
   残して 5 秒後に起こし直す。2026-10-26 までは 1 と 2 を RestartPreventExitStatus= で 1 回で止めて
-  いた。起こし直し続ける形に替えたのは、下の「自動更新」が壊れた版を以前のバージョンへ戻したとき、sudo 無しで
+  いた。起こし直し続ける形に替えたのは、下の「自動更新」が壊れた版を前のバージョンへ戻したとき、sudo 無しで
   常駐が戻るようにするためである。コストは、直らない誤りでも 5 秒ごとに起こし直して journal が伸びる
   ことと、`uniqnode install` が起動の失敗を報告するまで、unit が failed に落ちるのを待てずに
   確認の上限(90 秒)まで待つことである。75 は自己再起動(下の「自動更新」)で、これも起こし直す。
@@ -395,7 +395,7 @@ EOF
   無い(graph_a・graph_b は別の unit なので動き続ける)。lamalium の読み口への書き込みはこの間
   失敗する。
 - 順は、この外す命令 → 下の「user 単位から移る」の install の命令、でなければならない。逆に打つと、
-  install は旧い名が残っているので何も置かずに断る(壊れはしないが、据わらない)。外した後は間を空けず
+  install は旧い名が残っているので何も置かずに断る(壊れはしないが、インストールされない)。外した後は間を空けず
   に install の命令を打つ。ビルドを先に済ませておけば、install の命令の中の cargo build はすぐ終わり、
   止まる間が短くなる。
 - vega では、graph_a・graph_b を含むどのインスタンスの install も、この移行の後に打つ(第 17 版の
@@ -427,7 +427,7 @@ EOF
     定義から S1b 以後のバイナリであり、その判断は手で辿る代わりに cargo の試験で固定できる。中身は
     APPEND_FAILURE の方針 5 の「戻す前の検め」に書く。この命令は S1b の後の別の段 S1d で実装し、S1d は本番への
     反映の前に入る(第 28 版の APPEND_FAILURE の「段取り」)。S1d は S1b の印と hold-status の上に作るので、実装の順は
-    S1a、S1b、その後に S1d である(第 30 版の APPEND_FAILURE。S1a も S1b もまだ実装していない)。本番に据わる S1b 以後のバイナリは全部この命令を
+    S1a、S1b、その後に S1d である(第 30 版の APPEND_FAILURE。S1a も S1b もまだ実装していない)。本番にデプロイされる S1b 以後のバイナリは全部この命令を
     持つが、S1b と S1d の間の開発のビルドは持たず 2 を返すので、検め手には採らない。vega の install はどの
     インスタンスでも共有のバイナリを差し替えるので、S1b 以後で S1d より前のビルドは vega のどのインスタンスにも
     install しない(第 29 版の APPEND_FAILURE の低 1。検め手として名を出すのも S1d 以後のビルドだけである)。
@@ -704,7 +704,7 @@ preflight() {
       if [ "$bin" != "$checker" ]; then /usr/bin/rm -f "$bin"; fi
       case "$rc" in
         0) echo "検め手の候補 $bin は 0 で終わったが、出力を読めない(形が違う)。採らない" ;;
-        2) echo "検め手の候補 $bin は legacy-rollback-preflight を知らない(S1d より以前のバージョン)か、引数を誤った。採らない" ;;
+        2) echo "検め手の候補 $bin は legacy-rollback-preflight を知らない(S1d より前のバージョン)か、引数を誤った。採らない" ;;
         *) echo "検め手の候補 $bin が終了コード $rc で終わった(理由は上の行。126・127・シグナルなら走れていない)。採らない" ;;
       esac
       echo "検めの断りなら直して打ち直す。候補が走れないか版が違うなら、vega で最後に打った install と同じコミットの S1d 以後のビルドを sudo install -m 0755 -o root -g root <ビルド> $checker で置いてから打ち直す"
@@ -1164,7 +1164,7 @@ install(1) は走っている実行ファイルを一度 unlink してから置�
 restart で新しいものに替わる。restart は停止と同じく SIGTERM で落として起こし直す。
 
 2026-10-25 にストアのロックを抽象名前空間の unix socket からデータディレクトリの lock ファイルへの
-flock に替えた。それより以前のバージョンと後の版は互いのロックを見ないので、この境をまたいで更新するときは、
+flock に替えた。それより前のバージョンと後の版は互いのロックを見ないので、この境をまたいで更新するときは、
 serve を restart する前に、同じストアを開いているほかのプロセス(ストアを直接開く形の
 `uniqnode mcp`、手で走らせている CLI)を止めておく。止めずに新しい serve を起こすと、書き手が 2 つになる。
 
@@ -1210,7 +1210,7 @@ vega では、uniqnode の main に入った版を、エージェントの手も
 
 起こし直しの設定もこの仕組みの一部である。serve と viewer の unit は、起動時の誤り(1 と 2)でも
 起こし直し、回数に上限を置かない(上の「unit の読み方」)。壊れた版が起動で落ちても、autodeploy が
-以前のバージョンへ戻せば、sudo 無しで常駐が戻る。
+前のバージョンへ戻せば、sudo 無しで常駐が戻る。
 
 ### 据え付け(vega で一回)と、/etc を変える変更
 
@@ -1228,7 +1228,7 @@ sudo /work2/llm_playground_host_dir/uniqnode-deploy/target/release/uniqnode appl
 最初の 1 回は、旧い名の unit を退避して外し(`--retire-legacy-units`)、3 つのインスタンスを新しい
 unit(自己再起動つき)で据え直し、自動更新の timer を据える。再実行してよい。unit・drop-in・nft の
 規則・インスタンスの増減を変える変更は、vega.apply か unit のテンプレートを直して main に入れ、
-deployed_on_vega がその commit に進んだのを見てから、据わった版のバイナリで打つ次の 1 行を
+deployed_on_vega がその commit に進んだのを見てから、デプロイされた版のバイナリで打つ次の 1 行を
 操作者に渡す(デプロイ用の checkout の target/release には、確かめで落ちて戻した版が残りうるので
 使わない。ファイルは checkout の main の版で、autodeploy が main へ進めている):
 
@@ -1242,14 +1242,14 @@ apply の間に autodeploy が同じバイナリを置き換えると、install 
 
 ### 確かめ方と止め方
 
-- 据わった版: `git ls-remote origin deployed_on_vega`(どの機械からでも)。vega では
+- デプロイされた版: `git ls-remote origin deployed_on_vega`(どの機械からでも)。vega では
   `cat ~/.local/state/uniqnode-autodeploy/record`(deployed・published・failed・rolled_back)。
 - 回の出力: `journalctl -u uniqnode-autodeploy.service`、試した回のログは
   ~/.local/state/uniqnode-autodeploy/logs/。
 - 止める: `touch ~/.local/state/uniqnode-autodeploy/hold`(消せば再開する)。手で checkout や
   バイナリを触る間に置く。
 - 失敗した SHA を試し直す: 原因を直したうえで record の `failed` の行を消す(次の回が試す)。
-- 手で以前のバージョンへ戻す: `~/.local/bin/uniqnode.prev` を隣へ写してから rename で `~/.local/bin/uniqnode` へ
+- 手で前のバージョンへ戻す: `~/.local/bin/uniqnode.prev` を隣へ写してから rename で `~/.local/bin/uniqnode` へ
   置く(cp で上書きすると Text file busy で断られる)。常駐は自己再起動で戻る。直しは main へ積む。
 
 ### コストと残る危険
@@ -1260,7 +1260,7 @@ apply の間に autodeploy が同じバイナリを置き換えると、install 
   unit が failed に落ちなくなったので、起動の失敗を報告するまで確認の上限(90 秒)を待つ。
 - uniqnode の main は GitHub で検査を強制していない。コードの変更は vega で cargo test を通したもの
   だけを入れる規則(CLAUDE.md、docs/mop/COMMIT-QUEUE.md)は約束であり、破った変更も 1 分で vega に
-  届く。起動が壊れれば確かめで以前のバージョンへ戻るが、起動した後の誤りは戻らない。文書だけの変更でバイナリに
+  届く。起動が壊れれば確かめで前のバージョンへ戻るが、起動した後の誤りは戻らない。文書だけの変更でバイナリに
   入るのは unit のテンプレート(効くのは apply の後)と使い方の文だけで、中身が同じなら置き換えない。
 - 自動更新は常駐と同じ利用者で走ることが前提である(違う利用者の常駐は、バイナリを置き換えられず、
   /proc/<pid>/exe も読めない)。user 単位の常駐は対象にしない。

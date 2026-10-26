@@ -334,7 +334,7 @@ vega の firewall は A と B を区別しない。コンテナは orion のホ�
 ref は `graph/<グラフ名>/nodes/<ノード名>` が現行の状態ノードを、
 `graph/<グラフ名>/edges/<辺名>` が辺を指す。この形で得られる性質:
 
-- 辺は恒等ノードを指すので、ノードをいくら更新しても張り替えが要らない。
+- 辺は恒等ノードを指すので、ノードをいくら更新しても辺の付け替えが要らない。
 - 辺 1 本が ref 1 本なので gc の根に入り(根は ref・pin・保持表明の和集合。
   [docs/design/GC.md](#9b1ceac3-f3cf-4595-87cb-6e40ce0900e5))、削除は tombstone で表せる。
 - 版は previous の鎖で全部残り、旧版は現行 ref から到達できるので gc に消されない。
@@ -413,9 +413,9 @@ PUT と同じ規律。[docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c242402
 5. 着地したノードが消えずに state が landed として読め、history に遷移が残り、at が着地の
    時刻である。
 
-### 据わった(2026-09-09 05:07 JST)
+### デプロイされた(2026-09-09 05:07 JST)
 
-graph_b と graph_a が vega に据わり、1 分ごとの取り寄せ(uniqnode-graph-pull.timer)が
+graph_b と graph_a が vega にデプロイされ、1 分ごとの取り寄せ(uniqnode-graph-pull.timer)が
 回っている。install の記録は /tmp/uniqnode-graph-install.log。「確認:」が 7 本ずつ、
 nft の表は `inet uniqnode_graph_b`(7443)と `inet uniqnode_graph_a`(7445)に分かれ、
 本番の 7440 は同じ node_id で答えたままである。

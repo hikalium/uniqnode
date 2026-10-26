@@ -119,7 +119,7 @@ pub struct WriteFailure {
 
 /// kind が no_space のときの戻し方の案内(方針 5)。試験はこの定数で照らす(must/0023)。
 pub const NO_SPACE_GUIDANCE: &str = "free space on the file system that holds the store, then restart serve \
-     (adding space does not recover on its own)";
+     (freeing space alone does not make serve recover)";
 
 /// kind が io のときの戻し方の案内(方針 5)。
 pub const IO_GUIDANCE: &str = "restart the host (if that is not possible, umount the file system that holds the store, \

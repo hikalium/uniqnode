@@ -200,7 +200,7 @@ fn ingest_git_reads_the_ref_it_is_given() {
         serve_url.as_str(),
     ]);
     assert!(ok, "{stderr}");
-    assert!(stdout.contains(" of "), "{stdout}");
+    assert!(stdout.contains("tree: other of "), "{stdout}");
     let chunk = first_chunk_text(&server.address, "collections/lamalium/docs/design/store");
     assert!(chunk.contains("書きかけの版 2"), "{chunk}");
 

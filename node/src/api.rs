@@ -3199,7 +3199,7 @@ mod tests {
             Ok(_) => panic!("citation の欠けた応答を通してはならない"),
             Err(message) => message,
         };
-        assert!(no_citation.contains("citation"), "{no_citation}");
+        assert!(no_citation.contains("citation has no"), "{no_citation}");
     }
 
     /// 検索要求も、書いた本文がそのまま parse_search_request を通る(転送する形の MCP は

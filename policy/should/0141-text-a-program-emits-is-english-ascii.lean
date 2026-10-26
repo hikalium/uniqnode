@@ -46,8 +46,8 @@ structure RunTimeText where
   reader : Reader
   origin : Origin
   inTestCode : Bool
-  /-- The program judges text in another language and the deviation is noted beside the text. -/
-  notedLanguageJudgement : Bool
+  /-- A deviation, such as judging text in another language, is noted with its reason. -/
+  notedDeviation : Bool
 
 /-- The characters the requirement admits: printable ASCII, line feed and tab. -/
 def admitted (c : Char) : Bool :=
@@ -60,30 +60,30 @@ def applies (t : RunTimeText) : Bool :=
 /-- The requirement. Whether the wording is English is left to review, because no definition
 here decides it. The characters are decided. -/
 def complies (t : RunTimeText) : Bool :=
-  !applies t || t.notedLanguageJudgement || t.chars.all admitted
+  !applies t || t.notedDeviation || t.chars.all admitted
 
 /-- A terminal message in English passes. -/
 example : complies
     { chars := "apply: ran 4 instructions".toList, reader := .terminal,
-      origin := .ownWording, inTestCode := false, notedLanguageJudgement := false } = true := by
+      origin := .ownWording, inTestCode := false, notedDeviation := false } = true := by
   decide
 
 /-- A log line in Japanese fails. -/
 example : complies
     { chars := "命令を走らせる".toList, reader := .log,
-      origin := .ownWording, inTestCode := false, notedLanguageJudgement := false } = false := by
+      origin := .ownWording, inTestCode := false, notedDeviation := false } = false := by
   decide
 
 /-- A Japanese file name passed through is outside the policy. -/
 example : complies
     { chars := "メモ.md".toList, reader := .terminal,
-      origin := .passedThrough, inTestCode := false, notedLanguageJudgement := false } = true := by
+      origin := .passedThrough, inTestCode := false, notedDeviation := false } = true := by
   decide
 
 /-- A page shown to a person is outside the policy. -/
 example : complies
     { chars := "検索".toList, reader := .personInBrowser,
-      origin := .ownWording, inTestCode := false, notedLanguageJudgement := false } = true := by
+      origin := .ownWording, inTestCode := false, notedDeviation := false } = true := by
   decide
 
 end Policy.P0141TextAProgramEmitsIsEnglishAscii

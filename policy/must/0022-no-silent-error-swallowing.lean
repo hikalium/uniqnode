@@ -74,7 +74,7 @@ theorem best_effort_log_complies :
   exact trivial
 
 /-- Rust のソースの外に書かれた例 (文書の中の `.ok();`) は対象外である。 -/
-theorem fixture_string_outside :
+theorem outside_rust_source_outside :
     Complies { inRustSource := false, disposition := Disposition.okStatement } := by
   intro e
   cases e

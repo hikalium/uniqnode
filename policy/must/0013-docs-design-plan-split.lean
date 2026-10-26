@@ -30,6 +30,8 @@ structure Document where
   classificationVerifiedAgainstCode : Bool
   /-- H1 の直下に `<a id="<uuid>"></a>` のアンカーを持つか。 -/
   hasAnchorUnderH1 : Bool
+  /-- 木について既に正しくなくなった情報 (古くなった設計の事実や plan の記述) を残しているか。 -/
+  hasStaleFact : Bool
 
 /-- 適用のテスト。docs/ の下の文書。 -/
 def Applies (d : Document) : Prop :=
@@ -47,9 +49,14 @@ def PlanHalfIsFuture (d : Document) : Prop :=
 def ClassifiedAndAnchored (d : Document) : Prop :=
   d.classificationVerifiedAgainstCode = true /\ d.hasAnchorUnderH1 = true
 
+/-- どちらの側でも、古くなった情報は削除され、最新の情報だけが残る。 -/
+def OutdatedDeleted (d : Document) : Prop :=
+  d.hasStaleFact = false
+
 /-- 要求。 -/
 def Complies (d : Document) : Prop :=
-  Applies d -> DesignHalfIsCurrent d /\ PlanHalfIsFuture d /\ ClassifiedAndAnchored d
+  Applies d ->
+    DesignHalfIsCurrent d /\ PlanHalfIsFuture d /\ ClassifiedAndAnchored d /\ OutdatedDeleted d
 
 /-- 参照が書かれる場所。 -/
 inductive Site where
@@ -96,9 +103,19 @@ theorem finished_plan_kept_as_history_fails :
     Not (Complies { half := Half.plan, underDocs := true, hasUnimplementedPart := false,
                     hasChronicle := false, keepsLandedItem := true,
                     keptAfterWorkFullyLanded := true, classificationVerifiedAgainstCode := true,
-                    hasAnchorUnderH1 := true }) := by
+                    hasAnchorUnderH1 := true, hasStaleFact := true }) := by
   intro h
   have e : true = false := ((h rfl).2.1 rfl).2
+  cases e
+
+/-- 既に正しくない事実を残した design/ の文書は、要求を満たさない。 -/
+theorem stale_design_fact_fails :
+    Not (Complies { half := Half.design, underDocs := true, hasUnimplementedPart := false,
+                    hasChronicle := false, keepsLandedItem := false,
+                    keptAfterWorkFullyLanded := false, classificationVerifiedAgainstCode := true,
+                    hasAnchorUnderH1 := true, hasStaleFact := true }) := by
+  intro h
+  have e : true = false := (h rfl).2.2.2
   cases e
 
 /-- コードのコメントの中のパスによるリンクは、要求を満たさない。 -/
@@ -114,10 +131,10 @@ theorem current_design_document_complies :
     Complies { half := Half.design, underDocs := true, hasUnimplementedPart := false,
                hasChronicle := false, keepsLandedItem := false,
                keptAfterWorkFullyLanded := false, classificationVerifiedAgainstCode := true,
-               hasAnchorUnderH1 := true } := by
+               hasAnchorUnderH1 := true, hasStaleFact := false } := by
   intro _
   exact And.intro (fun _ => And.intro rfl rfl)
-    (And.intro (fun _ => And.intro rfl rfl) (And.intro rfl rfl))
+    (And.intro (fun _ => And.intro rfl rfl) (And.intro (And.intro rfl rfl) rfl))
 
 /-- 要求を満たす例。コードのコメントの中の `NAME (uuid:<uuid>)` の形の参照。 -/
 theorem path_free_code_reference_complies :

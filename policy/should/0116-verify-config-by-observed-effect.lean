@@ -42,29 +42,30 @@ structure Change where
 def Applies (c : Change) : Prop :=
   c.touchesConfiguration = true
 
-/-- 要求。観察の仕方を先に決め、意図した効果を稼働系で観察する。観察していない変更は完了ではない。 -/
+/-- 要求。観察の仕方を先に決め、完了と報告するなら意図した効果を稼働系で観察してある。 -/
 def Complies (c : Change) : Prop :=
-  Applies c -> c.observationDecidedBeforeApply = true /\ c.evidence.isObservedEffect
+  Applies c ->
+    c.observationDecidedBeforeApply = true /\ (c.reportedDone = true -> c.evidence.isObservedEffect)
 
 /-- 条項が止めたい形 (2026-07)。unit ファイルを編集し、適用の終了状態が 0 だったので完了と報告する。 -/
-theorem exit_code_as_effect_fails (decided reported : Bool) :
+theorem exit_code_as_effect_fails (decided : Bool) :
     Not (Complies { touchesConfiguration := true, observationDecidedBeforeApply := decided,
-                    evidence := Evidence.applyExitCode, reportedDone := reported }) := by
+                    evidence := Evidence.applyExitCode, reportedDone := true }) := by
   intro h
-  exact (h rfl).2
+  exact (h rfl).2 rfl
 
 /-- 「起動した」も効果ではない。1/8 の速さの代替の経路で動くサービスも起動はする。 -/
 theorem started_message_fails :
     Not (Complies { touchesConfiguration := true, observationDecidedBeforeApply := true,
                     evidence := Evidence.startedMessage, reportedDone := true }) := by
   intro h
-  exact (h rfl).2
+  exact (h rfl).2 rfl
 
 /-- 要求を満たす例。観察の仕方を決めてから適用し、稼働中の設定の出力で効果を見てから報告する。 -/
 theorem observed_effect_complies :
     Complies { touchesConfiguration := true, observationDecidedBeforeApply := true,
                evidence := Evidence.effectiveState, reportedDone := true } := by
   intro _
-  exact And.intro rfl trivial
+  exact And.intro rfl (fun _ => trivial)
 
 end VerifyConfigByObservedEffect

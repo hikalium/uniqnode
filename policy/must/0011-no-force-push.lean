@@ -73,8 +73,8 @@ theorem forward_push_complies :
   exact And.intro rfl rfl
 
 /-- 要求を満たす例。まだ push していない commit を amend してから初めて push する。条項は当たらない。 -/
-theorem local_amend_complies (forced : Bool) :
-    Complies { historyPublished := false, forced := forced, rewritesPublishedCommit := true } := by
+theorem local_amend_complies :
+    Complies { historyPublished := false, forced := false, rewritesPublishedCommit := false } := by
   intro e
   cases e
 

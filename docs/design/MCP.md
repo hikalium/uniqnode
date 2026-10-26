@@ -173,24 +173,24 @@ search ツールは、要求の読み取り(parse_search_request)から順位付
 出典付きで答えられるようにすることであり、出典の読めない応答は用を成さない。
 
 ```
-検索: 世代の整合(方式 bm25、得点の意味 bm25、1 件)
+search: 世代の整合 (method bm25, score meaning bm25, results 1)
 
-1. notes/search_ja 位置 1
-   見出し: 分散設計 > 世代の整合
-   取得日時: 2026-08-16T18:22:37Z
-   チャンク ID: s256:1fe778dbd7f9ec4a923cbce2b7f75892d2e23ab4cbb0a1276849d7a2aa7148ab
-   得点: 7.6674
-   抜粋: 転置索引は導出データであり、世代の整合はオブジェクト数と署名者ごとの最終列番号で確かめる。
-   原本(文書全体): /v1/objects/s256:1fe778db…/rendition/source
+1. notes/search_ja position 1
+   headings: 分散設計 > 世代の整合
+   retrieved at: 2026-08-16T18:22:37Z
+   chunk ID: s256:1fe778dbd7f9ec4a923cbce2b7f75892d2e23ab4cbb0a1276849d7a2aa7148ab
+   score: 7.6674
+   snippet: 転置索引は導出データであり、世代の整合はオブジェクト数と署名者ごとの最終列番号で確かめる。
+   original (whole document): /v1/objects/s256:1fe778db.../rendition/source
 
-全文が要るときは fetch ツールにチャンク ID を渡す。
+To read the full text, pass the chunk ID to the fetch tool.
 ```
 
-- 各件の 1 行目は「<コレクション名>/<文書名> 位置 <添字>」で、文書名は ref パスから
+- 各件の 1 行目は「<コレクション名>/<文書名> position <添字>」で、文書名は ref パスから
   `collections/<コレクション名>/` を除いた残り、位置は chunks 列の添字である。PDF のチャンクは
   文書名の後ろに `p.<ページ>` が付く。見出しの行はその下で、入れ子の見出しを ` > ` でつなぐ。
-  見出しを持たないチャンク(PDF がそうである)は空欄のまま黙らず「(なし)」と書く。
-- 「原本(文書全体)」の行は、検索の応答の source_url
+  見出しを持たないチャンク(PDF がそうである)は空欄のまま黙らず「(none)」と書く。
+- 「original (whole document)」の行は、検索の応答の source_url
   ([docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580))をそのまま写したものである。
   抜粋の周りや紙面そのものが要るときの道で、根は問い合わせ先の serve である(相対の道)。
   serve が言わなかった件には行を出さない。
@@ -198,13 +198,13 @@ search ツールは、要求の読み取り(parse_search_request)から順位付
   その版がこのノードに取り込まれた時刻であって、原典が書かれた時刻ではない。UTC で描く
   (純関数 format_unix_time。外部クレートを持たない(must/0008)ので暦の計算は自前で、
   グレゴリオ暦の 400 年周期を使う閉じた式である)。
-- 一致が無ければ「一致なし。」と書く。コレクションで絞ったときは条件を見出し行に書き戻すので、
+- 一致が無ければ「no matches.」と書く。コレクションで絞ったときは条件を見出し行に書き戻すので、
   空振りが絞り込みのせいかどうかが読み手に分かる。
-- 要求した方式で答えられなかったときは「劣化: <方式> で答えた(<理由>)」の行が入る。同じことを
+- 要求した方式で答えられなかったときは「degraded: answered with <方式> (<理由>)」の行が入る。同じことを
   標準エラーにも書く(黙って劣化しない。should/0128)。劣化の条件は REST と同一である
   ([docs/design/SEARCH.md](#19574e78-9bf5-4f87-a4c2-c4a10222c580))。融合を求めて BM25 が
   1 件も一致しなかったとき(順位が埋め込み単独と同じになるとき)も、この行で言う。
-- 低情報チャンクを落としたときは「低情報チャンク <n> 件を応答から落とした(…。残すには
+- 低情報チャンクを落としたときは「low-information chunks dropped from the response: <n> (...; to keep them, set
   include_low_information: true)」の行が入る。件数と戻し方の両方を書くのは、読み手がモデルで
   あり、次の手を選べるようにするためである。同じことを標準エラーにも書く。
 - 末尾の案内は定数 FETCH_HINT から出す。ツールの説明と同じ事実なので文言は 1 箇所が持つ
@@ -215,14 +215,14 @@ search ツールは、要求の読み取り(parse_search_request)から順位付
 ## add_document / fetch_url の応答
 
 どちらも 1 行で、何が入ったかと、新規か上書きかを言う。上書きなら前版の doc_rev を添える
-(消していないことが読める)。同じ内容の再実行は「変わらず」で、新規オブジェクトは 0 である。
+(消していないことが読める)。同じ内容の再実行は「unchanged」で、新規オブジェクトは 0 である。
 ID は先頭 8 桁に短縮する(全文が要るときは REST で引ける)。
 
 ```
-入れた: notes/hpet-memo(新規。doc_rev s256:4e40f68c…、新規オブジェクト 3)。検索に出る。
-入れた: notes/hpet-memo(上書き。前版 s256:4e40f68c…。doc_rev s256:9b12c0aa…、新規オブジェクト 2)。検索に出る。
-入れた: notes/hpet-memo(変わらず(同じ内容が既にある)。doc_rev s256:4e40f68c…、新規オブジェクト 0)。検索に出る。
-取り込んだ: web/page(html、final_url http://127.0.0.1:34795/page.html、新規。doc_rev s256:7bea4dee…、新規オブジェクト 3、落とした外部依存 3 件(images 1・scripts 2))。検索に出る。
+added: notes/hpet-memo (new; doc_rev s256:4e40f68c..., new objects 3); it appears in search.
+added: notes/hpet-memo (overwritten; previous version s256:4e40f68c...; doc_rev s256:9b12c0aa..., new objects 2); it appears in search.
+added: notes/hpet-memo (unchanged (the same content is already there); doc_rev s256:4e40f68c..., new objects 0); it appears in search.
+ingested: web/page (html, final_url http://127.0.0.1:34795/page.html, new; doc_rev s256:7bea4dee..., new objects 3, dropped 3 external dependencies (images 1, scripts 2)); it appears in search.
 ```
 
 - 新規・上書き・変わらずの区別は、取り込みの応答の ref_updated と previous
@@ -231,7 +231,7 @@ ID は先頭 8 桁に短縮する(全文が要るときは REST で引ける)。
 - fetch_url は取り込んだ名前(name を省いたときは URL から導いた名前)・種別・転送後の URL を
   言い、HTML なら自足化で落とした外部依存の数(dropped)を種類ごとに添える。0 件の種類は
   書かない。
-- 「検索に出る」は事実である: 索引は世代で作り直されるので、次の search から出る(転送する形
+- 「it appears in search」は事実である: 索引は世代で作り直されるので、次の search から出る(転送する形
   でも serve の索引が同じ世代で動く)。
 
 ## fetch の応答
@@ -245,18 +245,18 @@ fetch は同じ store の呼び出し(fetch_object)に出典を添える薄い�
 あり、ストアから読んでも REST から読んでも同じ答えになる(should/0135)。
 
 ```
-チャンク s256:1fe778dbd7f9ec4a923cbce2b7f75892d2e23ab4cbb0a1276849d7a2aa7148ab の全文
-出典: notes/search_ja 位置 1 / 見出し: 分散設計 > 世代の整合 / 取得日時: 2026-08-16T18:22:37Z
+full text of chunk s256:1fe778dbd7f9ec4a923cbce2b7f75892d2e23ab4cbb0a1276849d7a2aa7148ab
+source: notes/search_ja position 1 / headings: 分散設計 > 世代の整合 / retrieved at: 2026-08-16T18:22:37Z
 ---
 転置索引は導出データであり、世代の整合はオブジェクト数と署名者ごとの最終列番号で確かめる。
 ```
 
 - 引用は見え(collections/ 配下の現行 doc_rev)にあるチャンクだけが持つ。ID で取れても見えに無い
-  チャンク(旧版など)は、出典をでっち上げずに「見えの索引に無い」と言う。
+  チャンク(旧版など)は、出典をでっち上げずに「a chunk not in the current view's index」と言う。
 - チャンクでない c1 オブジェクト(doc_rev・注釈など)は、正規形のまま示す。
 - テキストでないバイト列(PDF の原文 blob など)は全文を示せないので、大きさだけを言って
   isError で返す。本文の要るチャンクは search が返す ID で取る。
-- ローカルに無い ID は isError で「このDBノードは持っていない」と言う。持っていないことは
+- ローカルに無い ID は isError で「this node does not hold <id>」と言う。持っていないことは
   ローカルな事実であって、不存在の言明ではない(SPEC §7.2/§10)。
 
 ## 誤りの区分
@@ -291,9 +291,9 @@ fetch_url で書ける。指定は繰り返せる(`--writable notes --writable w
 
 - 1 つも与えなければ、書くツールは tools/list に載らない(search と fetch の 2 本のまま)。
   書けない相手に書くツールを見せると、模型は試して断られるだけである。載せていないツールを
-  呼ばれたら、要求の誤り(-32602)で「--writable が 1 つも無いので読むだけ」と言う。
+  呼ばれたら、要求の誤り(-32602)で「no --writable was given, so this mcp only reads」と言う。
 - 与えたコレクション以外への書き込みは、ツールの失敗(isError)で
-  「<c> は書き込みを許していない(--writable で許すのは: notes, web)」と断る。書ける先を
+  「<c> is not writable (--writable allows: notes, web)」と断る。書ける先を
   言うのは、模型がそこへ入れ直せるようにするためである。断った書き込みはストアに何も残さない
   (統合試験 add_document_refuses_a_collection_that_is_not_writable_without_touching_the_store)。
 - 許した先は、書くツールの説明文と initialize の instructions にも並ぶ。模型が読むのはそこ
@@ -402,11 +402,11 @@ Claude Code に登録した stdio サーバは子プロセスとして起こさ�
 - 差し替えたことは標準エラーに残す(黙って入れ替えない)。
 - 実測 2026-08-17: 転送する形で常駐中に cargo build で実行ファイルを置き換えると(inode
   99526521 → 99525865)、次の応答の直後に exec が起き、PID は 4090627 のまま同じ標準入出力で
-  検索が通り続けた。標準エラーには「実行ファイルが更新された。自分を exec で差し替える」に
-  続いて、新しいイメージの「ハンドシェイク済みとして起動した(相手の protocol 2025-11-25、
+  検索が通り続けた。標準エラーには「the executable was updated; replacing itself with exec」に
+  続いて、新しいイメージの「started with the handshake already done (peer protocol 2025-11-25,
   client claude-code/2.1.232)」が並ぶ。壊れたイメージ(自己検査の命令名を潰した複製)を置いた
-  ときは「新しい実行ファイルの自己検査に落ちた。差し替えず、旧イメージのまま続ける:
-  … selfcheck が exit status: 2 で終わった」を出して差し替えず、以後の応答も旧イメージが返した。
+  ときは「the new executable failed its self-check; not replacing, continuing with the old image:
+  ... selfcheck ended with exit status: 2」を出して差し替えず、以後の応答も旧イメージが返した。
 
 ## 運用上の制約
 
@@ -423,7 +423,7 @@ Claude Code に登録した stdio サーバは子プロセスとして起こさ�
   取り(今はデータディレクトリの lock ファイルへの flock)、常駐して
   いるあいだ、ストアを開く CLI の命令はすべて断られる。実測 2026-08-17(当時のロックは抽象名前空間の
   unix socket): `uniqnode mcp <dir>` の
-  常駐中に ingest・embed・status を走らせると、どれも「<dir> は別プロセスが開いている」を標準
+  常駐中に ingest・embed・status を走らせると、どれも「<dir> is open in another process」を標準
   エラーに出して終了コード 1 で終わる。MCP を終わらせた直後に同じ ingest は成功する。serve と
   同じ制約である。
 - したがってこの形を使うときは、文書の取り込みとコーパスの埋め込みは MCP サーバを止めてから

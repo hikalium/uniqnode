@@ -160,7 +160,7 @@ pub fn outline_of_pdf(pdf: &[u8], page_count: Option<u32>) -> Result<DocumentOut
     let dir = work_dir()?;
     let source = dir.join("source.pdf");
     let written = std::fs::write(&source, pdf)
-        .map_err(|error| format!("一時ファイル {} を書けない: {error}", source.display()));
+        .map_err(|error| format!("cannot write the temporary file {}: {error}", source.display()));
     let outcome = match written {
         Ok(()) => outline_in_work_dir(&dir, &source, page_count),
         Err(error) => Err(error),
@@ -186,21 +186,21 @@ fn outline_in_work_dir(
             return Ok(DocumentOutline {
                 source: OutlineSource::Bookmarks,
                 pages,
-                reason: format!("しおり {} 件から作った(pdftohtml {version})", headings.len()),
+                reason: format!("built from {} bookmarks (pdftohtml {version})", headings.len()),
             });
         }
         Ok((headings, _)) => notes.push(format!(
-            "しおりは {} 件しか無い(最低 {MIN_HEADINGS} 件)",
+            "only {} bookmarks (at least {MIN_HEADINGS} needed)",
             headings.len()
         )),
-        Err(error) => notes.push(format!("しおり: {error}")),
+        Err(error) => notes.push(format!("bookmarks: {error}")),
     }
     let version = located_tool(Tool::Pdftotext)?.version.as_str();
     let (headings, pages_seen) = font_size_headings(pdf)?;
     let count = page_count.or(pages_seen);
     if headings.len() < MIN_HEADINGS {
         notes.push(format!(
-            "語の高さでも節番号つきの見出しは {} 件しか無い(最低 {MIN_HEADINGS} 件)",
+            "by word height too, only {} numbered section headings (at least {MIN_HEADINGS} needed)",
             headings.len()
         ));
         return Ok(DocumentOutline {
@@ -209,7 +209,7 @@ fn outline_in_work_dir(
             reason: notes.join(" / "),
         });
     }
-    notes.push(format!("語の高さから {} 件(pdftotext {version})", headings.len()));
+    notes.push(format!("{} from word height (pdftotext {version})", headings.len()));
     Ok(DocumentOutline {
         source: OutlineSource::FontSize,
         pages: attribute_headings_to_pages(&headings, count),
@@ -230,17 +230,17 @@ fn bookmark_headings(dir: &Path, pdf: &Path) -> Result<(Vec<Heading>, &'static s
         .arg(pdf)
         .arg(&prefix)
         .output()
-        .map_err(|error| format!("{} を起動できない: {error}", command.command.display()))?;
+        .map_err(|error| format!("cannot start {}: {error}", command.command.display()))?;
     if !output.status.success() {
         return Err(format!(
-            "pdftohtml が失敗した({}): {}",
+            "pdftohtml failed ({}): {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
     let path = dir.join("outline-outline.html");
     let html = std::fs::read_to_string(&path)
-        .map_err(|_| "この PDF にしおりが無い(-outline.html が作られない)".to_string())?;
+        .map_err(|_| "this PDF has no bookmarks (no -outline.html was made)".to_string())?;
     Ok((headings_from_outline_html(&html), command.version.as_str()))
 }
 
@@ -336,10 +336,10 @@ fn font_size_headings(pdf: &Path) -> Result<(Vec<Heading>, Option<u32>), String>
         .arg(pdf)
         .arg("-")
         .output()
-        .map_err(|error| format!("{} を起動できない: {error}", tool.command.display()))?;
+        .map_err(|error| format!("cannot start {}: {error}", tool.command.display()))?;
     if !output.status.success() {
         return Err(format!(
-            "pdftotext -bbox が失敗した({}): {}",
+            "pdftotext -bbox failed ({}): {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         ));
@@ -756,7 +756,7 @@ fn pdftohtml() -> Result<&'static Pdftohtml, String> {
         }
     }
     Err(format!(
-        "しおりの読み出しには {PDFTOHTML} コマンドが必要({})。{POPPLER_INSTALL_HINT}",
+        "reading bookmarks needs the {PDFTOHTML} command ({}). {POPPLER_INSTALL_HINT}",
         failures.join(" / ")
     ))
 }
@@ -790,7 +790,7 @@ fn pdftohtml_version(command: &Path) -> Result<String, String> {
         .filter(|version| !version.is_empty())
         .map(str::to_string)
         .ok_or_else(|| {
-            format!("{} -v の出力から版を読めない(先頭行: {first_line:?})", command.display())
+            format!("cannot read the version from the output of {} -v (first line: {first_line:?})", command.display())
         })
 }
 
@@ -805,16 +805,16 @@ fn work_dir() -> Result<PathBuf, String> {
         .join(format!("uniqnode-outline-{}-{serial}", std::process::id()));
     if dir.exists() {
         std::fs::remove_dir_all(&dir)
-            .map_err(|error| format!("{} を消せない: {error}", dir.display()))?;
+            .map_err(|error| format!("cannot remove {}: {error}", dir.display()))?;
     }
     std::fs::create_dir_all(&dir)
-        .map_err(|error| format!("{} を作れない: {error}", dir.display()))?;
+        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
     Ok(dir)
 }
 
 fn remove_work_dir(dir: &Path) -> Result<(), String> {
     std::fs::remove_dir_all(dir)
-        .map_err(|error| format!("{} を消せない: {error}", dir.display()))
+        .map_err(|error| format!("cannot remove {}: {error}", dir.display()))
 }
 
 // ---- 単体テスト ----
@@ -1064,8 +1064,8 @@ mod tests {
         };
         assert_eq!(outline.source, OutlineSource::Missing, "reason: {}", outline.reason);
         assert!(outline.pages.is_empty());
-        assert!(outline.reason.contains("しおり"), "理由が空: {}", outline.reason);
-        assert!(outline.reason.contains("高さ"), "理由が空: {}", outline.reason);
+        assert!(outline.reason.contains("bookmarks"), "理由が空: {}", outline.reason);
+        assert!(outline.reason.contains("word height"), "理由が空: {}", outline.reason);
         assert_eq!(outline.path_for_page(1), Vec::<String>::new().as_slice());
     }
 }

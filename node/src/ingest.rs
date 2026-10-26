@@ -196,7 +196,7 @@ pub fn chunk_pdf_text(text: &str) -> Vec<Chunk> {
     for (index, section) in sections.iter().enumerate().take(last_nonempty + 1) {
         let lines: Vec<&str> = section.lines().collect();
         let paragraphs = paragraphs_of(&lines);
-        let page = u32::try_from(index + 1).expect("ページ数が u32 を超えることはない");
+        let page = u32::try_from(index + 1).expect("the page count never exceeds u32");
         pack_paragraphs(&paragraphs, &[], Some(page), &mut chunks);
     }
     chunks
@@ -275,9 +275,9 @@ use std::process::Command;
 
 /// pdftotext が見つからないときに示す導入手順(sudo なし)。
 const PDFTOTEXT_INSTALL_HINT: &str =
-    "導入例(sudo なし): apt-get download poppler-utils と dpkg -x で ~/opt/poppler/ へ展開し、\
-     --pdftotext で実行ファイルを指すか PATH の通ったディレクトリへ symlink を置く。\
-     libpoppler の無い機械ではライブラリ側も同じ手順で展開して LD_LIBRARY_PATH を通す";
+    "to install without sudo: unpack apt-get download poppler-utils with dpkg -x into ~/opt/poppler/, \
+     then point --pdftotext at the executable or put a symlink in a directory on PATH; \
+     on a machine without libpoppler, unpack the library the same way and set LD_LIBRARY_PATH";
 
 /// pdftotext(poppler)への外部プロセス委譲。シェルを経由せず Command で直接起動する
 /// (must/0009 と同じ理由)。版は locate が起動確認を兼ねて一度だけ取得し、
@@ -299,7 +299,7 @@ impl PdfExtractor {
         };
         let probe = Command::new(&command).arg("-v").output().map_err(|error| {
             format!(
-                "PDF の取り込みには pdftotext コマンドが必要({}: {error})。{}",
+                "ingesting a PDF needs the pdftotext command ({}: {error}). {}",
                 command.display(),
                 PDFTOTEXT_INSTALL_HINT
             )
@@ -313,7 +313,7 @@ impl PdfExtractor {
             .filter(|v| !v.is_empty())
             .ok_or_else(|| {
                 format!(
-                    "{} -v の出力から版を読めない(先頭行: {first_line:?})",
+                    "cannot read the version from the output of {} -v (first line: {first_line:?})",
                     command.display()
                 )
             })?;
@@ -335,13 +335,13 @@ impl PdfExtractor {
         removed?;
         if !output.status.success() {
             return Err(crate::store::StoreError::Invalid(format!(
-                "pdftotext が失敗した({}): {}",
+                "pdftotext failed ({}): {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
         String::from_utf8(output.stdout).map_err(|_| {
-            crate::store::StoreError::Invalid("pdftotext の出力が UTF-8 でない".to_string())
+            crate::store::StoreError::Invalid("the output of pdftotext is not UTF-8".to_string())
         })
     }
 }
@@ -558,11 +558,11 @@ pub fn parse_annotation_index(text: &str) -> std::result::Result<Vec<AnnotationE
         }
         if let Some(rest) = line.strip_prefix("# ") {
             if expecting == Expecting::CodeBlock {
-                return Err(format!("{number} 行目: 見出し {spec_id} にコードブロックが無い"));
+                return Err(format!("line {number}: heading {spec_id} has no code block"));
             }
             spec_id = strip_enclosing_backticks(rest.trim()).to_string();
             if spec_id.is_empty() {
-                return Err(format!("{number} 行目: 見出しの spec_id が空"));
+                return Err(format!("line {number}: the spec_id of the heading is empty"));
             }
             expecting = Expecting::CodeBlock;
             index += 1;
@@ -571,7 +571,7 @@ pub fn parse_annotation_index(text: &str) -> std::result::Result<Vec<AnnotationE
         if line == "```" {
             if expecting != Expecting::CodeBlock {
                 return Err(format!(
-                    "{number} 行目: コードブロックは見出しの直後に 1 個だけ置ける"
+                    "line {number}: only one code block may follow a heading, directly after it"
                 ));
             }
             let mut body_lines = 0usize;
@@ -579,7 +579,7 @@ pub fn parse_annotation_index(text: &str) -> std::result::Result<Vec<AnnotationE
             let mut end = index + 1;
             loop {
                 let Some(body) = lines.get(end) else {
-                    return Err(format!("{number} 行目: コードブロックが閉じていない"));
+                    return Err(format!("line {number}: unterminated code block"));
                 };
                 if *body == "```" {
                     break;
@@ -593,8 +593,8 @@ pub fn parse_annotation_index(text: &str) -> std::result::Result<Vec<AnnotationE
             let expected = if is_zip { 4 } else { 3 };
             if body_lines != expected {
                 return Err(format!(
-                    "{number} 行目: コードブロックは表題・形式・URL の 3 行(形式 zip の\
-                     ときだけ書庫内パスの 4 行目)のはずが {body_lines} 行ある"
+                    "line {number}: a code block holds 3 lines, title, format and URL (plus a 4th line, the path inside the archive, \
+                     only for format zip), but it has {body_lines} lines"
                 ));
             }
             expecting = Expecting::Bullets;
@@ -604,35 +604,35 @@ pub fn parse_annotation_index(text: &str) -> std::result::Result<Vec<AnnotationE
         if let Some(rest) = line.strip_prefix("- p.") {
             if expecting != Expecting::Bullets {
                 return Err(format!(
-                    "{number} 行目: 注釈の行はコードブロックの後にしか置けない"
+                    "line {number}: annotation lines may only follow a code block"
                 ));
             }
             let Some((digits, raw_title)) = rest.split_once(": ") else {
                 return Err(format!(
-                    "{number} 行目: 注釈は「- p.N: 節タイトル」の形のはず: {line:?}"
+                    "line {number}: an annotation must have the form \"- p.N: section title\": {line:?}"
                 ));
             };
             if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(format!("{number} 行目: ページ番号が数字でない: {digits:?}"));
+                return Err(format!("line {number}: the page number is not a number: {digits:?}"));
             }
             let page: u32 = digits
                 .parse()
-                .map_err(|_| format!("{number} 行目: ページ番号が大きすぎる: {digits:?}"))?;
+                .map_err(|_| format!("line {number}: the page number is too large: {digits:?}"))?;
             let title = strip_enclosing_backticks(raw_title.trim()).to_string();
             if title.is_empty() {
-                return Err(format!("{number} 行目: 節タイトルが空"));
+                return Err(format!("line {number}: the section title is empty"));
             }
             entries.push(AnnotationEntry { spec_id: spec_id.clone(), page, title });
             index += 1;
             continue;
         }
         return Err(format!(
-            "{number} 行目: 形式外の行(見出し・コードブロック・「- p.N: 節タイトル」\
-             だけを受け付ける。must/0020): {line:?}"
+            "line {number}: a line outside the format (only headings, code blocks and \"- p.N: section title\" \
+             are accepted; must/0020): {line:?}"
         ));
     }
     if expecting == Expecting::CodeBlock {
-        return Err(format!("見出し {spec_id} にコードブロックが無いまま入力が終わった"));
+        return Err(format!("the input ended while heading {spec_id} had no code block"));
     }
     Ok(entries)
 }
@@ -653,14 +653,14 @@ pub fn parse_manual_approvals(
         let (Some(spec_id), Some(page), None) = (fields.next(), fields.next(), fields.next())
         else {
             return Err(format!(
-                "{number} 行目: 承認は「spec_id ページ番号」の 2 語のはず: {line:?}"
+                "line {number}: an approval must be the 2 words \"spec_id page-number\": {line:?}"
             ));
         };
         if page.is_empty() || !page.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(format!("{number} 行目: ページ番号が数字でない: {page:?}"));
+            return Err(format!("line {number}: the page number is not a number: {page:?}"));
         }
         let page: u32 =
-            page.parse().map_err(|_| format!("{number} 行目: ページ番号が大きすぎる: {page:?}"))?;
+            page.parse().map_err(|_| format!("line {number}: the page number is too large: {page:?}"))?;
         approvals.insert((spec_id.to_string(), page));
     }
     Ok(approvals)
@@ -766,12 +766,12 @@ struct ResolvedDocument {
 /// 明示的に失敗する(must/0022)。
 fn parse_stored_object(store: &Store, id: &str, role: &str) -> Result<Value> {
     let Some(bytes) = store.get_object(id)? else {
-        return Err(StoreError::Invalid(format!("{role} {id} がローカルに無い")));
+        return Err(StoreError::Invalid(format!("{role} {id} is not stored locally")));
     };
     let text = String::from_utf8(bytes)
-        .map_err(|_| StoreError::Invalid(format!("{role} {id} が UTF-8 でない")))?;
+        .map_err(|_| StoreError::Invalid(format!("{role} {id} is not UTF-8")))?;
     c1::parse(&text)
-        .map_err(|error| StoreError::Invalid(format!("{role} {id} を解釈できない: {error}")))
+        .map_err(|error| StoreError::Invalid(format!("cannot parse {role} {id}: {error}")))
 }
 
 /// spec_id を取り込み済み PDF に解決する。ref collections/<コレクション名>/<spec_id> を
@@ -788,16 +788,16 @@ fn resolve_document(
     let full_name = store.own_ref_name(&ref_path);
     let Some(target) = store.get_ref(&full_name).and_then(|state| state.target.clone()) else {
         return Err(StoreError::Invalid(format!(
-            "spec_id {spec_id} の PDF が未取り込み(ref {ref_path} が無い)。\
-             先に uniqnode ingest で PDF を取り込むこと"
+            "the PDF of spec_id {spec_id} has not been ingested (no ref {ref_path}); \
+             ingest the PDF with uniqnode ingest first"
         )));
     };
     let doc_rev = parse_stored_object(store, &target, "doc_rev")?;
     let Value::Object(doc) = &doc_rev else {
-        return Err(StoreError::Invalid(format!("doc_rev {target} がオブジェクトでない")));
+        return Err(StoreError::Invalid(format!("doc_rev {target} is not an object")));
     };
     let Some(Value::Text(blob_id)) = doc.get("source") else {
-        return Err(StoreError::Invalid(format!("doc_rev {target} に source が無い")));
+        return Err(StoreError::Invalid(format!("doc_rev {target} has no source")));
     };
     let page_lines = collect_page_lines(store, &target, doc, pages)?;
     Ok(ResolvedDocument { blob_id: blob_id.clone(), pages: page_lines })
@@ -813,18 +813,18 @@ fn collect_page_lines(
     pages: &BTreeSet<u32>,
 ) -> Result<BTreeMap<u32, Vec<String>>> {
     let Some(Value::Array(chunk_ids)) = doc.get("chunks") else {
-        return Err(StoreError::Invalid(format!("doc_rev {doc_rev_id} に chunks 列が無い")));
+        return Err(StoreError::Invalid(format!("doc_rev {doc_rev_id} has no chunks array")));
     };
     let mut page_lines: BTreeMap<u32, Vec<String>> = BTreeMap::new();
     for chunk_ref in chunk_ids {
         let Value::Text(chunk_id) = chunk_ref else {
             return Err(StoreError::Invalid(format!(
-                "doc_rev {doc_rev_id} の chunks 列に文字列でない要素がある"
+                "the chunks array of doc_rev {doc_rev_id} has an element that is not a string"
             )));
         };
         let chunk = parse_stored_object(store, chunk_id, "chunk")?;
         let Value::Object(chunk_map) = &chunk else {
-            return Err(StoreError::Invalid(format!("chunk {chunk_id} がオブジェクトでない")));
+            return Err(StoreError::Invalid(format!("chunk {chunk_id} is not an object")));
         };
         // meta.page を持たないチャンク(PDF 以外)は照合の対象にならない。
         let page = match chunk_map.get("meta") {
@@ -901,7 +901,7 @@ pub fn ingest_annotations(
     let mut type_id: Option<String> = None;
     let no_lines: Vec<String> = Vec::new();
     for entry in entries {
-        let document = documents.get(entry.spec_id.as_str()).expect("解決済み");
+        let document = documents.get(entry.spec_id.as_str()).expect("already resolved");
         let lines = document.pages.get(&entry.page).unwrap_or(&no_lines);
         let outcome = match_annotation(&entry.title, lines);
         let record = if outcome.matched {
@@ -927,7 +927,7 @@ pub fn ingest_annotations(
             new_objects += usize::from(is_new);
             type_id = Some(id);
         }
-        let type_id = type_id.as_ref().expect("直前に確保した");
+        let type_id = type_id.as_ref().expect("ensured just above");
         let title_bytes = c1::to_canonical_bytes(&title_node_value(&entry.title));
         let (title_id, is_new) = store.put_object(&title_bytes)?;
         new_objects += usize::from(is_new);
@@ -1011,15 +1011,15 @@ fn read_annotation_index(
     let Some(target) = store.get_ref(&full_name).and_then(|state| state.target.clone()) else {
         return Ok((Vec::new(), Vec::new()));
     };
-    let value = parse_stored_object(store, &target, "注釈索引")?;
+    let value = parse_stored_object(store, &target, "annotation index")?;
     let Value::Object(map) = &value else {
-        return Err(StoreError::Invalid(format!("注釈索引 {target} がオブジェクトでない")));
+        return Err(StoreError::Invalid(format!("annotation index {target} is not an object")));
     };
     let Some(Value::Object(contents)) = map.get("contents") else {
-        return Err(StoreError::Invalid(format!("注釈索引 {target} に contents が無い")));
+        return Err(StoreError::Invalid(format!("annotation index {target} has no contents")));
     };
     let Some(Value::Array(pairs)) = contents.get("annotations") else {
-        return Err(StoreError::Invalid(format!("注釈索引 {target} に annotations 列が無い")));
+        return Err(StoreError::Invalid(format!("annotation index {target} has no annotations array")));
     };
     let corrections = match contents.get("corrections") {
         None => Vec::new(),
@@ -1028,13 +1028,13 @@ fn read_annotation_index(
             .map(|item| match item {
                 Value::Text(id) => Ok(id.clone()),
                 _ => Err(StoreError::Invalid(format!(
-                    "注釈索引 {target} の corrections 列に文字列でない要素がある"
+                    "the corrections array of annotation index {target} has an element that is not a string"
                 ))),
             })
             .collect::<Result<Vec<String>>>()?,
         Some(_) => {
             return Err(StoreError::Invalid(format!(
-                "注釈索引 {target} の corrections が列でない"
+                "corrections of annotation index {target} is not an array"
             )))
         }
     };
@@ -1088,16 +1088,16 @@ struct AnnotatesParts {
 /// 明示的に失敗する(must/0022)。
 fn annotates_edge_parts(id: &str, value: &Value) -> Result<AnnotatesParts> {
     let Value::Object(map) = value else {
-        return Err(StoreError::Invalid(format!("annotates 辺 {id} がオブジェクトでない")));
+        return Err(StoreError::Invalid(format!("annotates edge {id} is not an object")));
     };
     let Some(Value::Array(members)) = map.get("members") else {
-        return Err(StoreError::Invalid(format!("annotates 辺 {id} に members が無い")));
+        return Err(StoreError::Invalid(format!("annotates edge {id} has no members")));
     };
     let (Some(Value::Text(title_id)), Some(Value::Text(blob_id)), None) =
         (members.first(), members.get(1), members.get(2))
     else {
         return Err(StoreError::Invalid(format!(
-            "annotates 辺 {id} の members が [節タイトルのノード, blob] の 2 要素でない"
+            "the members of annotates edge {id} are not the 2 elements [section title node, blob]"
         )));
     };
     let page = match map.get("meta") {
@@ -1109,7 +1109,7 @@ fn annotates_edge_parts(id: &str, value: &Value) -> Result<AnnotatesParts> {
     };
     let Some(page) = page else {
         return Err(StoreError::Invalid(format!(
-            "annotates 辺 {id} に meta.page(1 始まりの物理ページ番号)が無い"
+            "annotates edge {id} has no meta.page (a physical page number starting at 1)"
         )));
     };
     Ok(AnnotatesParts { title_id: title_id.clone(), blob_id: blob_id.clone(), page })
@@ -1154,43 +1154,43 @@ pub fn correct_statement(
 ) -> Result<CorrectionOutcome> {
     if wrong_id == new_id {
         return Err(StoreError::Invalid(format!(
-            "誤った言明と新しい言明が同じ({wrong_id})。言明は自分自身を訂正できない"
+            "the wrong statement and the new statement are the same ({wrong_id}); a statement cannot correct itself"
         )));
     }
     // 訂正の対象は既にストアにある言明だけ(INGEST の「訂正の表現」節)。無ければ
     // 黙って進めず明示的に失敗する(must/0022)。
-    for (role, id) in [("誤った言明", wrong_id), ("新しい言明", new_id)] {
+    for (role, id) in [("wrong statement", wrong_id), ("new statement", new_id)] {
         if !store.has_object(id) {
             return Err(StoreError::Invalid(format!(
-                "{role} {id} がストアに無い(訂正は既にストアにある言明にだけ張れる)"
+                "{role} {id} is not in the store (a correction can only link statements already in the store)"
             )));
         }
     }
     // 新しい言明の再照合。照合はタイトルとページ本文のトークン照合なので、適用できるのは
     // annotates 型の辺だけ。それ以外の形は理由を言って失敗する。
-    let new_value = parse_stored_object(store, new_id, "新しい言明")?;
+    let new_value = parse_stored_object(store, new_id, "new statement")?;
     if !is_annotates_edge(&new_value) {
         return Err(StoreError::Invalid(format!(
-            "新しい言明 {new_id} が annotates 型の辺でない。再照合(タイトルとページ本文の\
-             トークン照合)は annotates 辺にしか適用できないため、この言明では訂正を\
-             発行できない"
+            "new statement {new_id} is not an annotates edge; re-matching (matching the tokens of the title \
+             against the page text) applies only to annotates edges, so no correction can be \
+             issued with this statement"
         )));
     }
     let parts = annotates_edge_parts(new_id, &new_value)?;
-    let title_value = parse_stored_object(store, &parts.title_id, "節タイトルのノード")?;
+    let title_value = parse_stored_object(store, &parts.title_id, "section title node")?;
     let title = match &title_value {
         Value::Object(map) => match map.get("contents") {
             Some(Value::Text(title)) => title.clone(),
             _ => {
                 return Err(StoreError::Invalid(format!(
-                    "節タイトルのノード {} に contents(文字列)が無い",
+                    "section title node {} has no contents (string)",
                     parts.title_id
                 )))
             }
         },
         _ => {
             return Err(StoreError::Invalid(format!(
-                "節タイトルのノード {} がオブジェクトでない",
+                "section title node {} is not an object",
                 parts.title_id
             )))
         }
@@ -1198,13 +1198,13 @@ pub fn correct_statement(
     let Some((doc_rev_id, doc_rev)) = find_doc_rev_for_blob(store, collection, &parts.blob_id)?
     else {
         return Err(StoreError::Invalid(format!(
-            "新しい言明の参照する blob {} を source に持つ doc_rev が collections/\
-             {collection}/ に無い。先に uniqnode ingest で文書を取り込むこと",
+            "no doc_rev with the blob {} that the new statement refers to as its source is in collections/\
+             {collection}/; ingest the document with uniqnode ingest first",
             parts.blob_id
         )));
     };
     let Value::Object(doc) = &doc_rev else {
-        return Err(StoreError::Invalid(format!("doc_rev {doc_rev_id} がオブジェクトでない")));
+        return Err(StoreError::Invalid(format!("doc_rev {doc_rev_id} is not an object")));
     };
     let mut pages = BTreeSet::new();
     pages.insert(parts.page);
@@ -1214,8 +1214,8 @@ pub fn correct_statement(
     let outcome = match_annotation(&title, lines);
     if !outcome.matched {
         return Err(StoreError::Invalid(format!(
-            "新しい言明 {new_id} が照合に落ちた(p.{} との一致 {}/{})。照合を通らない言明\
-             では訂正を発行しない",
+            "new statement {new_id} failed matching (matched {1}/{2} against p.{0}); no correction is issued \
+             with a statement that fails matching",
             parts.page, outcome.matched_tokens, outcome.total_tokens
         )));
     }
@@ -1731,7 +1731,7 @@ mod tests {
             .expect_err("ref の無い spec_id で成功してはならない");
         let message = error.to_string();
         assert!(message.contains("absent"), "{message}");
-        assert!(message.contains("先に"), "{message}");
+        assert!(message.contains("first"), "{message}");
         assert_eq!(store.object_count(), objects_before, "失敗した取り込みが書き残した");
         let full_name = store.own_ref_name("annotations/specs");
         assert!(store.get_ref(&full_name).is_none(), "失敗した取り込みが ref を作った");
@@ -1866,27 +1866,27 @@ mod tests {
         let error = correct_statement(&mut store, "specs", &absent, &new_id, "理由")
             .expect_err("存在しない誤った言明で成功してはならない");
         let message = error.to_string();
-        assert!(message.contains("誤った言明"), "{message}");
+        assert!(message.contains("wrong statement"), "{message}");
         assert!(message.contains(&absent), "{message}");
-        assert!(message.contains("ストアに無い"), "{message}");
+        assert!(message.contains("is not in the store"), "{message}");
 
         // 新しい言明がストアに無い。
         let error = correct_statement(&mut store, "specs", &wrong_id, &absent, "理由")
             .expect_err("存在しない新しい言明で成功してはならない");
         let message = error.to_string();
-        assert!(message.contains("新しい言明"), "{message}");
-        assert!(message.contains("ストアに無い"), "{message}");
+        assert!(message.contains("new statement"), "{message}");
+        assert!(message.contains("is not in the store"), "{message}");
 
         // 自分自身では訂正できない。
         let error = correct_statement(&mut store, "specs", &wrong_id, &wrong_id, "理由")
             .expect_err("自分自身の訂正で成功してはならない");
-        assert!(error.to_string().contains("自分自身"), "{error}");
+        assert!(error.to_string().contains("cannot correct itself"), "{error}");
 
         // annotates 辺でない言明(節タイトルのノード)では再照合できない。
         let title_id = c1::object_id(&title_node_value("Alpha Beta"));
         let error = correct_statement(&mut store, "specs", &wrong_id, &title_id, "理由")
             .expect_err("annotates 辺でない言明で成功してはならない");
-        assert!(error.to_string().contains("annotates 型の辺でない"), "{error}");
+        assert!(error.to_string().contains("is not an annotates edge"), "{error}");
 
         // 参照先 blob の doc_rev がコレクションに無い annotates 辺。
         let make_edge = |title_id: &str, blob_id: &str, page: i64| {
@@ -1919,7 +1919,7 @@ mod tests {
         let error = correct_statement(&mut store, "specs", &wrong_id, &missed_edge_id, "理由")
             .expect_err("照合に落ちる言明で成功してはならない");
         let message = error.to_string();
-        assert!(message.contains("照合に落ちた"), "{message}");
+        assert!(message.contains("failed matching"), "{message}");
         assert!(message.contains("0/2"), "{message}");
         assert_eq!(store.object_count(), objects_before, "失敗した訂正が書き残した");
         std::fs::remove_dir_all(&dir).expect("cleanup");

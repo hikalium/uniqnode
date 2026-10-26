@@ -262,8 +262,8 @@ impl Embedder {
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
         {
             return Err(format!(
-                "模型識別子 {embedder_id:?} は英数字と - _ . だけで書く(キャッシュの\
-                 ファイル名になる)"
+                "model identifier {embedder_id:?} must use only letters, digits, - _ and . (it becomes the cache's \
+                 file name)"
             ));
         }
         Ok(Embedder {
@@ -313,7 +313,7 @@ impl Embedder {
         let mut vectors = self.embed(&[text.to_string()])?;
         match vectors.pop() {
             Some(vector) => Ok(vector),
-            None => Err("埋め込みが 1 件も返らなかった".to_string()),
+            None => Err("no embeddings were returned".to_string()),
         }
     }
 
@@ -335,14 +335,14 @@ impl Embedder {
             .map_err(|e| format!("{}: {e}", self.endpoint()))?;
         if response.status != 200 {
             return Err(format!(
-                "{} が {} を返した: {}",
+                "{} returned {}: {}",
                 self.endpoint(),
                 response.status,
                 http::body_head(&response.body)
             ));
         }
         let text = std::str::from_utf8(&response.body)
-            .map_err(|_| format!("{} の応答が UTF-8 でない", self.endpoint()))?;
+            .map_err(|_| format!("the response from {} is not UTF-8", self.endpoint()))?;
         vectors_from_response(text, texts.len(), self.dimension)
             .map_err(|e| format!("{}: {e}", self.endpoint()))
     }
@@ -360,37 +360,37 @@ fn vectors_from_response(
 ) -> Result<Vec<Vec<f32>>, String> {
     let value = Json::parse(text)?;
     let Json::Object(fields) = &value else {
-        return Err("応答がオブジェクトでない".to_string());
+        return Err("the response is not an object".to_string());
     };
     let data = match fields.iter().find(|(name, _)| name == "data") {
         Some((_, Json::Array(items))) => items,
-        Some(_) => return Err("応答の data が配列でない".to_string()),
-        None => return Err("応答に data がない".to_string()),
+        Some(_) => return Err("data in the response is not an array".to_string()),
+        None => return Err("the response has no data".to_string()),
     };
     if data.len() != count {
-        return Err(format!("{count} 件を求めたのに data は {} 件", data.len()));
+        return Err(format!("asked for {count} but data has {}", data.len()));
     }
     let mut slots: Vec<Option<Vec<f32>>> = (0..count).map(|_| None).collect();
     for item in data {
         let Json::Object(entry) = item else {
-            return Err("data の要素がオブジェクトでない".to_string());
+            return Err("an element of data is not an object".to_string());
         };
         let index = match entry.iter().find(|(name, _)| name == "index") {
             Some((_, Json::Number(n))) if *n >= 0.0 && n.fract() == 0.0 => *n as usize,
-            Some(_) => return Err("data の index が非負整数でない".to_string()),
-            None => return Err("data の要素に index がない".to_string()),
+            Some(_) => return Err("an index in data is not a non-negative integer".to_string()),
+            None => return Err("an element of data has no index".to_string()),
         };
         let numbers = match entry.iter().find(|(name, _)| name == "embedding") {
             Some((_, Json::Array(numbers))) => numbers,
-            Some(_) => return Err("data の embedding が配列でない".to_string()),
-            None => return Err("data の要素に embedding がない".to_string()),
+            Some(_) => return Err("an embedding in data is not an array".to_string()),
+            None => return Err("an element of data has no embedding".to_string()),
         };
         if index >= count {
-            return Err(format!("index {index} が要求した {count} 件の範囲外"));
+            return Err(format!("index {index} is outside the {count} requested"));
         }
         if numbers.len() != dimension {
             return Err(format!(
-                "index {index} のベクトルが {} 次元(模型の次元は {dimension})",
+                "the vector of index {index} has {} dimensions (the model has {dimension})",
                 numbers.len()
             ));
         }
@@ -398,11 +398,11 @@ fn vectors_from_response(
         for number in numbers {
             match number {
                 Json::Number(n) => vector.push(*n as f32),
-                _ => return Err(format!("index {index} のベクトルに数でない要素がある")),
+                _ => return Err(format!("the vector of index {index} has an element that is not a number")),
             }
         }
         if slots[index].is_some() {
-            return Err(format!("index {index} が二度現れた"));
+            return Err(format!("index {index} appeared twice"));
         }
         slots[index] = Some(normalized(vector, index)?);
     }
@@ -410,7 +410,7 @@ fn vectors_from_response(
     for (index, slot) in slots.into_iter().enumerate() {
         match slot {
             Some(vector) => out.push(vector),
-            None => return Err(format!("index {index} のベクトルが応答に無い")),
+            None => return Err(format!("the response has no vector for index {index}")),
         }
     }
     Ok(out)
@@ -422,7 +422,7 @@ fn vectors_from_response(
 fn normalized(mut vector: Vec<f32>, index: usize) -> Result<Vec<f32>, String> {
     let norm = vector.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>().sqrt();
     if !norm.is_finite() || norm <= 0.0 {
-        return Err(format!("index {index} のベクトルのノルムが {norm}(方向を持たない)"));
+        return Err(format!("the norm of the vector of index {index} is {norm} (it has no direction)"));
     }
     for value in &mut vector {
         *value = (f64::from(*value) / norm) as f32;
@@ -523,12 +523,12 @@ impl VectorCache {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(cache),
             Err(e) => {
-                return Err(EmbedError::Service(format!("{} を開けない: {e}", path.display())))
+                return Err(EmbedError::Service(format!("cannot open {}: {e}", path.display())))
             }
         };
         let total = file
             .metadata()
-            .map_err(|e| EmbedError::Service(format!("{} の大きさを見られない: {e}", path.display())))?
+            .map_err(|e| EmbedError::Service(format!("cannot read the size of {}: {e}", path.display())))?
             .len();
         let mut reader = std::io::BufReader::new(file);
         let mut header = Vec::new();
@@ -542,26 +542,26 @@ impl VectorCache {
                     header.push(byte[0]);
                     if header.len() > 256 {
                         return Err(EmbedError::Service(format!(
-                            "{} の見出し行が長すぎる",
+                            "the header line of {} is too long",
                             path.display()
                         )));
                     }
                 }
                 Err(_) => {
                     return Err(EmbedError::Service(format!(
-                        "{} の見出し行が読めない",
+                        "cannot read the header line of {}",
                         path.display()
                     )))
                 }
             }
         }
         let header = String::from_utf8(header)
-            .map_err(|_| EmbedError::Service(format!("{} の見出し行が UTF-8 でない", path.display())))?;
+            .map_err(|_| EmbedError::Service(format!("the header line of {} is not UTF-8", path.display())))?;
         let expected = format!("{CACHE_MAGIC} {embedder_id} {dimension}");
         if header != expected {
             return Err(EmbedError::Service(format!(
-                "{} の見出しが {header:?}(期待は {expected:?})。模型か次元が違うベクトルは\
-                 混ぜられない",
+                "the header of {} is {header:?} (expected {expected:?}); vectors of a different model or dimension \
+                 cannot be mixed",
                 path.display()
             )));
         }
@@ -609,7 +609,7 @@ impl VectorCache {
         for (chunk_id, vector) in &entries {
             if vector.len() != self.dimension {
                 return Err(EmbedError::Service(format!(
-                    "チャンク {chunk_id} のベクトルが {} 次元(キャッシュは {} 次元)",
+                    "the vector of chunk {chunk_id} has {} dimensions (the cache has {})",
                     vector.len(),
                     self.dimension
                 )));
@@ -654,7 +654,7 @@ impl VectorCache {
         for (chunk_id, vector) in entries {
             let id_bytes = chunk_id.as_bytes();
             let id_length = u16::try_from(id_bytes.len()).map_err(|_| {
-                EmbedError::Service(format!("チャンク ID {chunk_id} が長すぎる"))
+                EmbedError::Service(format!("chunk ID {chunk_id} is too long"))
             })?;
             let mut payload = Vec::with_capacity(id_bytes.len() + vector.len() * 4);
             payload.extend_from_slice(id_bytes);
@@ -697,10 +697,10 @@ fn read_record(
     let mut checksum = [0u8; 4];
     reader.read_exact(&mut checksum)?;
     if crate::crc32::crc32(&payload) != u32::from_le_bytes(checksum) {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "crc が合わない"));
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "crc mismatch"));
     }
     let chunk_id = String::from_utf8(payload[..id_length].to_vec())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "ID が UTF-8 でない"))?;
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "the ID is not UTF-8"))?;
     let mut vector = Vec::with_capacity(dimension);
     for index in 0..dimension {
         let at = id_length + index * 4;
@@ -773,7 +773,7 @@ pub fn embed_missing(
 ) -> Result<FillReport, EmbedError> {
     if embedder.embedder_id() != cache.embedder_id() {
         return Err(EmbedError::Service(format!(
-            "模型 {} のベクトルを {} のキャッシュには足せない",
+            "vectors of model {} cannot be added to the cache of {}",
             embedder.embedder_id(),
             cache.embedder_id()
         )));
@@ -785,7 +785,7 @@ pub fn embed_missing(
         // 件数がずれたまま zip すると、チャンクと違うベクトルを鍵に結びつけてしまう。
         if vectors.len() != group.len() {
             return Err(EmbedError::Service(format!(
-                "{} 件を求めたのに {} 件のベクトルが返った",
+                "asked for {} but {} vectors were returned",
                 group.len(),
                 vectors.len()
             )));
@@ -980,13 +980,13 @@ impl QueryEmbedding {
     pub fn of(embedder: Option<&Embedder>, query: &str) -> QueryEmbedding {
         let Some(embedder) = embedder else {
             return QueryEmbedding::Unavailable(
-                "埋め込みサーバが設定されていない(serve の --embed)".to_string(),
+                "no embedding server is configured (--embed of serve)".to_string(),
             );
         };
         match embedder.embed_query(query) {
             Ok(vector) if vector.len() == embedder.dimension() => QueryEmbedding::Ready(vector),
             Ok(vector) => QueryEmbedding::Unavailable(format!(
-                "クエリのベクトルが {} 次元(模型の次元は {})",
+                "the query vector has {} dimensions (the model has {})",
                 vector.len(),
                 embedder.dimension()
             )),
@@ -1065,9 +1065,9 @@ impl HybridSearch<'_> {
             let (embedded, total) = (vectors.embedded_count(), vectors.chunk_count());
             (embedded < total).then(|| {
                 format!(
-                    "ベクトルは {embedded}/{total} チャンクぶんしかない(残りは意味検索の\
-                     対象外。serve は書き込みの後に裏で埋める。ストアを直接開く形では \
-                     uniqnode embed で埋める)"
+                    "vectors exist for only {embedded}/{total} chunks (the rest are outside semantic \
+                     search; serve fills them in the background after a write; when the store is opened directly, \
+                     fill them with uniqnode embed)"
                 )
             })
         });
@@ -1087,15 +1087,15 @@ impl HybridSearch<'_> {
                 let one_sided = if lexical_ranking.hits.is_empty() {
                     // 実データの純日本語の問いでは 14/14 でこれが起きた(実測 2026-08-17)。
                     Some(
-                        "BM25 が 1 語も一致せず、順位は埋め込み単独と同じである(融合は効いて\
-                         いない。文書が使う語をクエリに入れると語の一致も効く)"
+                        "BM25 matched no words, so the ranking is the same as embedding alone (the fusion \
+                         had no effect; put words the documents use into the query to make word matching count)"
                             .to_string(),
                     )
                 } else if lexical_ranking.coverage() < MIN_FUSION_COVERAGE {
                     Some(format!(
-                        "BM25 は問いの語のまとまりを {:.2} しか覆えないので(問いの語は \
-                         {} 個)、融合に入れていない。順位は埋め込み単独と同じである\
-                         (文書が使う語をクエリに入れると語の一致も効く)",
+                        "BM25 covers only {:.2} of the query's words (the query has \
+                         {} words), so it is left out of the fusion; the ranking is the same as embedding alone \
+                         (put words the documents use into the query to make word matching count)",
                         lexical_ranking.coverage(),
                         lexical_ranking.query_terms
                     ))
@@ -1108,7 +1108,7 @@ impl HybridSearch<'_> {
                 let lexical =
                     if one_sided.is_some() { Vec::new() } else { lexical_ranking.hits };
                 let degraded = match (coverage, one_sided) {
-                    (Some(coverage), Some(one_sided)) => Some(format!("{coverage}。{one_sided}")),
+                    (Some(coverage), Some(one_sided)) => Some(format!("{coverage}. {one_sided}")),
                     (found, None) | (None, found) => found,
                 };
                 let rankings = vec![
@@ -1133,17 +1133,17 @@ impl HybridSearch<'_> {
         top_k: usize,
     ) -> Result<Vec<ScoredChunk>, String> {
         let Some(vectors) = self.vectors else {
-            return Err("ベクトルの索引がない".to_string());
+            return Err("there is no vector index".to_string());
         };
         if vectors.embedded_count() == 0 {
             return Err(format!(
-                "模型 {} のベクトルが 1 件も無い(serve は書き込みの後に裏で作る。ストアを\
-                 直接開く形では uniqnode embed <dir> で作る)",
+                "there are no vectors of model {} (serve makes them in the background after a write; when the store \
+                 is opened directly, make them with uniqnode embed <dir>)",
                 vectors.embedder_id()
             ));
         }
         if !vectors.aligned_with(self.lexical) {
-            return Err("ベクトルの索引が BM25 の索引と揃っていない".to_string());
+            return Err("the vector index is not aligned with the BM25 index".to_string());
         }
         let query_vector = match embedding {
             QueryEmbedding::Ready(vector) => vector,
@@ -1199,8 +1199,8 @@ impl EmbeddingService {
         )?;
         if cache.discarded_tail_bytes() > 0 {
             crate::log_line!(
-                "uniqnode: {} の末尾 {} バイトを捨てた(追記の途中で止まった記録。次の補完が\
-                 そこから埋め直す)",
+                "uniqnode: discarded the last {1} bytes of {0} (a record cut off in the middle of an append; the next fill \
+                 rebuilds from there)",
                 self.cache_path.display(),
                 cache.discarded_tail_bytes()
             );
@@ -1255,22 +1255,22 @@ mod tests {
 
         // 次元が違う応答は通さない(黙って短いベクトルを使わない)。
         let error = vectors_from_response(text, 2, 1024).expect_err("次元違いは失敗すべき");
-        assert!(error.contains("2 次元"), "{error}");
+        assert!(error.contains("has 2 dimensions"), "{error}");
         assert!(error.contains("1024"), "{error}");
 
         // 件数が足りない・index が重なる・data が無い応答も、理由を言って落ちる。
         let error = vectors_from_response(text, 3, 2).expect_err("件数違いは失敗すべき");
-        assert!(error.contains("3 件を求めた"), "{error}");
+        assert!(error.contains("asked for 3"), "{error}");
         let duplicated = "{\"data\":[{\"index\":0,\"embedding\":[1.0,0.0]},\
                           {\"index\":0,\"embedding\":[0.0,1.0]}]}";
         let error = vectors_from_response(duplicated, 2, 2).expect_err("index の重複");
-        assert!(error.contains("二度現れた"), "{error}");
+        assert!(error.contains("appeared twice"), "{error}");
         let error = vectors_from_response("{\"model\":\"x\"}", 1, 2).expect_err("data 無し");
-        assert!(error.contains("data がない"), "{error}");
+        assert!(error.contains("has no data"), "{error}");
         // ノルム 0 のベクトルは方向を持たないので通さない。
         let zero = "{\"data\":[{\"index\":0,\"embedding\":[0.0,0.0]}]}";
         let error = vectors_from_response(zero, 1, 2).expect_err("ノルム 0");
-        assert!(error.contains("ノルム"), "{error}");
+        assert!(error.contains("norm"), "{error}");
     }
 
     /// 方式を指定しない要求の既定。埋め込みが無ければ BM25 しかなく、あるときは top_k で
@@ -1351,9 +1351,9 @@ mod tests {
             }
         };
         let error = refusal("other-model", 2);
-        assert!(error.contains("見出し"), "{error}");
+        assert!(error.contains("header"), "{error}");
         let error = refusal("test-model", 3);
-        assert!(error.contains("見出し"), "{error}");
+        assert!(error.contains("header"), "{error}");
 
         // 追記の途中で止まった末尾(半端なバイト列)は捨てて、前半は使う。
         {

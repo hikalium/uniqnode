@@ -118,12 +118,12 @@ fn ingest_git_sends_only_tracked_files_under_the_paths_at_the_ref() {
 
     let (ok, first, stderr) = run_ingest_git(&args);
     assert!(ok, "{stderr}\n{first}");
-    assert!(first.contains("書き出さない(シンボリックリンク: docs/design/link.md)"), "{first}");
+    assert!(first.contains("not written (symbolic link: docs/design/link.md)"), "{first}");
     assert!(first.contains("lamalium/DESIGN: updated"), "{first}");
     assert!(first.contains("lamalium/docs/design/store: updated"), "{first}");
     assert!(first.contains("lamalium/policy/rules/first: updated"), "{first}");
-    assert!(first.contains("対象外(拡張子): docs/design/figure.png"), "{first}");
-    assert!(first.contains("取り込み: 4 件(updated 4、no-op 0)、対象外 1 件"), "{first}");
+    assert!(first.contains("skipped (extension): docs/design/figure.png"), "{first}");
+    assert!(first.contains("ingested: 4 (updated 4, no-op 0), skipped 1"), "{first}");
 
     let refs = body_text(&simple(&server.address, "GET", "/v1/refs", b""));
     for absent in [
@@ -141,7 +141,7 @@ fn ingest_git_sends_only_tracked_files_under_the_paths_at_the_ref() {
     // 再実行は全件 no-op。
     let (ok, second, stderr) = run_ingest_git(&args);
     assert!(ok, "{stderr}");
-    assert!(second.contains("取り込み: 4 件(updated 0、no-op 4)、対象外 1 件"), "{second}");
+    assert!(second.contains("ingested: 4 (updated 0, no-op 4), skipped 1"), "{second}");
 
     // 新しいコミット: 1 件を書き換え、1 件を消す。
     git(&tree, &["add", "docs/design/store.md"]);
@@ -151,7 +151,7 @@ fn ingest_git_sends_only_tracked_files_under_the_paths_at_the_ref() {
     assert!(ok, "{stderr}");
     assert!(third.contains("lamalium/docs/design/store: updated"), "{third}");
     assert!(third.contains("lamalium/DESIGN: no-op"), "{third}");
-    assert!(third.contains("取り込み: 3 件(updated 1、no-op 2)、対象外 1 件"), "{third}");
+    assert!(third.contains("ingested: 3 (updated 1, no-op 2), skipped 1"), "{third}");
     let chunk = first_chunk_text(&server.address, "collections/lamalium/docs/design/store");
     assert!(chunk.contains("書きかけの版 2"), "{chunk}");
     // git から消えた文書は消さない(INGEST の節に書いた既知の限り)。
@@ -200,7 +200,7 @@ fn ingest_git_reads_the_ref_it_is_given() {
         serve_url.as_str(),
     ]);
     assert!(ok, "{stderr}");
-    assert!(stdout.contains("の other = "), "{stdout}");
+    assert!(stdout.contains(" of "), "{stdout}");
     let chunk = first_chunk_text(&server.address, "collections/lamalium/docs/design/store");
     assert!(chunk.contains("書きかけの版 2"), "{chunk}");
 
@@ -212,7 +212,7 @@ fn ingest_git_reads_the_ref_it_is_given() {
 ///
 /// 壊して確かめた(should/0137): stage の missing の検査を消すと、ls-tree は無い道を
 /// 黙って無視して残りの道の文書を送り成功するので、assert!(!ok) が赤くなる。rev-parse の
-/// 失敗を見ずに進めると、ls-tree の失敗として落ち、"ref nope が木" の assert が赤くなる。
+/// 失敗を見ずに進めると、ls-tree の失敗として落ち、"ref nope is not in the tree" の assert が赤くなる。
 #[test]
 fn ingest_git_refuses_a_missing_tree_ref_or_path_and_sends_nothing() {
     let server = start_server("ingest-git-refuse");
@@ -227,11 +227,11 @@ fn ingest_git_refuses_a_missing_tree_ref_or_path_and_sends_nothing() {
     let plain_text = plain.to_str().expect("utf-8");
 
     let cases: [(&[&str], &str); 5] = [
-        (&[absent_text, "--paths", "DESIGN.md"], "が存在しない"),
-        (&[plain_text, "--paths", "DESIGN.md"], "が git の木でない"),
-        (&[tree_text, "--paths", "DESIGN.md", "--ref", "nope"], "ref nope が木"),
-        (&[tree_text, "--paths", "DESIGN.md,memory,docs/design"], "に無い道がある"),
-        (&[tree_text], "--paths で取り込む道を与える"),
+        (&[absent_text, "--paths", "DESIGN.md"], "does not exist"),
+        (&[plain_text, "--paths", "DESIGN.md"], "is not a git tree"),
+        (&[tree_text, "--paths", "DESIGN.md", "--ref", "nope"], "ref nope is not in the tree"),
+        (&[tree_text, "--paths", "DESIGN.md,memory,docs/design"], "some paths are not in"),
+        (&[tree_text], "give the paths to ingest with --paths"),
     ];
     for (tail, expected) in cases {
         let mut args = vec![data_dir, "lamalium"];
@@ -240,7 +240,7 @@ fn ingest_git_refuses_a_missing_tree_ref_or_path_and_sends_nothing() {
         let (ok, stdout, stderr) = run_ingest_git(&args);
         assert!(!ok, "{tail:?} で成功した: {stdout}");
         assert!(stderr.contains(expected), "{tail:?}: {stderr}");
-        if expected == "に無い道がある" {
+        if expected == "some paths are not in" {
             assert!(stderr.contains("\"memory\""), "{stderr}");
         }
     }

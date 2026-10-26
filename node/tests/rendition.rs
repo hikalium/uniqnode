@@ -104,8 +104,8 @@ fn a_pdf_chunk_offers_source_thumb_page_and_pagepdf() {
         view_of(&body, "pagepdf"),
         format!(
             "{{\"alias\":\"pagepdf\",\"content_type\":\"application/pdf\",\
-             \"note\":\"再描画であり、字形の写しは完全ではない。\
-             本文のソースは取り込み済みチャンクである\",\
+             \"note\":\"this is a re-rendering and does not reproduce the glyphs exactly; \
+             the source of the text is the ingested chunks\",\
              \"state\":\"absent\",\"url\":\"/v1/objects/{chunk}/rendition/pagepdf\"}}"
         )
     );
@@ -189,7 +189,7 @@ fn a_markdown_chunk_offers_only_its_source() {
     let refused = rendition(&server.address, &chunk, "page");
     assert_eq!(refused.status, 400, "{}", body_text(&refused));
     let text = body_text(&refused);
-    assert!(text.contains("PDF の紙面に結びついていない"), "{text}");
+    assert!(text.contains("is not tied to a PDF page"), "{text}");
     assert!(text.contains("media=markdown"), "何が理由かを言うべき: {text}");
 
     let source = rendition(&server.address, &chunk, "source");
@@ -209,7 +209,7 @@ fn unknown_aliases_and_chunks_outside_the_view_are_refused() {
     let unknown = rendition(&server.address, &chunk, "w1200");
     assert_eq!(unknown.status, 400, "{}", body_text(&unknown));
     let text = body_text(&unknown);
-    assert!(text.contains("許可表にない"), "{text}");
+    assert!(text.contains("is not in the allowed list"), "{text}");
     assert!(text.contains("source, thumb, page, pagepdf"), "受け付ける別名を示す: {text}");
 
     // 見えに無いチャンク(このDBノードが持っていない ID)。不在の言明ではなく、

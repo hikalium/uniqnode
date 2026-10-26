@@ -341,7 +341,7 @@ CLI はストアの排他ロックを取るので serve 停止中のストア用
   ディレクトリは再帰(名前順)。対象の拡張子は .md / .markdown / .txt / .html / .htm / .pdf のみで、
   それ以外は取り込まず、対象外の一覧を最後に印字する(黙って捨てない)。1 件ごとに
   `<c>/<文書名>: updated|no-op chunks=N new_objects=N doc_rev=<id>` の行を出し、最後に
-  `取り込み: N 件(updated N、no-op N)、対象外 N 件` の 1 行で締める。
+  `ingested: N (updated N, no-op N), skipped N` の 1 行で締める。
 - `uniqnode ingest <dir> <コレクション名> <パス> --serve-url <url>`: 転送する形の取り込み。
   ストアを開かず(ロックは serve が持っている)、選んだ文書を 1 件ずつ走っている serve の
   `PUT /v1/collections/{collection}/documents/{name}` へ送る(url は serve の主の口の根。
@@ -361,8 +361,8 @@ CLI はストアの排他ロックを取るので serve 停止中のストア用
 - `uniqnode ingest-git <dir> <コレクション名> <木> --paths <道,道,...> [--ref <ref>] [--serve-url <url> | --pdftotext <exe>]`:
   git の木からの取り込み(git の木からの取り込みの節)。ref の既定は main。--serve-url の有無で
   上の 2 つの形のどちらかになり、1 件ごとの行と締めの 1 行も同じ。その前に
-  `木: <木> の <ref> = <コミット ID>(書き出し N 件、書き出さなかったもの N 件)` の 1 行と、
-  書き出さなかったものごとの `書き出さない(シンボリックリンク: <道>)` の行を出す。
+  `tree: <ref> of <木> = <コミット ID> (written N, left out N)` の 1 行と、
+  書き出さなかったものごとの `not written (symbolic link: <道>)` の行を出す。
 - `uniqnode fetch <dir> <コレクション名> <url> [--name <名>] [--pdftotext <exe>]`: URL からの
   取り込み(URL からの取り込みの節)。ストアを開くのは取ってからで、取れない URL では
   ストアを作らない。1 行目は ingest と同じ形に media と final_url を足したもの、HTML なら

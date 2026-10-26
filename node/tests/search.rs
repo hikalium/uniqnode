@@ -288,7 +288,7 @@ fn hybrid_says_when_bm25_matched_nothing_and_the_fusion_was_one_sided() {
     ));
     assert!(fused.contains("\"method\":\"hybrid\""), "{fused}");
     assert!(
-        fused.contains("BM25 が 1 語も一致せず、順位は埋め込み単独と同じである"),
+        fused.contains("BM25 matched no words, so the ranking is the same as embedding alone"),
         "片肺の融合をそう言うべき: {fused}"
     );
     // 実際に同じ列であることを、埋め込み単独の応答と突き合わせて確かめる(言葉だけの
@@ -313,7 +313,7 @@ fn hybrid_says_when_bm25_matched_nothing_and_the_fusion_was_one_sided() {
         &server.address,
         "{\"query\":\"世代の整合\",\"top_k\":10,\"method\":\"hybrid\"}",
     ));
-    assert!(!matched.contains("BM25 が 1 語も一致せず"), "語が一致すれば片肺ではない: {matched}");
+    assert!(!matched.contains("BM25 matched no words"), "語が一致すれば片肺ではない: {matched}");
     assert!(!matched.contains("degraded"), "全チャンクぶん埋まっていれば劣化は無い: {matched}");
     drop(server);
     std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -384,7 +384,7 @@ fn search_degrades_to_bm25_when_the_embedding_server_cannot_be_reached() {
     let body = body_text(&search(&server.address, "{\"query\":\"世代の整合\"}"));
     assert!(body.contains("\"method\":\"bm25\""), "劣化後の方式が読めるべき: {body}");
     assert!(body.contains("\"score_semantics\":\"bm25\""), "{body}");
-    assert!(body.contains("ベクトルが 1 件も無い"), "劣化の理由が読めるべき: {body}");
+    assert!(body.contains("there are no vectors of model"), "劣化の理由が読めるべき: {body}");
     assert_eq!(body.matches("\"id\":").count(), 1, "劣化しても BM25 の結果は返るべき: {body}");
     let chunk_id = json_text_field(&body, "id").expect("チャンク ID");
 
@@ -404,7 +404,7 @@ fn search_degrades_to_bm25_when_the_embedding_server_cannot_be_reached() {
     let body = body_text(&search(&server.address, "{\"query\":\"世代の整合\"}"));
     assert!(body.contains("\"method\":\"bm25\""), "{body}");
     assert!(body.contains("127.0.0.1:1"), "どのサーバに届かなかったかを言うべき: {body}");
-    assert!(body.contains("接続できない"), "劣化の理由が読めるべき: {body}");
+    assert!(body.contains("cannot connect to"), "劣化の理由が読めるべき: {body}");
     assert_eq!(body.matches("\"id\":").count(), 1, "劣化しても BM25 の結果は返るべき: {body}");
 
     // 方式を明示して BM25 を求めたときは、そもそも埋め込みを試さないので理由も出ない。
@@ -421,7 +421,7 @@ fn search_degrades_to_bm25_when_the_embedding_server_cannot_be_reached() {
     let refusal = serve_log(&server);
     let line = refusal.lines().find(|line| line.contains(FILL_REFUSED)).expect("補完の失敗の行");
     assert!(line.contains("127.0.0.1:1"), "どのサーバに届かなかったかを言うべき: {line}");
-    assert!(line.contains("BM25 に劣化"), "検索がどうなるかを言うべき: {line}");
+    assert!(line.contains("degrades to BM25"), "検索がどうなるかを言うべき: {line}");
     // 同じ理由が続くあいだは繰り返さない: もう 1 文書書いて補完がもう 1 回失敗しても、
     // 行は 1 本のまま。補完が走ったことは温めの記録がもう 1 本増えたことで知り(起動直後の
     // 温めと最初の PUT のどちらが先かで本数が変わるので、増分で数える)、失敗は接続拒否
@@ -610,7 +610,7 @@ fn search_rejects_malformed_requests_explicitly() {
     let cases: &[(&str, &str)] = &[
         ("{}", "query"),
         ("{\"query\":\"\"}", "query"),
-        ("{\"query\":\"。。。\"}", "索引語"),
+        ("{\"query\":\"。。。\"}", "index terms"),
         ("{\"query\":\"x\",\"top_k\":0}", "top_k"),
         ("{\"query\":\"x\",\"top_k\":\"ten\"}", "top_k"),
         ("{\"query\":\"x\",\"collection\":7}", "collection"),
@@ -686,7 +686,7 @@ fn full_results_carry_the_whole_chunk_text() {
     let response = search(&server.address, "{\"query\":\"索引の温め\",\"full\":true,\"top_k\":11}");
     assert_eq!(response.status, 400, "{}", body_text(&response));
     assert!(
-        body_text(&response).contains("top_k は full のとき 1..=10"),
+        body_text(&response).contains("with full, top_k must be in 1..=10"),
         "{}",
         body_text(&response)
     );
@@ -702,7 +702,7 @@ const VECTORS_FILLED: &str = "uniqnode: embed: embedded ";
 /// ベクトルの索引を作り直した記録(api.rs の with_current_vectors が残す 1 行)。
 const VECTORS_LOADED: &str = "uniqnode: embed: vector index loaded in ";
 /// 埋められなかった記録(同じ関数。同じ理由が続くあいだは 1 本だけ)。
-const FILL_REFUSED: &str = "uniqnode: embed: 無いベクトルを埋められない: ";
+const FILL_REFUSED: &str = "uniqnode: embed: cannot fill the missing vectors: ";
 
 /// serve のログの全文(起動直後はまだ無いことがある: ログを開くのは束縛より前だが、
 /// ファイルは最初の 1 行で生まれる)。

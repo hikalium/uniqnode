@@ -184,7 +184,7 @@ uniqnode 側の書く口と出所の meta は着地した(`--agent-writable <c>`
 
 - lamalium 側の書くツール(`uniqnode_remember {name, text}` のようなもの。capability
   `uniqnode:vega:rw` を持つ task にだけ載る)。`PUT /v1/collections/lamalium-notes/documents/<name>.md?meta.agent=<id>&meta.task=<id>`
-  を打ち、403 の本文(「コレクション … は書けない(--agent-writable で許したのは …)」)は
+  を打ち、403 の本文(「collection … cannot be written (--agent-writable allows …)」)は
   そのまま観測へ載せる。同じ本文の再 PUT は meta が違っても no-op なので、書き直しは本文を
   変える(追記する)形にする。
 - 読めるコレクションの許可表(`--agent-collections`)は着地した(2026-09-06。

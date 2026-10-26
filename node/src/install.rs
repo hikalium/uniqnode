@@ -2252,7 +2252,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
             )
         };
         return Err(format!(
-            // run-time-text-exempt: 指す先の SYSTEMD.md のセクションの見出しをそのまま引く(should/0141 の範囲外)。
+            // run-time-text-exempt: 逸脱。SYSTEMD.md のセクションの見出しを、grep で引けるようそのまま引く(should/0141 が認める、理由を記した逸脱)。
             "the deploy target {} still has units with the names from before the templates ({}); {conflict}; \
              refusing without placing anything (the binary is not replaced either); remove them first \
              (section \"旧い名の unit から移る\" of SYSTEMD (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2)): {}; if you use nft, \

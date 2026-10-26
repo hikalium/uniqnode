@@ -10,6 +10,8 @@ namespace ParseOnlyTheFormatYouAskedFor
 structure ParserSite where
   /-- 出力を機械が読むか。 -/
   machineReads : Bool
+  /-- プロンプトがその出力をモデルに求めたか。 -/
+  promptAskedForAnswer : Bool
   /-- パーサの anchor と判別のマークの全てが、プロンプトが明示的に求めた字句と構造か。 -/
   anchorsRequestedByPrompt : Bool
   /-- 種類の違うフィールドを、文体の慣習を区切りにして 1 つの自由な文字列に多重化しているか。 -/
@@ -19,9 +21,9 @@ structure ParserSite where
   /-- 契約を満たしつつ任意の飾りを 1 つも持たない入力のテストがあるか。 -/
   hasUnstyledConformingTest : Bool
 
-/-- 適用のテスト。LLM の出力を機械が読む全ての場所。 -/
+/-- 適用のテスト。LLM の出力を機械が読む全ての場所で、その出力を求めたプロンプトと対になっているもの。 -/
 def Applies (p : ParserSite) : Prop :=
-  p.machineReads = true
+  p.machineReads = true /\ p.promptAskedForAnswer = true
 
 /-- anchor と判別のマークは、プロンプトが明示的に求めた字句と構造に限る。 -/
 def AnchorsFromPrompt (p : ParserSite) : Prop :=
@@ -47,23 +49,26 @@ def Complies (p : ParserSite) : Prop :=
 /-- looks_block の実例。プロンプトが求めていない「- 」の接頭辞で欠陥と説明を分け、フィクスチャだけが
     その接頭辞を使っていたパーサは、要求を満たさない。 -/
 theorem keying_on_a_habit_fails :
-    Not (Complies { machineReads := true, anchorsRequestedByPrompt := false,
+    Not (Complies { machineReads := true, promptAskedForAnswer := true,
+                    anchorsRequestedByPrompt := false,
                     multiplexedByConvention := true, fixtureUsesUnrequestedFormat := true,
                     hasUnstyledConformingTest := false }) := by
   intro h
-  cases (h rfl).1
+  cases (h (And.intro rfl rfl)).1
 
 /-- 字句はプロンプトのものでも、飾りの無い入力のテストを欠くパーサは、要求を満たさない。 -/
 theorem missing_unstyled_test_fails :
-    Not (Complies { machineReads := true, anchorsRequestedByPrompt := true,
+    Not (Complies { machineReads := true, promptAskedForAnswer := true,
+                    anchorsRequestedByPrompt := true,
                     multiplexedByConvention := false, fixtureUsesUnrequestedFormat := false,
                     hasUnstyledConformingTest := false }) := by
   intro h
-  cases (h rfl).2.2.2
+  cases (h (And.intro rfl rfl)).2.2.2
 
 /-- 要求を満たす例。ハーネスが指定した anchor でフィールドを分け、飾りの無い入力のテストを持つパーサ。 -/
 theorem anchored_fields_parser_complies :
-    Complies { machineReads := true, anchorsRequestedByPrompt := true,
+    Complies { machineReads := true, promptAskedForAnswer := true,
+               anchorsRequestedByPrompt := true,
                multiplexedByConvention := false, fixtureUsesUnrequestedFormat := false,
                hasUnstyledConformingTest := true } := by
   intro _
@@ -71,10 +76,11 @@ theorem anchored_fields_parser_complies :
 
 /-- 人が読む答えには当たらない。 -/
 theorem human_read_answer_is_out_of_scope :
-    Complies { machineReads := false, anchorsRequestedByPrompt := false,
+    Complies { machineReads := false, promptAskedForAnswer := true,
+               anchorsRequestedByPrompt := false,
                multiplexedByConvention := true, fixtureUsesUnrequestedFormat := true,
                hasUnstyledConformingTest := false } := by
   intro h
-  cases h
+  cases h.1
 
 end ParseOnlyTheFormatYouAskedFor

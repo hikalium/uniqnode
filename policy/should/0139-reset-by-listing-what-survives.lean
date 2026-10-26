@@ -20,8 +20,12 @@ structure Reset where
   everySurvivorHasReason : Bool
   /-- 新しい状態の置き場が、既定で掃除される領域の中に落ちるか。 -/
   newStateLandsInsideByDefault : Bool
+  /-- 越えなければならない項目に、それ専用のディレクトリを与えているか。 -/
+  survivorsInOwnRegion : Bool
   /-- 規則に無いファイルを置いてリセットを走らせ、消えたことを検証するテストで境界を留めているか。 -/
   pinnedByTest : Bool
+  /-- そのテストを、列挙するリセットに対して走らせて落ちることで証明した (should/0137) か。 -/
+  pinTestProvedAgainstEnumeratingReset : Bool
   /-- 共有の作業場で試行を繰り返すか。 -/
   trialsRepeatInSharedWorkspace : Bool
   /-- 繰り返す前に、その根の下への書き込みを全て列挙して生き残りの一覧と突き合わせたか。 -/
@@ -39,13 +43,13 @@ def SweepAndRebuild (r : Reset) : Prop :=
 def SurvivorListWritten (r : Reset) : Prop :=
   r.survivorListAtReset = true /\ r.everySurvivorHasReason = true
 
-/-- 新しい状態は既定で掃除される領域の中に落ちる。 -/
+/-- 新しい状態は既定で掃除される領域の中に落ち、越える項目は専用のディレクトリを持つ。 -/
 def NewStateInside (r : Reset) : Prop :=
-  r.newStateLandsInsideByDefault = true
+  r.newStateLandsInsideByDefault = true /\ r.survivorsInOwnRegion = true
 
-/-- 境界をテストで留める。 -/
+/-- 境界をテストで留め、そのテストは列挙するリセットに対して証明する。 -/
 def PinnedByTest (r : Reset) : Prop :=
-  r.pinnedByTest = true
+  r.pinnedByTest = true /\ r.pinTestProvedAgainstEnumeratingReset = true
 
 /-- 共有の作業場で試行を繰り返すなら、書き込みを列挙して一覧と突き合わせる。 -/
 def WritesListed (r : Reset) : Prop :=
@@ -58,35 +62,44 @@ def Complies (r : Reset) : Prop :=
     WritesListed r
 
 /-- 消す物を列挙するリセットは、ほかを全て満たしても要求を満たさない。 -/
-theorem enumerating_reset_fails (restores listed reasons inside pinned repeats writes : Bool) :
+theorem enumerating_reset_fails
+    (restores listed reasons inside own pinned proved repeats writes : Bool) :
     Not (Complies { promisesCleanSlate := true, sweepsWholeRegion := false,
                     restoresOnlySurvivors := restores, survivorListAtReset := listed,
                     everySurvivorHasReason := reasons, newStateLandsInsideByDefault := inside,
-                    pinnedByTest := pinned, trialsRepeatInSharedWorkspace := repeats,
+                    survivorsInOwnRegion := own, pinnedByTest := pinned,
+                    pinTestProvedAgainstEnumeratingReset := proved,
+                    trialsRepeatInSharedWorkspace := repeats,
                     writesListedAgainstSurvivors := writes }) := by
   intro h
   cases (h rfl).1.1
 
 /-- 生き残りの理由が無い一覧も、要求を満たさない。 -/
-theorem survivor_without_reason_fails (inside pinned repeats writes : Bool) :
+theorem survivor_without_reason_fails (inside own pinned proved repeats writes : Bool) :
     Not (Complies { promisesCleanSlate := true, sweepsWholeRegion := true,
                     restoresOnlySurvivors := true, survivorListAtReset := true,
                     everySurvivorHasReason := false, newStateLandsInsideByDefault := inside,
-                    pinnedByTest := pinned, trialsRepeatInSharedWorkspace := repeats,
+                    survivorsInOwnRegion := own, pinnedByTest := pinned,
+                    pinTestProvedAgainstEnumeratingReset := proved,
+                    trialsRepeatInSharedWorkspace := repeats,
                     writesListedAgainstSurvivors := writes }) := by
   intro h
   cases (h rfl).2.1.2
 
 /-- 要求を満たす例。エージェントの状態の領域を消して作り直し、理由付きの一覧の項目だけを戻し、
-テストで留め、繰り返す前に書き込みを突き合わせたリセット (wipe_agent を裏返した形)。 -/
+越える項目に専用のディレクトリを与え、列挙するリセットで証明したテストで留め、繰り返す前に
+書き込みを突き合わせたリセット (wipe_agent を裏返した形)。 -/
 theorem survivor_list_reset_complies :
     Complies { promisesCleanSlate := true, sweepsWholeRegion := true,
                restoresOnlySurvivors := true, survivorListAtReset := true,
                everySurvivorHasReason := true, newStateLandsInsideByDefault := true,
-               pinnedByTest := true, trialsRepeatInSharedWorkspace := true,
+               survivorsInOwnRegion := true, pinnedByTest := true,
+               pinTestProvedAgainstEnumeratingReset := true,
+               trialsRepeatInSharedWorkspace := true,
                writesListedAgainstSurvivors := true } := by
   intro _
   exact And.intro (And.intro rfl rfl)
-    (And.intro (And.intro rfl rfl) (And.intro rfl (And.intro rfl (fun _ => rfl))))
+    (And.intro (And.intro rfl rfl)
+      (And.intro (And.intro rfl rfl) (And.intro (And.intro rfl rfl) (fun _ => rfl))))
 
 end ResetByListingWhatSurvives

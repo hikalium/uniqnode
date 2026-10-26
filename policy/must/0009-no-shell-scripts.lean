@@ -34,17 +34,18 @@ structure ShellString where
   controlFlow : Bool
   /-- `$( )` のコマンド置換を含むか。 -/
   commandSubstitution : Bool
-  /-- 引用、リダイレクト、builtin、データの通り道としての 1 本のパイプ。これらは許される。 -/
-  usesAllowedFeature : Bool
+  /-- パイプの本数。データの通り道としての 1 本だけが許される。引用、リダイレクト、builtin は数えない。 -/
+  pipeCount : Nat
 
 /-- 適用のテスト。追跡されるコードの中の、shell に届く文字列。uniqnode でも同じ 2 つの自己テストが守る。 -/
 def ShellStringApplies (s : ShellString) : Prop :=
   s.checkedIn = true /\ s.reachesShell = true
 
-/-- 要求。文字列は 1 つのコマンドであり、順序付け、分岐、繰り返し、置換を含まない。 -/
+/-- 要求。文字列は 1 つのコマンドであり、順序付け、分岐、繰り返し、置換を含まず、パイプは 1 本まで。 -/
 def ShellStringComplies (s : ShellString) : Prop :=
   ShellStringApplies s ->
-    s.sequencing = false /\ s.controlFlow = false /\ s.commandSubstitution = false
+    s.sequencing = false /\ s.controlFlow = false /\ s.commandSubstitution = false /\
+    s.pipeCount <= 1
 
 /-- 追跡される `.sh` のファイルは要求を満たさない。 -/
 theorem tracked_sh_file_fails (shebang : Bool) :
@@ -53,14 +54,23 @@ theorem tracked_sh_file_fails (shebang : Bool) :
   have e : true = false := (h rfl).1
   cases e
 
-/-- `&&` で 2 つ目のコマンドをつないだ文字列は、許される機能を使っていても要求を満たさない。 -/
-theorem sequencing_fails (feature : Bool) :
+/-- `&&` で 2 つ目のコマンドをつないだ文字列は、要求を満たさない。 -/
+theorem sequencing_fails (pipes : Nat) :
     Not (ShellStringComplies { checkedIn := true, reachesShell := true, sequencing := true,
                                controlFlow := false, commandSubstitution := false,
-                               usesAllowedFeature := feature }) := by
+                               pipeCount := pipes }) := by
   intro h
   have e : true = false := (h (And.intro rfl rfl)).1
   cases e
+
+/-- パイプを 2 本つないだ文字列は、要求を満たさない。 -/
+theorem two_pipes_fail :
+    Not (ShellStringComplies { checkedIn := true, reachesShell := true, sequencing := false,
+                               controlFlow := false, commandSubstitution := false,
+                               pipeCount := 2 }) := by
+  intro h
+  have e : 2 <= 1 := (h (And.intro rfl rfl)).2.2.2
+  exact absurd e (by decide)
 
 /-- 要求を満たす例。Rust のソースと宣言的な設定だけを追跡する木の中のファイル。 -/
 theorem rust_source_complies :
@@ -68,19 +78,19 @@ theorem rust_source_complies :
   intro _
   exact And.intro rfl rfl
 
-/-- 要求を満たす例。リダイレクトを要するために `sh -c` で渡す 1 つのコマンド。 -/
-theorem single_command_with_redirect_complies :
+/-- 要求を満たす例。リダイレクトと 1 本のパイプを要するために `sh -c` で渡す 1 つのコマンド。 -/
+theorem single_command_with_one_pipe_complies :
     ShellStringComplies { checkedIn := true, reachesShell := true, sequencing := false,
                           controlFlow := false, commandSubstitution := false,
-                          usesAllowedFeature := true } := by
+                          pipeCount := 1 } := by
   intro _
-  exact And.intro rfl (And.intro rfl rfl)
+  exact And.intro rfl (And.intro rfl (And.intro rfl (Nat.le_refl 1)))
 
 /-- エージェントが実行時に書くコマンドには、条項が当たらない。 -/
-theorem runtime_command_is_outside (seq flow subst feature : Bool) :
+theorem runtime_command_is_outside (seq flow subst : Bool) (pipes : Nat) :
     Not (ShellStringApplies { checkedIn := false, reachesShell := true, sequencing := seq,
                               controlFlow := flow, commandSubstitution := subst,
-                              usesAllowedFeature := feature }) := by
+                              pipeCount := pipes }) := by
   intro h
   have e : false = true := And.left h
   cases e

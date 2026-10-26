@@ -82,7 +82,7 @@ theorem warm_samples_for_cold_situation_fails :
 /-- 要求を満たす例。strace で項目ごとの stat に帰属させ、隔離した経路で冷えた状態を測った変更。 -/
 theorem strace_attributed_change_complies :
     Complies { isPerformanceWork := true, costAttributedBeforeFix := true,
-               primaryFromLiveSystem := false, spreadWiderThanEffect := true,
+               primaryFromLiveSystem := false, spreadWiderThanEffect := false,
                modelsColdSituation := true, samplesSpacedCold := true,
                regimeStated := true, measurementNamed := true } := by
   intro _

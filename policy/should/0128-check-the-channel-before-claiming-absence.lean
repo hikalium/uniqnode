@@ -19,7 +19,9 @@ structure Claim where
   verifiedAgainstRawPayload : Bool
   /-- どの経路に基づく主張かを書いたか。 -/
   channelNamed : Bool
-  /-- 探索の覚え書きで、未検証の仮の 0 とマークを付けたか。 -/
+  /-- 探索の覚え書きの中の主張か (計画の文書や分析の結論ではなく)。 -/
+  inExploratoryNote : Bool
+  /-- 未検証の仮の 0 とマークを付けたか。 -/
   markedUnverified : Bool
 
 /-- 適用のテスト。経路から導いた不在の主張。肯定の主張 (「X は N 回起きた」) は対象外。 -/
@@ -35,19 +37,40 @@ def ChannelChecked (c : Claim) : Prop :=
 def ChannelNamed (c : Claim) : Prop :=
   c.channelNamed = true
 
+/-- 探索の覚え書きの仮の 0 で、未検証とマークを付けたもの。条項が認める逸脱。 -/
+def TentativeInExploratoryNote (c : Claim) : Prop :=
+  c.inExploratoryNote = true /\ c.markedUnverified = true
+
 /-- 要求。事実として述べるなら経路を検証して名指す。探索の覚え書きの仮の 0 は、未検証とマークを付ければよい。 -/
 def Complies (c : Claim) : Prop :=
-  Applies c -> (c.markedUnverified = true \/ (ChannelChecked c /\ ChannelNamed c))
+  Applies c -> (TentativeInExploratoryNote c \/ (ChannelChecked c /\ ChannelNamed c))
 
 /-- 切り詰められた ctl log の表示の grep から、死角を見ずに事実として述べた 0 は、要求を満たさない。 -/
 theorem zero_from_truncated_view_fails :
     Not (Complies { isAbsenceClaim := true, derivedFromChannel := true,
                     channelObservabilityConfirmed := false, blindSpotCouldSwallow := true,
                     verifiedAgainstRawPayload := false, channelNamed := true,
-                    markedUnverified := false }) := by
+                    inExploratoryNote := false, markedUnverified := false }) := by
   intro h
   cases h (And.intro rfl rfl) with
-  | inl e => cases e
+  | inl t =>
+    have e : false = true := t.1
+    cases e
+  | inr k =>
+    have e : false = true := k.1.1
+    cases e
+
+/-- 計画の文書に書いた 0 は、未検証とマークを付けても、経路を検証して名指さなければ要求を満たさない。 -/
+theorem marked_zero_in_plan_document_fails :
+    Not (Complies { isAbsenceClaim := true, derivedFromChannel := true,
+                    channelObservabilityConfirmed := false, blindSpotCouldSwallow := true,
+                    verifiedAgainstRawPayload := false, channelNamed := false,
+                    inExploratoryNote := false, markedUnverified := true }) := by
+  intro h
+  cases h (And.intro rfl rfl) with
+  | inl t =>
+    have e : false = true := t.1
+    cases e
   | inr k =>
     have e : false = true := k.1.1
     cases e
@@ -64,7 +87,7 @@ theorem raw_payload_verified_zero_complies :
     Complies { isAbsenceClaim := true, derivedFromChannel := true,
                channelObservabilityConfirmed := true, blindSpotCouldSwallow := true,
                verifiedAgainstRawPayload := true, channelNamed := true,
-               markedUnverified := false } := by
+               inExploratoryNote := false, markedUnverified := false } := by
   intro _
   exact Or.inr (And.intro (And.intro rfl (fun _ => rfl)) rfl)
 
@@ -73,8 +96,8 @@ theorem marked_tentative_zero_complies :
     Complies { isAbsenceClaim := true, derivedFromChannel := true,
                channelObservabilityConfirmed := false, blindSpotCouldSwallow := true,
                verifiedAgainstRawPayload := false, channelNamed := false,
-               markedUnverified := true } := by
+               inExploratoryNote := true, markedUnverified := true } := by
   intro _
-  exact Or.inl rfl
+  exact Or.inl (And.intro rfl rfl)
 
 end CheckTheChannelBeforeClaimingAbsence

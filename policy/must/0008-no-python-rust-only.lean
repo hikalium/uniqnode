@@ -2,7 +2,7 @@
   must/0008-no-python-rust-only の Lean 版。
   条項の本文は同じ名前の .md にあり、食い違ったら .md が優先する。このプロジェクトの実行可能なコードの
   1 つの単位を型で表し、適用のテストと要求 (Python を使わず、実装は Rust) を Prop にする。
-  Rust の依存の取得の経路 (cargo vendor と allowlist の proxy) は要求の外の注として扱わない。
+  Rust の依存の取得 (cargo vendor か、取得の間だけ開く allowlist の proxy) は 2 つ目の主題として表す。
 -/
 namespace NoPythonRustOnly
 
@@ -86,6 +86,33 @@ theorem rust_web_server_complies :
   refine And.intro ?_ (And.intro rfl (fun _ => rfl))
   intro e
   cases e
+
+/-- Rust の依存の 1 回の取得。cargo と rustup は network が要るが、箱は既定で offline である (should/0102)。 -/
+structure DependencyFetch where
+  /-- 範囲と時間を限った経路か (再現できる offline のビルドのための cargo vendor か、専用の取得の道具の間だけ
+      開く allowlist の proxy)。 -/
+  scopedTimeBoxedPath : Bool
+  /-- 常設の一般の egress の許可を使うか。 -/
+  standingEgressGrant : Bool
+
+/-- 適用のテスト。Rust の依存の全ての取得。 -/
+def DependencyFetchApplies (_f : DependencyFetch) : Prop := True
+
+/-- 要求。範囲と時間を限った経路を通り、常設の一般の egress の許可を使わない。 -/
+def DependencyFetchComplies (f : DependencyFetch) : Prop :=
+  DependencyFetchApplies f -> f.scopedTimeBoxedPath = true /\ f.standingEgressGrant = false
+
+/-- 常設の egress の許可で依存を取る取得は、要求を満たさない。 -/
+theorem standing_egress_grant_fails :
+    Not (DependencyFetchComplies { scopedTimeBoxedPath := false, standingEgressGrant := true }) := by
+  intro h
+  cases (h trivial).1
+
+/-- 要求を満たす例。cargo vendor で offline のビルドに揃えた取得。 -/
+theorem vendored_fetch_complies :
+    DependencyFetchComplies { scopedTimeBoxedPath := true, standingEgressGrant := false } := by
+  intro _
+  exact And.intro rfl rfl
 
 /-- 要求を満たす例。sh と awk だけを糊に使う自明な run コマンド。 -/
 theorem posix_glue_complies :

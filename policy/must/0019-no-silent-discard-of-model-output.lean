@@ -17,16 +17,16 @@ inductive OnMismatch where
 
 /-- モデルの出力を機械で読む 1 つの場所 (ツール呼び出しの解析、本文とフェンスの扱い、判定の読み手)。 -/
 structure ParserSite where
-  /-- 出力を期待した形と突き合わせ、合わないと判定できるか。 -/
-  checksShape : Bool
+  /-- モデルの出力を機械で読む場所か。読むとは、期待した形と突き合わせ、合わないと判定することである。 -/
+  machineReadsModelOutput : Bool
   /-- 形が合わなかったときの振る舞い。 -/
   onMismatch : OnMismatch
   /-- 合わない入力を与え、内容が残るか拒否が明示かを断定するテストがあるか。 -/
   nonconformingInputTested : Bool
 
-/-- 適用のテスト。出力を形と突き合わせ、合わないと判定できる場所。 -/
+/-- 適用のテスト。モデルの出力を機械で読む全ての場所。 -/
 def Applies (s : ParserSite) : Prop :=
-  s.checksShape = true
+  s.machineReadsModelOutput = true
 
 /-- 内容は消えない。開いて失敗するか、見える形で拒否する。 -/
 def NothingVanishes (s : ParserSite) : Prop :=
@@ -42,7 +42,7 @@ def Complies (s : ParserSite) : Prop :=
 
 /-- 形が合わないと静かに空になる場所は、どれほど起きにくく見えても要求を満たさない。 -/
 theorem quiet_empty_fails (t : Bool) :
-    Not (Complies { checksShape := true, onMismatch := OnMismatch.quietEmpty,
+    Not (Complies { machineReadsModelOutput := true, onMismatch := OnMismatch.quietEmpty,
                     nonconformingInputTested := t }) := by
   intro h
   have hr := h rfl
@@ -54,7 +54,7 @@ theorem quiet_empty_fails (t : Bool) :
 
 /-- 開いて失敗しても、合わない入力のテストが無い場所は要求を満たさない。 -/
 theorem untested_site_fails :
-    Not (Complies { checksShape := true, onMismatch := OnMismatch.failOpen,
+    Not (Complies { machineReadsModelOutput := true, onMismatch := OnMismatch.failOpen,
                     nonconformingInputTested := false }) := by
   intro h
   have hr := h rfl
@@ -63,14 +63,14 @@ theorem untested_site_fails :
 
 /-- 要求を満たす例。フェンスの契約に合わない本文を、未解析のマークを付けてそのまま通す書き込みの経路。 -/
 theorem fail_open_write_complies :
-    Complies { checksShape := true, onMismatch := OnMismatch.failOpen,
+    Complies { machineReadsModelOutput := true, onMismatch := OnMismatch.failOpen,
                nonconformingInputTested := true } := by
   intro _
   exact And.intro (Or.inl rfl) rfl
 
 /-- 要求を満たす例。期待した形を名指す拒否をモデルへ返すツール呼び出しの解析。 -/
 theorem reject_visibly_complies :
-    Complies { checksShape := true, onMismatch := OnMismatch.rejectVisibly,
+    Complies { machineReadsModelOutput := true, onMismatch := OnMismatch.rejectVisibly,
                nonconformingInputTested := true } := by
   intro _
   exact And.intro (Or.inr rfl) rfl

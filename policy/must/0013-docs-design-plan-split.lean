@@ -30,6 +30,10 @@ structure Document where
   classificationVerifiedAgainstCode : Bool
   /-- H1 の直下に `<a id="<uuid>"></a>` のアンカーを持つか。 -/
   hasAnchorUnderH1 : Bool
+  /-- アンカーの 16 進が小文字か。 -/
+  anchorLowercase : Bool
+  /-- 参照の無いセクションに、先回りしてアンカーを置いているか。 -/
+  hasSpeculativeSectionAnchor : Bool
   /-- 木について既に正しくなくなった情報 (古くなった設計の事実や plan の記述) を残しているか。 -/
   hasStaleFact : Bool
 
@@ -45,9 +49,10 @@ def DesignHalfIsCurrent (d : Document) : Prop :=
 def PlanHalfIsFuture (d : Document) : Prop :=
   d.half = Half.plan -> d.keepsLandedItem = false /\ d.keptAfterWorkFullyLanded = false
 
-/-- 分類はコードと突き合わせて検証し、H1 の直下にアンカーを持つ。 -/
+/-- 分類はコードと突き合わせて検証し、H1 の直下に小文字のアンカーを持ち、セクションのアンカーは参照があるときだけ置く。 -/
 def ClassifiedAndAnchored (d : Document) : Prop :=
-  d.classificationVerifiedAgainstCode = true /\ d.hasAnchorUnderH1 = true
+  d.classificationVerifiedAgainstCode = true /\ d.hasAnchorUnderH1 = true /\
+    d.anchorLowercase = true /\ d.hasSpeculativeSectionAnchor = false
 
 /-- どちらの側でも、古くなった情報は削除され、最新の情報だけが残る。 -/
 def OutdatedDeleted (d : Document) : Prop :=
@@ -82,6 +87,8 @@ structure Reference where
   form : RefForm
   /-- 参照先が docs/ の下の文書か。 -/
   targetUnderDocs : Bool
+  /-- 参照の UUID が小文字か。 -/
+  uuidLowercase : Bool
   /-- セクションを指すとき、そのセクションの見出しの下にアンカーがあり、リンクがそれを指すか。文書全体を指すときは true。 -/
   sectionAnchorDirect : Bool
 
@@ -96,14 +103,15 @@ def FormFitsSite (r : Reference) : Prop :=
 
 /-- 参照への要求。 -/
 def ReferenceComplies (r : Reference) : Prop :=
-  ReferenceApplies r -> FormFitsSite r /\ r.sectionAnchorDirect = true
+  ReferenceApplies r -> FormFitsSite r /\ r.uuidLowercase = true /\ r.sectionAnchorDirect = true
 
 /-- 仕事が全て着地したのに「履歴記録」として残した plan の文書は、要求を満たさない。 -/
 theorem finished_plan_kept_as_history_fails :
     Not (Complies { half := Half.plan, underDocs := true, hasUnimplementedPart := false,
                     hasChronicle := false, keepsLandedItem := true,
                     keptAfterWorkFullyLanded := true, classificationVerifiedAgainstCode := true,
-                    hasAnchorUnderH1 := true, hasStaleFact := true }) := by
+                    hasAnchorUnderH1 := true, anchorLowercase := true,
+                    hasSpeculativeSectionAnchor := false, hasStaleFact := true }) := by
   intro h
   have e : true = false := ((h rfl).2.1 rfl).2
   cases e
@@ -113,34 +121,59 @@ theorem stale_design_fact_fails :
     Not (Complies { half := Half.design, underDocs := true, hasUnimplementedPart := false,
                     hasChronicle := false, keepsLandedItem := false,
                     keptAfterWorkFullyLanded := false, classificationVerifiedAgainstCode := true,
-                    hasAnchorUnderH1 := true, hasStaleFact := true }) := by
+                    hasAnchorUnderH1 := true, anchorLowercase := true,
+                    hasSpeculativeSectionAnchor := false, hasStaleFact := true }) := by
   intro h
   have e : true = false := (h rfl).2.2.2
+  cases e
+
+/-- 参照の無いセクションに先回りしてアンカーを置いた文書は、要求を満たさない。 -/
+theorem speculative_section_anchor_fails :
+    Not (Complies { half := Half.design, underDocs := true, hasUnimplementedPart := false,
+                    hasChronicle := false, keepsLandedItem := false,
+                    keptAfterWorkFullyLanded := false, classificationVerifiedAgainstCode := true,
+                    hasAnchorUnderH1 := true, anchorLowercase := true,
+                    hasSpeculativeSectionAnchor := true, hasStaleFact := false }) := by
+  intro h
+  have e : true = false := (h rfl).2.2.1.2.2.2
   cases e
 
 /-- コードのコメントの中のパスによるリンクは、要求を満たさない。 -/
 theorem path_link_in_code_fails :
     Not (ReferenceComplies { site := Site.codeOrString, form := RefForm.pathLink,
-                             targetUnderDocs := true, sectionAnchorDirect := true }) := by
+                             targetUnderDocs := true, uuidLowercase := true,
+                             sectionAnchorDirect := true }) := by
   intro h
   have e : RefForm.pathLink = RefForm.pathFree := (h rfl).1.2 rfl
   cases e
 
-/-- 要求を満たす例。今の実装だけを書き、アンカーを持つ design/ の文書。 -/
+/-- 大文字の 16 進で書いた参照は解決しないので、要求を満たさない。 -/
+theorem uppercase_reference_fails :
+    Not (ReferenceComplies { site := Site.prose, form := RefForm.readableLink,
+                             targetUnderDocs := true, uuidLowercase := false,
+                             sectionAnchorDirect := true }) := by
+  intro h
+  have e : false = true := (h rfl).2.1
+  cases e
+
+/-- 要求を満たす例。今の実装だけを書き、小文字のアンカーを持つ design/ の文書。 -/
 theorem current_design_document_complies :
     Complies { half := Half.design, underDocs := true, hasUnimplementedPart := false,
                hasChronicle := false, keepsLandedItem := false,
                keptAfterWorkFullyLanded := false, classificationVerifiedAgainstCode := true,
-               hasAnchorUnderH1 := true, hasStaleFact := false } := by
+               hasAnchorUnderH1 := true, anchorLowercase := true,
+               hasSpeculativeSectionAnchor := false, hasStaleFact := false } := by
   intro _
   exact And.intro (fun _ => And.intro rfl rfl)
-    (And.intro (fun _ => And.intro rfl rfl) (And.intro (And.intro rfl rfl) rfl))
+    (And.intro (fun _ => And.intro rfl rfl)
+      (And.intro (And.intro rfl (And.intro rfl (And.intro rfl rfl))) rfl))
 
 /-- 要求を満たす例。コードのコメントの中の `NAME (uuid:<uuid>)` の形の参照。 -/
 theorem path_free_code_reference_complies :
     ReferenceComplies { site := Site.codeOrString, form := RefForm.pathFree,
-                        targetUnderDocs := true, sectionAnchorDirect := true } := by
+                        targetUnderDocs := true, uuidLowercase := true,
+                        sectionAnchorDirect := true } := by
   intro _
-  exact And.intro (And.intro (fun e => by cases e) (fun _ => rfl)) rfl
+  exact And.intro (And.intro (fun e => by cases e) (fun _ => rfl)) (And.intro rfl rfl)
 
 end DocsDesignPlanSplit

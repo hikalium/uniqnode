@@ -57,10 +57,4 @@ theorem triple_complies :
   intro _
   exact Or.inr (by decide : 3 <= 3)
 
-/-- 要求を満たす例。struct FeedLine { ms, id, kind, bad, text, task } は 6 つの要素に名前がある。 -/
-theorem named_feed_line_complies :
-    Complies { kind := Kind.tupleStruct, arity := 6, anyMemberNamed := true } := by
-  intro _
-  exact Or.inl rfl
-
 end NoUnnamedTuplesOfFourOrMore

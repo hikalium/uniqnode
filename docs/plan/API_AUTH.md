@@ -66,7 +66,7 @@ A3・A4 は未着手。実際の unit の制限の下での確認(完了条件)�
 守れることと、FEED の
   edit・retire・rollback を主の口に置く前提(F2 は A1・A2 の後)を満たすことである。A4・A5 の差は小さい
   (どちらも穴を塞ぐだけで、日々の仕事の形は変えない)。
-- 代価:
+- コスト:
   - 大きさ: A1 M、A2 S、A4 S、A5 S。A3 は取り下げた。
   - 操作者の作業: A2 を本番へ入れる前に、vega で旧い名の unit から `@default` へ移す sudo の 1 ブロック
     (APPEND_FAILURE の S1 と共通で、1 回で両方の前提を満たす)と、据え付け直しの 1 ブロック。
@@ -194,7 +194,7 @@ distributed_search.rs の 185 行付近)。署名された要求者に対する�
     (a))。
   - uid は接続ごとに 1 度判定し、HTTP のヘッダ(下の門)は要求ごとに見る。serve は keep-alive を
     受けるので、同じ接続の 2 つ目以降の要求は uid の判定を繰り返さない(Codex 中 4)。
-  - 代価は接続ごとに netlink の照会を 2 回まで(AF_INET と AF_INET6)。費用は表の大きさに依らない。
+  - コストは接続ごとに netlink の照会を 2 回まで(AF_INET と AF_INET6)。費用は表の大きさに依らない。
     判定を同時に走らせる数に上限(16)を置く。今の http.rs は accept の直後に無条件でスレッドを作るので、判定の枠はスレッドを作る前に、
     accept するスレッドの中で待たずに取る。枠が取れない接続は、新しいスレッドを作らずにその場で
     閉じる(応答は書かない。書くと遅い相手に accept が止められる)。判定を通った後の接続を持つ
@@ -386,7 +386,7 @@ std を呼ばず、子プロセス `getent ahosts -- <host>`(std と同じ NSS �
 表に次の行を足す: `POST /v1/admin/gc`、`GET /v1/objects/{id}/citation`、
 `GET /v1/objects/{id}/rendition` と `/rendition/{alias}`、`GET /v1/closure/{id}`、
 `POST /v1/collections/{c}/fetch`。表の下に待ち受けごとの許可の短い表を置き、読み口の
-許可表の正典は agent_door.rs と docs/design/ の読み口の節、viewer の method と道の許可表の正典は viewer.rs で
+許可表のソースは agent_door.rs と docs/design/ の読み口の節、viewer の method と道の許可表のソースは viewer.rs で
 ある、と書く。§6.2・§6.3・§7・§12 を
 上の 3 と 4 のとおり直す。
 

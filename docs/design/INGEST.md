@@ -335,7 +335,7 @@ CLI `uniqnode correct <dir> <コレクション名> <誤った言明ID> <新し�
 
 CLI はストアの排他ロックを取るので serve 停止中のストア用であり、serve 中は HTTP API を使う
 (既存の sync サブコマンドと同じ扱い)。例外は ingest の --serve-url で、ストアを開かずに
-走っている serve の HTTP API へ送る。形の正典は node/src/main.rs の usage と node/src/api.rs。
+走っている serve の HTTP API へ送る。形のソースは node/src/main.rs の usage と node/src/api.rs。
 
 - `uniqnode ingest <dir> <コレクション名> <パス> [--pdftotext <exe>]`: 文書の取り込み。
   ディレクトリは再帰(名前順)。対象の拡張子は .md / .markdown / .txt / .html / .htm / .pdf のみで、

@@ -424,9 +424,9 @@ uniqnode コアの上に応用層が載る。検索(RAG)層とその上の MCP �
   である([docs/design/MCP.md](#dacd474d-424a-45d5-a278-766fc2465dd9))。
 - Webアーカイブ層: HTTP 応答を不変オブジェクトとして保存する日時付きスナップショット。
   blob の重複排除が再取得の差分保存を自動化する。
-- グラフ層: 可変なグラフ(節点の状態が変わり、辺が増減する)を、不変な恒等ノードと
+- グラフ層: 可変なグラフ(ノードの状態が変わり、辺が増減する)を、不変な恒等ノードと
   状態ノードの鎖、および `graph/` 配下の ref として載せる応用。辺は恒等ノードを members に
-  持つので、節点の更新で張り替えが要らない。コアの kind を増やさない
+  持つので、ノードの更新で張り替えが要らない。コアの kind を増やさない
   ([docs/design/GRAPH.md](#9d1f73a8-fabd-493e-9003-0a36503c7573))。
 - 提示層: mgcanvas 形式へのエクスポート、閉世界ラッパー越しのファイルシステム風マウント。
 - 訂正の表現: 不変オブジェクトの誤りは「直す」のではなく、訂正辺(corrects 型)と
@@ -468,8 +468,8 @@ netlink ソケットの作成が EAFNOSUPPORT・EPERM・EACCES で断られた u
 | `GET /v1/collections` | コレクションの一覧と各コレクションの文書数(collections/ 配下の非 tombstone ref を数える。自分の見えの範囲の導出データで、空は不在の言明ではない) |
 | `POST /v1/search` | 検索(method で bm25 / embedding / hybrid を選ぶ。既定は埋め込みサーバの設定があれば hybrid、無ければ bm25。索引もベクトルも導出データで、見え = collections/ 配下の現行文書のチャンクだけが対象。各件は出典を伴う: 文書名・位置・見出し・PDF はページ・取得日時 at = その版を見えに置いた ref レコードの時刻(§4.4)。`full` を付けると各件にチャンクの全文 text が載る(top_k は 10 まで)。`peers` を付けると登録ピアへ散布して順位を融合する(§7.1 の kind:search)) |
 | `GET /v1/refs` | ref の一覧(名前・target・seq・at) |
-| `GET /v1/graphs` / `GET /v1/graphs/{g}` | グラフ名の一覧 / グラフ全体(節点と辺。可変なグラフを ref 層に載せる応用層。[docs/design/GRAPH.md](#9d1f73a8-fabd-493e-9003-0a36503c7573)) |
-| `PUT`・`GET`・`DELETE /v1/graphs/{g}/nodes/{n}` | 節点の作成と更新(同じ attrs は no-op)・現在・tombstone |
+| `GET /v1/graphs` / `GET /v1/graphs/{g}` | グラフ名の一覧 / グラフ全体(ノードと辺。可変なグラフを ref 層に載せる応用層。[docs/design/GRAPH.md](#9d1f73a8-fabd-493e-9003-0a36503c7573)) |
+| `PUT`・`GET`・`DELETE /v1/graphs/{g}/nodes/{n}` | ノードの作成と更新(同じ attrs は no-op)・現在・tombstone |
 | `GET /v1/graphs/{g}/nodes/{n}/history` / `/neighbors` | 版の鎖(各版の attrs と at)/ 隣接(向きと型で絞る) |
 | `GET /v1/graphs/{g}/edges` / `PUT`・`DELETE /v1/graphs/{g}/edges/{型}/{from}/{to}` | 辺の一覧 / 型付きの辺の作成と tombstone |
 | `GET /v1/refs/...` / `PUT /v1/refs/...` | ref の解決と更新(自DBノードの名前空間のみ書ける) |
@@ -494,7 +494,7 @@ netlink ソケットの作成が EAFNOSUPPORT・EPERM・EACCES で断られた u
 | viewer(`uniqnode viewer` の `<host:port>`) | 運用者が決める | viewer の転送(許可表は設計中。API_AUTH の 3) |
 | 書き口・ピア口 | (未実装) | 設計中(書き口は [docs/plan/FEED.md](#fa8de6f9-59f8-4512-a815-9f41d305db15)、ピア口は §7.1 と §12) |
 
-読み口の許可表の正典は node/src/agent_door.rs と
+読み口の許可表のソースは node/src/agent_door.rs と
 [docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d) である。
 
 404 の意味に注意: ローカル API の 404 は「このDBノードは持っていない」というローカルな事実で

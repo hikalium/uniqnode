@@ -2,7 +2,7 @@
 
 <a id="f24219ab-96b3-47af-9ea7-ef1ebb80fc47"></a>
 
-日付: 2026-10-01 00:27〜00:28 JST。lamalium の作業グラフの節点 n_gpu_vram_vega の割り当て。
+日付: 2026-10-01 00:27〜00:28 JST。lamalium の作業グラフのノード n_gpu_vram_vega の割り当て。
 `nvidia-smi`・`ps`・`/proc/<pid>/cmdline` を読んだだけで、プロセスの再起動・設定変更・負荷は
 かけていない。
 

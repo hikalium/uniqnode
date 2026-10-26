@@ -2,7 +2,7 @@
 
 <a id="86363f4a-3df6-4aa2-9c64-b99aa5cb4e7b"></a>
 
-現在の状態は design/ が正典である(土台は
+現在の状態は design/ がソースである(土台は
 [docs/design/OVERVIEW.md](#cfa85cc2-0d72-49f2-b628-b9622589851b)、その上の層は
 [INGEST](#47d69a3e-c39a-4e76-9814-e9c24240293b)・
 [SEARCH](#19574e78-9bf5-4f87-a4c2-c4a10222c580)・
@@ -28,7 +28,7 @@ wg1 で疎通する)である。計画は [docs/plan/LAMALIUM.md](#68571059-94ed
 
 読み口の側(L1〜L3 で uniqnode が持つもの)は着地している: wg1 のアドレスに束縛する読み口
 (`--listen-agent`。許可表の外は 403)と第 2 段の `--agent-writable`、search の `full` と
-`GET /v1/collections`、索引の温め、出所の meta。仕組みは design/ 側が正典である。
+`GET /v1/collections`、索引の温め、出所の meta。仕組みは design/ 側がソースである。
 
 残りは L4 の、crystal の timer が lamalium の文書を送ってくる専用の書き口で、設計は
 [docs/plan/FEED.md](#fa8de6f9-59f8-4512-a815-9f41d305db15)(2026-09-30 の裁定 C)にある。
@@ -78,7 +78,7 @@ gc で消えたオブジェクトのベクトルが `derived/embeddings/` に残
 
 <a id="d75f287e-ce56-4bf0-a85e-6a9ffb3dc571"></a>
 
-取り込みの doc_rev は previous に前の版の ID を `s256:` 付きで持つ(ingest.rs)。gc は値の中の
+取り込みの doc_rev は previous に以前のバージョンの ID を `s256:` 付きで持つ(ingest.rs)。gc は値の中の
 `s256:` を参照として辿るので(GC.md)、公開中の版から同じ文書の過去の全版とそのチャンクが
 辿れ、上書きしても回収されない。GC.md の「同じ ref パスへの上書きで孤児が生まれる」という
 記述と食い違い、2026-09-05 の dry-run で孤児が 1 件しか無かったことと整合する。直し方は

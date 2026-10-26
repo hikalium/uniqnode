@@ -120,8 +120,8 @@ unit ファイルは差し替えても drop-in は残る。
   設定による失敗(照会の netlink ソケットを作れない。AF_NETLINK を塞いだ unit など。自分の uid が
   overflowuid に見える user namespace)、3 は自己試験の一時の失敗で、どれも理由をそのたびに journal に
   残して 5 秒後に起こし直す。2026-10-26 までは 1 と 2 を RestartPreventExitStatus= で 1 回で止めて
-  いた。起こし直し続ける形に替えたのは、下の「自動更新」が壊れた版を前の版へ戻したとき、sudo 無しで
-  常駐が戻るようにするためである。代価は、直らない誤りでも 5 秒ごとに起こし直して journal が伸びる
+  いた。起こし直し続ける形に替えたのは、下の「自動更新」が壊れた版を以前のバージョンへ戻したとき、sudo 無しで
+  常駐が戻るようにするためである。コストは、直らない誤りでも 5 秒ごとに起こし直して journal が伸びる
   ことと、`uniqnode install` が起動の失敗を報告するまで、unit が failed に落ちるのを待てずに
   確認の上限(90 秒)まで待つことである。75 は自己再起動(下の「自動更新」)で、これも起こし直す。
   POST /v1/admin/shutdown による終了(0)は意図した停止なので、
@@ -498,7 +498,7 @@ EOF
     起きない。どちらの文もこの形を言う。戻す前にそれも閉じる。
   - 保留(終了コード 3): ホストを再起動するか、ストアを置いたファイルシステムを umount・fsck・mount し直して
     page cache を捨てた後でなければ release-hold しない。同じ boot_id の `Running` と `Io` は再起動だけで解ける。
-    ホストの再起動は手で起こした llama-server(8082〜8084)も止める(APPEND_FAILURE の「最終目標とのつながり」の代価)。
+    ホストの再起動は手で起こした llama-server(8082〜8084)も止める(APPEND_FAILURE の「最終目標とのつながり」のコスト)。
   - 検め手は /var/backups/uniqnode-legacy-checker である。無ければ、今の共有のバイナリが退避と違うときだけそれを
     候補として /var/backups/uniqnode-legacy-checker.candidate へ写す。候補(置いてあった検め手も、この回の最初の
     検めまでは候補として扱う)は、最初の検めが終了コード 0 で終わり、出力が読める形のときだけ採り、写した候補は
@@ -567,7 +567,7 @@ EOF
     状態は和で残り、差し替えと展開は同じものを置き直すだけである。止まっている間は、主の口 7440・読み口 7441・
     viewer 7450、graph の口 7442〜7445(lamalium-plan)、graph の viewer 7452・7454、毎分の graph-pull の timer と
     backup の timer が止まり、打ち直しが通るか、やめる道を打ち終えるまで続く。前の回が止めたものは、その後の回が
-    止める前に断っても止まったままである(APPEND_FAILURE の「最終目標とのつながり」の代価)。
+    止める前に断っても止まったままである(APPEND_FAILURE の「最終目標とのつながり」のコスト)。
   - 既知の限界: 検めが見るのは今走っているプロセスと system の `uniqnode-*` の unit だけで、今走っていない書き手
     (`uniqnode-*` でない unit、user の unit、cron)は覆わない。それらが戻した後に旧いバイナリを起こしうるなら、
     戻す前に止めておく。`uniqnode-*` の unit の起こす依存の先(`--after` から描いた `Wants=` の先など)はこの限界に
@@ -704,7 +704,7 @@ preflight() {
       if [ "$bin" != "$checker" ]; then /usr/bin/rm -f "$bin"; fi
       case "$rc" in
         0) echo "検め手の候補 $bin は 0 で終わったが、出力を読めない(形が違う)。採らない" ;;
-        2) echo "検め手の候補 $bin は legacy-rollback-preflight を知らない(S1d より前の版)か、引数を誤った。採らない" ;;
+        2) echo "検め手の候補 $bin は legacy-rollback-preflight を知らない(S1d より以前のバージョン)か、引数を誤った。採らない" ;;
         *) echo "検め手の候補 $bin が終了コード $rc で終わった(理由は上の行。126・127・シグナルなら走れていない)。採らない" ;;
       esac
       echo "検めの断りなら直して打ち直す。候補が走れないか版が違うなら、vega で最後に打った install と同じコミットの S1d 以後のビルドを sudo install -m 0755 -o root -g root <ビルド> $checker で置いてから打ち直す"
@@ -1164,7 +1164,7 @@ install(1) は走っている実行ファイルを一度 unlink してから置�
 restart で新しいものに替わる。restart は停止と同じく SIGTERM で落として起こし直す。
 
 2026-10-25 にストアのロックを抽象名前空間の unix socket からデータディレクトリの lock ファイルへの
-flock に替えた。それより前の版と後の版は互いのロックを見ないので、この境をまたいで更新するときは、
+flock に替えた。それより以前のバージョンと後の版は互いのロックを見ないので、この境をまたいで更新するときは、
 serve を restart する前に、同じストアを開いているほかのプロセス(ストアを直接開く形の
 `uniqnode mcp`、手で走らせている CLI)を止めておく。止めずに新しい serve を起こすと、書き手が 2 つになる。
 
@@ -1197,7 +1197,7 @@ vega では、uniqnode の main に入った版を、エージェントの手も
   5. 挙げた unit が全て、120 秒のうちに active になり、MainPID の /proc/<pid>/exe が新しい版を指し、
      serve は UNIQNODE_LISTEN の /v1/status に答え、そのまま 15 秒 MainPID が変わらないことを見る。
   6. 通れば記録の据えた SHA を進め、`--publish-branch`(vega では deployed_on_vega)へその SHA を
-     push する。ビルドか確かめが失敗したら、`<path>.prev` を rename で戻し(常駐は自己再起動で前の版へ
+     push する。ビルドか確かめが失敗したら、`<path>.prev` を rename で戻し(常駐は自己再起動で以前のバージョンへ
      戻る。戻した版で落ち着いたかはログに残す)、失敗した SHA と戻したことを記録して 1 で終わる。
      その SHA は試し直さない。main が進めば次の SHA を試す。systemctl や写しの一時の失敗は記録せず、
      次の回にやり直す。
@@ -1210,7 +1210,7 @@ vega では、uniqnode の main に入った版を、エージェントの手も
 
 起こし直しの設定もこの仕組みの一部である。serve と viewer の unit は、起動時の誤り(1 と 2)でも
 起こし直し、回数に上限を置かない(上の「unit の読み方」)。壊れた版が起動で落ちても、autodeploy が
-前の版へ戻せば、sudo 無しで常駐が戻る。
+以前のバージョンへ戻せば、sudo 無しで常駐が戻る。
 
 ### 据え付け(vega で一回)と、/etc を変える変更
 
@@ -1249,10 +1249,10 @@ apply の間に autodeploy が同じバイナリを置き換えると、install 
 - 止める: `touch ~/.local/state/uniqnode-autodeploy/hold`(消せば再開する)。手で checkout や
   バイナリを触る間に置く。
 - 失敗した SHA を試し直す: 原因を直したうえで record の `failed` の行を消す(次の回が試す)。
-- 手で前の版へ戻す: `~/.local/bin/uniqnode.prev` を隣へ写してから rename で `~/.local/bin/uniqnode` へ
+- 手で以前のバージョンへ戻す: `~/.local/bin/uniqnode.prev` を隣へ写してから rename で `~/.local/bin/uniqnode` へ
   置く(cp で上書きすると Text file busy で断られる)。常駐は自己再起動で戻る。直しは main へ積む。
 
-### 代価と残る危険
+### コストと残る危険
 
 - バイナリが変わる更新のたびに、全てのインスタンスの serve と viewer が起き直す。止まっている時間と、
   その後の索引の温め直しの時間は、最初の自動更新で測ってここに書く。
@@ -1260,7 +1260,7 @@ apply の間に autodeploy が同じバイナリを置き換えると、install 
   unit が failed に落ちなくなったので、起動の失敗を報告するまで確認の上限(90 秒)を待つ。
 - uniqnode の main は GitHub で検査を強制していない。コードの変更は vega で cargo test を通したもの
   だけを入れる規則(CLAUDE.md、docs/mop/COMMIT-QUEUE.md)は約束であり、破った変更も 1 分で vega に
-  届く。起動が壊れれば確かめで前の版へ戻るが、起動した後の誤りは戻らない。文書だけの変更でバイナリに
+  届く。起動が壊れれば確かめで以前のバージョンへ戻るが、起動した後の誤りは戻らない。文書だけの変更でバイナリに
   入るのは unit のテンプレート(効くのは apply の後)と使い方の文だけで、中身が同じなら置き換えない。
 - 自動更新は常駐と同じ利用者で走ることが前提である(違う利用者の常駐は、バイナリを置き換えられず、
   /proc/<pid>/exe も読めない)。user 単位の常駐は対象にしない。

@@ -48,8 +48,8 @@ node/src/agent_door.rs の `admit` の match がこの表そのものである�
 | GET | /v1/objects/{id}/citation | 出典 | id は `c1::is_object_id` の形に限る。出典のコレクションが読める集合の外なら 403 |
 | GET | /v1/collections | コレクションの一覧 | 読める集合にあるものだけ |
 | PUT | /v1/collections/{c}/documents/{name} | 文書 1 件の取り込み(第 2 段) | c が `--agent-writable` の集合にあるときだけ。集合に無い c は許した一覧を言って 403。集合が空なら表に無い |
-| GET | /v1/graphs/{g}… | グラフ層の読み(全件・節点・履歴・隣接・辺の一覧) | g が `--agent-graph` か `--agent-graph-writable` の集合にあるときだけ。どちらも空ならグラフ層は見えない |
-| PUT・DELETE | /v1/graphs/{g}… | グラフ層の書き(節点と辺) | g が `--agent-graph-writable` の集合にあるときだけ |
+| GET | /v1/graphs/{g}… | グラフ層の読み(全件・ノード・履歴・隣接・辺の一覧) | g が `--agent-graph` か `--agent-graph-writable` の集合にあるときだけ。どちらも空ならグラフ層は見えない |
+| PUT・DELETE | /v1/graphs/{g}… | グラフ層の書き(ノードと辺) | g が `--agent-graph-writable` の集合にあるときだけ |
 
 グラフの既定はコレクションと逆で、指定が無ければ読み口からグラフ層は見えない。コレクションの
 「空 = 全部読める」は読み口の既定として先にあったもので、グラフは後から足したからである。

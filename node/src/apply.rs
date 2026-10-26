@@ -1,5 +1,5 @@
 //! `uniqnode apply <ファイル> [--log-dir <dir>]`: ファイルに書いた uniqnode の命令を順に走らせる
-//! (docs/mop/SYSTEMD.md の「自動更新」)。機械の据え付け(install と install-autodeploy)を
+//! (docs/mop/SYSTEMD.md の「自動更新」)。機械のデプロイ(install と install-autodeploy)を
 //! 操作者の 1 行の命令にするためのもので、vega のファイルは docs/mop/vega/vega.apply にある。
 //!
 //! ファイルの形: 空行で区切った塊が 1 つの命令で、塊の中は 1 行 1 引数(引用符を解釈しない。
@@ -34,7 +34,7 @@ pub fn parse(text: &str) -> Result<Vec<Vec<String>>, String> {
         blocks.push(current);
     }
     if blocks.is_empty() {
-        return Err("走らせる命令が 1 つも無い".to_string());
+        return Err("no commands to run".to_string());
     }
     Ok(blocks)
 }
@@ -55,7 +55,7 @@ impl Log {
 /// 全ての塊を走らせる。Err は最初に失敗した塊の理由。
 pub fn run(file: &Path, log_dir: &Path, program: &Path) -> Result<PathBuf, String> {
     let text =
-        std::fs::read_to_string(file).map_err(|e| format!("{} を読めない: {e}", file.display()))?;
+        std::fs::read_to_string(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     let blocks = parse(&text)?;
     let stamp = crate::clock::format_unix_time(crate::clock::unix_now()).replace([':', '-'], "");
     // 名には pid も入れ、既にある名なら断る(同じ秒の 2 回目が前のログを消さない)。
@@ -64,10 +64,10 @@ pub fn run(file: &Path, log_dir: &Path, program: &Path) -> Result<PathBuf, Strin
         .write(true)
         .create_new(true)
         .open(&log_path)
-        .map_err(|e| format!("{} を作れない: {e}", log_path.display()))?;
+        .map_err(|e| format!("cannot create {}: {e}", log_path.display()))?;
     let mut log = Log { file: log_file };
     log.line(&format!(
-        "apply: {} の {} 個の命令を走らせる。ログは {}",
+        "apply: {}: running {} commands; log: {}",
         file.display(),
         blocks.len(),
         log_path.display()
@@ -76,14 +76,14 @@ pub fn run(file: &Path, log_dir: &Path, program: &Path) -> Result<PathBuf, Strin
         let number = index + 1;
         log.line(&format!("apply: {number}/{}: uniqnode {}", blocks.len(), block.join(" ")));
         let (reader, writer) =
-            std::io::pipe().map_err(|e| format!("子の出力の pipe を作れない: {e}"))?;
+            std::io::pipe().map_err(|e| format!("cannot create the pipe for the child's output: {e}"))?;
         let mut command = Command::new(program);
         command.args(block);
-        command.stdout(writer.try_clone().map_err(|e| format!("pipe を複製できない: {e}"))?);
+        command.stdout(writer.try_clone().map_err(|e| format!("cannot duplicate the pipe: {e}"))?);
         command.stderr(writer);
         let mut child = command
             .spawn()
-            .map_err(|e| format!("{} を起こせない: {e}", program.display()))?;
+            .map_err(|e| format!("cannot start {}: {e}", program.display()))?;
         // 親の手元の書き口を閉じないと、子が終わっても読み口が終わりを見ない。
         drop(command);
         // UTF-8 でないバイトがあっても読み続ける(読むのをやめると子が EPIPE で落ちる)。
@@ -95,22 +95,22 @@ pub fn run(file: &Path, log_dir: &Path, program: &Path) -> Result<PathBuf, Strin
                 Ok(0) => break,
                 Ok(_) => log.line(String::from_utf8_lossy(&line).trim_end_matches(['\n', '\r'])),
                 Err(e) => {
-                    log.line(&format!("apply: 子の出力を読めない: {e}"));
+                    log.line(&format!("apply: cannot read the child's output: {e}"));
                     break;
                 }
             }
         }
-        let status = child.wait().map_err(|e| format!("子を待てない: {e}"))?;
+        let status = child.wait().map_err(|e| format!("cannot wait for the child: {e}"))?;
         if !status.success() {
             let message = format!(
-                "{number} 番目の命令が {status} で終わった。後の命令は走らせない。ログは {}",
+                "command {number} ended with {status}; the remaining commands are not run; log: {}",
                 log_path.display()
             );
             log.line(&format!("apply: {message}"));
             return Err(message);
         }
     }
-    log.line(&format!("apply: {} 個の命令を全て終えた。ログは {}", blocks.len(), log_path.display()));
+    log.line(&format!("apply: all {} commands finished; log: {}", blocks.len(), log_path.display()));
     Ok(log_path)
 }
 

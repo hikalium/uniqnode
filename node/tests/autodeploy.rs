@@ -124,7 +124,7 @@ fn apply_runs_blocks_in_order_and_stops_at_the_first_failure() {
     assert_eq!(log.len(), 1, "ログは 1 本");
     let text = std::fs::read_to_string(log[0].as_ref().unwrap().path()).expect("read log");
     assert!(text.contains("node_id: "), "子の出力がログに残る: {text}");
-    assert!(text.contains("2 番目の命令が"), "止まった理由がログに残る: {text}");
+    assert!(text.contains("command 2 ended with"), "止まった理由がログに残る: {text}");
     std::fs::remove_dir_all(&root).expect("cleanup");
 }
 
@@ -138,11 +138,11 @@ fn the_record_round_trips_and_decides_what_a_round_does() {
     };
     assert_eq!(Record::parse(&record.render()).expect("読める"), record);
     assert!(Record::parse("unknown x\n").is_err(), "知らない鍵は断る");
-    assert_eq!(decide(&record, "aaa", false), Next::Nothing, "据え済み");
-    assert_eq!(decide(&record, "aaa", true), Next::Publish, "据えたが push が残る");
+    assert_eq!(decide(&record, "aaa", false), Next::Nothing, "デプロイ済み");
+    assert_eq!(decide(&record, "aaa", true), Next::Publish, "デプロイしたが push が残る");
     assert_eq!(decide(&record, "bbb", true), Next::Nothing, "失敗した SHA は試し直さない");
-    assert_eq!(decide(&record, "ccc", true), Next::Deploy, "新しい SHA は据える");
-    assert_eq!(decide(&Record::default(), "ccc", false), Next::Deploy, "記録が無ければ据える");
+    assert_eq!(decide(&record, "ccc", true), Next::Deploy, "新しい SHA はデプロイする");
+    assert_eq!(decide(&Record::default(), "ccc", false), Next::Deploy, "記録が無ければデプロイする");
 }
 
 #[test]
@@ -196,7 +196,7 @@ fn place_binary_leaves_an_identical_destination_alone() {
     uniqnode::install::place_binary(&source, &destination, None).expect("写す");
     let before = std::fs::metadata(&destination).expect("stat").ino();
     let line = uniqnode::install::place_binary(&source, &destination, None).expect("写さない");
-    assert!(line.contains("中身が同じ"), "{line}");
+    assert!(line.contains("has the same content"), "{line}");
     assert_eq!(std::fs::metadata(&destination).expect("stat").ino(), before, "置き換えていない");
     std::fs::write(&source, b"two").expect("write");
     uniqnode::install::place_binary(&source, &destination, None).expect("写す");

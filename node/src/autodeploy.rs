@@ -5,7 +5,7 @@
 //!   `<path>` を置き換え、常駐(serve と viewer)が自己再起動(node/src/selfreload.rs)で新しい
 //!   版に替わったことを確かめる。sudo を使わない。
 //! - `uniqnode install-autodeploy <checkout> [--user <name>] [--bin <path>] [--publish-branch <name>]`
-//!   は、そのループを 1 分ごとに起こす system 単位の service と timer を据える(root で一回)。
+//!   は、そのループを 1 分ごとに起こす system 単位の service と timer をデプロイする(root で一回)。
 //!
 //! lamalium の crystal の自動デプロイ(lamalium の docs/design/CQ-DEPLOY.md)と同じ形で、日々の
 //! 更新の経路に root を置かない(lamalium の policy/must/sudo-and-policy-authority)。
@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 pub const SERVICE_UNIT: &str = "uniqnode-autodeploy.service";
 pub const TIMER_UNIT: &str = "uniqnode-autodeploy.timer";
 
-/// 据える unit(名, 中身)。中身は docs/mop/systemd/system/ の現物である(install と同じく
+/// デプロイする unit(名, 中身)。中身は docs/mop/systemd/system/ の現物である(install と同じく
 /// include_str!。should/0112)。
 pub const UNITS: [(&str, &str); 2] = [
     (
@@ -38,7 +38,7 @@ pub const UNITS: [(&str, &str); 2] = [
 pub const STATE_SUBDIR: &str = ".local/state/uniqnode-autodeploy";
 /// これがあれば何もしない(手で作業する間、自動更新を止める)。
 pub const HOLD_NAME: &str = "hold";
-/// 据えた SHA と失敗した SHA の記録。
+/// デプロイした SHA と失敗した SHA の記録。
 pub const RECORD_NAME: &str = "record";
 /// 同時に 2 つの回が走らないためのロック。
 pub const LOCK_NAME: &str = "lock";
@@ -56,7 +56,7 @@ pub const STABLE_FOR: Duration = Duration::from_secs(15);
 /// 記録。1 行 1 項目の `<鍵> <SHA>`。
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Record {
-    /// 最後に据えた(常駐が新しい版に替わったと確かめた)SHA。
+    /// 最後にデプロイした(常駐が新しい版に替わったと確かめた)SHA。
     pub deployed: Option<String>,
     /// 最後に publish branch へ push できた SHA。
     pub published: Option<String>,
@@ -74,14 +74,14 @@ impl Record {
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
             let (key, value) = line
                 .split_once(' ')
-                .ok_or_else(|| format!("記録の行を読めない: {line:?}"))?;
+                .ok_or_else(|| format!("cannot read a record line: {line:?}"))?;
             let value = Some(value.trim().to_string());
             match key {
                 "deployed" => record.deployed = value,
                 "published" => record.published = value,
                 "failed" => record.failed = value,
                 "rolled_back" => record.rolled_back = value,
-                _ => return Err(format!("記録に知らない鍵がある: {line:?}(鍵は {RECORD_KEYS:?})")),
+                _ => return Err(format!("unknown key in the record: {line:?} (the keys are {RECORD_KEYS:?})")),
             }
         }
         Ok(record)
@@ -106,11 +106,11 @@ impl Record {
 /// 1 回のループで何をするか。
 #[derive(Debug, PartialEq)]
 pub enum Next {
-    /// 据え済みか、失敗した SHA のまま。
+    /// デプロイ済みか、失敗した SHA のまま。
     Nothing,
-    /// 据えたが publish branch への push が残っている。
+    /// デプロイしたが publish branch への push が残っている。
     Publish,
-    /// 新しい SHA を据える。
+    /// 新しい SHA をデプロイする。
     Deploy,
 }
 
@@ -162,10 +162,10 @@ fn git(repo: &Path, arguments: &[&str]) -> Result<String, String> {
         .args(arguments)
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
-        .map_err(|e| format!("git {} を起こせない: {e}", arguments.join(" ")))?;
+        .map_err(|e| format!("cannot start git {}: {e}", arguments.join(" ")))?;
     if !output.status.success() {
         return Err(format!(
-            "git {} が {} で終わった: {}",
+            "git {} ended with {}: {}",
             arguments.join(" "),
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
@@ -176,7 +176,7 @@ fn git(repo: &Path, arguments: &[&str]) -> Result<String, String> {
 
 fn identity(path: &Path) -> Result<FileIdentity, String> {
     let metadata =
-        std::fs::metadata(path).map_err(|e| format!("{} を stat できない: {e}", path.display()))?;
+        std::fs::metadata(path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
     Ok((metadata.dev(), metadata.ino()))
 }
 
@@ -184,37 +184,37 @@ fn write_record(options: &Options, record: &Record) -> Result<(), String> {
     let path = options.state_dir.join(RECORD_NAME);
     let staging = options.state_dir.join(format!(".{RECORD_NAME}.new"));
     std::fs::write(&staging, record.render())
-        .map_err(|e| format!("{} を書けない: {e}", staging.display()))?;
-    std::fs::rename(&staging, &path).map_err(|e| format!("{} を置けない: {e}", path.display()))
+        .map_err(|e| format!("cannot write {}: {e}", staging.display()))?;
+    std::fs::rename(&staging, &path).map_err(|e| format!("cannot put {} in place: {e}", path.display()))
 }
 
-/// 1 回のループ。Err は理由を言って 1 で終わる回(据えなかった、または前のバージョンへ戻した)。
+/// 1 回のループ。Err は理由を言って 1 で終わる回(デプロイしなかった、または前のバージョンへ戻した)。
 pub fn run(options: &Options) -> Result<(), String> {
     std::fs::create_dir_all(&options.state_dir)
-        .map_err(|e| format!("{} を作れない: {e}", options.state_dir.display()))?;
+        .map_err(|e| format!("cannot create {}: {e}", options.state_dir.display()))?;
     let hold = options.state_dir.join(HOLD_NAME);
     if hold.exists() {
-        println!("autodeploy: {} があるので何もしない", hold.display());
+        println!("autodeploy: {} exists, so doing nothing", hold.display());
         return Ok(());
     }
     let lock_path = options.state_dir.join(LOCK_NAME);
     let lock = std::fs::File::create(&lock_path)
-        .map_err(|e| format!("{} を開けない: {e}", lock_path.display()))?;
+        .map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
     match lock.try_lock() {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => {
-            println!("autodeploy: 別の回が走っているので何もしない({})", lock_path.display());
+            println!("autodeploy: another run is in progress, so doing nothing ({})", lock_path.display());
             return Ok(());
         }
         Err(std::fs::TryLockError::Error(e)) => {
-            return Err(format!("{} のロックを取れない: {e}", lock_path.display()))
+            return Err(format!("cannot take the lock on {}: {e}", lock_path.display()))
         }
     }
     let record_path = options.state_dir.join(RECORD_NAME);
     let mut record = match std::fs::read_to_string(&record_path) {
         Ok(text) => Record::parse(&text)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Record::default(),
-        Err(e) => return Err(format!("{} を読めない: {e}", record_path.display())),
+        Err(e) => return Err(format!("cannot read {}: {e}", record_path.display())),
     };
     // 取得の失敗は記録しない(一時の失敗でありうる。次の回にやり直す)。
     git(&options.repo, &["fetch", "--quiet", "origin", "main"])?;
@@ -233,11 +233,11 @@ fn publish(options: &Options, target: &str, record: &mut Record, journal: &mut J
     let Some(branch) = &options.publish_branch else {
         return Ok(());
     };
-    // push が失敗しても据えた事実は変わらない。記録の published が進まないので次の回にやり直す。
+    // push が失敗してもデプロイした事実は変わらない。記録の published が進まないので次の回にやり直す。
     git(&options.repo, &["push", "--quiet", "origin", &format!("{target}:refs/heads/{branch}")])?;
     record.published = Some(target.to_string());
     write_record(options, record)?;
-    journal.line(&format!("{branch} を {target} へ進めた"));
+    journal.line(&format!("advanced {branch} to {target}"));
     Ok(())
 }
 
@@ -245,32 +245,32 @@ fn deploy(options: &Options, target: &str, record: &mut Record) -> Result<(), St
     // checkout の形の誤りは手元の問題であって SHA の失敗ではない。記録せず、ログも開かずに言う。
     let branch = git(&options.repo, &["symbolic-ref", "--short", "HEAD"])?;
     if branch != "main" {
-        return Err(format!("{} はブランチ {branch} にある(main だけを追う)", options.repo.display()));
+        return Err(format!("{} is on branch {branch} (only main is followed)", options.repo.display()));
     }
     let dirty = git(&options.repo, &["status", "--porcelain", "--untracked-files=no"])?;
     if !dirty.is_empty() {
-        return Err(format!("{} に commit していない変更がある: {dirty}", options.repo.display()));
+        return Err(format!("{} has uncommitted changes: {dirty}", options.repo.display()));
     }
     git(&options.repo, &["merge-base", "--is-ancestor", "HEAD", &target])
-        .map_err(|e| format!("{} の main が origin/main の祖先でない: {e}", options.repo.display()))?;
+        .map_err(|e| format!("main of {} is not an ancestor of origin/main: {e}", options.repo.display()))?;
 
     let logs = options.state_dir.join(LOGS_NAME);
-    std::fs::create_dir_all(&logs).map_err(|e| format!("{} を作れない: {e}", logs.display()))?;
+    std::fs::create_dir_all(&logs).map_err(|e| format!("cannot create {}: {e}", logs.display()))?;
     let stamp = crate::clock::format_unix_time(crate::clock::unix_now()).replace([':', '-'], "");
     let short = &target[..target.len().min(12)];
     let log_path = logs.join(format!("{stamp}-{short}.log"));
     let file = std::fs::File::create(&log_path)
-        .map_err(|e| format!("{} を作れない: {e}", log_path.display()))?;
+        .map_err(|e| format!("cannot create {}: {e}", log_path.display()))?;
     let mut journal = Journal { file: Some(file) };
-    journal.line(&format!("{target} を据える。ログは {}", log_path.display()));
+    journal.line(&format!("deploying {target}; log: {}", log_path.display()));
 
     match build_and_replace(options, target, &mut journal) {
         Ok(()) => {
             record.deployed = Some(target.to_string());
             write_record(options, record)?;
-            journal.line(&format!("{target} を据えた"));
+            journal.line(&format!("deployed {target}"));
             if let Err(message) = publish(options, target, record, &mut journal) {
-                journal.line(&format!("publish branch へ進められない(次の回にやり直す): {message}"));
+                journal.line(&format!("cannot advance the publish branch (retrying on the next run): {message}"));
             }
             Ok(())
         }
@@ -281,14 +281,14 @@ fn deploy(options: &Options, target: &str, record: &mut Record) -> Result<(), St
             }
             write_record(options, record)?;
             journal.line(&format!(
-                "{target} を据えられない: {}。この SHA は試し直さない(手で試し直すなら {} の failed の行を消す)",
+                "cannot deploy {target}: {}; this SHA is not retried (to retry by hand, delete the failed line in {})",
                 failure.message,
                 options.state_dir.join(RECORD_NAME).display()
             ));
             Err(failure.message)
         }
         Err(failure) => {
-            journal.line(&format!("{target} を据えられない(記録せず、次の回にやり直す): {}", failure.message));
+            journal.line(&format!("cannot deploy {target} (not recorded; retrying on the next run): {}", failure.message));
             Err(failure.message)
         }
     }
@@ -322,29 +322,29 @@ fn build_and_replace(options: &Options, target: &str, journal: &mut Journal) -> 
         .arg(&target_dir)
         .current_dir(&options.repo)
         .output()
-        .map_err(|e| format!("cargo を起こせない: {e}"))?;
+        .map_err(|e| format!("cannot start cargo: {e}"))?;
     journal.line(String::from_utf8_lossy(&output.stderr).trim_end());
     if !output.status.success() {
-        return Err(sha_failure(format!("cargo build が {} で終わった", output.status)));
+        return Err(sha_failure(format!("cargo build ended with {}", output.status)));
     }
     let built = target_dir.join("release").join("uniqnode");
     let help = Command::new(&built)
         .arg("--help")
         .output()
-        .map_err(|e| format!("{} を起こせない: {e}", built.display()))?;
+        .map_err(|e| format!("cannot start {}: {e}", built.display()))?;
     if !help.status.success() {
-        return Err(sha_failure(format!("{} --help が {} で終わった", built.display(), help.status)));
+        return Err(sha_failure(format!("{} --help ended with {}", built.display(), help.status)));
     }
     // 置き換える前に対象を挙げる。置き換えた後では古い版の /proc/<pid>/exe が " (deleted)" になる。
     // 対象は今の <bin> を走らせている unit だけ(別のバイナリで動く unit を待たない)。
     let units = units_running(&options.binary)?;
-    journal.line(&format!("確かめる unit: {}", if units.is_empty() { "無い".to_string() } else { units.join(" ") }));
-    let new_bytes = std::fs::read(&built).map_err(|e| format!("{} を読めない: {e}", built.display()))?;
+    journal.line(&format!("units to verify: {}", if units.is_empty() { "none".to_string() } else { units.join(" ") }));
+    let new_bytes = std::fs::read(&built).map_err(|e| format!("cannot read {}: {e}", built.display()))?;
     if std::fs::read(&options.binary).is_ok_and(|old| old == new_bytes) {
         // 置き換えない(常駐を起こし直さない)。前の回が確かめの途中で切れていても、ここで確かめる。
-        journal.line(&format!("{} は中身が同じなので置き換えない", options.binary.display()));
+        journal.line(&format!("{} has the same content, so not replacing it", options.binary.display()));
         let elapsed = verify(&units, &options.binary).map_err(sha_failure)?;
-        journal.line(&format!("全ての unit がこの版で落ち着いている({} 秒)", elapsed.as_secs()));
+        journal.line(&format!("all units are settled on this version ({} s)", elapsed.as_secs()));
         return Ok(());
     }
     let previous = previous_path(&options.binary);
@@ -354,25 +354,25 @@ fn build_and_replace(options: &Options, target: &str, journal: &mut Journal) -> 
     journal.line(&install::place_binary(&built, &options.binary, None)?);
     let message = match verify(&units, &options.binary) {
         Ok(elapsed) => {
-            journal.line(&format!("全ての unit が新しい版で {} 秒落ち着いた({} 秒)", STABLE_FOR.as_secs(), elapsed.as_secs()));
+            journal.line(&format!("all units stayed settled on the new version for {} s ({} s)", STABLE_FOR.as_secs(), elapsed.as_secs()));
             return Ok(());
         }
         Err(message) => message,
     };
     if !previous.exists() {
-        return Err(sha_failure(format!("{message}。前のバージョンが無いので戻さない")));
+        return Err(sha_failure(format!("{message}; there is no previous version, so not rolling back")));
     }
     match install::place_binary(&previous, &options.binary, None) {
         Ok(line) => {
-            journal.line(&format!("前のバージョンへ戻した: {line}"));
+            journal.line(&format!("rolled back to the previous version: {line}"));
             // 戻した版で落ち着いたかはログに残すだけにする(戻した事実は変わらない)。
             match verify(&units, &options.binary) {
-                Ok(elapsed) => journal.line(&format!("全ての unit が以前のバージョンで落ち着いた({} 秒)", elapsed.as_secs())),
-                Err(e) => journal.line(&format!("以前のバージョンでも落ち着かない: {e}")),
+                Ok(elapsed) => journal.line(&format!("all units settled on the previous version ({} s)", elapsed.as_secs())),
+                Err(e) => journal.line(&format!("the previous version does not settle either: {e}")),
             }
-            Err(Failure { message: format!("{message}。前のバージョンへ戻した"), of_sha: true, rolled_back: true })
+            Err(Failure { message: format!("{message}; rolled back to the previous version"), of_sha: true, rolled_back: true })
         }
-        Err(e) => Err(sha_failure(format!("{message}。前のバージョンへ戻せない: {e}"))),
+        Err(e) => Err(sha_failure(format!("{message}; cannot roll back to the previous version: {e}"))),
     }
 }
 
@@ -409,10 +409,10 @@ fn systemctl(arguments: &[&str]) -> Result<String, String> {
     let output = Command::new("systemctl")
         .args(arguments)
         .output()
-        .map_err(|e| format!("systemctl {} を起こせない: {e}", arguments.join(" ")))?;
+        .map_err(|e| format!("cannot start systemctl {}: {e}", arguments.join(" ")))?;
     if !output.status.success() {
         return Err(format!(
-            "systemctl {} が {} で終わった: {}",
+            "systemctl {} ended with {}: {}",
             arguments.join(" "),
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
@@ -441,21 +441,21 @@ fn unit_on_new_binary(unit: &str, new: FileIdentity) -> Result<u32, String> {
     let listing = systemctl(&["show", "-p", "ActiveState", "-p", "MainPID", "-p", "Environment", unit])?;
     let state = show_value(&listing, "ActiveState").unwrap_or("");
     if state != "active" {
-        return Err(format!("{unit} は {state}"));
+        return Err(format!("{unit} is {state}"));
     }
     let pid: u32 = show_value(&listing, "MainPID")
         .and_then(|pid| pid.parse().ok())
         .filter(|pid| *pid > 0)
-        .ok_or_else(|| format!("{unit} の MainPID が無い"))?;
+        .ok_or_else(|| format!("{unit} has no MainPID"))?;
     if identity(Path::new(&format!("/proc/{pid}/exe")))? != new {
-        return Err(format!("{unit}(pid {pid})はまだ以前のバージョン"));
+        return Err(format!("{unit} (pid {pid}) is still the previous version"));
     }
     // serve は主の口の /v1/status に答えるまで見る(同じ利用者なので主の口が通す)。
     if unit.starts_with("uniqnode-serve@") {
         let environment = show_value(&listing, "Environment").unwrap_or("");
         let listen = environment_value(environment, "UNIQNODE_LISTEN")
-            .ok_or_else(|| format!("{unit} の Environment に UNIQNODE_LISTEN が無い"))?;
-        install::status_node_id(listen).map_err(|e| format!("{unit} の /v1/status({listen}): {e}"))?;
+            .ok_or_else(|| format!("the Environment of {unit} has no UNIQNODE_LISTEN"))?;
+        install::status_node_id(listen).map_err(|e| format!("/v1/status of {unit} ({listen}): {e}"))?;
     }
     Ok(pid)
 }
@@ -480,10 +480,10 @@ fn verify(units: &[String], binary: &Path) -> Result<Duration, String> {
         }
         if started.elapsed() >= VERIFY_BOUND {
             return Err(format!(
-                "{} 秒のうちに全ての unit が新しい版で落ち着かない: {}",
+                "not all units settled on the new version within {} s: {}",
                 VERIFY_BOUND.as_secs(),
                 match observed {
-                    Ok(_) => "落ち着く前に MainPID が替わった".to_string(),
+                    Ok(_) => "the MainPID changed before settling".to_string(),
                     Err(e) => e,
                 }
             ));
@@ -506,7 +506,7 @@ pub struct InstallOptions {
 /// 崩れるので断る。
 fn plain_value(what: &str, value: &str) -> Result<(), String> {
     if value.is_empty() || value.chars().any(char::is_whitespace) {
-        return Err(format!("{what} {value:?} は空白を含まない空でない値にする"));
+        return Err(format!("{what} {value:?} must be a non-empty value without whitespace"));
     }
     Ok(())
 }
@@ -515,7 +515,7 @@ fn plain_value(what: &str, value: &str) -> Result<(), String> {
 pub fn service_drop_in(options: &InstallOptions, path_env: &str) -> Result<String, String> {
     let repo = options.repo.to_string_lossy();
     let binary = options.binary.to_string_lossy();
-    plain_value("checkout の道", &repo)?;
+    plain_value("checkout path", &repo)?;
     plain_value("--bin", &binary)?;
     let mut autodeploy_options = format!("--bin {binary}");
     if let Some(branch) = &options.publish_branch {
@@ -524,7 +524,7 @@ pub fn service_drop_in(options: &InstallOptions, path_env: &str) -> Result<Strin
     }
     let unit = UNITS[0].1;
     Ok(format!(
-        "# uniqnode install-autodeploy が書いた drop-in。再実行で書き直される。\n\
+        "# drop-in written by uniqnode install-autodeploy; rewritten on each run.\n\
          [Service]\n\
          User={}\n\
          Group={}\n\
@@ -546,13 +546,13 @@ pub fn service_drop_in(options: &InstallOptions, path_env: &str) -> Result<Strin
 /// 形だけを見る。git の木として正しいかは、利用者で走る回が毎回確かめる。
 pub fn check_checkout(repo: &Path, account: &Account) -> Result<(), String> {
     if !repo.is_absolute() {
-        return Err(format!("checkout {} は絶対の道で指す", repo.display()));
+        return Err(format!("checkout {} must be an absolute path", repo.display()));
     }
     let metadata =
-        std::fs::metadata(repo).map_err(|e| format!("checkout {} を読めない: {e}", repo.display()))?;
+        std::fs::metadata(repo).map_err(|e| format!("cannot read checkout {}: {e}", repo.display()))?;
     if metadata.uid() != account.uid {
         return Err(format!(
-            "checkout {} の持ち主が {} でない(uid {})",
+            "checkout {} is not owned by {} (uid {})",
             repo.display(),
             account.name,
             metadata.uid()
@@ -560,7 +560,7 @@ pub fn check_checkout(repo: &Path, account: &Account) -> Result<(), String> {
     }
     for name in [".git", "Cargo.toml"] {
         if !repo.join(name).exists() {
-            return Err(format!("checkout {} に {name} が無い", repo.display()));
+            return Err(format!("checkout {} has no {name}", repo.display()));
         }
     }
     Ok(())
@@ -572,19 +572,19 @@ pub fn path_with_cargo(account: &Account) -> Result<String, String> {
     let cargo_dir = account.home.join(".cargo").join("bin");
     let path = format!("{}:{}", cargo_dir.display(), install::SYSTEMD_DEFAULT_PATH);
     install::find_in_path("cargo", &path).ok_or_else(|| {
-        format!("cargo が {} にも systemd の既定の PATH にも無い", cargo_dir.display())
+        format!("cargo is neither in {} nor on the default systemd PATH", cargo_dir.display())
     })?;
     Ok(path)
 }
 
 pub fn install_units(options: &InstallOptions, out: &mut dyn Write) -> Result<(), String> {
     let say = |out: &mut dyn Write, line: &str| -> Result<(), String> {
-        writeln!(out, "install-autodeploy: {line}").map_err(|e| format!("標準出力に書けない: {e}"))
+        writeln!(out, "install-autodeploy: {line}").map_err(|e| format!("cannot write to standard output: {e}"))
     };
     check_checkout(&options.repo, &options.account)?;
     if !options.binary.is_file() {
         return Err(format!(
-            "バイナリ {} が無い(先に uniqnode install で据える)",
+            "the binary {} does not exist (deploy it first with uniqnode install)",
             options.binary.display()
         ));
     }
@@ -602,7 +602,7 @@ pub fn install_units(options: &InstallOptions, out: &mut dyn Write) -> Result<()
     install::write_file(&drop_in_path, &drop_in)?;
     say(out, &format!("drop-in {}", drop_in_path.display()))?;
     if !options.start {
-        say(out, "--no-start なので daemon-reload と timer の起動はしない")?;
+        say(out, "--no-start given, so not running daemon-reload or starting the timer")?;
         return Ok(());
     }
     let scope = Scope::System(options.account.clone());
@@ -611,13 +611,13 @@ pub fn install_units(options: &InstallOptions, out: &mut dyn Write) -> Result<()
     let state = install::systemctl(&scope, &["is-active", TIMER_UNIT])?;
     let state = String::from_utf8_lossy(&state.stdout).trim().to_string();
     if state != "active" {
-        return Err(format!("{TIMER_UNIT} が active にならない({state})"));
+        return Err(format!("{TIMER_UNIT} did not become active ({state})"));
     }
     say(
         out,
         &format!(
-            "{TIMER_UNIT} が active。1 分ごとに {} で main を追う(ログは {} の下の {STATE_SUBDIR}/{LOGS_NAME}/、\
-             回の出力は journalctl -u {SERVICE_UNIT})",
+            "{TIMER_UNIT} is active; following main every minute as {} (logs in {STATE_SUBDIR}/{LOGS_NAME}/ under {}, \
+             output of each run in journalctl -u {SERVICE_UNIT})",
             options.account.name,
             options.account.home.display()
         ),

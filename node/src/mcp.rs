@@ -60,7 +60,7 @@ const INVALID_PARAMS: i64 = -32602;
 
 /// スニペットではなく全文が要るときの案内(search の結果の末尾に置く)。ツールの説明と
 /// 同じ事実なので、文言はこの 1 箇所から出す(must/0023)。
-const FETCH_HINT: &str = "全文が要るときは fetch ツールにチャンク ID を渡す。";
+const FETCH_HINT: &str = "To read the full text, pass the chunk ID to the fetch tool.";
 
 /// 転送する形が serve を待つ期限(1 要求ぶん)。初回の検索は索引の構築ぶんだけ待つので
 /// (実データ規模で約 9 秒)、埋め込みのクエリ期限(15 秒)より長く採る。期限のない待ちは
@@ -172,9 +172,9 @@ impl Backend {
     /// 起動の知らせに載せる、この形の説明。
     fn description(&self) -> String {
         match self {
-            Backend::Local(_) => "ストアを直接開く形(排他ロックを持つ)".to_string(),
+            Backend::Local(_) => "opening the store directly (holding the exclusive lock)".to_string(),
             Backend::Forward(client) => {
-                format!("{} へ転送する形(ストアのロックを取らない)", client.url)
+                format!("forwarding to {} (taking no store lock)", client.url)
             }
         }
     }
@@ -228,7 +228,7 @@ impl ServeClient {
         let (address, path) = http::split_http_url(url)?;
         if path != "/" {
             return Err(format!(
-                "{url}: serve の根を指す URL であるべき(例 http://127.0.0.1:7440)"
+                "{url}: must be a URL to the root of serve (for example http://127.0.0.1:7440)"
             ));
         }
         Ok(ServeClient {
@@ -242,9 +242,9 @@ impl ServeClient {
     /// 読んだ者が次の手を打てる形で言う(must/0022)。
     fn unreachable(&self, cause: &str) -> String {
         format!(
-            "走っている serve に届かない({}): {cause}。\
-             転送する形(mcp・ingest の --serve-url)は自分でストアを開かないので、\
-             先に serve を起こす: \
+            "cannot reach a running serve ({}): {cause}; \
+             the forwarding form (--serve-url of mcp and ingest) does not open the store itself, \
+             so start serve first: \
              uniqnode serve {} {}",
             self.url, self.data_dir, self.address
         )
@@ -252,7 +252,7 @@ impl ServeClient {
 
     /// 相手が誤りを返したときの文(届いてはいるので、起動の案内は付けない)。
     fn refused(&self, what: &str, status: u16, body: &[u8]) -> String {
-        format!("serve の {what} が {status} を返した({}): {}", self.url, http::body_head(body))
+        format!("{what} of serve returned {status} ({}): {}", self.url, http::body_head(body))
     }
 
     fn search(&self, request: &SearchRequest) -> Result<SearchResults, String> {
@@ -263,7 +263,7 @@ impl ServeClient {
             return Err(self.refused("POST /v1/search", response.status, &response.body));
         }
         api::parse_search_response(&response.body)
-            .map_err(|error| format!("serve の検索応答を読めない({}): {error}", self.url))
+            .map_err(|error| format!("cannot read the search response of serve ({}): {error}", self.url))
     }
 
     fn fetch(&self, id: &str) -> Result<Option<Fetched>, String> {
@@ -339,15 +339,15 @@ impl ServeClient {
             return Err(self.refused(&format!("GET {path}"), response.status, &response.body));
         }
         let text = std::str::from_utf8(&response.body)
-            .map_err(|_| format!("serve の {path} の応答が UTF-8 でない"))?;
+            .map_err(|_| format!("the response of serve to {path} is not UTF-8"))?;
         let value = crate::json::Json::parse(text)
-            .map_err(|error| format!("serve の {path} の応答を読めない: {error}"))?;
+            .map_err(|error| format!("cannot read the response of serve to {path}: {error}"))?;
         match value.field("citation") {
-            None => Err(format!("serve の {path} の応答に citation がない")),
+            None => Err(format!("the response of serve to {path} has no citation")),
             Some(crate::json::Json::Null) => Ok(None),
             Some(found) => api::citation_from_json(found)
                 .map(Some)
-                .map_err(|error| format!("serve の {path} の出典を読めない: {error}")),
+                .map_err(|error| format!("cannot read the citation from serve's {path}: {error}")),
         }
     }
 }
@@ -403,9 +403,9 @@ impl StdioServer {
         let handshake = Handshake::inherited();
         if let Some(protocol) = &handshake.protocol {
             crate::log_line!(
-                "uniqnode: mcp: ハンドシェイク済みとして起動した(相手の protocol {protocol}、\
+                "uniqnode: mcp: started with the handshake already done (peer protocol {protocol}, \
                  client {})",
-                handshake.client.as_deref().unwrap_or("(名乗りなし)")
+                handshake.client.as_deref().unwrap_or("(unnamed)")
             );
         }
         StdioServer { backend, writable, binary: BinaryStamp::of_current_exe(), handshake }
@@ -415,16 +415,16 @@ impl StdioServer {
     /// 書き込みを許すコレクションもここで言う。
     pub fn announce(&self, target: &str) {
         let tools = if self.writable.is_empty() {
-            "search・fetch(読むだけ。書き込みは --writable で許す)".to_string()
+            "search, fetch (read only; --writable allows writes)".to_string()
         } else {
             format!(
-                "search・fetch・add_document・fetch_url(書き込みを許す: {})",
+                "search, fetch, add_document, fetch_url (writes allowed to: {})",
                 self.writable.join(", ")
             )
         };
         crate::log_line!(
-            "uniqnode: mcp: {target} を stdio で提供する(protocol {PROTOCOL_VERSION}、\
-             tools: {tools}、{})",
+            "uniqnode: mcp: serving {target} on stdio (protocol {PROTOCOL_VERSION}, \
+             tools: {tools}, {})",
             self.backend.description()
         );
     }
@@ -469,11 +469,11 @@ impl StdioServer {
             Ok(value) => value,
             // 解析できなければ id も読めないので、規定どおり id は null で答える。
             Err(error) => {
-                return Some(failure(&Value::Null, PARSE_ERROR, &format!("JSON が不正: {error}")))
+                return Some(failure(&Value::Null, PARSE_ERROR, &format!("invalid JSON: {error}")))
             }
         };
         let Value::Object(map) = &message else {
-            return Some(failure(&Value::Null, INVALID_REQUEST, "要求はオブジェクトであるべき"));
+            return Some(failure(&Value::Null, INVALID_REQUEST, "the request must be an object"));
         };
         // id が無い(または null)のは通知である。以後、応答を返さない道はここで分かれる。
         let id = match map.get("id") {
@@ -484,19 +484,19 @@ impl StdioServer {
             Some(Value::Text(method)) => method.as_str(),
             _ => {
                 let id = id?;
-                return Some(failure(&id, INVALID_REQUEST, "method がない(文字列)"));
+                return Some(failure(&id, INVALID_REQUEST, "no method (a string)"));
             }
         };
         if map.get("jsonrpc") != Some(&Value::Text("2.0".to_string())) {
             let id = id?;
-            return Some(failure(&id, INVALID_REQUEST, "jsonrpc は \"2.0\" であるべき"));
+            return Some(failure(&id, INVALID_REQUEST, "jsonrpc must be \"2.0\""));
         }
         let params = map.get("params");
         let Some(id) = id else {
             // 通知。initialized と cancelled は受理して黙る。知らない通知も、応答を返して
             // はならない以上ここで捨てるほかないが、標準エラーには残す(must/0022)。
             if method != "notifications/initialized" && method != "notifications/cancelled" {
-                crate::log_line!("uniqnode: mcp: 知らない通知を無視した: {method}");
+                crate::log_line!("uniqnode: mcp: ignored an unknown notification: {method}");
             }
             return None;
         };
@@ -506,7 +506,7 @@ impl StdioServer {
             "ping" => success(&id, Value::Object(BTreeMap::new())),
             "tools/list" => success(&id, tools_result(&self.writable)),
             "tools/call" => call_tool(&self.backend, &self.writable, &id, params),
-            other => failure(&id, METHOD_NOT_FOUND, &format!("知らないメソッド: {other}")),
+            other => failure(&id, METHOD_NOT_FOUND, &format!("unknown method: {other}")),
         })
     }
 
@@ -519,15 +519,15 @@ impl StdioServer {
                 self.handshake.protocol = Some(requested.clone());
                 if requested != PROTOCOL_VERSION {
                     crate::log_line!(
-                        "uniqnode: mcp: 相手は protocol {requested} を求めた。\
-                         {PROTOCOL_VERSION} で答える"
+                        "uniqnode: mcp: the peer asked for protocol {requested}; \
+                         answering with {PROTOCOL_VERSION}"
                     );
                 }
             }
             if let Some(Value::Object(info)) = map.get("clientInfo") {
                 let field = |name: &str| match info.get(name) {
                     Some(Value::Text(value)) => value.clone(),
-                    _ => "(不明)".to_string(),
+                    _ => "(unknown)".to_string(),
                 };
                 self.handshake.client = Some(format!("{}/{}", field("name"), field("version")));
             }
@@ -543,7 +543,7 @@ impl StdioServer {
                 object(vec![
                     ("name", text(SERVER_NAME)),
                     ("version", text(env!("CARGO_PKG_VERSION"))),
-                    ("title", text("uniqnode RAG ストレージ")),
+                    ("title", text("uniqnode RAG storage")),
                 ]),
             ),
             ("instructions", text(&self.instructions())),
@@ -553,14 +553,17 @@ impl StdioServer {
     /// initialize の instructions。読む道具の使い方に、書き込みを許しているときだけ書く
     /// 道具の使い方を足す(許していないのに書けると言わない)。
     fn instructions(&self) -> String {
-        let mut instructions = "uniqnode は取り込んだ文書をチャンク単位で検索できる知識ストアで\
-             ある。search で問い、返った出典(文書名・ページ・見出し・取得日時)を答えに\
-             添える。抜粋で足りなければ fetch にチャンク ID を渡して全文を読む。"
+        let mut instructions = "uniqnode is a knowledge store that searches ingested documents \
+             chunk by chunk. Ask with search, and add the citations it returns (document, page, \
+             headings, retrieval time) to your answer. If a snippet is not enough, pass the chunk \
+             ID to fetch to read the full text."
             .to_string();
         if !self.writable.is_empty() {
             instructions.push_str(&format!(
-                "利用者が『覚えておいて』『保存して』と言ったら add_document で、URL を取り\
-                 込めと言ったら fetch_url で、書き込みを許されたコレクション({})に入れる。",
+                // run-time-text-exempt: 引用の句は利用者が言う言葉の代わり(should/0141 の範囲外)。
+                " When the user says \"覚えておいて\" (remember this) or \"保存して\" (save this), \
+                 use add_document; when asked to ingest a URL, use fetch_url; write to the \
+                 collections that allow writes ({}).",
                 self.writable.join(", ")
             ));
         }
@@ -585,8 +588,8 @@ impl StdioServer {
             // 先読みバッファに次のメッセージが載っている。ここで exec すると、その
             // バイト列は旧イメージと共に消える。差し替えは次の機会に回す。
             crate::log_line!(
-                "uniqnode: mcp: 実行ファイルが更新されたが、先読みバッファに次の\
-                 メッセージがある。差し替えを次の応答の後に回す"
+                "uniqnode: mcp: the executable was updated, but the read-ahead buffer holds the next \
+                 message; replacing after the next response"
             );
             return;
         }
@@ -594,21 +597,21 @@ impl StdioServer {
         // exec の前に、新しいイメージを子プロセスとして起こして健全さを確かめる。
         if let Err(reason) = self_check(&stamp.path) {
             crate::log_line!(
-                "uniqnode: mcp: 新しい実行ファイルの自己検査に落ちた。差し替えず、\
-                 旧イメージのまま続ける: {reason}"
+                "uniqnode: mcp: the new executable failed its self-check; not replacing, \
+                 continuing with the old image: {reason}"
             );
             // 同じ姿を応答のたびに検査し直さない。次にまた変わったときに試す。
             self.binary = Some(current);
             return;
         }
         crate::log_line!(
-            "uniqnode: mcp: 実行ファイルが更新された。自分を exec で差し替える: {}",
+            "uniqnode: mcp: the executable was updated; replacing itself with exec: {}",
             stamp.path.display()
         );
         let path = stamp.path.clone();
         let error = self.exec_replacement(&path);
         // exec が返るのは失敗したときだけである(成功すればこの行は無い)。
-        crate::log_line!("uniqnode: mcp: exec に失敗した。旧イメージのまま続ける: {error}");
+        crate::log_line!("uniqnode: mcp: exec failed; continuing with the old image: {error}");
         self.binary = Some(current);
     }
 
@@ -647,7 +650,7 @@ impl BinaryStamp {
             Ok(path) => path,
             Err(error) => {
                 crate::log_line!(
-                    "uniqnode: mcp: 実行ファイルの位置が分からない。自己置換をしない: {error}"
+                    "uniqnode: mcp: cannot find the executable; not replacing itself: {error}"
                 );
                 return None;
             }
@@ -655,7 +658,7 @@ impl BinaryStamp {
         let stamp = BinaryStamp::read(&path);
         if stamp.is_none() {
             crate::log_line!(
-                "uniqnode: mcp: {} の属性を読めない。自己置換をしない",
+                "uniqnode: mcp: cannot read the attributes of {}; not replacing itself",
                 path.display()
             );
         }
@@ -691,23 +694,23 @@ fn self_check(path: &Path) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("{} を起こせない: {error}", path.display()))?;
+        .map_err(|error| format!("cannot start {}: {error}", path.display()))?;
     let deadline = Instant::now() + SELF_CHECK_TIMEOUT;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {}
-            Err(error) => return Err(format!("自己検査の子を待てない: {error}")),
+            Err(error) => return Err(format!("cannot wait for the self-check child: {error}")),
         }
         if Instant::now() >= deadline {
             // 終わらない新しいイメージも健全ではない。始末してから断る。
             if let Err(error) = child.kill() {
-                crate::log_line!("uniqnode: mcp: 自己検査の子を kill できない: {error}");
+                crate::log_line!("uniqnode: mcp: cannot kill the self-check child: {error}");
             }
             if let Err(error) = child.wait() {
-                crate::log_line!("uniqnode: mcp: 自己検査の子を待てない: {error}");
+                crate::log_line!("uniqnode: mcp: cannot wait for the self-check child: {error}");
             }
-            return Err(format!("自己検査が {SELF_CHECK_TIMEOUT:?} で終わらない"));
+            return Err(format!("the self-check did not finish within {SELF_CHECK_TIMEOUT:?}"));
         }
         std::thread::sleep(SELF_CHECK_POLL);
     };
@@ -715,14 +718,14 @@ fn self_check(path: &Path) -> Result<(), String> {
     if let Some(mut stdout) = child.stdout.take() {
         stdout
             .read_to_string(&mut reported)
-            .map_err(|error| format!("自己検査の標準出力を読めない: {error}"))?;
+            .map_err(|error| format!("cannot read the standard output of the self-check: {error}"))?;
     }
     if !status.success() {
-        return Err(format!("{} {SELF_CHECK_COMMAND} が {status} で終わった", path.display()));
+        return Err(format!("{} {SELF_CHECK_COMMAND} ended with {status}", path.display()));
     }
     if !reported.contains(SELF_CHECK_MARKER) {
         return Err(format!(
-            "{} {SELF_CHECK_COMMAND} の標準出力に「{SELF_CHECK_MARKER}」が無い: {reported:?}",
+            "the standard output of {} {SELF_CHECK_COMMAND} lacks \"{SELF_CHECK_MARKER}\": {reported:?}",
             path.display()
         ));
     }
@@ -764,15 +767,15 @@ fn read_tool_descriptors() -> Vec<Value> {
     let search_properties = object(vec![
         (
             "query",
-            schema_property("string", "問い合わせ文(自然文でも語でもよい)"),
+            schema_property("string", "the query (a sentence or keywords)"),
         ),
         (
             "collection",
-            schema_property("string", "絞り込むコレクション名(省略時は全コレクション)"),
+            schema_property("string", "the collection to search (all collections if omitted)"),
         ),
         (
             "top_k",
-            schema_property("integer", "返す件数(1..=1000。省略時は 10)"),
+            schema_property("integer", "how many results to return (1..=1000; 10 if omitted)"),
         ),
         (
             "method",
@@ -782,43 +785,48 @@ fn read_tool_descriptors() -> Vec<Value> {
             "include_low_information",
             schema_property(
                 "boolean",
-                "目次の紙面・柱だけ・ページ番号だけの低情報チャンクを応答に残すか\
-                 (省略時は false で落とす。落とした件数は応答に出る)",
+                "whether to keep low-information chunks (table-of-contents pages, running heads only, page numbers only) \
+                 in the response (false if omitted, which drops them; the response says how many were dropped)",
             ),
         ),
     ]);
     let fetch_properties = object(vec![(
         "id",
-        schema_property("string", "チャンクのオブジェクト ID(search が返す s256:… の値)"),
+        schema_property("string", "the object ID of the chunk (the s256:... value search returns)"),
     )]);
     let search_description = format!(
-        "取り込み済みの文書を検索し、本文の抜粋と出典(文書名・ページ番号・見出し・\
-         チャンク ID・取得日時)を返す。\n\
+        // run-time-text-exempt: 例の問いは利用者か模型が打つ言葉の代わり(should/0141 の範囲外)。
+        "Search the ingested documents and return snippets of the text with their citations \
+         (document, page number, headings, chunk ID, retrieval time).\n\
          \n\
-         問い方で当たり方が大きく変わる。英語で問い、文書が使っている英語の術語と略語を\
-         そのまま入れること。実データ(仕様書 PDF 25 本)での実測 2026-08-17 では、\
-         同じ 14 主題を純日本語で問うと平均逆順位 0.315、日本語の文に英語術語を混ぜると \
-         0.869、英語だけで問うと 0.705〜0.798 だった。効くのは言語そのものではなく、\
-         文書が使う語がクエリに入っているかである。\n\
-         良い例: which field reports the period at which the HPET main counter increments\n\
-         悪い例: 高精度イベントタイマの主計数器が増える周期(文書は HPET としか書かない\
-         ので、この言い換えはどのページにも無い)\n\
-         日本語の言い方しか分からないときは、日英を併記した 1 本のクエリにする\
-         (例: HPET main counter 周期 tick period)。訳が外れても片方が当たる。\n\
+         How you ask changes what you find. Ask in English and include the English terms and \
+         abbreviations the documents use as they are. Measured on real data (25 specification \
+         PDFs) on 2026-08-17, the same 14 topics scored a mean reciprocal rank of 0.315 when \
+         asked in Japanese only, 0.869 when English terms were mixed into a Japanese sentence, \
+         and 0.705 to 0.798 when asked in English only. What matters is not the language \
+         itself but whether the query holds the words the documents use.\n\
+         Good: which field reports the period at which the HPET main counter increments\n\
+         Bad: 高精度イベントタイマの主計数器が増える周期 (the documents only say HPET, so \
+         this paraphrase is on no page)\n\
+         If you only know how to say it in Japanese, write one query with both Japanese and \
+         English (for example: HPET main counter 周期 tick period). If the translation misses, \
+         the other half still hits.\n\
          \n\
-         方式は語の一致(bm25)・意味の近さ(embedding)・両者の融合(hybrid)。省略時は\
-         このノードの装備に従い、埋め込みがあれば top_k が {} 以下で embedding、\
-         それより多ければ hybrid になる。\n\
-         目次の紙面・柱だけ・ページ番号だけといった低情報のチャンクは既定で応答から落とす\
-         (落とした件数は応答に出る)。pdftotext が柱しか採れなかった図版のページを探す\
-         ときだけ include_low_information を true にする。\n\
-         得点は同じ応答の中の順位付けにだけ意味があり、応答をまたいだ比較には使えない。",
+         The methods are word matching (bm25), closeness of meaning (embedding) and their \
+         fusion (hybrid). If omitted, the method follows what this node has: with embeddings, \
+         embedding when top_k is at most {}, and hybrid above that.\n\
+         Low-information chunks such as table-of-contents pages, running heads only or page \
+         numbers only are dropped from the response by default (the response says how many). \
+         Set include_low_information to true only when looking for figure pages from which \
+         pdftotext got only the running heads.\n\
+         Scores only rank the results within one response and cannot be compared across \
+         responses.",
         crate::embed::EMBEDDING_ONLY_TOP_K
     );
     vec![
         object(vec![
             ("name", text("search")),
-            ("title", text("uniqnode 検索")),
+            ("title", text("uniqnode search")),
             ("description", text(&search_description)),
             (
                 "inputSchema",
@@ -828,16 +836,16 @@ fn read_tool_descriptors() -> Vec<Value> {
                     ("required", Value::Array(vec![text("query")])),
                 ]),
             ),
-            ("annotations", read_only_annotations("uniqnode 検索")),
+            ("annotations", read_only_annotations("uniqnode search")),
         ]),
         object(vec![
             ("name", text("fetch")),
-            ("title", text("uniqnode 全文取得")),
+            ("title", text("uniqnode full text")),
             (
                 "description",
                 text(
-                    "チャンクのオブジェクト ID を受けて全文を返す(search の抜粋で\
-                     足りないときに使う)。見えにあるチャンクなら出典も添える。",
+                    "return the full text for a chunk's object ID (use it when the search snippet \
+                     is not enough); a chunk in the current view also comes with its citation.",
                 ),
             ),
             (
@@ -848,7 +856,7 @@ fn read_tool_descriptors() -> Vec<Value> {
                     ("required", Value::Array(vec![text("id")])),
                 ]),
             ),
-            ("annotations", read_only_annotations("uniqnode 全文取得")),
+            ("annotations", read_only_annotations("uniqnode full text")),
         ]),
     ]
 }
@@ -859,11 +867,11 @@ fn write_tool_descriptors(writable: &[String]) -> Vec<Value> {
     let allowed = writable.join(", ");
     let collection_property = schema_property(
         "string",
-        &format!("書き込む先のコレクション名(許すのは: {allowed}。それ以外は断られる)"),
+        &format!("the collection to write to (allowed: {allowed}; others are refused)"),
     );
     let name_description = format!(
-        "文書名(拡張子なし。例: hpet-notes)。空でなく、/ ? # % と空白を含まず、. で始まらず、\
-         {} 文字以内。同じ名前への再実行は上書きで、前版は残る",
+        "the document name without extension (for example hpet-notes): non-empty, without / ? # % or whitespace, not starting with ., \
+         at most {} characters; writing the same name again overwrites it and keeps the previous version",
         crate::fetch::MAX_NAME_CHARS
     );
     let media_values: Vec<Value> =
@@ -871,7 +879,7 @@ fn write_tool_descriptors(writable: &[String]) -> Vec<Value> {
     let add_document_properties = object(vec![
         ("collection", collection_property.clone()),
         ("name", schema_property("string", &name_description)),
-        ("text", schema_property("string", "本文(空でない文字列)")),
+        ("text", schema_property("string", "the text (a non-empty string)")),
         (
             "media",
             object(vec![
@@ -879,7 +887,7 @@ fn write_tool_descriptors(writable: &[String]) -> Vec<Value> {
                 (
                     "description",
                     text(&format!(
-                        "本文の種別(省略時は {}。markdown なら見出しがチャンクの出典に載る)",
+                        "the kind of the text ({} if omitted; with markdown, headings appear in the chunks' citations)",
                         ADD_DOCUMENT_MEDIA[0].0
                     )),
                 ),
@@ -888,49 +896,55 @@ fn write_tool_descriptors(writable: &[String]) -> Vec<Value> {
         ),
     ]);
     let add_document_description = format!(
-        "任意のテキスト知識(markdown か素文)を文書としてコレクションに入れる。入れた文書は\
-         次の search から出典付きで出る。\n\
-         使うとき: 利用者が『覚えておいて』『保存して』『メモしておいて』と言ったとき、\
-         会話で確かめた事実・決めごと・手順を後で引けるように残すとき。\n\
-         使わないとき: 仕様書や取り込んだ原本のコレクションには書かない(この mcp が書き込みを\
-         許すのは {allowed} だけで、それ以外は断られる)。利用者が頼んでいないものを勝手に\
-         残さない。\n\
-         同じ name への再実行は上書き(前版は残る)、同じ内容なら何も変わらない。"
+        // run-time-text-exempt: 引用の句は利用者が言う言葉の代わり(should/0141 の範囲外)。
+        "Add any text knowledge (markdown or plain text) to a collection as a document. The \
+         document appears with its citation from the next search on.\n\
+         When to use: when the user says \"覚えておいて\" (remember this), \"保存して\" (save \
+         this) or \"メモしておいて\" (make a note), or to keep facts, decisions and procedures \
+         confirmed in the conversation so they can be looked up later.\n\
+         When not to use: do not write to collections of specifications or ingested originals \
+         (this mcp allows writes only to {allowed}, and others are refused). Do not keep \
+         anything the user did not ask for.\n\
+         Writing the same name again overwrites it (the previous version is kept); the same \
+         content changes nothing."
     );
     let fetch_url_properties = object(vec![
         ("collection", collection_property),
         (
             "url",
-            schema_property("string", "取りに行く URL(http か https。file: や ftp: は断る)"),
+            schema_property("string", "the URL to fetch (http or https; file: and ftp: are refused)"),
         ),
         (
             "name",
             schema_property(
                 "string",
                 &format!(
-                    "文書名(拡張子なし。規則は add_document の name と同じ)。省くと URL から\
-                     導く(ホストとパスを 1 語に。{} 文字以内)ので、同じ URL の再取得は同じ\
-                     名前への上書きになる",
+                    "the document name without extension (same rules as the name of add_document); if omitted it is derived \
+                     from the URL (host and path as one word, at most {} characters), so fetching the same URL again \
+                     overwrites the same name",
                     crate::fetch::MAX_NAME_CHARS
                 ),
             ),
         ),
     ]);
     let fetch_url_description = format!(
-        "URL の文書を取りに行き、コレクションに取り込む。HTML は外部への依存(スクリプト・\
-         画像・フォント・外部スタイル)を落として自足した 1 枚にしてから、PDF は本文を抜いて、\
-         素文はそのまま入れる。取り込んだ文書は次の search から出典付きで出る。\n\
-         使うとき: 利用者が『このページを取り込んで』『この URL を保存して』と言ったとき。\n\
-         使わないとき: ただ読みたいだけのとき(取り込みは永続する。読むだけなら別の道具で\
-         読む)。許されたコレクション({allowed})以外には書けない。\n\
-         取りに行く先は http/https だけで、{} 秒・{} バイトを超えるものは断られる。",
+        // run-time-text-exempt: 引用の句は利用者が言う言葉の代わり(should/0141 の範囲外)。
+        "Fetch the document at a URL and ingest it into a collection. HTML is made \
+         self-contained by dropping its external dependencies (scripts, images, fonts, \
+         external styles), PDF has its text extracted, and plain text goes in as is. The \
+         document appears with its citation from the next search on.\n\
+         When to use: when the user says \"このページを取り込んで\" (ingest this page) or \
+         \"この URL を保存して\" (save this URL).\n\
+         When not to use: when you only want to read it (ingesting is permanent; read with \
+         another tool). Only the allowed collections ({allowed}) can be written.\n\
+         Only http/https can be fetched, and anything over {} seconds or {} bytes is refused.",
         crate::fetch::DEFAULT_MAX_SECONDS,
         crate::fetch::DEFAULT_MAX_BYTES
     );
     vec![
         object(vec![
             ("name", text("add_document")),
-            ("title", text("uniqnode 文書の追加")),
+            ("title", text("uniqnode add document")),
             ("description", text(&add_document_description)),
             (
                 "inputSchema",
@@ -945,11 +959,11 @@ fn write_tool_descriptors(writable: &[String]) -> Vec<Value> {
             ),
             // 上書きは起こるが消さない(destructiveHint false)。同じ内容は同じ ID に
             // 落ちるので、繰り返しても状態は変わらない(idempotentHint true)。
-            ("annotations", write_annotations("uniqnode 文書の追加", true, false)),
+            ("annotations", write_annotations("uniqnode add document", true, false)),
         ]),
         object(vec![
             ("name", text("fetch_url")),
-            ("title", text("uniqnode URL の取り込み")),
+            ("title", text("uniqnode fetch URL")),
             ("description", text(&fetch_url_description)),
             (
                 "inputSchema",
@@ -961,7 +975,7 @@ fn write_tool_descriptors(writable: &[String]) -> Vec<Value> {
             ),
             // 取るたびに相手の内容が変わりうる(idempotentHint false)し、外の世界(網)に
             // 出る(openWorldHint true)。
-            ("annotations", write_annotations("uniqnode URL の取り込み", false, true)),
+            ("annotations", write_annotations("uniqnode fetch URL", false, true)),
         ]),
     ]
 }
@@ -984,8 +998,8 @@ fn method_property() -> Value {
         (
             "description",
             text(&format!(
-                "検索の方式(省略時はノードの装備に従う。埋め込みがあれば top_k が {} 以下で\
-                 embedding、それより多ければ hybrid)",
+                "the search method (if omitted, it follows what the node has: with embeddings, embedding when top_k is at most {}, \
+                 and hybrid above that)",
                 crate::embed::EMBEDDING_ONLY_TOP_K
             )),
         ),
@@ -1024,10 +1038,10 @@ fn write_annotations(title: &str, idempotent: bool, open_world: bool) -> Value {
 /// 組み立てが誤っている話、後者はモデルが読んで次の手を選べる話である)。
 fn call_tool(backend: &Backend, writable: &[String], id: &Value, params: Option<&Value>) -> String {
     let Some(Value::Object(map)) = params else {
-        return failure(id, INVALID_PARAMS, "params がない(オブジェクト)");
+        return failure(id, INVALID_PARAMS, "no params (an object)");
     };
     let Some(Value::Text(name)) = map.get("name") else {
-        return failure(id, INVALID_PARAMS, "params.name がない(ツール名)");
+        return failure(id, INVALID_PARAMS, "no params.name (the tool name)");
     };
     let empty = Value::Object(BTreeMap::new());
     let arguments = map.get("arguments").unwrap_or(&empty);
@@ -1040,13 +1054,13 @@ fn call_tool(backend: &Backend, writable: &[String], id: &Value, params: Option<
             id,
             INVALID_PARAMS,
             &format!(
-                "{write_tool} は出していない(--writable が 1 つも無いので、この mcp は\
-                 読むだけ)"
+                "{write_tool} is not offered (no --writable was given, so this mcp \
+                 only reads)"
             ),
         ),
         "add_document" => call_add_document(backend, writable, id, arguments),
         "fetch_url" => call_fetch_url(backend, writable, id, arguments),
-        other => failure(id, INVALID_PARAMS, &format!("知らないツール: {other}")),
+        other => failure(id, INVALID_PARAMS, &format!("unknown tool: {other}")),
     }
 }
 
@@ -1068,33 +1082,33 @@ fn call_search(backend: &Backend, id: &Value, arguments: &Value) -> String {
     };
     match backend.search(&request) {
         Ok(results) => success(id, tool_text(&render_search(&request, &results), false)),
-        Err(reason) => tool_failure(id, "検索に失敗した", &reason),
+        Err(reason) => tool_failure(id, "search failed", &reason),
     }
 }
 
 /// fetch ツール。
 fn call_fetch(backend: &Backend, id: &Value, arguments: &Value) -> String {
     let Value::Object(map) = arguments else {
-        return failure(id, INVALID_PARAMS, "引数はオブジェクトであるべき");
+        return failure(id, INVALID_PARAMS, "the arguments must be an object");
     };
     let Some(Value::Text(object_id)) = map.get("id") else {
-        return failure(id, INVALID_PARAMS, "id がない(チャンクのオブジェクト ID)");
+        return failure(id, INVALID_PARAMS, "no id (the object ID of the chunk)");
     };
     if !c1::is_object_id(object_id) {
         return failure(
             id,
             INVALID_PARAMS,
-            "オブジェクトIDの形式が不正(s256: と16進64桁)",
+            "malformed object ID (s256: followed by 64 hex digits)",
         );
     }
     match backend.fetch(object_id) {
-        Err(reason) => tool_failure(id, "取得に失敗した", &reason),
+        Err(reason) => tool_failure(id, "fetch failed", &reason),
         // ローカルに無いのは「このDBノードは持っていない」というローカルな事実で
         // あって、不存在の言明ではない(SPEC §7.2/§10)。
         Ok(None) => success(
             id,
             tool_text(
-                &format!("{object_id} はこのノードが持っていない(不存在の言明ではない)"),
+                &format!("this node does not hold {object_id} (this is not a claim that it does not exist)"),
                 true,
             ),
         ),
@@ -1109,7 +1123,7 @@ fn call_fetch(backend: &Backend, id: &Value, arguments: &Value) -> String {
 /// 後ろ盾に渡す。種別の判定も取り込みも api.rs の put_document が持つ(should/0135)。
 fn call_add_document(backend: &Backend, writable: &[String], id: &Value, arguments: &Value) -> String {
     let Value::Object(map) = arguments else {
-        return failure(id, INVALID_PARAMS, "引数はオブジェクトであるべき");
+        return failure(id, INVALID_PARAMS, "the arguments must be an object");
     };
     let collection = match collection_argument(map) {
         Ok(collection) => collection,
@@ -1117,14 +1131,14 @@ fn call_add_document(backend: &Backend, writable: &[String], id: &Value, argumen
     };
     let name = match map.get("name") {
         Some(Value::Text(name)) => name,
-        _ => return failure(id, INVALID_PARAMS, "name がない(文書名。拡張子なし)"),
+        _ => return failure(id, INVALID_PARAMS, "no name (the document name, without extension)"),
     };
     if let Some(message) = document_name_error(name) {
         return failure(id, INVALID_PARAMS, &message);
     }
     let body = match map.get("text") {
         Some(Value::Text(body)) if !body.trim().is_empty() => body,
-        _ => return failure(id, INVALID_PARAMS, "text がない(空でない本文)"),
+        _ => return failure(id, INVALID_PARAMS, "no text (a non-empty text)"),
     };
     let extension = match map.get("media") {
         None => ADD_DOCUMENT_MEDIA[0].1,
@@ -1135,16 +1149,16 @@ fn call_add_document(backend: &Backend, writable: &[String], id: &Value, argumen
                     id,
                     INVALID_PARAMS,
                     &format!(
-                        "media は {} のどれか: {media}",
+                        "media must be one of {}: {media}",
                         ADD_DOCUMENT_MEDIA.map(|(media, _)| media).join(" / ")
                     ),
                 )
             }
         },
-        Some(_) => return failure(id, INVALID_PARAMS, "media は文字列であるべき"),
+        Some(_) => return failure(id, INVALID_PARAMS, "media must be a string"),
     };
     if let Some(refusal) = write_refusal(collection, writable) {
-        return tool_failure(id, "文書を入れなかった", &refusal);
+        return tool_failure(id, "document not added", &refusal);
     }
     let file_name = format!("{name}.{extension}");
     let what = format!("PUT {}", document_path(collection, &file_name));
@@ -1156,7 +1170,7 @@ fn call_add_document(backend: &Backend, writable: &[String], id: &Value, argumen
             id,
             tool_text(&render_added(collection, name, &fields), false),
         ),
-        Err(reason) => tool_failure(id, "文書を入れられなかった", &reason),
+        Err(reason) => tool_failure(id, "could not add the document", &reason),
     }
 }
 
@@ -1164,7 +1178,7 @@ fn call_add_document(backend: &Backend, writable: &[String], id: &Value, argumen
 /// 判断も取り込みも api.rs の fetch_into(と node/src/fetch.rs)が持つ(should/0135)。
 fn call_fetch_url(backend: &Backend, writable: &[String], id: &Value, arguments: &Value) -> String {
     let Value::Object(map) = arguments else {
-        return failure(id, INVALID_PARAMS, "引数はオブジェクトであるべき");
+        return failure(id, INVALID_PARAMS, "the arguments must be an object");
     };
     let collection = match collection_argument(map) {
         Ok(collection) => collection,
@@ -1172,7 +1186,7 @@ fn call_fetch_url(backend: &Backend, writable: &[String], id: &Value, arguments:
     };
     let url = match map.get("url") {
         Some(Value::Text(url)) if !url.is_empty() => url,
-        _ => return failure(id, INVALID_PARAMS, "url がない(http か https の URL)"),
+        _ => return failure(id, INVALID_PARAMS, "no url (an http or https URL)"),
     };
     // 取りに行ける URL かの判断は node/src/fetch.rs の 1 箇所に問う(should/0135)。
     // ここで断るのは、要求の組み立ての誤り(-32602)として返すためである。
@@ -1188,10 +1202,10 @@ fn call_fetch_url(backend: &Backend, writable: &[String], id: &Value, arguments:
             }
             body.push(("name", text(name)));
         }
-        Some(_) => return failure(id, INVALID_PARAMS, "name は文字列であるべき(省けば URL から導く)"),
+        Some(_) => return failure(id, INVALID_PARAMS, "name must be a string (if omitted, it is derived from the URL)"),
     }
     if let Some(refusal) = write_refusal(collection, writable) {
-        return tool_failure(id, "取り込まなかった", &refusal);
+        return tool_failure(id, "not ingested", &refusal);
     }
     let what = format!("POST {}", fetch_path(collection));
     let written = backend
@@ -1199,7 +1213,7 @@ fn call_fetch_url(backend: &Backend, writable: &[String], id: &Value, arguments:
         .and_then(|written| written_document(&what, written));
     match written {
         Ok(fields) => success(id, tool_text(&render_fetched_url(collection, &fields), false)),
-        Err(reason) => tool_failure(id, "取り込めなかった", &reason),
+        Err(reason) => tool_failure(id, "could not ingest", &reason),
     }
 }
 
@@ -1209,7 +1223,7 @@ fn collection_argument(map: &BTreeMap<String, Value>) -> Result<&str, String> {
         Some(Value::Text(collection)) if !collection.is_empty() && !collection.contains('/') => {
             Ok(collection)
         }
-        _ => Err("collection がない(コレクション名。/ を含まない 1 語)".to_string()),
+        _ => Err("no collection (a collection name: one word without /)".to_string()),
     }
 }
 
@@ -1220,7 +1234,7 @@ fn write_refusal(collection: &str, writable: &[String]) -> Option<String> {
         return None;
     }
     Some(format!(
-        "{collection} は書き込みを許していない(--writable で許すのは: {})",
+        "{collection} is not writable (--writable allows: {})",
         writable.join(", ")
     ))
 }
@@ -1231,8 +1245,8 @@ fn write_refusal(collection: &str, writable: &[String]) -> Option<String> {
 /// 取り込みと同じ表 crate::ingest::media_for_extension に問う。should/0135)。
 fn document_name_error(name: &str) -> Option<String> {
     let rule = format!(
-        "name は文書名(拡張子なし)。空でなく、/ ? # % と空白・制御文字を含まず、. で始まらず、\
-         {} 文字以内",
+        "name is the document name without extension: non-empty, without / ? # %, whitespace or control characters, not starting with ., \
+         at most {} characters",
         crate::fetch::MAX_NAME_CHARS
     );
     if name.is_empty()
@@ -1247,7 +1261,7 @@ fn document_name_error(name: &str) -> Option<String> {
     if let Some((_, extension)) = name.rsplit_once('.') {
         if crate::ingest::media_for_extension(&extension.to_ascii_lowercase()).is_some() {
             return Some(format!(
-                "name は拡張子なし(.{extension} を除いた名前にする。種別は media で言う): {name:?}"
+                "name takes no extension (drop .{extension}; give the kind in media): {name:?}"
             ));
         }
     }
@@ -1270,17 +1284,17 @@ fn written_document(what: &str, written: Written) -> Result<BTreeMap<String, Val
             Some(Value::Text(message)) => message.clone(),
             _ => http::body_head(&written.body),
         };
-        return Err(format!("{what} が {} を返した: {reason}", written.status));
+        return Err(format!("{what} returned {}: {reason}", written.status));
     }
     parsed.ok_or_else(|| {
-        format!("{what} の応答を読めない(JSON のオブジェクトでない): {}", http::body_head(&written.body))
+        format!("cannot read the response to {what} (not a JSON object): {}", http::body_head(&written.body))
     })
 }
 
 /// add_document の応答(1 行)。新規か上書きか、同じ内容で変わらなかったかを言う。
 fn render_added(collection: &str, name: &str, fields: &BTreeMap<String, Value>) -> String {
     format!(
-        "入れた: {collection}/{name}({})。検索に出る。",
+        "added: {collection}/{name} ({}); it appears in search.",
         revision_summary(fields)
     )
 }
@@ -1288,11 +1302,11 @@ fn render_added(collection: &str, name: &str, fields: &BTreeMap<String, Value>) 
 /// fetch_url の応答(1 行)。取り込んだ名前・種別・転送後の URL と、HTML なら落とした
 /// 外部依存の数。
 fn render_fetched_url(collection: &str, fields: &BTreeMap<String, Value>) -> String {
-    let name = field_text(fields, "name").unwrap_or("(名前なし)");
-    let media = field_text(fields, "media").unwrap_or("(種別なし)");
-    let final_url = field_text(fields, "final_url").unwrap_or("(URL なし)");
+    let name = field_text(fields, "name").unwrap_or("(no name)");
+    let media = field_text(fields, "media").unwrap_or("(no media)");
+    let final_url = field_text(fields, "final_url").unwrap_or("(no URL)");
     let mut line = format!(
-        "取り込んだ: {collection}/{name}({media}、final_url {final_url}、{}",
+        "ingested: {collection}/{name} ({media}, final_url {final_url}, {}",
         revision_summary(fields)
     );
     if let Some(Value::Object(dropped)) = fields.get("dropped") {
@@ -1304,32 +1318,31 @@ fn render_fetched_url(collection: &str, fields: &BTreeMap<String, Value>) -> Str
             })
             .collect();
         let total: i64 = counts.iter().map(|(_, count)| count).sum();
-        line.push_str(&format!("、落とした外部依存 {total} 件"));
+        line.push_str(&format!(", dropped {total} external dependencies"));
         if !counts.is_empty() {
             let detail: Vec<String> =
                 counts.iter().map(|(kind, count)| format!("{kind} {count}")).collect();
-            line.push_str(&format!("({})", detail.join("・")));
+            line.push_str(&format!(" ({})", detail.join(", ")));
         }
     }
-    line.push_str(")。検索に出る。");
+    line.push_str("); it appears in search.");
     line
 }
 
 /// 取り込みの結果の要約: 新規 / 上書き(前版) / 変わらず、doc_rev の短縮、新規オブジェクト数。
 fn revision_summary(fields: &BTreeMap<String, Value>) -> String {
-    let doc_rev = field_text(fields, "doc_rev").map(short_id).unwrap_or_else(|| "(なし)".to_string());
+    let doc_rev = field_text(fields, "doc_rev").map(short_id).unwrap_or_else(|| "(none)".to_string());
     let new_objects = match fields.get("new_objects") {
         Some(Value::Integer(count)) => *count,
         _ => 0,
     };
     let previous = field_text(fields, "previous");
     let revision = match (fields.get("ref_updated"), previous) {
-        (Some(Value::Bool(false)), _) => "変わらず(同じ内容が既にある)".to_string(),
-
-        (_, Some(previous)) => format!("上書き。前版 {}", short_id(previous)),
-        (_, None) => "新規".to_string(),
+        (Some(Value::Bool(false)), _) => "unchanged (the same content is already there)".to_string(),
+        (_, Some(previous)) => format!("overwritten; previous version {}", short_id(previous)),
+        (_, None) => "new".to_string(),
     };
-    format!("{revision}。doc_rev {doc_rev}、新規オブジェクト {new_objects}")
+    format!("{revision}; doc_rev {doc_rev}, new objects {new_objects}")
 }
 
 fn field_text<'a>(fields: &'a BTreeMap<String, Value>, key: &str) -> Option<&'a str> {
@@ -1343,7 +1356,7 @@ fn field_text<'a>(fields: &'a BTreeMap<String, Value>, key: &str) -> Option<&'a 
 /// ときは REST で引ける。
 fn short_id(id: &str) -> String {
     match id.char_indices().nth(13) {
-        Some((cut, _)) => format!("{}…", &id[..cut]),
+        Some((cut, _)) => format!("{}...", &id[..cut]),
         None => id.to_string(),
     }
 }
@@ -1352,37 +1365,37 @@ fn short_id(id: &str) -> String {
 /// (完了条件は「出典付きで答えられる」であり、出典の読めない応答は用を成さない)。
 fn render_search(request: &SearchRequest, outcome: &SearchResults) -> String {
     let mut out = format!(
-        "検索: {}(方式 {}、得点の意味 {}、{} 件",
+        "search: {} (method {}, score meaning {}, results {}",
         request.query,
         outcome.method.as_str(),
         outcome.method.score_semantics(),
         outcome.results.len()
     );
     match &request.collection {
-        Some(collection) => out.push_str(&format!("、コレクション {collection})\n")),
+        Some(collection) => out.push_str(&format!(", collection {collection})\n")),
         None => out.push_str(")\n"),
     }
     // 黙って劣化しない(should/0128)。求めた方式で答えられなかったことを、応答の
     // 読み手にも見せる。
     if let Some(reason) = &outcome.degraded {
-        out.push_str(&format!("劣化: {} で答えた({reason})\n", outcome.method.as_str()));
+        out.push_str(&format!("degraded: answered with {} ({reason})\n", outcome.method.as_str()));
     }
     // 捨てたことを黙らない(must/0019 と同じ理由)。落とした件数と、戻す方法を書く。
     if outcome.filtered_low_information > 0 {
         out.push_str(&format!(
-            "低情報チャンク {} 件を応答から落とした(目次の紙面・柱だけ・ページ番号だけ。\
-             残すには include_low_information: true)\n",
+            "low-information chunks dropped from the response: {} (table-of-contents pages, running heads only, page numbers only; \
+             to keep them, set include_low_information: true)\n",
             outcome.filtered_low_information
         ));
     }
     if outcome.results.is_empty() {
-        out.push_str("一致なし。\n");
+        out.push_str("no matches.\n");
         return out;
     }
     for (rank, result) in outcome.results.iter().enumerate() {
         let citation = &result.citation;
         out.push_str(&format!(
-            "\n{}. {}/{}{} 位置 {}\n",
+            "\n{}. {}/{}{} position {}\n",
             rank + 1,
             citation.collection,
             citation.document,
@@ -1392,15 +1405,15 @@ fn render_search(request: &SearchRequest, outcome: &SearchResults) -> String {
             },
             citation.position
         ));
-        out.push_str(&format!("   見出し: {}\n", breadcrumb_path(&citation.breadcrumbs)));
-        out.push_str(&format!("   取得日時: {}\n", format_unix_time(citation.at)));
-        out.push_str(&format!("   チャンク ID: {}\n", result.id));
-        out.push_str(&format!("   得点: {:.4}\n", result.score));
-        out.push_str(&format!("   抜粋: {}\n", result.snippet));
+        out.push_str(&format!("   headings: {}\n", breadcrumb_path(&citation.breadcrumbs)));
+        out.push_str(&format!("   retrieved at: {}\n", format_unix_time(citation.at)));
+        out.push_str(&format!("   chunk ID: {}\n", result.id));
+        out.push_str(&format!("   score: {:.4}\n", result.score));
+        out.push_str(&format!("   snippet: {}\n", result.snippet));
         // 原本(文書そのもの)への道。serve が言った件にだけ出す。相対の道であり、
         // 根は問い合わせ先の serve である。
         if let Some(url) = &result.source_url {
-            out.push_str(&format!("   原本(文書全体): {url}\n"));
+            out.push_str(&format!("   original (whole document): {url}\n"));
         }
     }
     out.push_str(&format!("\n{FETCH_HINT}\n"));
@@ -1413,7 +1426,7 @@ fn render_fetch(object_id: &str, fetched: &Fetched) -> String {
         Fetched::Chunk { text, citation } => {
             let source = match citation {
                 Some(citation) => format!(
-                    "出典: {}/{}{} 位置 {} / 見出し: {} / 取得日時: {}",
+                    "source: {}/{}{} position {} / headings: {} / retrieved at: {}",
                     citation.collection,
                     citation.document,
                     match citation.page {
@@ -1426,19 +1439,19 @@ fn render_fetch(object_id: &str, fetched: &Fetched) -> String {
                 ),
                 // ID で取れても見えに無いことはある(旧版のチャンクなど)。出典を
                 // でっち上げず、そう言う。
-                None => "出典: 見えの索引に無いチャンク(旧版か、collections/ 配下でない \
-                         ref のチャンク)"
+                None => "source: a chunk not in the current view's index (an old version, or a chunk of a ref \
+                         outside collections/)"
                     .to_string(),
             };
-            format!("チャンク {object_id} の全文\n{source}\n---\n{text}\n")
+            format!("full text of chunk {object_id}\n{source}\n---\n{text}\n")
         }
         Fetched::Object { text } => format!(
-            "{object_id} はチャンクではない c1 オブジェクト(doc_rev・注釈など)。\
-             正規形のまま示す。\n---\n{text}\n"
+            "{object_id} is a c1 object that is not a chunk (such as a doc_rev or an annotation); \
+             shown in canonical form.\n---\n{text}\n"
         ),
         Fetched::Binary { bytes } => format!(
-            "{object_id} はテキストでないバイト列({bytes} バイト。PDF の原文 blob など)。\
-             全文は示せない。本文の要るチャンクは search が返す ID で取る。"
+            "{object_id} is bytes that are not text ({bytes} bytes, such as the original blob of a PDF); \
+             its full text cannot be shown; get the chunks you need by the IDs search returns."
         ),
     }
 }
@@ -1446,7 +1459,7 @@ fn render_fetch(object_id: &str, fetched: &Fetched) -> String {
 /// 見出しの入れ子パス(PDF のチャンクは見出しを持たない)。
 fn breadcrumb_path(breadcrumbs: &[String]) -> String {
     if breadcrumbs.is_empty() {
-        return "(なし)".to_string();
+        return "(none)".to_string();
     }
     breadcrumbs.join(" > ")
 }
@@ -1485,7 +1498,7 @@ fn failure(id: &Value, code: i64, message: &str) -> String {
 /// 1 メッセージ 1 行の直列化。c1 の正規形は空白を持たず、制御文字を \u00xx に畳むので、
 /// 本文にどんな改行が混ざっても 1 行に収まる(stdio 転送の要求)。
 fn line_of(value: &Value) -> String {
-    String::from_utf8(c1::to_canonical_bytes(value)).expect("c1 直列化は UTF-8")
+    String::from_utf8(c1::to_canonical_bytes(value)).expect("c1 serialization is UTF-8")
 }
 
 fn object(entries: Vec<(&str, Value)>) -> Value {
@@ -1507,7 +1520,7 @@ mod tests {
     /// 見出しの無いチャンク(PDF)でも、出典の欄が空白のまま残らない。
     #[test]
     fn breadcrumbs_render_as_a_path_or_an_explicit_absence() {
-        assert_eq!(breadcrumb_path(&[]), "(なし)");
+        assert_eq!(breadcrumb_path(&[]), "(none)");
         assert_eq!(
             breadcrumb_path(&["分散設計".to_string(), "世代の整合".to_string()]),
             "分散設計 > 世代の整合"
@@ -1594,7 +1607,7 @@ mod tests {
              {\"name\":\"search\",\"arguments\":{\"query\":\"世代の整合\"}}}",
             )
             .expect("応答");
-        assert!(searched.contains("一致なし"), "{searched}");
+        assert!(searched.contains("no matches"), "{searched}");
         assert!(searched.contains("\"isError\":false"), "{searched}");
 
         let absent = format!("s256:{}", "0".repeat(64));
@@ -1605,7 +1618,7 @@ mod tests {
             ))
             .expect("応答");
         assert!(fetched.contains("\"isError\":true"), "{fetched}");
-        assert!(fetched.contains("持っていない"), "{fetched}");
+        assert!(fetched.contains("does not hold"), "{fetched}");
 
         // 知らないツールと引数の誤りはプロトコルの誤り。
         let unknown_tool = server
@@ -1648,10 +1661,10 @@ mod tests {
         assert_eq!(document_name_error("v1.2-notes"), None, "拡張子でない . は通す");
         for bad in ["", "a/b", "a b", ".hidden", "a?b", "a#b", "a%b", "a\nb"] {
             let error = document_name_error(bad).unwrap_or_else(|| panic!("{bad:?} を通した"));
-            assert!(error.contains("name は文書名"), "{error}");
+            assert!(error.contains("name is the document name"), "{error}");
         }
         let extension = document_name_error("notes.md").expect("拡張子つきは断る");
-        assert!(extension.contains("拡張子なし"), "{extension}");
+        assert!(extension.contains("takes no extension"), "{extension}");
         assert!(document_name_error("notes.PDF").is_some(), "大文字の拡張子も断る");
         let long = "x".repeat(crate::fetch::MAX_NAME_CHARS + 1);
         assert!(document_name_error(&long).is_some(), "長すぎる名前は断る");
@@ -1686,7 +1699,7 @@ mod tests {
         );
         assert!(listed.contains("\"required\":[\"collection\",\"url\"]"), "{listed}");
         // 書ける先は説明文に出る(模型が読むのはここだけである)。
-        assert!(listed.contains("許すのは: notes, web"), "{listed}");
+        assert!(listed.contains("allowed: notes, web"), "{listed}");
         assert!(listed.contains("\"readOnlyHint\":false"), "{listed}");
         // 許していないコレクションはツールの失敗(isError)で、どこなら書けるかを言う。
         let refused = server
@@ -1698,7 +1711,7 @@ mod tests {
             .expect("応答");
         assert!(refused.contains("\"isError\":true"), "{refused}");
         assert!(
-            refused.contains("specs は書き込みを許していない(--writable で許すのは: notes, web)"),
+            refused.contains("specs is not writable (--writable allows: notes, web)"),
             "{refused}"
         );
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -1713,10 +1726,10 @@ mod tests {
             body: b"{\"error\":\"\xe5\xaf\xbe\xe8\xb1\xa1\xe5\xa4\x96\xe3\x81\xae\xe6\x8b\xa1\xe5\xbc\xb5\xe5\xad\x90\"}".to_vec(),
         };
         let error = written_document("PUT /x", refused).expect_err("400 は失敗");
-        assert_eq!(error, "PUT /x が 400 を返した: 対象外の拡張子");
+        assert_eq!(error, "PUT /x returned 400: 対象外の拡張子");
         let plain = Written { status: 502, body: b"bad gateway".to_vec() };
         let error = written_document("POST /y", plain).expect_err("502 は失敗");
-        assert!(error.starts_with("POST /y が 502 を返した: bad gateway"), "{error}");
+        assert!(error.starts_with("POST /y returned 502: bad gateway"), "{error}");
         let ok = Written {
             status: 200,
             body: b"{\"doc_rev\":\"s256:ab\",\"new_objects\":2,\"previous\":null,\"ref_updated\":true}".to_vec(),
@@ -1739,20 +1752,20 @@ mod tests {
         fields.insert("previous".to_string(), Value::Null);
         assert_eq!(
             render_added("notes", "memo", &fields),
-            "入れた: notes/memo(新規。doc_rev s256:11111111…、新規オブジェクト 3)。検索に出る。"
+            "added: notes/memo (new; doc_rev s256:11111111..., new objects 3); it appears in search."
         );
         fields.insert("previous".to_string(), text(&previous));
         assert_eq!(
             render_added("notes", "memo", &fields),
-            "入れた: notes/memo(上書き。前版 s256:22222222…。doc_rev s256:11111111…、\
-             新規オブジェクト 3)。検索に出る。"
+            "added: notes/memo (overwritten; previous version s256:22222222...; \
+             doc_rev s256:11111111..., new objects 3); it appears in search."
         );
         fields.insert("ref_updated".to_string(), Value::Bool(false));
         fields.insert("new_objects".to_string(), Value::Integer(0));
         assert_eq!(
             render_added("notes", "memo", &fields),
-            "入れた: notes/memo(変わらず(同じ内容が既にある)。doc_rev s256:11111111…、\
-             新規オブジェクト 0)。検索に出る。"
+            "added: notes/memo (unchanged (the same content is already there); \
+             doc_rev s256:11111111..., new objects 0); it appears in search."
         );
         // fetch_url は名前・種別・転送後の URL と、HTML なら落とした数を添える。
         fields.insert("ref_updated".to_string(), Value::Bool(true));
@@ -1768,9 +1781,9 @@ mod tests {
         fields.insert("dropped".to_string(), Value::Object(dropped));
         assert_eq!(
             render_fetched_url("web", &fields),
-            "取り込んだ: web/example.com_page(html、final_url http://example.com/page.html、\
-             新規。doc_rev s256:11111111…、新規オブジェクト 2、落とした外部依存 3 件\
-             (images 1・scripts 2))。検索に出る。"
+            "ingested: web/example.com_page (html, final_url http://example.com/page.html, \
+             new; doc_rev s256:11111111..., new objects 2, dropped 3 external dependencies \
+             (images 1, scripts 2)); it appears in search."
         );
     }
 
@@ -1795,7 +1808,7 @@ mod tests {
         let missing =
             std::env::temp_dir().join(format!("uniqnode-absent-{}", std::process::id()));
         let error = self_check(&missing).expect_err("起こせないはず");
-        assert!(error.contains("起こせない"), "{error}");
+        assert!(error.contains("cannot start"), "{error}");
     }
 
     /// 空のストアを直接開いた MCP のサーバ(serve と同じ形の ApiContext を組む。

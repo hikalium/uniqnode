@@ -190,35 +190,35 @@ fn the_handshake_lists_the_tools_and_search_answers_with_citations() {
     // 問い方の手引きはツールの説明にしか無い(モデルが読むのはここだけである)。
     // 実データで測った差(MCP (uuid:dacd474d-424a-45d5-a278-766fc2465dd9) の
     // 「公開するツール」)を、良い例と悪い例つきで載せていることを確かめる。
-    assert!(listed.contains("英語で問い"), "問い方の手引きが説明に無い: {listed}");
+    assert!(listed.contains("Ask in English"), "問い方の手引きが説明に無い: {listed}");
     assert!(
         listed.contains("which field reports the period at which the HPET main counter increments"),
         "良い例が説明に無い: {listed}"
     );
     assert!(listed.contains("高精度イベントタイマ"), "悪い例が説明に無い: {listed}");
-    assert!(listed.contains("日英を併記"), "訳が分からないときの逃げ道が説明に無い: {listed}");
+    assert!(listed.contains("both Japanese and English"), "訳が分からないときの逃げ道が説明に無い: {listed}");
 
     // (3) search。出典が全部そろっていること(完了条件は「出典付きで答えられる」で
     // あり、出典を欠いた応答は用を成さない)。
     let searched = mcp.call(2, "search", "{\"query\":\"世代の整合\"}");
     assert!(searched.contains("\"id\":2"), "{searched}");
     assert!(searched.contains("\"isError\":false"), "{searched}");
-    assert!(searched.contains("方式 bm25"), "実際に使った方式が読めるべき: {searched}");
+    assert!(searched.contains("method bm25"), "実際に使った方式が読めるべき: {searched}");
     assert!(searched.contains("notes/search_ja"), "文書名が出典に無い: {searched}");
-    assert!(searched.contains("位置 1"), "チャンクの位置が出典に無い: {searched}");
+    assert!(searched.contains("position 1"), "チャンクの位置が出典に無い: {searched}");
     assert!(
-        searched.contains("見出し: 分散設計 > 世代の整合"),
+        searched.contains("headings: 分散設計 > 世代の整合"),
         "見出しが出典に無い: {searched}"
     );
-    assert!(searched.contains("チャンク ID: s256:"), "チャンク ID が出典に無い: {searched}");
+    assert!(searched.contains("chunk ID: s256:"), "チャンク ID が出典に無い: {searched}");
     assert!(
-        searched.contains("抜粋: 転置索引は導出データであり"),
+        searched.contains("snippet: 転置索引は導出データであり"),
         "本文の抜粋が無い: {searched}"
     );
     // 取得日時: ref レコードの at。今この場で取り込んだので、日付は今日である。
     let today = uniqnode::clock::format_unix_time(uniqnode::clock::unix_now());
     assert!(
-        searched.contains(&format!("取得日時: {}", &today[..10])),
+        searched.contains(&format!("retrieved at: {}", &today[..10])),
         "取得日時が今日の取り込みを指していない(期待する日付 {}): {searched}",
         &today[..10]
     );
@@ -232,8 +232,8 @@ fn the_handshake_lists_the_tools_and_search_answers_with_citations() {
         fetched.contains("世代の整合はオブジェクト数と署名者ごとの最終列番号"),
         "全文が返っていない: {fetched}"
     );
-    assert!(fetched.contains("出典: notes/search_ja"), "全文にも出典が要る: {fetched}");
-    assert!(fetched.contains("取得日時: 20"), "{fetched}");
+    assert!(fetched.contains("source: notes/search_ja"), "全文にも出典が要る: {fetched}");
+    assert!(fetched.contains("retrieved at: 20"), "{fetched}");
 
     // 起動の知らせは標準エラーへ出る(標準出力の純度は finish が検査する)。
     let exit = mcp.finish();
@@ -308,7 +308,7 @@ fn malformed_requests_get_json_rpc_errors_and_absent_ids_get_tool_errors() {
     let absent = format!("s256:{}", "a".repeat(64));
     let missing = mcp.call(7, "fetch", &format!("{{\"id\":\"{absent}\"}}"));
     assert!(missing.contains("\"isError\":true"), "{missing}");
-    assert!(missing.contains("持っていない"), "{missing}");
+    assert!(missing.contains("does not hold"), "{missing}");
     assert!(!missing.contains("\"error\""), "ツールの失敗は JSON-RPC の誤りではない: {missing}");
 
     mcp.finish();
@@ -326,10 +326,10 @@ fn a_degraded_search_says_so_through_mcp_and_on_stderr() {
     // (1) ベクトルが 1 件も無い段階。既定の方式(融合)を求めても BM25 で答え、
     // 理由を言う。
     let first = mcp.call(1, "search", "{\"query\":\"世代の整合\"}");
-    assert!(first.contains("方式 bm25"), "劣化後の方式が読めるべき: {first}");
-    assert!(first.contains("劣化:"), "劣化を黙っている: {first}");
-    assert!(first.contains("ベクトルが 1 件も無い"), "劣化の理由が読めるべき: {first}");
-    assert!(first.contains("チャンク ID: s256:"), "劣化しても BM25 の結果は返るべき: {first}");
+    assert!(first.contains("method bm25"), "劣化後の方式が読めるべき: {first}");
+    assert!(first.contains("degraded:"), "劣化を黙っている: {first}");
+    assert!(first.contains("there are no vectors of model"), "劣化の理由が読めるべき: {first}");
+    assert!(first.contains("chunk ID: s256:"), "劣化しても BM25 の結果は返るべき: {first}");
 
     // (2) ベクトルはあるが埋め込みサーバに届かない段階。ベクトルはストアの外の導出
     // データなので、MCP を止めずに書ける。
@@ -345,13 +345,13 @@ fn a_degraded_search_says_so_through_mcp_and_on_stderr() {
     cache.extend(vec![(chunk_id, vector)]).expect("write cache");
 
     let second = mcp.call(2, "search", "{\"query\":\"世代の整合\"}");
-    assert!(second.contains("方式 bm25"), "{second}");
+    assert!(second.contains("method bm25"), "{second}");
     assert!(second.contains("127.0.0.1:1"), "どのサーバに届かなかったかを言うべき: {second}");
-    assert!(second.contains("接続できない"), "劣化の理由が読めるべき: {second}");
+    assert!(second.contains("cannot connect to"), "劣化の理由が読めるべき: {second}");
 
     // 方式を明示して BM25 を求めたときは、そもそも埋め込みを試さないので劣化もない。
     let third = mcp.call(3, "search", "{\"query\":\"世代の整合\",\"method\":\"bm25\"}");
-    assert!(!third.contains("劣化:"), "劣化していないのに理由を出さない: {third}");
+    assert!(!third.contains("degraded:"), "劣化していないのに理由を出さない: {third}");
 
     // 劣化は標準エラーにも残る(応答を読まない運用者にも見えるように)。
     let exit = mcp.finish();
@@ -388,7 +388,7 @@ fn pdf_citations_carry_the_page_number_through_mcp() {
         "{\"query\":\"Page two\",\"top_k\":1,\"include_low_information\":true}",
     );
     assert!(searched.contains("specs/three_pages p.2"), "ページ番号が出典に無い: {searched}");
-    assert!(searched.contains("見出し: (なし)"), "見出しの不在を言うべき: {searched}");
+    assert!(searched.contains("headings: (none)"), "見出しの不在を言うべき: {searched}");
     mcp.finish();
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
@@ -402,9 +402,9 @@ fn the_search_tool_says_how_many_low_information_chunks_it_dropped() {
     let mut mcp = McpProcess::start(&dir, &[]);
     // 「索引の構築」は目次の節(点線の紙面)と本文の節の両方に現れる。
     let dropped = mcp.call(1, "search", "{\"query\":\"索引の構築\",\"top_k\":10}");
-    assert!(dropped.contains("1 件"), "本文の節だけが残るべき: {dropped}");
+    assert!(dropped.contains("results 1"), "本文のセクションだけが残るべき: {dropped}");
     assert!(
-        dropped.contains("低情報チャンク 1 件を応答から落とした"),
+        dropped.contains("low-information chunks dropped from the response: 1"),
         "落とした件数を言うべき: {dropped}"
     );
     assert!(
@@ -417,11 +417,11 @@ fn the_search_tool_says_how_many_low_information_chunks_it_dropped() {
         "search",
         "{\"query\":\"索引の構築\",\"top_k\":10,\"include_low_information\":true}",
     );
-    assert!(kept.contains("2 件"), "目次の節も返るべき: {kept}");
-    assert!(!kept.contains("落とした"), "落としていないのに言わない: {kept}");
+    assert!(kept.contains("results 2"), "目次のセクションも返るべき: {kept}");
+    assert!(!kept.contains("dropped"), "落としていないのに言わない: {kept}");
     let exit = mcp.finish();
     assert!(
-        exit.stderr.contains("低情報チャンク 1 件を応答から落とした"),
+        exit.stderr.contains("low-information chunks dropped from the response: 1"),
         "標準エラーにも残すべき: {}",
         exit.stderr
     );
@@ -435,10 +435,10 @@ fn the_search_tool_honours_collection_and_top_k() {
     let dir = store_with("mcp-arguments", &["search_ja.md", "search_en.md"]);
     let mut mcp = McpProcess::start(&dir, &[]);
     let all = mcp.call(1, "search", "{\"query\":\"の\",\"top_k\":2}");
-    assert!(all.contains("2 件"), "top_k で件数を絞れるべき: {all}");
+    assert!(all.contains("results 2"), "top_k で件数を絞れるべき: {all}");
     let narrowed = mcp.call(2, "search", "{\"query\":\"世代の整合\",\"collection\":\"absent\"}");
-    assert!(narrowed.contains("一致なし"), "存在しないコレクションは空振り: {narrowed}");
-    assert!(narrowed.contains("コレクション absent"), "絞り込みの条件を書き戻すべき: {narrowed}");
+    assert!(narrowed.contains("no matches"), "存在しないコレクションは空振り: {narrowed}");
+    assert!(narrowed.contains("collection absent"), "絞り込みの条件を書き戻すべき: {narrowed}");
     mcp.finish();
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
@@ -452,8 +452,8 @@ const CLAUDE_CODE_INITIALIZE: &str = "{\"method\":\"initialize\",\"params\":\
 
 /// initialize の応答に出る表示名。自己置換の検査は、この文字列を同じ長さの別の文字列に
 /// 差し替えた複製を「新しいイメージ」として置き、応答がどちらから来たのかを見る。
-const SERVER_TITLE: &str = "uniqnode RAG ストレージ";
-const PATCHED_TITLE: &str = "uniqnode NEW ストレージ";
+const SERVER_TITLE: &str = "uniqnode RAG storage";
+const PATCHED_TITLE: &str = "uniqnode NEW storage";
 
 /// CLI を 1 回動かして結果をそのまま返す(失敗する経路を検査する側で読むため)。
 fn cli_output(arguments: &[&str]) -> std::process::Output {
@@ -483,16 +483,16 @@ fn the_forwarding_form_answers_through_serve_and_names_the_cause_when_serve_is_d
     // 検索。整形はストアを直接開く形と同じ関数を通るので、出典の見え方も同じである。
     let searched = mcp.call(2, "search", "{\"query\":\"世代の整合\"}");
     assert!(searched.contains("\"isError\":false"), "{searched}");
-    assert!(searched.contains("方式 bm25"), "{searched}");
+    assert!(searched.contains("method bm25"), "{searched}");
     assert!(searched.contains("notes/search_ja"), "文書名が出典に無い: {searched}");
-    assert!(searched.contains("位置 1"), "{searched}");
+    assert!(searched.contains("position 1"), "{searched}");
     assert!(
-        searched.contains("見出し: 分散設計 > 世代の整合"),
+        searched.contains("headings: 分散設計 > 世代の整合"),
         "見出しが出典に無い: {searched}"
     );
-    assert!(searched.contains("チャンク ID: s256:"), "{searched}");
-    assert!(searched.contains("取得日時: 20"), "取得日時が出典に無い: {searched}");
-    assert!(searched.contains("抜粋: 転置索引は導出データであり"), "{searched}");
+    assert!(searched.contains("chunk ID: s256:"), "{searched}");
+    assert!(searched.contains("retrieved at: 20"), "取得日時が出典に無い: {searched}");
+    assert!(searched.contains("snippet: 転置索引は導出データであり"), "{searched}");
 
     // 全文の取得。出典(取得日時を含む)は GET /v1/objects/{id}/citation から組む。
     let chunk_id = first_chunk_id(&searched);
@@ -502,37 +502,37 @@ fn the_forwarding_form_answers_through_serve_and_names_the_cause_when_serve_is_d
         fetched.contains("世代の整合はオブジェクト数と署名者ごとの最終列番号"),
         "全文が返っていない: {fetched}"
     );
-    assert!(fetched.contains("出典: notes/search_ja"), "全文にも出典が要る: {fetched}");
-    assert!(fetched.contains("取得日時: 20"), "{fetched}");
+    assert!(fetched.contains("source: notes/search_ja"), "全文にも出典が要る: {fetched}");
+    assert!(fetched.contains("retrieved at: 20"), "{fetched}");
 
     // 持っていない ID は、転送する形でも「持っていない」と言う(404 の読み替え)。
     let absent = format!("s256:{}", "a".repeat(64));
     let missing = mcp.call(4, "fetch", &format!("{{\"id\":\"{absent}\"}}"));
     assert!(missing.contains("\"isError\":true"), "{missing}");
-    assert!(missing.contains("持っていない"), "{missing}");
+    assert!(missing.contains("does not hold"), "{missing}");
 
     // serve を止める。以後は黙って失敗せず、原因と起動コマンドを言う(must/0022)。
     drop(server);
     let unreachable = mcp.call(5, "search", "{\"query\":\"世代の整合\"}");
     assert!(unreachable.contains("\"isError\":true"), "{unreachable}");
-    assert!(unreachable.contains("serve に届かない"), "{unreachable}");
-    assert!(unreachable.contains("接続できない"), "原因を言うべき: {unreachable}");
+    assert!(unreachable.contains("cannot reach a running serve"), "{unreachable}");
+    assert!(unreachable.contains("cannot connect to"), "原因を言うべき: {unreachable}");
     assert!(
         unreachable.contains("uniqnode serve"),
         "起動コマンドを添えるべき: {unreachable}"
     );
     let unreachable_fetch = mcp.call(6, "fetch", &format!("{{\"id\":\"{chunk_id}\"}}"));
-    assert!(unreachable_fetch.contains("serve に届かない"), "{unreachable_fetch}");
+    assert!(unreachable_fetch.contains("cannot reach a running serve"), "{unreachable_fetch}");
 
     // 同じ理由は標準エラーにも残る(応答を読まない運用者にも見えるように)。
     let exit = mcp.finish();
     assert!(
-        exit.stderr.contains("serve に届かない"),
+        exit.stderr.contains("cannot reach a running serve"),
         "届かない理由が標準エラーに無い: {}",
         exit.stderr
     );
     assert!(
-        exit.stderr.contains("へ転送する形(ストアのロックを取らない)"),
+        exit.stderr.contains("forwarding to http://"),
         "どの形で起きたのかを起動時に言うべき: {}",
         exit.stderr
     );
@@ -563,7 +563,7 @@ fn the_forwarding_form_holds_no_store_lock_so_the_cli_can_ingest_and_embed() {
     let error = String::from_utf8_lossy(&embedded.stderr);
     assert!(out.contains("cache:"), "ストアを開けていない: {out} {error}");
     assert!(
-        !error.contains("別プロセスが開いている"),
+        !error.contains("is open in another process"),
         "MCP がロックを持っている: {error}"
     );
 
@@ -586,16 +586,16 @@ fn the_local_form_equips_the_reranker_and_says_when_it_cannot_reach_it() {
     // 当たる問いを選ぶ。
     let searched = mcp.call(1, "search", "{\"query\":\"レプリカ 世代\"}");
     assert!(searched.contains("\"isError\":false"), "{searched}");
-    assert!(searched.contains("2 件"), "候補が 2 件無いと取り直しを試みない: {searched}");
-    assert!(searched.contains("劣化:"), "届かないリランカーを黙っている: {searched}");
+    assert!(searched.contains("results 2"), "候補が 2 件無いと取り直しを試みない: {searched}");
+    assert!(searched.contains("degraded:"), "届かないリランカーを黙っている: {searched}");
     assert!(
         searched.contains("127.0.0.1:1"),
         "どのリランカーに届かなかったかを言うべき: {searched}"
     );
-    assert!(searched.contains("接続できない"), "劣化の理由が読めるべき: {searched}");
+    assert!(searched.contains("cannot connect to"), "劣化の理由が読めるべき: {searched}");
     // 取り直せなくても一次検索の結果はそのまま返る(検索を失敗させない)。
-    assert!(searched.contains("方式 bm25"), "{searched}");
-    assert!(searched.contains("チャンク ID: s256:"), "{searched}");
+    assert!(searched.contains("method bm25"), "{searched}");
+    assert!(searched.contains("chunk ID: s256:"), "{searched}");
 
     // 装備したことは起動時に標準エラーへ言う(serve と同じ行)。
     let exit = mcp.finish();
@@ -625,7 +625,7 @@ fn the_forwarding_form_refuses_a_reranker_it_cannot_equip() {
         assert_eq!(output.status.code(), Some(2), "{flag} を受けて起動している: {error}");
         assert!(output.stdout.is_empty(), "標準出力はプロトコル専用: {:?}", output.stdout);
         assert!(
-            error.contains(&format!("--serve-url と {flag} は併用しない")),
+            error.contains(&format!("--serve-url and {flag} are not used together")),
             "断りの理由が標準エラーに無い: {error}"
         );
     }
@@ -652,7 +652,7 @@ fn the_forwarding_form_refuses_an_embedder_it_cannot_equip() {
     assert_eq!(output.status.code(), Some(2), "--embedder を受けて起動している: {error}");
     assert!(output.stdout.is_empty(), "標準出力はプロトコル専用: {:?}", output.stdout);
     assert!(
-        error.contains("--serve-url と --embedder は併用しない"),
+        error.contains("--serve-url and --embedder are not used together"),
         "断りの理由が標準エラーに無い: {error}"
     );
     std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -674,7 +674,7 @@ fn embed_refuses_the_reranker_arguments_instead_of_ignoring_them() {
         assert_eq!(output.status.code(), Some(2), "{flag} を受けて進んでいる: {out} {error}");
         assert!(out.is_empty(), "断る前に仕事を始めている: {out}");
         assert!(
-            error.contains(&format!("{flag} は embed の引数ではない")),
+            error.contains(&format!("{flag} is not an argument of embed")),
             "断りの理由が標準エラーに無い: {error}"
         );
     }
@@ -727,19 +727,19 @@ fn the_server_execs_a_healthy_new_binary_and_refuses_a_broken_one() {
 
     let exit = mcp.finish();
     assert!(
-        exit.stderr.contains("自己検査に落ちた"),
+        exit.stderr.contains("failed its self-check"),
         "壊れたイメージを断った記録が無い: {}",
         exit.stderr
     );
     assert!(
-        exit.stderr.contains("exec で差し替える"),
+        exit.stderr.contains("replacing itself with exec"),
         "差し替えの記録が無い(黙って入れ替えない): {}",
         exit.stderr
     );
     // 新しいイメージは initialize を受けた事実を環境変数で引き継ぐ(Claude Code は
     // 再送しない)。
     assert!(
-        exit.stderr.contains("ハンドシェイク済みとして起動した(相手の protocol 2025-11-25、client claude-code/2.1.232)"),
+        exit.stderr.contains("started with the handshake already done (peer protocol 2025-11-25, client claude-code/2.1.232)"),
         "ハンドシェイクの引き継ぎが無い: {}",
         exit.stderr
     );
@@ -790,10 +790,10 @@ fn the_write_tools_are_listed_only_when_a_collection_is_writable() {
         ["search", "fetch", "add_document", "fetch_url"],
         "--writable があれば 4 本: {listed}"
     );
-    assert!(listed.contains("許すのは: notes"), "書ける先が説明に無い: {listed}");
+    assert!(listed.contains("allowed: notes"), "書ける先が説明に無い: {listed}");
     let exit = writable.finish();
     assert!(
-        exit.stderr.contains("add_document・fetch_url(書き込みを許す: notes)"),
+        exit.stderr.contains("add_document, fetch_url (writes allowed to: notes)"),
         "起動の知らせに書ける先が無い: {}",
         exit.stderr
     );
@@ -813,7 +813,7 @@ fn the_write_tools_are_listed_only_when_a_collection_is_writable() {
     let output = cli_output(&["viewer", dir.to_str().expect("utf-8"), "127.0.0.1:0", "--writable", "notes"]);
     assert_eq!(output.status.code(), Some(2), "viewer が --writable を受けて起動している");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("--writable はビューワの引数ではない"),
+        String::from_utf8_lossy(&output.stderr).contains("--writable is not an argument of viewer"),
         "断りの理由が標準エラーに無い: {}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -838,12 +838,12 @@ fn add_document_puts_markdown_into_a_writable_collection_and_search_finds_it() {
          \"# HPET の覚え書き\\n\\nHPET main counter の周期は GCAP_ID の COUNTER_CLK_PERIOD が言う。\"}",
     );
     assert!(added.contains("\"isError\":false"), "{added}");
-    assert!(added.contains("入れた: notes/hpet-memo(新規。doc_rev s256:"), "{added}");
-    assert!(added.contains("検索に出る"), "{added}");
+    assert!(added.contains("added: notes/hpet-memo (new; doc_rev s256:"), "{added}");
+    assert!(added.contains("it appears in search"), "{added}");
 
     let searched = mcp.call(2, "search", "{\"query\":\"HPET main counter\",\"collection\":\"notes\"}");
-    assert!(searched.contains("notes/hpet-memo 位置 0"), "入れた文書が検索に出ない: {searched}");
-    assert!(searched.contains("見出し: HPET の覚え書き"), "markdown の見出しが出典に無い: {searched}");
+    assert!(searched.contains("notes/hpet-memo position 0"), "入れた文書が検索に出ない: {searched}");
+    assert!(searched.contains("headings: HPET の覚え書き"), "markdown の見出しが出典に無い: {searched}");
     assert!(searched.contains("COUNTER_CLK_PERIOD"), "本文の抜粋が無い: {searched}");
 
     // 同じ内容は同じ ID に落ち、何も変わらない。
@@ -853,8 +853,8 @@ fn add_document_puts_markdown_into_a_writable_collection_and_search_finds_it() {
         "{\"collection\":\"notes\",\"name\":\"hpet-memo\",\"text\":\
          \"# HPET の覚え書き\\n\\nHPET main counter の周期は GCAP_ID の COUNTER_CLK_PERIOD が言う。\"}",
     );
-    assert!(same.contains("変わらず(同じ内容が既にある)"), "{same}");
-    assert!(same.contains("新規オブジェクト 0"), "{same}");
+    assert!(same.contains("unchanged (the same content is already there)"), "{same}");
+    assert!(same.contains("new objects 0"), "{same}");
 
     // 違う内容は上書きで、前版の doc_rev を言う。素文(media text)も受ける。
     let overwritten = mcp.call(
@@ -863,10 +863,10 @@ fn add_document_puts_markdown_into_a_writable_collection_and_search_finds_it() {
         "{\"collection\":\"notes\",\"name\":\"hpet-memo\",\"media\":\"text\",\
          \"text\":\"HPET の周期はフェムト秒単位で GCAP_ID に載る。\"}",
     );
-    assert!(overwritten.contains("上書き。前版 s256:"), "{overwritten}");
+    assert!(overwritten.contains("overwritten; previous version s256:"), "{overwritten}");
     let searched = mcp.call(5, "search", "{\"query\":\"フェムト秒\",\"collection\":\"notes\"}");
     assert!(searched.contains("notes/hpet-memo"), "上書き後の本文が検索に出ない: {searched}");
-    assert!(searched.contains("見出し: (なし)"), "素文は見出しを持たない: {searched}");
+    assert!(searched.contains("headings: (none)"), "素文は見出しを持たない: {searched}");
 
     // 引数の誤りは要求の組み立ての誤り(-32602)。ストアには何も書かない。
     let with_extension = mcp.call(
@@ -875,7 +875,7 @@ fn add_document_puts_markdown_into_a_writable_collection_and_search_finds_it() {
         "{\"collection\":\"notes\",\"name\":\"memo.md\",\"text\":\"x\"}",
     );
     assert!(with_extension.contains("\"code\":-32602"), "{with_extension}");
-    assert!(with_extension.contains("拡張子なし"), "{with_extension}");
+    assert!(with_extension.contains("takes no extension"), "{with_extension}");
     let no_text = mcp.call(7, "add_document", "{\"collection\":\"notes\",\"name\":\"memo\"}");
     assert!(no_text.contains("\"code\":-32602"), "{no_text}");
     assert!(no_text.contains("text"), "{no_text}");
@@ -912,7 +912,7 @@ fn add_document_refuses_a_collection_that_is_not_writable_without_touching_the_s
     assert!(refused.contains("\"isError\":true"), "{refused}");
     assert!(!refused.contains("\"error\""), "ツールの失敗は JSON-RPC の誤りではない: {refused}");
     assert!(
-        refused.contains("specs は書き込みを許していない(--writable で許すのは: notes)"),
+        refused.contains("specs is not writable (--writable allows: notes)"),
         "理由と書ける先を言うべき: {refused}"
     );
     let refused_fetch = mcp.call(
@@ -921,7 +921,7 @@ fn add_document_refuses_a_collection_that_is_not_writable_without_touching_the_s
         "{\"collection\":\"specs\",\"url\":\"http://127.0.0.1:1/x\"}",
     );
     assert!(refused_fetch.contains("\"isError\":true"), "{refused_fetch}");
-    assert!(refused_fetch.contains("specs は書き込みを許していない"), "{refused_fetch}");
+    assert!(refused_fetch.contains("specs is not writable"), "{refused_fetch}");
 
     let refs_after = body_text(&simple(&server.address, "GET", "/v1/refs", b""));
     assert!(!refs_after.contains("collections/specs/"), "断ったのに ref ができている: {refs_after}");
@@ -930,7 +930,7 @@ fn add_document_refuses_a_collection_that_is_not_writable_without_touching_the_s
     // 断りは標準エラーにも残る(応答を読まない運用者にも見えるように)。
     let exit = mcp.finish();
     assert!(
-        exit.stderr.contains("specs は書き込みを許していない"),
+        exit.stderr.contains("specs is not writable"),
         "断りが標準エラーに無い: {}",
         exit.stderr
     );
@@ -966,22 +966,22 @@ fn fetch_url_ingests_html_from_a_local_site_and_reports_what_it_dropped() {
         &format!("{{\"collection\":\"web\",\"url\":\"{url}\",\"name\":\"page\"}}"),
     );
     assert!(fetched.contains("\"isError\":false"), "{fetched}");
-    assert!(fetched.contains("取り込んだ: web/page(html、final_url "), "{fetched}");
+    assert!(fetched.contains("ingested: web/page (html, final_url "), "{fetched}");
     assert!(fetched.contains(&url), "転送後の URL を言うべき: {fetched}");
-    assert!(fetched.contains("新規。doc_rev s256:"), "{fetched}");
+    assert!(fetched.contains("new; doc_rev s256:"), "{fetched}");
     assert!(
-        fetched.contains("落とした外部依存 3 件(images 1・scripts 2)"),
+        fetched.contains("dropped 3 external dependencies (images 1, scripts 2)"),
         "落とした数を言うべき: {fetched}"
     );
     let searched = mcp.call(2, "search", "{\"query\":\"取り込みの本文\",\"collection\":\"web\"}");
-    assert!(searched.contains("web/page 位置 0"), "取り込んだ紙面が検索に出ない: {searched}");
-    assert!(searched.contains("見出し: 紙面 > 節"), "{searched}");
+    assert!(searched.contains("web/page position 0"), "取り込んだ紙面が検索に出ない: {searched}");
+    assert!(searched.contains("headings: 紙面 > 節"), "{searched}");
 
     // name を省くと URL から導く(ホストとパスを 1 語に)。
     let derived = mcp.call(3, "fetch_url", &format!("{{\"collection\":\"web\",\"url\":\"{url}\"}}"));
     assert!(derived.contains("\"isError\":false"), "{derived}");
     let host = site.address.replace(':', "_");
-    assert!(derived.contains(&format!("取り込んだ: web/{host}_page(html")), "{derived}");
+    assert!(derived.contains(&format!("ingested: web/{host}_page (html")), "{derived}");
 
     // 404 は serve が 502 で言う理由をそのまま伝える(黙って飲まない)。
     let missing = mcp.call(
@@ -990,7 +990,7 @@ fn fetch_url_ingests_html_from_a_local_site_and_reports_what_it_dropped() {
         &format!("{{\"collection\":\"web\",\"url\":\"{}\"}}", site.url("/absent")),
     );
     assert!(missing.contains("\"isError\":true"), "{missing}");
-    assert!(missing.contains("が 502 を返した"), "{missing}");
+    assert!(missing.contains("returned 502"), "{missing}");
     assert!(missing.contains("404"), "相手の状態を言うべき: {missing}");
     // file: は取りに行く前に断る(要求の誤り)。
     let file = mcp.call(5, "fetch_url", "{\"collection\":\"web\",\"url\":\"file:///etc/hosts\"}");
@@ -1013,16 +1013,16 @@ fn the_local_form_adds_documents_too() {
         "{\"collection\":\"notes\",\"name\":\"local-memo\",\"text\":\"# 直接開く形\\n\\nロックを持ったまま書く。\"}",
     );
     assert!(added.contains("\"isError\":false"), "{added}");
-    assert!(added.contains("入れた: notes/local-memo(新規。doc_rev s256:"), "{added}");
+    assert!(added.contains("added: notes/local-memo (new; doc_rev s256:"), "{added}");
     let searched = mcp.call(2, "search", "{\"query\":\"ロックを持ったまま\",\"collection\":\"notes\"}");
-    assert!(searched.contains("notes/local-memo 位置 0"), "{searched}");
-    assert!(searched.contains("見出し: 直接開く形"), "{searched}");
+    assert!(searched.contains("notes/local-memo position 0"), "{searched}");
+    assert!(searched.contains("headings: 直接開く形"), "{searched}");
     let refused = mcp.call(
         3,
         "add_document",
         "{\"collection\":\"specs\",\"name\":\"x\",\"text\":\"y\"}",
     );
-    assert!(refused.contains("specs は書き込みを許していない"), "{refused}");
+    assert!(refused.contains("specs is not writable"), "{refused}");
     // 標準出力の純度は finish が検査する(書き込みの記録も標準エラーへ出ている)。
     let exit = mcp.finish();
     assert!(exit.stderr.contains("uniqnode: mcp:"), "{}", exit.stderr);

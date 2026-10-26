@@ -41,7 +41,7 @@ impl Viewer {
         let (address, path) = http::split_http_url(serve_url)?;
         if path != "/" {
             return Err(format!(
-                "{serve_url}: serve の根を指す URL であるべき(例 {DEFAULT_SERVE_URL})"
+                "{serve_url}: must be a URL to the root of serve (for example {DEFAULT_SERVE_URL})"
             ));
         }
         Ok(Viewer {
@@ -59,8 +59,8 @@ impl Viewer {
     /// 読んだ者が次の手を打てる形で言う。must/0022)。
     fn unreachable(&self, cause: &str) -> String {
         format!(
-            "走っている serve に届かない({}): {cause}。ビューワは自分でストアを開かないので、\
-             先に serve を起こす: uniqnode serve {} {}",
+            "cannot reach a running serve ({}): {cause}; the viewer does not open the store itself, \
+             so start serve first: uniqnode serve {} {}",
             self.url, self.data_dir, self.address
         )
     }
@@ -169,9 +169,9 @@ fn not_found(path: &str) -> Response {
     Response::text(
         404,
         &format!(
-            "{path} はビューワの口ではない(この頁が使うのは / と \
-             /v1/status・/v1/refs・/v1/search・\
-             /v1/objects/{{id}}[/citation|/rendition[/{{別名}}]] だけである)\n"
+            "{path} is not a viewer endpoint (this page uses only / and \
+             /v1/status, /v1/refs, /v1/search, \
+             /v1/objects/{{id}}[/citation|/rendition[/{{alias}}]])\n"
         ),
     )
 }

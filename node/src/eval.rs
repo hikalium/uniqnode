@@ -116,11 +116,11 @@ impl Retrieval for HybridRetrieval<'_> {
             );
         if outcome.method != self.method {
             panic!(
-                "方式 {} を測ろうとしたが {} に劣化した({})。劣化した順位を方式の数値として\
-                 記録してはならない",
+                "tried to measure method {} but it degraded to {} ({}); a degraded ranking must not \
+                 be recorded as the method's figures",
                 self.method.as_str(),
                 outcome.method.as_str(),
-                outcome.degraded.unwrap_or_else(|| "理由なし".to_string())
+                outcome.degraded.unwrap_or_else(|| "no reason given".to_string())
             );
         }
         outcome
@@ -265,7 +265,7 @@ impl EvalReport {
             .cutoffs
             .iter()
             .position(|cutoff| *cutoff == k)
-            .unwrap_or_else(|| panic!("Recall@{k} は評価していない(評価した k: {:?})", self.cutoffs));
+            .unwrap_or_else(|| panic!("Recall@{k} was not evaluated (evaluated k: {:?})", self.cutoffs));
         self.mean_recalls[position]
     }
 
@@ -304,7 +304,7 @@ impl EvalReport {
         self.queries
             .iter()
             .find(|outcome| outcome.query == query)
-            .unwrap_or_else(|| panic!("クエリ {query:?} は評価対象にない"))
+            .unwrap_or_else(|| panic!("query {query:?} is not among the evaluated queries"))
     }
 
     /// 失敗時に読む内訳(should/0125: 失敗が修理の物語を語る)。平均のあとに、クエリ
@@ -323,30 +323,30 @@ impl EvalReport {
         let widest = self.cutoffs.iter().copied().max().unwrap_or(0);
         let missed = self.missed_queries(widest);
         let mut lines = vec![format!(
-            "方式 {}: {} クエリ、取りこぼし {}/{}(@{})、MRR {:.3}、{}",
+            "method {}: {} queries, missed {}/{} (@{}), MRR {:.3}, {}",
             self.method,
             self.queries.len(),
             missed.len(),
             self.queries.len(),
             widest,
             self.mean_reciprocal_rank,
-            averages.join("、")
+            averages.join(", ")
         )];
         if !missed.is_empty() {
-            lines.push(format!("  取りこぼした問い: {}", missed.join(" / ")));
+            lines.push(format!("  missed queries: {}", missed.join(" / ")));
         }
         for outcome in &self.queries {
             let place = match outcome.first_relevant_rank {
-                Some(rank) => format!("{rank} 位"),
-                None => "圏外".to_string(),
+                Some(rank) => format!("rank {rank}"),
+                None => "not ranked".to_string(),
             };
             let ranked = if outcome.ranked.is_empty() {
-                "(空振り)".to_string()
+                "(no results)".to_string()
             } else {
                 outcome.ranked.join(" > ")
             };
             lines.push(format!(
-                "  [{place}] {:?} 正解 {} / 返り値 {ranked}",
+                "  [{place}] {:?} relevant {} / returned {ranked}",
                 outcome.query,
                 outcome.relevant.join(", ")
             ));
@@ -485,13 +485,13 @@ mod tests {
         let method = FixedRanking { label: "fixed", ranking: names(&["doc#0", "doc#2"]) };
         let report = evaluate(&method, &cases, &[1usize, 2]);
         let detail = report.detail();
-        assert!(detail.contains("方式 fixed"), "{detail}");
+        assert!(detail.contains("method fixed"), "{detail}");
         assert!(detail.contains("MRR 0.250"), "平均が読めるべき: {detail}");
         assert!(detail.contains("Recall@1 0.000"), "{detail}");
         assert!(detail.contains("Recall@2 0.500"), "{detail}");
-        assert!(detail.contains("[2 位] \"問い\" 正解 doc#2"), "{detail}");
-        assert!(detail.contains("返り値 doc#0 > doc#2"), "実際の並びが読めるべき: {detail}");
-        assert!(detail.contains("[圏外] \"圏外の問い\" 正解 doc#9"), "{detail}");
+        assert!(detail.contains("[rank 2] \"問い\" relevant doc#2"), "{detail}");
+        assert!(detail.contains("returned doc#0 > doc#2"), "実際の並びが読めるべき: {detail}");
+        assert!(detail.contains("[not ranked] \"圏外の問い\" relevant doc#9"), "{detail}");
         // 内訳の引き当ても名前で行える。
         assert_eq!(report.outcome_of("問い").first_relevant_rank, Some(2));
         assert_eq!(report.outcome_of("圏外の問い").first_relevant_rank, None);

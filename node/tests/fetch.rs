@@ -396,7 +396,7 @@ fn fetch_refuses_file_and_ftp_urls_with_400() {
     }
     let response = post_fetch(&server, "site", "{\"name\":\"x\"}");
     assert_eq!(response.status, 400, "{}", body_text(&response));
-    assert!(body_text(&response).contains("url がない"));
+    assert!(body_text(&response).contains("no url"));
     let response = post_fetch(
         &server,
         "site",
@@ -638,7 +638,7 @@ fn cli_fetch_ingests_into_a_stopped_store_with_the_same_shape() {
         .output()
         .expect("run fetch");
     assert!(!output.status.success(), "file: で成功してはならない");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("http と https だけ"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("only http and https"));
     // 知らない引数は usage で落ちる。
     let output = Command::new(binary())
         .args([
@@ -677,7 +677,7 @@ fn serve_without_curl_rejects_fetch_with_instructions() {
     );
     assert_eq!(response.status, 503, "{}", body_text(&response));
     let body = body_text(&response);
-    assert!(body.contains("curl コマンドが必要"), "{body}");
+    assert!(body.contains("needs the curl command"), "{body}");
     assert!(body.contains("apt-get install curl"), "{body}");
     assert!(
         site.requests().is_empty(),

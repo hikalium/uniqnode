@@ -142,7 +142,7 @@ const RECIPES: &[RecipeSpec] = &[
         parameters: "pdf-native-color",
         args: &["-pdf"],
         note: Some(
-            "再描画であり、字形の写しは完全ではない。本文のソースは取り込み済みチャンクである",
+            "this is a re-rendering and does not reproduce the glyphs exactly; the source of the text is the ingested chunks",
         ),
     },
 ];
@@ -258,10 +258,10 @@ pub fn ref_path(blob_id: &str, page: u32, recipe_name: &str) -> String {
 /// PDFTOTEXT_INSTALL_HINT が先例。写しは pdftotext と同じ poppler 一式から作るので、
 /// 手順も同じである。
 pub const POPPLER_INSTALL_HINT: &str =
-    "導入例(sudo なし): apt-get download poppler-utils と dpkg -x で ~/opt/poppler/ へ\
-     展開し、その中の実行ファイルを PATH の通ったディレクトリへ symlink するか、\
-     pdftotext と同じディレクトリに揃えて置く(pdftotext の隣も探索する)。\
-     libpoppler の無い機械ではライブラリ側も同じ手順で展開して LD_LIBRARY_PATH を通す";
+    "to install without sudo: unpack apt-get download poppler-utils with dpkg -x into ~/opt/poppler/ \
+     and symlink its executables into a directory on PATH, or \
+     place them in the same directory as pdftotext (the directory of pdftotext is searched too); \
+     on a machine without libpoppler, unpack the library the same way and set LD_LIBRARY_PATH";
 
 /// 見つかった道具。起動確認と版の取得は locate が 1 回の起動で兼ねる。
 #[derive(Debug)]
@@ -343,12 +343,12 @@ impl LocatedTool {
             }
         }
         let detail = if failures.is_empty() {
-            "PATH にも pdftotext の隣にも無い".to_string()
+            "neither on PATH nor beside pdftotext".to_string()
         } else {
             failures.join(" / ")
         };
         Err(format!(
-            "PDF のページの写しには {} コマンドが必要({detail})。{POPPLER_INSTALL_HINT}",
+            "rendering a PDF page needs the {} command ({detail}). {POPPLER_INSTALL_HINT}",
             tool.binary()
         ))
     }
@@ -370,7 +370,7 @@ fn probe_version(tool: Tool, command: &Path) -> std::result::Result<String, Stri
         .filter(|version| is_version_text(version))
         .map(str::to_string)
         .ok_or_else(|| {
-            format!("{} -v の出力から版を読めない(先頭行: {first_line:?})", command.display())
+            format!("cannot read the version from the output of {} -v (first line: {first_line:?})", command.display())
         })
 }
 
@@ -625,7 +625,7 @@ pub fn prepare(
     let recipe = recipe_of(request)?;
     let Some(source) = store.get_object(request.blob_id)? else {
         return Err(RenditionError::NotFound(format!(
-            "原本 {} はこのDBノードに無い",
+            "the original {} is not on this DB node",
             request.blob_id
         )));
     };
@@ -643,7 +643,7 @@ pub fn prepare(
     }
 
     check_page_and_pdf(request, &source)?;
-    let tool = located_tool(recipe.tool().expect("恒等でないレシピは道具を持つ"))
+    let tool = located_tool(recipe.tool().expect("a non-identity recipe has a tool"))
         .map_err(RenditionError::ToolMissing)?;
     let recipe_name = recipe.recipe_name(&tool.version);
     let path = ref_path(request.blob_id, request.page, &recipe_name);
@@ -652,7 +652,7 @@ pub fn prepare(
     if let Some((object_id, origin)) = lookup_existing(store, &path) {
         let Some(bytes) = store.get_object(&object_id)? else {
             return Err(RenditionError::Store(StoreError::Corruption(format!(
-                "ref {path} は {object_id} を指すが実体が読めない"
+                "ref {path} points to {object_id} but the object cannot be read"
             ))));
         };
         return Ok(Prepared::Ready(Rendition {
@@ -691,11 +691,11 @@ pub fn render(work: &RenditionWork) -> Result<Rendered> {
     let args = work
         .recipe
         .command_args(work.page, &source_path)
-        .expect("道具のあるレシピは引数列を持つ");
+        .expect("a recipe with a tool has arguments");
     let bytes = run_tool(work.tool, &args, &request)?;
     if bytes.is_empty() {
         return Err(RenditionError::Failed(format!(
-            "{} が {} の p.{} に対して空の出力を返した",
+            "{} returned empty output for {} p.{}",
             work.tool.command.display(),
             work.blob_id,
             work.page
@@ -730,12 +730,12 @@ pub fn commit(store: &mut Store, work: RenditionWork, rendered: Rendered) -> Res
     if let Some((object_id, origin)) = lookup_existing(store, &work.path) {
         if let Some(bytes) = store.get_object(&object_id)? {
             crate::log_line!(
-                "uniqnode: rendition: {} p.{} の {} は待っているあいだに他所から入った\
-                 ({object_id}{})。今作ったぶんは捨てる",
+                "uniqnode: rendition: {} p.{} {} arrived from elsewhere while waiting \
+                 ({object_id}{}); discarding the one just made",
                 work.blob_id,
                 work.page,
                 work.recipe_name,
-                if bytes == rendered.bytes { "、同じバイト列" } else { "、違うバイト列" },
+                if bytes == rendered.bytes { ", same bytes" } else { ", different bytes" },
             );
             return Ok(Rendition {
                 object_id,
@@ -784,7 +784,7 @@ pub fn commit(store: &mut Store, work: RenditionWork, rendered: Rendered) -> Res
 pub fn recipe_for_alias(alias: &str) -> Result<Recipe> {
     Recipe::from_alias(alias).ok_or_else(|| {
         RenditionError::UnknownRecipe(format!(
-            "レシピ {alias} は許可表にない(受け付けるのは {})",
+            "recipe {alias} is not in the allowed list (accepted: {})",
             Recipe::aliases().join(", ")
         ))
     })
@@ -794,7 +794,7 @@ fn recipe_of(request: &RenditionRequest) -> Result<Recipe> {
     let recipe = recipe_for_alias(request.alias)?;
     if !c1::is_object_id(request.blob_id) {
         return Err(RenditionError::InvalidRequest(format!(
-            "原本 {} はオブジェクト ID(s256: + 16進64桁)の形ではない",
+            "the original {} is not an object ID (s256: followed by 64 hex digits)",
             request.blob_id
         )));
     }
@@ -805,12 +805,12 @@ fn recipe_of(request: &RenditionRequest) -> Result<Recipe> {
 fn check_page_and_pdf(request: &RenditionRequest, source: &[u8]) -> Result<()> {
     if request.page == 0 {
         return Err(RenditionError::InvalidRequest(
-            "ページ番号は 1 から始まる物理ページ番号である".to_string(),
+            "the page number is a physical page number starting at 1".to_string(),
         ));
     }
     if !source.starts_with(b"%PDF-") {
         return Err(RenditionError::InvalidRequest(format!(
-            "原本 {} は PDF ではない(先頭が %PDF- で始まらない)",
+            "the original {} is not a PDF (it does not start with %PDF-)",
             request.blob_id
         )));
     }
@@ -894,11 +894,11 @@ pub fn inspect(store: &Store, request: &RenditionRequest) -> Result<ViewStatus> 
             },
             None => unavailable(
                 recipe.content_type(),
-                format!("原本 {} はこのDBノードに無い", request.blob_id),
+                format!("the original {} is not on this DB node", request.blob_id),
             ),
         });
     }
-    let tool = match located_tool(recipe.tool().expect("恒等でないレシピは道具を持つ")) {
+    let tool = match located_tool(recipe.tool().expect("a non-identity recipe has a tool")) {
         Ok(tool) => tool,
         Err(reason) => return Ok(unavailable(recipe.content_type(), reason)),
     };
@@ -947,19 +947,19 @@ fn materialize_source(work_dir: &Path, blob_id: &str, bytes: &[u8]) -> Result<Pa
 /// poppler を起こして標準出力を受け取る。シェルは経由しない(must/0009 と同じ理由)。
 fn run_tool(tool: &LocatedTool, args: &[OsString], request: &RenditionRequest) -> Result<Vec<u8>> {
     let output = Command::new(&tool.command).args(args).output().map_err(|error| {
-        RenditionError::Failed(format!("{} を起こせない: {error}", tool.command.display()))
+        RenditionError::Failed(format!("cannot start {}: {error}", tool.command.display()))
     })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         // 範囲外のページは「このDBノードにその紙面が無い」というローカルな事実である。
         if stderr.contains(PAGE_RANGE_REFUSAL) {
             return Err(RenditionError::NotFound(format!(
-                "{} に p.{} は無い({stderr})",
+                "{} has no p.{} ({stderr})",
                 request.blob_id, request.page
             )));
         }
         return Err(RenditionError::Failed(format!(
-            "{} が失敗した({}): {stderr}",
+            "{} failed ({}): {stderr}",
             tool.command.display(),
             output.status
         )));
@@ -1082,11 +1082,11 @@ pub fn disagreement_message(
     };
     let chunk_excerpt = chunk_texts.get(best_chunk).map(|t| excerpt(t)).unwrap_or_default();
     format!(
-        "ページ番号が食い違っている: 原本 {} の p.{} を {recipe_name} で写したが、\
-         poppler が p.{} として出した本文と、取り込み済みの meta.page={} のチャンク\
-         {chunks} 件との語の重なりが最良 {best_ratio:.2}(最悪 {worst_ratio:.2})しかない\
-         (整合とみなす下限は {PAGE_AGREEMENT_RATIO:.2})。\
-         poppler の本文「{}」に対し、チャンクは「{chunk_excerpt}」である。写しは返さない",
+        "page numbers disagree: rendered p.{1} of the original {0} with {recipe_name}, but \
+         the text poppler gave as p.{2} and the {chunks} ingested chunks with meta.page={3} \
+         share words only up to {best_ratio:.2} (worst {worst_ratio:.2}) \
+         (agreement needs at least {PAGE_AGREEMENT_RATIO:.2}); \
+         poppler's text is \"{4}\" and the chunk is \"{chunk_excerpt}\"; no rendition is returned",
         request.blob_id,
         request.page,
         request.page,
@@ -1154,7 +1154,7 @@ fn extract_text(path: &Path, page: Option<u32>, request: &RenditionRequest) -> R
     args.extend(Tool::Pdftotext.stdout_args().iter().map(OsString::from));
     let stdout = run_tool(tool, &args, request)?;
     String::from_utf8(stdout).map_err(|_| {
-        RenditionError::Failed("pdftotext の出力が UTF-8 でない".to_string())
+        RenditionError::Failed("the output of pdftotext is not UTF-8".to_string())
     })
 }
 
@@ -1162,7 +1162,7 @@ fn extract_text(path: &Path, page: Option<u32>, request: &RenditionRequest) -> R
 fn excerpt(text: &str) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     match flat.char_indices().nth(EXCERPT_CHARS) {
-        Some((offset, _)) => format!("{}…", &flat[..offset]),
+        Some((offset, _)) => format!("{}...", &flat[..offset]),
         None => flat,
     }
 }
@@ -1835,7 +1835,7 @@ mod tests {
         .expect_err("ずれているのに写しを返した");
         assert_eq!(error.status(), 500);
         let message = error.to_string();
-        assert!(message.contains("ページ番号が食い違っている"), "{message}");
+        assert!(message.contains("page numbers disagree"), "{message}");
         assert!(message.contains(&blob_id), "{message}");
         assert!(message.contains("p.2"), "{message}");
         assert!(message.contains("pdftoppm-"), "{message}");
@@ -1955,7 +1955,7 @@ mod tests {
         let (text_blob, _) = store.put_object(b"not a pdf at all").expect("put");
         let not_pdf = case(&mut store, &text_blob, 1, "thumb");
         assert_eq!(not_pdf.status(), 400);
-        assert!(not_pdf.to_string().contains("PDF ではない"), "{not_pdf}");
+        assert!(not_pdf.to_string().contains("is not a PDF"), "{not_pdf}");
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

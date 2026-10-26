@@ -39,8 +39,8 @@ pub const CURL: &str = "curl";
 
 /// curl が見つからないときに示す導入手順。
 const CURL_INSTALL_HINT: &str =
-    "導入例: apt-get install curl(Debian/Ubuntu)。sudo なしなら apt-get download curl と \
-     dpkg -x で ~/opt/curl/ へ展開し、PATH の通ったディレクトリへ symlink を置く";
+    "to install: apt-get install curl (Debian/Ubuntu); without sudo, unpack apt-get download curl with \
+     dpkg -x into ~/opt/curl/ and put a symlink in a directory on PATH";
 
 /// 取得の上限。
 #[derive(Clone, Copy, Debug)]
@@ -107,7 +107,7 @@ pub fn validate_url(url: &str) -> Result<(), String> {
         .chars()
         .any(|c| c.is_ascii_control() || c.is_whitespace())
     {
-        return Err(format!("{url:?}: URL に空白や制御文字が入っている"));
+        return Err(format!("{url:?}: the URL contains whitespace or control characters"));
     }
     let lower = url.to_ascii_lowercase();
     let Some(rest) = lower
@@ -115,12 +115,12 @@ pub fn validate_url(url: &str) -> Result<(), String> {
         .or_else(|| lower.strip_prefix("https://"))
     else {
         return Err(format!(
-            "{url}: 取りに行けるのは http と https だけ(file や ftp などは断る)"
+            "{url}: only http and https can be fetched (file, ftp and others are refused)"
         ));
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     if authority.is_empty() || authority.rsplit('@').next().unwrap_or("").is_empty() {
-        return Err(format!("{url}: ホストが無い"));
+        return Err(format!("{url}: no host"));
     }
     Ok(())
 }
@@ -145,7 +145,7 @@ impl Curl {
             .output()
             .map_err(|error| {
                 FetchError::ToolMissing(format!(
-                    "URL の取り込みには curl コマンドが必要({}: {error})。{CURL_INSTALL_HINT}",
+                    "ingesting a URL needs the curl command ({}: {error}). {CURL_INSTALL_HINT}",
                     command.display()
                 ))
             })?;
@@ -157,7 +157,7 @@ impl Curl {
             (Some("curl"), Some(version)) => format!("curl {version}"),
             _ => {
                 return Err(FetchError::Internal(format!(
-                    "{} --version の出力から版を読めない(先頭行: {first_line:?})",
+                    "cannot read the version from the output of {} --version (first line: {first_line:?})",
                     command.display()
                 )))
             }
@@ -204,13 +204,13 @@ impl Curl {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(FetchError::Internal(format!(
-                "一時ファイル {} を消せない: {error}",
+                "cannot remove the temporary file {}: {error}",
                 temp.display()
             ))),
         };
         let output = output.map_err(|error| {
             FetchError::ToolMissing(format!(
-                "curl を起動できない({}: {error})。{CURL_INSTALL_HINT}",
+                "cannot start curl ({}: {error}). {CURL_INSTALL_HINT}",
                 self.command.display()
             ))
         })?;
@@ -218,11 +218,11 @@ impl Curl {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let reason = if stderr.is_empty() {
-                format!("curl が {} で終わった", output.status)
+                format!("curl ended with {}", output.status)
             } else {
                 stderr
             };
-            return Err(FetchError::Upstream(format!("{url} を取れない: {reason}")));
+            return Err(FetchError::Upstream(format!("cannot fetch {url}: {reason}")));
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut lines = stdout.lines();
@@ -230,27 +230,27 @@ impl Curl {
             (lines.next(), lines.next(), lines.next())
         else {
             return Err(FetchError::Internal(format!(
-                "curl の --write-out の出力を読めない: {stdout:?}"
+                "cannot read the --write-out output of curl: {stdout:?}"
             )));
         };
         let status: u16 = http_code.trim().parse().map_err(|_| {
-            FetchError::Internal(format!("curl の http_code を読めない: {http_code:?}"))
+            FetchError::Internal(format!("cannot read the http_code from curl: {http_code:?}"))
         })?;
         if !(200..300).contains(&status) {
             return Err(FetchError::Upstream(format!(
-                "{url} は HTTP {status} を返した(転送後の URL: {final_url})"
+                "{url} returned HTTP {status} (URL after redirects: {final_url})"
             )));
         }
         let bytes = body.map_err(|error| {
             FetchError::Internal(format!(
-                "curl が落とした本文 {} を読めない: {error}",
+                "cannot read the body {} that curl downloaded: {error}",
                 temp.display()
             ))
         })?;
         // 古い curl は転送の途中で上限を見ないことがあるので、こちらでも数える。
         if bytes.len() as u64 > limits.max_bytes {
             return Err(FetchError::Upstream(format!(
-                "{url} の本文が上限 {} バイトを超えた({} バイト)",
+                "the body of {url} exceeded the limit of {} bytes ({} bytes)",
                 limits.max_bytes,
                 bytes.len()
             )));
@@ -335,12 +335,12 @@ pub fn media_of(content_type: Option<&str>, bytes: &[u8]) -> Result<&'static str
     match declared {
         Some(declared) => media_for_content_type(&declared).ok_or_else(|| {
             format!(
-                "Content-Type {declared} は取り込める種別ではない(text/html・application/pdf・\
-                 text/plain・text/markdown だけ)"
+                "Content-Type {declared} cannot be ingested (only text/html, application/pdf, \
+                 text/plain and text/markdown)"
             )
         }),
         None => media_for_content_type(&sniffed).ok_or_else(|| {
-            "Content-Type が無く、中身も HTML・PDF・UTF-8 の素文のどれでもない".to_string()
+            "no Content-Type, and the content is neither HTML, PDF nor UTF-8 plain text".to_string()
         }),
     }
 }
@@ -430,7 +430,7 @@ pub struct PdfText {
 pub fn pdf_text_with(extractor: &PdfExtractor, pdf: &[u8]) -> Result<PdfText, FetchError> {
     let text = extractor
         .extract(pdf)
-        .map_err(|error| FetchError::Internal(format!("取れた PDF を読めない: {error}")))?;
+        .map_err(|error| FetchError::Internal(format!("cannot read the fetched PDF: {error}")))?;
     Ok(PdfText {
         text,
         extractor: extractor.extractor.clone(),
@@ -513,7 +513,7 @@ pub fn fetch_document(
         Some(given) if !given.is_empty() && !given.starts_with('/') => given.to_string(),
         Some(_) => {
             return Err(FetchError::BadRequest(
-                "name は空でなく / で始まらない文字列(省けば URL から導く)".to_string(),
+                "name must be a non-empty string that does not start with / (if omitted, it is derived from the URL)".to_string(),
             ))
         }
     };
@@ -525,7 +525,7 @@ pub fn fetch_document(
     let utf8 = |bytes: Vec<u8>| {
         String::from_utf8(bytes).map_err(|_| {
             FetchError::UnsupportedMedia(format!(
-                "{}: UTF-8 でない({media} として取り込めない)",
+                "{}: not UTF-8 (cannot be ingested as {media})",
                 fetched.final_url
             ))
         })
@@ -602,14 +602,14 @@ mod tests {
         assert!(validate_url("http://example.test/a").is_ok());
         assert!(validate_url("HTTPS://Example.test").is_ok());
         let error = validate_url("file:///etc/hostname").expect_err("file は断る");
-        assert!(error.contains("http と https だけ"), "{error}");
+        assert!(error.contains("only http and https"), "{error}");
         assert!(validate_url("ftp://example.test/x").is_err());
         assert!(
             validate_url("example.test/x").is_err(),
             "スキームの無い URL は受けない"
         );
         let error = validate_url("http:///path").expect_err("ホストが無い");
-        assert!(error.contains("ホストが無い"), "{error}");
+        assert!(error.contains("no host"), "{error}");
         assert!(validate_url("http://user@/x").is_err());
         assert!(
             validate_url("http://example.test/a b").is_err(),

@@ -106,8 +106,8 @@ impl Reranker {
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
         {
             return Err(format!(
-                "模型識別子 {reranker_id:?} は英数字と - _ . だけで書く(要求の model と\
-                 診断の行にそのまま出る)"
+                "model identifier {reranker_id:?} must use only letters, digits, - _ and . (it appears as is in the request's model \
+                 and in the diagnostic line)"
             ));
         }
         Ok(Reranker {
@@ -157,7 +157,7 @@ impl Reranker {
             return Ok(Vec::new());
         }
         if query.is_empty() {
-            return Err("問いが空のままリランカーには掛けられない".to_string());
+            return Err("an empty query cannot be sent to the reranker".to_string());
         }
         // 要求本文は c1 の直列化で組む(文字列のエスケープの実装を増やさない。
         // should/0135)。c1 は JSON の部分集合なので、そのまま JSON として読める。
@@ -176,14 +176,14 @@ impl Reranker {
             .map_err(|e| format!("{}: {e}", self.endpoint()))?;
         if response.status != 200 {
             return Err(format!(
-                "{} が {} を返した: {}",
+                "{} returned {}: {}",
                 self.endpoint(),
                 response.status,
                 http::body_head(&response.body)
             ));
         }
         let text = std::str::from_utf8(&response.body)
-            .map_err(|_| format!("{} の応答が UTF-8 でない", self.endpoint()))?;
+            .map_err(|_| format!("the response from {} is not UTF-8", self.endpoint()))?;
         order_from_response(text, documents.len()).map_err(|e| format!("{}: {e}", self.endpoint()))
     }
 }
@@ -199,39 +199,39 @@ impl Reranker {
 fn order_from_response(text: &str, count: usize) -> Result<Vec<(usize, f64)>, String> {
     let value = Json::parse(text)?;
     let Json::Object(fields) = &value else {
-        return Err("応答がオブジェクトでない".to_string());
+        return Err("the response is not an object".to_string());
     };
     let results = match fields.iter().find(|(name, _)| name == "results") {
         Some((_, Json::Array(items))) => items,
-        Some(_) => return Err("応答の results が配列でない".to_string()),
-        None => return Err("応答に results がない".to_string()),
+        Some(_) => return Err("results in the response is not an array".to_string()),
+        None => return Err("the response has no results".to_string()),
     };
     if results.len() != count {
-        return Err(format!("{count} 件を求めたのに results は {} 件", results.len()));
+        return Err(format!("asked for {count} but results has {}", results.len()));
     }
     let mut slots: Vec<Option<f64>> = (0..count).map(|_| None).collect();
     for item in results {
         let Json::Object(entry) = item else {
-            return Err("results の要素がオブジェクトでない".to_string());
+            return Err("an element of results is not an object".to_string());
         };
         let index = match entry.iter().find(|(name, _)| name == "index") {
             Some((_, Json::Number(n))) if *n >= 0.0 && n.fract() == 0.0 => *n as usize,
-            Some(_) => return Err("results の index が非負整数でない".to_string()),
-            None => return Err("results の要素に index がない".to_string()),
+            Some(_) => return Err("an index in results is not a non-negative integer".to_string()),
+            None => return Err("an element of results has no index".to_string()),
         };
         let score = match entry.iter().find(|(name, _)| name == "relevance_score") {
             Some((_, Json::Number(n))) => *n,
-            Some(_) => return Err("results の relevance_score が数でない".to_string()),
-            None => return Err("results の要素に relevance_score がない".to_string()),
+            Some(_) => return Err("a relevance_score in results is not a number".to_string()),
+            None => return Err("an element of results has no relevance_score".to_string()),
         };
         if index >= count {
-            return Err(format!("index {index} が要求した {count} 件の範囲外"));
+            return Err(format!("index {index} is outside the {count} requested"));
         }
         if !score.is_finite() {
-            return Err(format!("index {index} の得点が {score}(有限の値でない)"));
+            return Err(format!("the score of index {index} is {score} (not finite)"));
         }
         if slots[index].is_some() {
-            return Err(format!("index {index} が二度現れた"));
+            return Err(format!("index {index} appeared twice"));
         }
         slots[index] = Some(score);
     }
@@ -239,7 +239,7 @@ fn order_from_response(text: &str, count: usize) -> Result<Vec<(usize, f64)>, St
     for (index, slot) in slots.into_iter().enumerate() {
         match slot {
             Some(score) => order.push((index, score)),
-            None => return Err(format!("index {index} の得点が応答に無い")),
+            None => return Err(format!("the response has no score for index {index}")),
         }
     }
     order.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -291,7 +291,7 @@ pub fn rerank_items<T>(
         return Reranked {
             reranked: false,
             rescored: 0,
-            degraded: Some("リランカーが設定されていない".to_string()),
+            degraded: Some("no reranker is configured".to_string()),
         };
     };
     // 1 件以下では順位が動かない。往復の 0.7 秒と、動かない順位に別の意味論の得点を
@@ -332,7 +332,7 @@ pub fn rerank_items<T>(
     let mut slots: Vec<Option<T>> = items.drain(..depth).map(Some).collect();
     let mut reordered = Vec::with_capacity(depth);
     for entry in fused {
-        let mut item = slots[entry.item].take().expect("添字は一度だけ現れる");
+        let mut item = slots[entry.item].take().expect("each index appears only once");
         *score_of(&mut item) = entry.score;
         reordered.push(item);
     }
@@ -397,35 +397,35 @@ mod tests {
                             {\"index\":7,\"relevance_score\":0.0}]}";
         let error = order_from_response(out_of_range, 2).expect_err("範囲外は失敗すべき");
         assert!(error.contains("index 7"), "{error}");
-        assert!(error.contains("範囲外"), "{error}");
+        assert!(error.contains("is outside the"), "{error}");
         // index の重複(片方の文書の得点が二度現れ、もう片方が欠ける)。
         let duplicated = "{\"results\":[{\"index\":0,\"relevance_score\":1.0},\
                           {\"index\":0,\"relevance_score\":0.0}]}";
         let error = order_from_response(duplicated, 2).expect_err("重複は失敗すべき");
-        assert!(error.contains("二度現れた"), "{error}");
+        assert!(error.contains("appeared twice"), "{error}");
         // 件数が足りない(欠落)。
         let short = "{\"results\":[{\"index\":0,\"relevance_score\":1.0}]}";
         let error = order_from_response(short, 3).expect_err("件数違いは失敗すべき");
-        assert!(error.contains("3 件を求めた"), "{error}");
+        assert!(error.contains("asked for 3"), "{error}");
         // 件数は合っているが index が飛んでいる(1 が欠けて 2 が二度…ではなく欠落だけ)。
         let missing = "{\"results\":[{\"index\":0,\"relevance_score\":1.0},\
                        {\"index\":2,\"relevance_score\":0.0}]}";
         let error = order_from_response(missing, 3).expect_err("欠落は失敗すべき");
-        assert!(error.contains("3 件を求めた"), "{error}");
+        assert!(error.contains("asked for 3"), "{error}");
         // results そのものが無い応答(--reranking なしで起こしたサーバの誤り本文など)。
         let error = order_from_response("{\"error\":{\"message\":\"x\"}}", 1)
             .expect_err("results 無しは失敗すべき");
-        assert!(error.contains("results がない"), "{error}");
+        assert!(error.contains("has no results"), "{error}");
         // 空の応答を「0 件の順位」として通さない(1 件求めたのに 0 件は欠落である)。
         let error = order_from_response("{\"results\":[]}", 1).expect_err("空は失敗すべき");
-        assert!(error.contains("1 件を求めた"), "{error}");
+        assert!(error.contains("asked for 1"), "{error}");
         // 得点が数でない・有限でない。
         let text = "{\"results\":[{\"index\":0,\"relevance_score\":\"1.0\"}]}";
         let error = order_from_response(text, 1).expect_err("文字列の得点は失敗すべき");
-        assert!(error.contains("数でない"), "{error}");
+        assert!(error.contains("is not a number"), "{error}");
         let text = "{\"results\":[{\"index\":0,\"relevance_score\":1e400}]}";
         let error = order_from_response(text, 1).expect_err("無限大は失敗すべき");
-        assert!(error.contains("有限"), "{error}");
+        assert!(error.contains("not finite"), "{error}");
     }
 
     /// URL の分解と模型識別子の検査(期待値はリテラル。should/0137)。
@@ -456,7 +456,7 @@ mod tests {
             .with_timeout(Duration::from_millis(500));
         let error = reranker.rerank("問い", &["a".to_string()]).expect_err("繋がらないはず");
         assert!(error.contains("http://127.0.0.1:1/v1/rerank"), "{error}");
-        assert!(error.contains("接続できない"), "{error}");
+        assert!(error.contains("cannot connect to"), "{error}");
 
         let mut items = vec![("a", 2.0f64), ("b", 1.0)];
         let outcome = rerank_items(
@@ -470,14 +470,14 @@ mod tests {
         assert_eq!(outcome.rescored, 0);
         assert_eq!(items, vec![("a", 2.0), ("b", 1.0)], "順位も得点も元のまま残るべき");
         let reason = outcome.degraded.expect("理由を持ち帰るべき");
-        assert!(reason.contains("接続できない"), "{reason}");
+        assert!(reason.contains("cannot connect to"), "{reason}");
 
         // リランカーが設定されていない呼び手も、同じ形で答え続けられる。
         let outcome =
             rerank_items(None, "問い", &mut items, |item| item.0.to_string(), |item| &mut item.1);
         assert!(!outcome.reranked);
         assert_eq!(items, vec![("a", 2.0), ("b", 1.0)]);
-        assert!(outcome.degraded.expect("理由").contains("設定されていない"));
+        assert!(outcome.degraded.expect("理由").contains("no reranker is configured"));
 
         // 1 件以下では順位が動かないので往復しない(届かない相手でも理由が出ない)。
         let mut single = vec![("a", 2.0f64)];

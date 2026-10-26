@@ -155,7 +155,7 @@ fn cli_ingest_walks_a_directory_and_reports_skipped_files() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(stdout.contains("notes/a: updated"), "{stdout}");
     assert!(stdout.contains("notes/sub/b: updated"), "{stdout}");
-    assert!(stdout.contains("対象外(拡張子): c.rs"), "{stdout}");
+    assert!(stdout.contains("skipped (extension): c.rs"), "{stdout}");
 
     // 取り込んだ ref が残っている(別プロセスで一覧)。
     let output = Command::new(binary())
@@ -289,7 +289,7 @@ fn cli_ingest_without_pdftotext_fails_with_install_instructions() {
         .expect("run ingest");
     assert!(!output.status.success(), "存在しない pdftotext の指定で成功してはならない");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("pdftotext コマンドが必要"), "{stderr}");
+    assert!(stderr.contains("needs the pdftotext command"), "{stderr}");
     assert!(stderr.contains("apt-get download poppler-utils"), "{stderr}");
     std::fs::remove_dir_all(&store_dir).expect("cleanup");
     std::fs::remove_dir_all(&corpus).expect("cleanup");
@@ -345,8 +345,8 @@ fn cli_ingest_via_serve_url_writes_through_the_running_serve_and_reingest_is_noo
     assert!(ok, "{stderr}");
     assert!(first.contains("notes/a: updated"), "{first}");
     assert!(first.contains("notes/sub/b: updated"), "{first}");
-    assert!(first.contains("対象外(拡張子): c.rs"), "{first}");
-    assert!(first.contains("取り込み: 2 件(updated 2、no-op 0)、対象外 1 件"), "{first}");
+    assert!(first.contains("skipped (extension): c.rs"), "{first}");
+    assert!(first.contains("ingested: 2 (updated 2, no-op 0), skipped 1"), "{first}");
 
     // serve の ref 一覧に載る(serve が書いた)。
     let refs = body_text(&simple(&server.address, "GET", "/v1/refs", b""));
@@ -361,14 +361,14 @@ fn cli_ingest_via_serve_url_writes_through_the_running_serve_and_reingest_is_noo
     for prefix in ["notes/a:", "notes/sub/b:"] {
         assert_eq!(doc_rev_on_line(&first, prefix), doc_rev_on_line(&direct, prefix), "{prefix}");
     }
-    assert!(direct.contains("取り込み: 2 件(updated 2、no-op 0)、対象外 1 件"), "{direct}");
+    assert!(direct.contains("ingested: 2 (updated 2, no-op 0), skipped 1"), "{direct}");
 
     // 再実行は全件 no-op。
     let (ok, second, stderr) = run_cli_ingest(&args);
     assert!(ok, "{stderr}");
     assert!(second.contains("notes/a: no-op new_objects=0"), "{second}");
     assert!(second.contains("notes/sub/b: no-op new_objects=0"), "{second}");
-    assert!(second.contains("取り込み: 2 件(updated 0、no-op 2)、対象外 1 件"), "{second}");
+    assert!(second.contains("ingested: 2 (updated 0, no-op 2), skipped 1"), "{second}");
 
     // 1 件だけ書き換えると、その 1 件だけが新しい doc_rev になる。
     std::fs::write(corpus.join("a.md"), "# 章\n\n本文 A を書き換えた。\n").expect("write");
@@ -404,8 +404,8 @@ fn cli_ingest_via_serve_url_reports_the_serves_refusal_and_stops() {
         run_cli_ingest(&[data_dir, "notes", corpus_text, "--serve-url", serve_url.as_str()]);
     assert!(!ok, "serve が断った文書があるのに成功した: {stdout}");
     assert!(stderr.contains("b.md"), "{stderr}");
-    assert!(stderr.contains("PUT /v1/collections/notes/documents/b.md が 400 を返した"), "{stderr}");
-    assert!(stderr.contains("ボディが UTF-8 でない"), "{stderr}");
+    assert!(stderr.contains("PUT /v1/collections/notes/documents/b.md returned 400"), "{stderr}");
+    assert!(stderr.contains("the body is not UTF-8"), "{stderr}");
     // 名前順で先の a は入り、断られた b の後ろの c は送られない。
     assert!(stdout.contains("notes/a: updated"), "{stdout}");
     assert!(!stdout.contains("notes/c"), "{stdout}");
@@ -437,7 +437,7 @@ fn cli_ingest_via_serve_url_refuses_what_it_cannot_carry_before_sending() {
         .expect("run ingest");
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--serve-url と --pdftotext は併用しない"), "{stderr}");
+    assert!(stderr.contains("--serve-url and --pdftotext are not used together"), "{stderr}");
 
     // 届かない serve: 理由と起こし方を言って失敗し、ストアは作らない。
     let store = unique_dir("ingest-serve-url-unreachable");
@@ -445,7 +445,7 @@ fn cli_ingest_via_serve_url_refuses_what_it_cannot_carry_before_sending() {
     let (ok, _, stderr) =
         run_cli_ingest(&[store_text, "notes", corpus_text, "--serve-url", "http://127.0.0.1:1"]);
     assert!(!ok);
-    assert!(stderr.contains("走っている serve に届かない"), "{stderr}");
+    assert!(stderr.contains("cannot reach a running serve"), "{stderr}");
     assert!(stderr.contains(&format!("uniqnode serve {store_text} 127.0.0.1:1")), "{stderr}");
     assert!(!store.exists(), "転送する形がストアを作った");
 
@@ -461,7 +461,7 @@ fn cli_ingest_via_serve_url_refuses_what_it_cannot_carry_before_sending() {
         serve_url.as_str(),
     ]);
     assert!(!ok);
-    assert!(stderr.contains("--serve-url では送れない"), "{stderr}");
+    assert!(stderr.contains("cannot be sent with --serve-url"), "{stderr}");
     assert!(stderr.contains("\"b c\""), "{stderr}");
     let refs = body_text(&simple(&server.address, "GET", "/v1/refs", b""));
     assert!(!refs.contains("collections/notes/a"), "{refs}");
@@ -514,10 +514,10 @@ fn the_data_md_excerpt_parses_into_the_expected_entries() {
 fn the_annotation_parser_rejects_input_outside_the_format() {
     let stray_prose = "# `a`\n\n```\nT\npdf\nU\n```\n\nprose line\n";
     let error = parse_annotation_index(stray_prose).expect_err("形式外の行を受理してはならない");
-    assert!(error.contains("形式外の行"), "{error}");
+    assert!(error.contains("a line outside the format"), "{error}");
     let unclosed = "# `a`\n\n```\nT\npdf\nU\n";
     let error = parse_annotation_index(unclosed).expect_err("閉じないブロックを受理してはならない");
-    assert!(error.contains("閉じていない"), "{error}");
+    assert!(error.contains("unterminated"), "{error}");
     let four_line_pdf = "# `a`\n\n```\nT\npdf\nU\nextra\n```\n";
     assert!(parse_annotation_index(four_line_pdf).is_err(), "zip 以外の 4 行ブロック");
     let bad_page = "# `a`\n\n```\nT\npdf\nU\n```\n\n- p.x: Title\n";
@@ -571,14 +571,14 @@ fn cli_ingest_annotations_ingests_matches_and_reports_mismatches() {
     // 一致は入り(一致率つき)、不一致は一致率とともに報告されて入らない。
     let first = run(&[]);
     assert!(
-        first.contains("取り込み: three_pages p.1 Page one (method=token-match, 一致 2/2)"),
+        first.contains("accepted: three_pages p.1 Page one (method=token-match, matched 2/2)"),
         "{first}"
     );
     assert!(
-        first.contains("不一致: three_pages p.3 Nonexistent widget frobnicator (一致 0/3)"),
+        first.contains("mismatch: three_pages p.3 Nonexistent widget frobnicator (matched 0/3)"),
         "{first}"
     );
-    assert!(first.contains("annotations/specs: updated 取り込み=1 不一致=1"), "{first}");
+    assert!(first.contains("annotations/specs: updated accepted=1 mismatched=1"), "{first}");
 
     // 再実行は no-op(索引もオブジェクトも増えない)。
     let second = run(&[]);
@@ -620,11 +620,11 @@ fn cli_ingest_annotations_ingests_matches_and_reports_mismatches() {
     let approved = run(&["--manual", manual_path.to_str().expect("utf-8")]);
     assert!(
         approved.contains(
-            "取り込み: three_pages p.3 Nonexistent widget frobnicator (method=manual, 一致 0/3)"
+            "accepted: three_pages p.3 Nonexistent widget frobnicator (method=manual, matched 0/3)"
         ),
         "{approved}"
     );
-    assert!(approved.contains("annotations/specs: updated 取り込み=2 不一致=0"), "{approved}");
+    assert!(approved.contains("annotations/specs: updated accepted=2 mismatched=0"), "{approved}");
 
     // 取り込み済み PDF の無い spec_id は黙って飛ばさず全体を失敗させる(must/0022 の同型)。
     let missing_path = corpus.join("missing.md");
@@ -640,7 +640,7 @@ fn cli_ingest_annotations_ingests_matches_and_reports_mismatches() {
     assert!(!output.status.success(), "ref の無い spec_id で成功してはならない");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("absent_spec"), "{stderr}");
-    assert!(stderr.contains("先に"), "{stderr}");
+    assert!(stderr.contains("first"), "{stderr}");
 
     std::fs::remove_dir_all(&store_dir).expect("cleanup");
     std::fs::remove_dir_all(&corpus).expect("cleanup");
@@ -659,7 +659,7 @@ fn serve_without_pdftotext_rejects_pdf_with_instructions() {
     );
     assert_eq!(response.status, 503, "{}", body_text(&response));
     let body = body_text(&response);
-    assert!(body.contains("pdftotext コマンドが必要"), "{body}");
+    assert!(body.contains("needs the pdftotext command"), "{body}");
     assert!(body.contains("apt-get download poppler-utils"), "{body}");
 
     let response = simple(
@@ -772,7 +772,7 @@ fn cli_correct_issues_a_corrects_edge_and_referrers_finds_it_from_the_wrong_stat
         String::from_utf8_lossy(&output.stdout).into_owned()
     };
     let first = run_correct();
-    assert!(first.contains("再照合 一致 2/2"), "{first}");
+    assert!(first.contains("re-matched 2/2"), "{first}");
     assert!(first.contains("annotations/specs: updated"), "{first}");
     let corrects_id = first
         .split("corrects: ")
@@ -867,16 +867,16 @@ fn cli_correct_fails_explicitly_for_missing_ids_and_non_annotates_statements() {
     };
     // 誤った言明がストアに無い。
     let stderr = run_correct(&absent, &node_a);
-    assert!(stderr.contains("誤った言明"), "{stderr}");
+    assert!(stderr.contains("wrong statement"), "{stderr}");
     assert!(stderr.contains(&absent), "{stderr}");
-    assert!(stderr.contains("ストアに無い"), "{stderr}");
+    assert!(stderr.contains("is not in the store"), "{stderr}");
     // 新しい言明がストアに無い。
     let stderr = run_correct(&node_a, &absent);
-    assert!(stderr.contains("新しい言明"), "{stderr}");
-    assert!(stderr.contains("ストアに無い"), "{stderr}");
+    assert!(stderr.contains("new statement"), "{stderr}");
+    assert!(stderr.contains("is not in the store"), "{stderr}");
     // 新しい言明が annotates 辺でない(再照合できる形でない)。
     let stderr = run_correct(&node_a, &node_b);
-    assert!(stderr.contains("annotates 型の辺でない"), "{stderr}");
+    assert!(stderr.contains("is not an annotates edge"), "{stderr}");
 
     std::fs::remove_dir_all(&store_dir).expect("cleanup");
 }

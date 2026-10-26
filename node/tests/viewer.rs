@@ -133,7 +133,7 @@ fn the_viewer_forwards_the_rendition_paths_and_refuses_unknown_aliases() {
     let serve_url = format!("http://{}", server.address);
     let viewer = start_viewer(server.dir.to_str().expect("utf-8"), &serve_url);
     let id = format!("s256:{}", "ab".repeat(32));
-    let refusal = "ビューワの口ではない";
+    let refusal = "is not a viewer endpoint";
 
     // 通す道(目録と 4 つの別名)。serve まで届いていることを、断り文が無いことで見る。
     let mut forwarded = vec![format!("/v1/objects/{id}/rendition")];
@@ -251,7 +251,7 @@ fn the_page_still_opens_when_the_serve_is_down() {
     let status = simple(&viewer.address, "GET", "/v1/status", b"");
     assert_eq!(status.status, 502);
     let text = body_text(&status);
-    assert!(text.contains("走っている serve に届かない"), "{text}");
+    assert!(text.contains("cannot reach a running serve"), "{text}");
     assert!(text.contains("uniqnode serve"), "起こし方を添える: {text}");
 
     drop(viewer);

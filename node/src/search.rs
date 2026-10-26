@@ -684,7 +684,7 @@ impl SearchIndex {
         if !single_wide {
             return self.postings.get(term).cloned().unwrap_or_default();
         }
-        let character = first.expect("1 文字ある");
+        let character = first.expect("there is one character");
         let mut merged: BTreeMap<usize, u32> = BTreeMap::new();
         for (indexed_term, postings) in &self.postings {
             if !indexed_term.contains(character) {

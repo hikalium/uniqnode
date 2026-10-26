@@ -41,11 +41,11 @@ pub fn parse_paths(list: &str) -> Result<Vec<String>, String> {
     for raw in list.split(',') {
         let path = raw.trim().trim_end_matches('/');
         if path.is_empty() {
-            return Err(format!("--paths {list:?} に空の要素がある"));
+            return Err(format!("--paths {list:?} has an empty element"));
         }
         if path.starts_with('/') || path.split('/').any(|part| part == ".." || part.is_empty()) {
             return Err(format!(
-                "--paths の {path:?} は木の根からの相対パスでない(絶対パス・`..`・空の段は使えない)"
+                "{path:?} in --paths is not a path relative to the root of the tree (absolute paths, `..` and empty components are not allowed)"
             ));
         }
         paths.push(path.to_string());
@@ -79,10 +79,10 @@ fn run_git(tree: &Path, args: &[&str], what: &str) -> Result<Vec<u8>, String> {
     let output = git(tree)
         .args(args)
         .output()
-        .map_err(|error| format!("git を起こせない({what}): {error}"))?;
+        .map_err(|error| format!("cannot start git ({what}): {error}"))?;
     if !output.status.success() {
         return Err(format!(
-            "{what}: git {} が失敗した({}): {}",
+            "{what}: git {} failed ({}): {}",
             args.join(" "),
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
@@ -104,15 +104,15 @@ fn parse_ls_tree(bytes: &[u8]) -> Result<Vec<Entry>, String> {
     let mut entries = Vec::new();
     for record in bytes.split(|b| *b == 0).filter(|r| !r.is_empty()) {
         let text = std::str::from_utf8(record)
-            .map_err(|_| format!("ls-tree の項目が UTF-8 でない: {}", String::from_utf8_lossy(record)))?;
+            .map_err(|_| format!("an ls-tree entry is not UTF-8: {}", String::from_utf8_lossy(record)))?;
         let (head, path) = text
             .split_once('\t')
-            .ok_or_else(|| format!("ls-tree の項目の形が違う: {text:?}"))?;
+            .ok_or_else(|| format!("malformed ls-tree entry: {text:?}"))?;
         let mut fields = head.split(' ');
         let (Some(mode), Some(kind), Some(object), None) =
             (fields.next(), fields.next(), fields.next(), fields.next())
         else {
-            return Err(format!("ls-tree の項目の形が違う: {text:?}"));
+            return Err(format!("malformed ls-tree entry: {text:?}"));
         };
         entries.push(Entry {
             mode: mode.to_string(),
@@ -146,30 +146,30 @@ pub fn stage(
     parent: &Path,
 ) -> Result<Staged, String> {
     if paths.is_empty() {
-        return Err("取り込む道(--paths)が 1 つも無い".to_string());
+        return Err("no paths to ingest (--paths)".to_string());
     }
     if !tree.exists() {
         return Err(format!(
-            "木 {} が存在しない(木を置く・最新にする段がまだ走っていないか、道が違う)",
+            "the tree {} does not exist (the step that places or updates the tree has not run yet, or the path is wrong)",
             tree.display()
         ));
     }
     // 天井(GIT_CEILING_DIRECTORIES)は絶対パスでないと効かないので、正規化した道で走らせる。
     let tree = &std::fs::canonicalize(tree)
-        .map_err(|error| format!("木 {} を開けない: {error}", tree.display()))?;
-    run_git(tree, &["rev-parse", "--git-dir"], &format!("木 {} が git の木でない", tree.display()))?;
+        .map_err(|error| format!("cannot open the tree {}: {error}", tree.display()))?;
+    run_git(tree, &["rev-parse", "--git-dir"], &format!("the tree {} is not a git tree", tree.display()))?;
     if reference.is_empty() || reference.starts_with('-') {
-        return Err(format!("ref {reference:?} の形が違う"));
+        return Err(format!("malformed ref {reference:?}"));
     }
     let wanted = format!("{reference}^{{commit}}");
     let commit = git(tree)
         .args(["rev-parse", "--verify", "--quiet", "--end-of-options", &wanted])
         .output()
-        .map_err(|error| format!("git を起こせない(ref の解決): {error}"))?;
+        .map_err(|error| format!("cannot start git (resolving the ref): {error}"))?;
     if !commit.status.success() {
         return Err(format!(
-            "ref {reference} が木 {} に無い(コミットを指さない)。clone を fetch で最新にする形なら \
-             origin/main のように追跡ブランチを指す",
+            "ref {reference} is not in the tree {} (it does not point to a commit); if the clone is kept current with fetch, \
+             name a tracking branch such as origin/main",
             tree.display()
         ));
     }
@@ -177,7 +177,7 @@ pub fn stage(
 
     let mut args = vec!["ls-tree", "-r", "-z", "--full-tree", commit.as_str(), "--"];
     args.extend(paths.iter().map(String::as_str));
-    let listing = run_git(tree, &args, &format!("木 {} の {reference}", tree.display()))?;
+    let listing = run_git(tree, &args, &format!("{reference} of the tree {}", tree.display()))?;
     let entries = parse_ls_tree(&listing)?;
 
     let missing: Vec<&str> = paths
@@ -191,26 +191,26 @@ pub fn stage(
         .collect();
     if !missing.is_empty() {
         return Err(format!(
-            "{reference}({commit})に無い道がある(何も送っていない。道の一覧を直す): {missing:?}"
+            "some paths are not in {reference} ({commit}) (nothing was sent; fix the list of paths): {missing:?}"
         ));
     }
 
     let mut staged = Staged { dir: staging_dir(parent), commit, written: 0, left_out: Vec::new() };
     std::fs::create_dir(&staged.dir)
-        .map_err(|error| format!("置き場 {} を作れない: {error}", staged.dir.display()))?;
+        .map_err(|error| format!("cannot create the staging directory {}: {error}", staged.dir.display()))?;
     for entry in &entries {
         match (entry.mode.as_str(), entry.kind.as_str()) {
             ("100644" | "100755", "blob") => {}
             ("120000", _) => {
-                staged.left_out.push(format!("シンボリックリンク: {}", entry.path));
+                staged.left_out.push(format!("symbolic link: {}", entry.path));
                 continue;
             }
             ("160000", _) => {
-                staged.left_out.push(format!("サブモジュール: {}", entry.path));
+                staged.left_out.push(format!("submodule: {}", entry.path));
                 continue;
             }
             _ => {
-                staged.left_out.push(format!("種類 {} {}: {}", entry.mode, entry.kind, entry.path));
+                staged.left_out.push(format!("kind {} {}: {}", entry.mode, entry.kind, entry.path));
                 continue;
             }
         }
@@ -218,25 +218,25 @@ pub fn stage(
         if entry.path.starts_with('/')
             || entry.path.split('/').any(|part| part == ".." || part == "." || part.is_empty())
         {
-            return Err(format!("木の中の道の形が違う: {:?}", entry.path));
+            return Err(format!("malformed path in the tree: {:?}", entry.path));
         }
         let bytes = run_git(
             tree,
             &["cat-file", "blob", &entry.object],
-            &format!("{} の中身", entry.path),
+            &format!("contents of {}", entry.path),
         )?;
         let target = staged.dir.join(&entry.path);
         if let Some(dir) = target.parent() {
             std::fs::create_dir_all(dir)
-                .map_err(|error| format!("{} を作れない: {error}", dir.display()))?;
+                .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
         }
         std::fs::write(&target, &bytes)
-            .map_err(|error| format!("{} を書けない: {error}", target.display()))?;
+            .map_err(|error| format!("cannot write {}: {error}", target.display()))?;
         staged.written += 1;
     }
     if staged.written == 0 {
         return Err(format!(
-            "{reference}({})の {paths:?} に通常のファイルが 1 つも無い(書き出さなかったもの: {:?})",
+            "{paths:?} in {reference} ({}) has no regular files (left out: {:?})",
             staged.commit, staged.left_out
         ));
     }

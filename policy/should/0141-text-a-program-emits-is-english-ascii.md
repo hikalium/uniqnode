@@ -17,9 +17,10 @@ should/text-a-program-emits-is-english-ascii (uuid:9b8d9c9b-b173-4ac1-b81b-4ec78
 
 The program's own wording SHOULD be English, written in printable ASCII with line feed and tab.
 Text passed through is shown as it is, and a message that shows such text carries it in a
-placeholder rather than in the literal. A program whose job is to judge text in another language
-may name words of that language in its messages, and such a deviation is noted in a comment
-beside the message or in the list of exemptions the source scan reads.
+placeholder rather than in the literal. A deviation, such as a program whose job is to judge text
+in another language naming words of that language, or a model prompt kept in another language
+because translating it would change what is measured, is noted with its reason in a comment
+beside the text or in the list of exemptions the source scan reads.
 
 Rationale: an agent reads a command's output and an MCP tool's result as a tool observation, so
 that text becomes part of a model's prompt and reads best as the plain English the model was

@@ -66,4 +66,4 @@ cargo llvm-cov --summary-only     # テキストサマリ
 cargo llvm-cov --html             # target/llvm-cov/html/index.html
 ```
 
-計測値は節目ごとに docs/analysis/ に記録する(このファイルには写さない — 古びるため)。
+計測値は区切りごとに docs/analysis/ に記録する(このファイルには写さない — 古びるため)。

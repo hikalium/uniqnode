@@ -51,7 +51,7 @@ curl -X POST -H 'Content-Type: application/json' -d '{"url":"https://arxiv.org/a
 ```
 
 ブラウザから引くには、serve を起こしたままビューワを足す(ストアのロックを取らないので同時に
-走る)。`http://127.0.0.1:7450` を開けば、検索・出典・全文が 1 枚の頁で辿れる:
+走る)。`http://127.0.0.1:7450` を開けば、検索・出典・全文が 1 枚のページで辿れる:
 
 ```
 cargo run -p uniqnode -- viewer /tmp/uniqnode-data 127.0.0.1:7450

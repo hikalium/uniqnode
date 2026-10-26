@@ -140,7 +140,7 @@ agentd(ハーネス)─HTTP─▶ 10.100.0.1:11440 ─server-proxy─wg1─▶ 1
    既定(hybrid)に任せる。時限の既定は 60 秒。届かなければ「uniqnode に届かない」と言って
    空で返す(fail-open。タスクを止めない)。
 5. 測定: BENCH に「引けば直る」タスクを足す(先例: pianoapp の HTTP 応答が RFC 9112 違反。
-   同型で、uniqnode にしか無い知識、仕様書 PDF の 1 節や過去の決めごとが要るタスク)。
+   同型で、uniqnode にしか無い知識、仕様書 PDF の 1 セクションや過去の決めごとが要るタスク)。
    計るのは (a) uniqnode_search が呼ばれた率、(b) 呼ばれたとき緑に至った率、(c) 呼ばれ
    なかったときの率。モデル(gemma4:31b・gpt-oss-120b・Qwen3)× 説明文の版で行列にする。
 6. 調整: (a) が低ければ説明文と一覧での位置を変えて測り直す。それでも低いモデルにだけ、
@@ -195,7 +195,7 @@ uniqnode 側の書く口と出所の meta は着地した(`--agent-writable <c>`
 ### L4 で要るもの
 
 serve を止めない転送形の取り込み `uniqnode ingest … --serve-url <url>` は着地した(現在形は
-[docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b) の「CLI と API」節)。残るもの:
+[docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c24240293b) の「CLI と API」セクション)。残るもの:
 
 git の木からの取り込み `uniqnode ingest-git <dir> lamalium <木> --paths … [--ref main] --serve-url <url>`
 と、それを毎時回す unit の例 uniqnode-ingest-git@.service / .timer も着地した(2026-09-30。
@@ -357,7 +357,7 @@ priority の意味も知らない。知ると、向こうの書式が uniqnode �
 ### 口
 
 実物は [docs/design/GRAPH.md](#9d1f73a8-fabd-493e-9003-0a36503c7573) にある(段 1 で
-2026-09-08 に着地)。表をここに写さない。写しは古びるからで、現にこの節の初版に載せた案は
+2026-09-08 に着地)。表をここに写さない。写しは古びるからで、現にこのセクションの初版に載せた案は
 着地した形と食い違った(should/0135)。相談の途中で示した案から変えた点だけ記す。
 
 - 辺の PUT は `/v1/graphs/{g}/edges/{型}/{from}/{to}` で、本文を取らない。名前が

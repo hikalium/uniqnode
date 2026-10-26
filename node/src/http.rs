@@ -49,7 +49,7 @@ pub struct Response {
     /// 応答を書き切った後にプロセスを正常終了する(POST /v1/admin/shutdown 用。
     /// 正常終了はカバレッジのプロファイル書き出しも保証する)。
     pub shutdown_after: bool,
-    /// 取り込んだ紙面をそのまま返す応答に付ける印(HTML の原本。INGEST の HTML 抽出)。
+    /// 取り込んだ紙面をそのまま返す応答に付けるマーク(HTML の原本。INGEST の HTML 抽出)。
     /// 付けると Content-Security-Policy: sandbox allow-scripts が載り、紙面は不透明な
     /// 生成元で描かれる。取り込んだ HTML は「よそから来た文書」であって、この生成元の
     /// 権限(同じ生成元の /v1/* を叩ける権限)を渡してよいものではない。スクリプトは
@@ -584,7 +584,7 @@ fn read_request(
     Ok(Some(ReadOutcome::Ok(Request { body, ..request_head })))
 }
 
-/// 取り込んだ紙面に付ける印。不透明な生成元で描かせ、スクリプトだけは動かす。
+/// 取り込んだ紙面に付けるマーク。不透明な生成元で描かせ、スクリプトだけは動かす。
 /// allow-same-origin は与えない: 与えると砂場の意味が無くなる(同じ生成元の /v1/* を
 /// そのまま叩ける)。
 const SANDBOX_HEADER: &str = "Content-Security-Policy: sandbox allow-scripts\r\n";

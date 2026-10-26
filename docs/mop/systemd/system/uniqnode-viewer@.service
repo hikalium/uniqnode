@@ -9,7 +9,7 @@
 [Unit]
 Description=uniqnode viewer (RAG viewer, one HTML page forwarding to serve) [%i]
 StartLimitIntervalSec=0
-# serve の後に起こす。Requires= にしないのは、serve が居なくても頁は出て、届かないことを
+# serve の後に起こす。Requires= にしないのは、serve が居なくてもページは出て、届かないことを
 # 502 の本文で言うため(serve を起こし直したら、そのまま繋がる)。
 After=network.target uniqnode-serve@%i.service
 Wants=uniqnode-serve@%i.service

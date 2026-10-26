@@ -245,7 +245,7 @@ pub struct HttpResponse {
     /// 型で名乗るので、本文だけでなくヘッダも検証の対象になる。
     pub content_type: String,
     /// 名乗られた Content-Security-Policy(ヘッダが無ければ空)。取り込んだ紙面を
-    /// 砂場で描かせる印なので、これも検証の対象になる。
+    /// 砂場で描かせるマークなので、これも検証の対象になる。
     pub content_security_policy: String,
 }
 

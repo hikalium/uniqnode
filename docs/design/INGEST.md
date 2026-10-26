@@ -23,7 +23,7 @@ blob(原文そのもの)・chunk(検索と引用の単位)・doc_rev(版)・ref(
   "meta": { "breadcrumbs": ["5 …", "5.2.3.2 …"] } }
 
 // doc_rev: 原文 blob と順序付きチャンク列を束ねる版。media は markdown | text | html | pdf。
-// extractor は PDF のときだけ(PDF 抽出の節)。previous は前版の doc_rev(初版はキー
+// extractor は PDF のときだけ(PDF 抽出のセクション)。previous は前版の doc_rev(初版はキー
 // なし)。
 { "v": 1, "kind": "doc_rev", "source": "s256:<blob>",
   "chunks": ["s256:…", "s256:…"],
@@ -43,12 +43,12 @@ blob(原文そのもの)・chunk(検索と引用の単位)・doc_rev(版)・ref(
 - 引用は doc_rev 側から組み立てる: 文書名は ref パスから `collections/<コレクション名>/` を
   除いた残り、文書内位置は chunks 列の添字、見出しは meta.breadcrumbs、PDF はさらに
   meta.page。チャンク単体から出発する逆方向(このチャンクはどの文書のものか)は逆引き
-  (逆引きの節)が与える。
+  (逆引きのセクション)が与える。
 - チャンクの順序は doc_rev の chunks 列だけが持つ(順序は辺が持つ、という I7 と同じ形)。
   chunk 自身は番号を持たず、順序という一つの事実を二箇所に置かない。
 - doc_rev に時刻は入らない。入れると同一内容の再取り込みが別 ID になり、べき等(I1)が
   壊れる。取り込み時刻は ref レコードの at(可変層・署名付き)が持つ(I2)。例外は URL
-  からの取り込みの meta.fetched_at(URL からの取り込みの節)で、同一性は下の (source,
+  からの取り込みの meta.fetched_at(URL からの取り込みのセクション)で、同一性は下の (source,
   chunks 列) の一致で判定するので、同じ内容の再取得は時刻が違っても no-op のままである。
 - 書き込みの順序は blob と chunk 群 → doc_rev → ref(set_ref は存在しない target を拒否する
   ため ref は最後)。
@@ -68,7 +68,7 @@ blob(原文そのもの)・chunk(検索と引用の単位)・doc_rev(版)・ref(
   ([docs/design/EVAL.md](#1109a04b-923e-4493-8f00-d704047d6a2a))で測って調整する暫定値である。
 - 近似トークン数は「ASCII 文字は 1/4 トークン、非 ASCII 文字は 1 トークン」の重み付き文字数
   (切り上げ)。純関数 token_estimate として一箇所にあり、チャンカーとテストが共用する
-  (should/0135)。注釈の照合で数える「語」(注釈の取り込みと照合の節)とは別物である。
+  (should/0135)。注釈の照合で数える「語」(注釈の取り込みと照合のセクション)とは別物である。
 - どの形式も、空行区切りの段落を上限まで詰めてチャンクにする。単一の段落が上限を超えるとき
   だけ文字境界で分割する。コードフェンスの内側では空行でも段落を切らず、フェンスの行も本文の
   一部として保つ。
@@ -150,10 +150,10 @@ node/src/fetch.rs で、取る・見分ける・名前を決める・出所を�
 - HTML は blob にする前に自足した 1 枚に書き換える(node/src/web.rs の self_contain。
   スクリプト・外部スタイル・画像・フレーム・フォントなど外部への依存を落とし、相対リンクを
   転送後の URL を基準に絶対にし、出所の meta を入れる)。blob になるのは書き換えた後の
-  紙面で、チャンクはそこから HTML 抽出の節の道で作る。`<html>` も DOCTYPE も無い断片は
+  紙面で、チャンクはそこから HTML 抽出のセクションの道で作る。`<html>` も DOCTYPE も無い断片は
   書き換えの出力が `<head>` で始まり、原本の Content-Type 判定(RENDITION.md。頭が
   `<!doctype html` か `<html` のときだけ text/html)で素文に落ちるので、その判定に問うて
-  HTML と名乗れなければ `<!DOCTYPE html>` を前置してから blob にする。PDF は PDF 抽出の節の道(blob は PDF
+  HTML と名乗れなければ `<!DOCTYPE html>` を前置してから blob にする。PDF は PDF 抽出のセクションの道(blob は PDF
   そのもの、meta.extractor に pdftotext の版)。素文と Markdown はそのまま。
 - 文書名は指定が無ければ URL から導く: ホスト(小文字)とパスと問い合わせ(? 以降)を、
   英数字と `.` `-` 以外を `_` に潰した 1 語にする(`https://arxiv.org/abs/2401.00001` は
@@ -168,7 +168,7 @@ node/src/fetch.rs で、取る・見分ける・名前を決める・出所を�
   落としたものの数。scripts・stylesheets・images・frames・fonts・handlers・others の 7 つを
   0 でも書く)。
 - 入口は `POST /v1/collections/{collection}/fetch`(ボディ `{"url": "...", "name"?: "..."}`)
-  と CLI の `uniqnode fetch`(CLI と API の節)。serve は curl と pdftotext を待つあいだ
+  と CLI の `uniqnode fetch`(CLI と API のセクション)。serve は curl と pdftotext を待つあいだ
   ストアのロックを持たない(取ってから、ロックを取って書く。SPEC §8.2 の同型)。誤りは
   誰が直せるかで分ける: 400 は URL や name の誤り、415 は取り込める種別でない、502 は
   向こうから取れない(繋がらない・期限切れ・2xx でない・上限超え)、503 は道具(curl・
@@ -186,18 +186,18 @@ node/src/fetch.rs で、取る・見分ける・名前を決める・出所を�
 注釈索引ファイル(data.md)を読み、注釈 1 件を annotates 型の辺として取り込む。
 
 ```jsonc
-// 節タイトルのノード
+// セクションタイトルのノード
 { "v": 1, "kind": "node", "contents": "Generic Address Structure" }
 
-// annotates 型の辺: blob のページ page に節 title がある、という一次言明
+// annotates 型の辺: blob のページ page にセクション title がある、という一次言明
 { "v": 1, "kind": "edge", "type": "s256:<annotates 型ノード>",
-  "members": ["s256:<節タイトルのノード>", "s256:<PDF blob>"],
+  "members": ["s256:<セクションタイトルのノード>", "s256:<PDF blob>"],
   "meta": { "page": 162 } }
 ```
 
 - data.md のパーサが受け付ける形式(この形だけを受け付ける。must/0020): spec_id の見出し +
   表題・形式・URL の 3 行コードブロック(形式が zip のときだけ書庫内パスの 4 行目)+
-  「- p.N: 節タイトル」の箇条書き。タイトルはバッククォート囲みと裸の両方を受け、注釈が
+  「- p.N: セクションタイトル」の箇条書き。タイトルはバッククォート囲みと裸の両方を受け、注釈が
   1 件も無い見出しも正常。形式外の行は行番号を示して失敗する。
 - ページ番号 p.N は PDF の物理ページ番号(pdftotext の -f / -l と同じ 1 始まりの通し番号)で
   あり、紙面に刷られたページ番号ではない。meta.page も同じ番号空間で書く。
@@ -235,7 +235,7 @@ node/src/fetch.rs で、取る・見分ける・名前を決める・出所を�
 
 - 索引は取り込みの実行ごとにまとめて作り直し、現行索引の corrections を持ち越す。同一の
   索引に落ちたら ref は触らない(no-op)。辺と検証記録の結びつけはこの対だけが持つ
-  (検証記録は言明を指さず、言明も検証記録を持たない。理由は訂正の表現の節)。
+  (検証記録は言明を指さず、言明も検証記録を持たない。理由は訂正の表現のセクション)。
 
 ## 訂正の表現
 
@@ -273,7 +273,7 @@ CLI `uniqnode correct <dir> <コレクション名> <誤った言明ID> <新し�
 - 両 ID はストアに存在しなければならず、新しい言明は annotates 型の辺でなければならない
   (再照合はタイトルとページ本文のトークン照合なので、annotates 辺にしか適用できない)。
   言明は自分自身を訂正できない。満たさなければ理由を言って失敗する(must/0022)。
-- 新しい言明は取り込み時と同じ照合(注釈の取り込みと照合の節)で再照合される。ページ本文は、
+- 新しい言明は取り込み時と同じ照合(注釈の取り込みと照合のセクション)で再照合される。ページ本文は、
   新しい言明の参照する blob を source に持つ現行 doc_rev を `collections/<コレクション名>/`
   配下の ref から探して得る。doc_rev が無い・照合に落ちる場合は発行せず失敗する。
 - 発行は corrects 型ノード・検証記録(method は token-match)・corrects 辺を書き、索引の
@@ -359,18 +359,18 @@ CLI はストアの排他ロックを取るので serve 停止中のストア用
   1 件も送る前に全部を確かめる。PUT 1 件を待つ期限は 600 秒(千ページ級の PDF の抽出を
   serve が終えるまで答えないため)。
 - `uniqnode ingest-git <dir> <コレクション名> <木> --paths <道,道,...> [--ref <ref>] [--serve-url <url> | --pdftotext <exe>]`:
-  git の木からの取り込み(git の木からの取り込みの節)。ref の既定は main。--serve-url の有無で
+  git の木からの取り込み(git の木からの取り込みのセクション)。ref の既定は main。--serve-url の有無で
   上の 2 つの形のどちらかになり、1 件ごとの行と締めの 1 行も同じ。その前に
   `tree: <ref> of <木> = <コミット ID> (written N, left out N)` の 1 行と、
   書き出さなかったものごとの `not written (symbolic link: <道>)` の行を出す。
 - `uniqnode fetch <dir> <コレクション名> <url> [--name <名>] [--pdftotext <exe>]`: URL からの
-  取り込み(URL からの取り込みの節)。ストアを開くのは取ってからで、取れない URL では
+  取り込み(URL からの取り込みのセクション)。ストアを開くのは取ってからで、取れない URL では
   ストアを作らない。1 行目は ingest と同じ形に media と final_url を足したもの、HTML なら
   2 行目に dropped の内訳。
 - `uniqnode ingest-annotations <dir> <コレクション名> <data.md> [--manual <承認リスト>]`:
-  注釈索引の取り込み(注釈の取り込みと照合の節)。
+  注釈索引の取り込み(注釈の取り込みと照合のセクション)。
 - `uniqnode correct <dir> <コレクション名> <誤った言明ID> <新しい言明ID> <理由>`: 訂正の
-  発行(訂正の発行の節)。
+  発行(訂正の発行のセクション)。
 - `PUT /v1/collections/{collection}/documents/{name}[?meta.<key>=<value>&...]`: 文書 1 件の
   取り込み。本文は生バイト列で、種別は name の拡張子で判定し、ref 名には拡張子を残さない。
   応答は doc_rev の ID・new_objects・ref_updated・previous(上書きなら前版の doc_rev、新規なら
@@ -384,12 +384,12 @@ CLI はストアの排他ロックを取るので serve 停止中のストア用
   検索の citation の形は変えない。同じ本文の再 PUT は meta が違っても no-op(同一内容の判定は
   source と chunks 列で、meta を見ない)。serve の読み口からのこの PUT は
   [docs/design/AGENT_DOOR.md](#02f79aec-2f12-41e6-bede-1557d4719e4d) の「書く口」。
-- `POST /v1/collections/{collection}/fetch`: URL からの取り込み(URL からの取り込みの節)。
+- `POST /v1/collections/{collection}/fetch`: URL からの取り込み(URL からの取り込みのセクション)。
   ボディは `{"url": "...", "name": "..."}`(name は省略可)。応答は PUT documents と同じ
   doc_rev・new_objects・ref_updated・previous に final_url・name・media を足し、HTML なら
   dropped(落としたものの数)も載る。本体は api.rs の fetch_into で、MCP の fetch_url も同じ
   関数を通る。
-- `GET /v1/objects/{id}/referrers`: 逆引き(逆引きの節)。応答は referrers(ID の列)。
+- `GET /v1/objects/{id}/referrers`: 逆引き(逆引きのセクション)。応答は referrers(ID の列)。
 - 引用を組み立てる専用 API は無い(ref → doc_rev → chunks の添字と、既存のオブジェクト取得
   で組める)。
 
@@ -398,9 +398,9 @@ CLI はストアの排他ロックを取るので serve 停止中のストア用
 - .txt が対象拡張子なので、取り込み起点の下にある SHA-1 台帳のような index.txt もプレーン
   テキストの文書として取り込まれる。コレクションを狭めたければ、取り込み起点を絞るか ref を
   tombstone する。
-- PDF のチャンクの meta.breadcrumbs は、節見出しの経路である(しおりか語の高さから復元する。
+- PDF のチャンクの meta.breadcrumbs は、セクションの見出しの経路である(しおりか語の高さから復元する。
   RENDITION と同じ道具を使う抽出で、node/src/outline.rs が家)。全 34 本の 95.9% のページに
-  経路が付く。しおりも高さも拾えない文書(組版が節番号の体を成さないもの)は空のままで、
+  経路が付く。しおりも高さも拾えない文書(組版がセクション番号の体を成さないもの)は空のままで、
   そのときは索引語が本文だけから出る。
 - 注釈索引は 1 オブジェクトで、注釈数に比例して大きくなる。100 件規模を超えて常用するなら
   分割が要る(現在は分割していない)。

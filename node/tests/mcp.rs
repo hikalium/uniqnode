@@ -400,7 +400,7 @@ fn pdf_citations_carry_the_page_number_through_mcp() {
 fn the_search_tool_says_how_many_low_information_chunks_it_dropped() {
     let dir = store_with("mcp-lowinfo", &["search_lowinfo.md"]);
     let mut mcp = McpProcess::start(&dir, &[]);
-    // 「索引の構築」は目次の節(点線の紙面)と本文の節の両方に現れる。
+    // 「索引の構築」は目次のセクション(点線の紙面)と本文のセクションの両方に現れる。
     let dropped = mcp.call(1, "search", "{\"query\":\"索引の構築\",\"top_k\":10}");
     assert!(dropped.contains("results 1"), "本文のセクションだけが残るべき: {dropped}");
     assert!(
@@ -582,7 +582,7 @@ fn the_local_form_equips_the_reranker_and_says_when_it_cannot_reach_it() {
     let dir = store_with("mcp-rerank", &["search_ja.md"]);
     let mut mcp = McpProcess::start(&dir, &["--rerank", "http://127.0.0.1:1/v1/rerank"]);
 
-    // 候補が 2 件無いと取り直しは往復しない(1 件では順位が動かない)ので、2 つの節に
+    // 候補が 2 件無いと取り直しは往復しない(1 件では順位が動かない)ので、2 つのセクションに
     // 当たる問いを選ぶ。
     let searched = mcp.call(1, "search", "{\"query\":\"レプリカ 世代\"}");
     assert!(searched.contains("\"isError\":false"), "{searched}");
@@ -747,8 +747,8 @@ fn the_server_execs_a_healthy_new_binary_and_refuses_a_broken_one() {
     std::fs::remove_dir_all(&binary_dir).expect("cleanup");
 }
 
-/// 自己置換の防御が呼ぶ命令(uniqnode selfcheck)は、健全な実行ファイルなら規定の印を
-/// 標準出力に出して正常終了する。防御はこの印と終了コードの両方を見る。
+/// 自己置換の防御が呼ぶ命令(uniqnode selfcheck)は、健全な実行ファイルなら規定のマークを
+/// 標準出力に出して正常終了する。防御はこのマークと終了コードの両方を見る。
 #[test]
 fn selfcheck_reports_the_marker_on_stdout() {
     let output = cli_output(&["selfcheck"]);
@@ -756,7 +756,7 @@ fn selfcheck_reports_the_marker_on_stdout() {
     assert!(output.status.success(), "selfcheck は正常終了すべき: {}", output.status);
     assert!(
         reported.contains(uniqnode::mcp::SELF_CHECK_MARKER),
-        "印が無い: {reported}"
+        "マークが無い: {reported}"
     );
     assert!(reported.contains("tools=4"), "読む 2 本と書く 2 本の記述を組み立てるべき: {reported}");
 }
@@ -940,7 +940,7 @@ fn add_document_refuses_a_collection_that_is_not_writable_without_touching_the_s
 
 /// fetch_url に取りに行かせる紙面(script と img を含む。落とした数が 0 でないように)。
 const FETCHED_PAGE_HTML: &str = "<!DOCTYPE html>\n<html><head><title>紙面</title>\
-    <script src=\"/app.js\"></script></head><body>\n<h2>節</h2>\n\
+    <script src=\"/app.js\"></script></head><body>\n<h2>概要</h2>\n\
     <p>取り込みの本文はここにある。</p>\n<img src=\"pic.png\" alt=\"絵\">\n\
     <script>var a = 1;</script>\n</body></html>\n";
 
@@ -975,7 +975,7 @@ fn fetch_url_ingests_html_from_a_local_site_and_reports_what_it_dropped() {
     );
     let searched = mcp.call(2, "search", "{\"query\":\"取り込みの本文\",\"collection\":\"web\"}");
     assert!(searched.contains("web/page position 0"), "取り込んだ紙面が検索に出ない: {searched}");
-    assert!(searched.contains("headings: 紙面 > 節"), "{searched}");
+    assert!(searched.contains("headings: 紙面 > 概要"), "{searched}");
 
     // name を省くと URL から導く(ホストとパスを 1 語に)。
     let derived = mcp.call(3, "fetch_url", &format!("{{\"collection\":\"web\",\"url\":\"{url}\"}}"));

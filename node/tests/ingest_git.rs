@@ -1,5 +1,5 @@
 //! git の木からの取り込み(`ingest-git`。INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の
-//! 「git の木からの取り込み」節)の統合テスト。一時の git の木を実物の git で作り、実プロセスの
+//! 「git の木からの取り込み」セクション)の統合テスト。一時の git の木を実物の git で作り、実プロセスの
 //! serve に --serve-url で送る(should/0138)。
 
 mod common;
@@ -154,7 +154,7 @@ fn ingest_git_sends_only_tracked_files_under_the_paths_at_the_ref() {
     assert!(third.contains("ingested: 3 (updated 1, no-op 2), skipped 1"), "{third}");
     let chunk = first_chunk_text(&server.address, "collections/lamalium/docs/design/store");
     assert!(chunk.contains("書きかけの版 2"), "{chunk}");
-    // git から消えた文書は消さない(INGEST の節に書いた既知の限り)。
+    // git から消えた文書は消さない(INGEST のセクションに書いた既知の限り)。
     let refs = body_text(&simple(&server.address, "GET", "/v1/refs", b""));
     assert!(refs.contains("collections/lamalium/docs/design/old"), "{refs}");
 

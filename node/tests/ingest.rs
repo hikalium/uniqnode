@@ -89,7 +89,7 @@ fn put_document_and_resolve_a_citation_then_reput_is_noop() {
 fn put_html_document_is_chunked_as_text_and_served_back_as_html() {
     let server = start_server("ingest-html");
     let page = "<!-- 取得の記録 -->\n<!DOCTYPE html><html><head><title>紙面</title>\
-                <style>body { color: red }</style></head><body><h2>節</h2>\
+                <style>body { color: red }</style></head><body><h2>概要</h2>\
                 <p>検索に載る本文。</p><ul><li>項目</li></ul>\
                 <script>var a = 1;</script></body></html>";
 
@@ -112,9 +112,9 @@ fn put_html_document_is_chunked_as_text_and_served_back_as_html() {
     let chunk_id = chunk_ids_of(&doc).into_iter().next().expect("chunk id");
     let chunk = body_text(&simple(&server.address, "GET", &format!("/v1/objects/{chunk_id}"), b""));
     assert!(chunk.contains("検索に載る本文。"), "{chunk}");
-    assert!(chunk.contains("- 項目"), "箇条書きは行頭の印になる: {chunk}");
+    assert!(chunk.contains("- 項目"), "箇条書きは行頭のマークになる: {chunk}");
     assert!(!chunk.contains("<p>") && !chunk.contains("var a"), "札と script は落ちる: {chunk}");
-    assert!(chunk.contains("\"breadcrumbs\":[\"紙面\",\"節\"]"), "{chunk}");
+    assert!(chunk.contains("\"breadcrumbs\":[\"紙面\",\"概要\"]"), "{chunk}");
 
     // 原本は 1 バイトも変わらず、HTML として返る。
     let response = simple(
@@ -295,7 +295,7 @@ fn cli_ingest_without_pdftotext_fails_with_install_instructions() {
     std::fs::remove_dir_all(&corpus).expect("cleanup");
 }
 
-// ---- 転送する形の取り込み(ingest … --serve-url。INGEST の「CLI と API」節の確認) ----
+// ---- 転送する形の取り込み(ingest … --serve-url。INGEST の「CLI と API」セクションの確認) ----
 
 /// ingest を実プロセスで走らせ、(成功したか, 標準出力, 標準エラー) を返す。
 fn run_cli_ingest(args: &[&str]) -> (bool, String, String) {
@@ -469,7 +469,7 @@ fn cli_ingest_via_serve_url_refuses_what_it_cannot_carry_before_sending() {
     std::fs::remove_dir_all(&corpus).expect("cleanup");
 }
 
-// ---- 注釈の取り込み(INGEST の「注釈の取り込みと照合」節の確認) ----
+// ---- 注釈の取り込み(INGEST の「注釈の取り込みと照合」セクションの確認) ----
 
 use uniqnode::ingest::{parse_annotation_index, parse_manual_approvals, AnnotationEntry};
 
@@ -671,7 +671,7 @@ fn serve_without_pdftotext_rejects_pdf_with_instructions() {
     assert_eq!(response.status, 200, "{}", body_text(&response));
 }
 
-// ---- 訂正の発行(INGEST の「訂正の発行」節と「逆引き」節の確認) ----
+// ---- 訂正の発行(INGEST の「訂正の発行」セクションと「逆引き」セクションの確認) ----
 
 /// annotates 型ノードの固定 ID(must/0023 の定数の末端確認で使う)。
 const ANNOTATES_TYPE_ID: &str =

@@ -18,7 +18,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// 日本語文書(検索の統合テストと共用の資材。世代の整合の節が識別しやすい語を持つ)。
+/// 日本語文書(検索の統合テストと共用の資材。世代の整合のセクションが識別しやすい語を持つ)。
 const SEARCH_JA: &str = include_str!("assets/search_ja.md");
 
 /// 読み口つきで起こした serve。標準出力は裏のスレッドが読み続ける(読み口の
@@ -364,7 +364,7 @@ fn an_allowed_collection_takes_a_put_through_the_door_and_records_where_it_came_
 /// 文書で、許した側と同じ語(世代の整合)を持つ: collection を省いた検索が、集合の外の
 /// 件を落としていることを見るために要る。
 const BORROWED_JA: &str =
-    "# 第三者の頁\n\n## 世代の整合\n\n第三者の頁の写しにも世代の整合の話がある。\n";
+    "# 第三者のページ\n\n## 世代の整合\n\n第三者のページの写しにも世代の整合の話がある。\n";
 
 /// 2 つのコレクション(notes と web)に別々の文書を入れ、それぞれの最初のチャンクの ID を
 /// 返す。入れるのは主の口なので、読み口の許可表とは無関係に両方がストアにある。

@@ -18,7 +18,7 @@ pub struct ApiContext {
     /// serve でのみ Some(健全性エンジン。SPEC §8)。
     pub health: Option<Arc<crate::health::HealthEngine>>,
     /// 逆引き索引の遅延キャッシュ(GET /v1/objects/{id}/referrers)。起動時には作らず
-    /// (Store::open に全件パースを足さない。INGEST の「逆引き」節)、初回要求時に
+    /// (Store::open に全件パースを足さない。INGEST の「逆引き」セクション)、初回要求時に
     /// 構築して、世代(object_count)がずれたら次の要求で作り直す。
     pub referrers: Mutex<Option<crate::store::ReferrerIndex>>,
     /// 検索索引の遅延キャッシュ(POST /v1/search)。referrers と同じ遅延構築だが、
@@ -622,7 +622,7 @@ pub struct SearchRequest {
 pub const FULL_TOP_K_LIMIT: usize = 10;
 
 /// 引用(取り込み層の引用規則。INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の
-/// 「文書モデル」節): document は ref パスから collections/<コレクション名>/ を除いた
+/// 「文書モデル」セクション): document は ref パスから collections/<コレクション名>/ を除いた
 /// 残り、position は chunks 列の添字、breadcrumbs は見出しの入れ子パス、PDF はさらに
 /// page、at はその版を見えに置いた ref レコードの時刻(取得日時。unix 秒)。
 #[derive(Clone, Debug)]
@@ -1186,9 +1186,9 @@ pub fn run_search(
         context.reranker.as_ref(),
         &request.query,
         &mut outcome.results,
-        // 節見出しの経路を本文の前に置いてから採点させる(contextual chunk header)。
-        // 抜粋だけを渡すと、リランカーには「その語が出る一文」と「その語を題に持つ節」の
-        // 区別が付かない: 実測で、xHCI の「4.20 Scratchpad Buffers」の節と、Slot Context
+        // セクションの見出しの経路を本文の前に置いてから採点させる(contextual chunk header)。
+        // 抜粋だけを渡すと、リランカーには「その語が出る一文」と「その語を題に持つセクション」の
+        // 区別が付かない: 実測で、xHCI の「4.20 Scratchpad Buffers」のセクションと、Slot Context
         // の説明の中で同じ語が 1 度出る紙面が、抜粋だけでは後者が上に来ていた。見出しは
         // 引用が既に持っているので、ここで足すのに新しい取得は要らない。
         |result| match result.citation.breadcrumbs.is_empty() {
@@ -1845,7 +1845,7 @@ fn rendition_error_response(error: crate::rendition::RenditionError) -> Response
 }
 
 /// 用意できた写しをそのまま返す。Content-Type はレシピ(恒等レシピだけは原本の中身)が
-/// 決めたものである。HTML の原本には砂場の印を付ける: 取り込んだ紙面はよそから来た文書
+/// 決めたものである。HTML の原本には砂場のマークを付ける: 取り込んだ紙面はよそから来た文書
 /// であって、この生成元の /v1/* を叩ける権限を渡してよいものではない(node/src/http.rs)。
 fn rendition_response(rendition: crate::rendition::Rendition) -> Response {
     let mut response = Response::bytes_typed(200, rendition.content_type, rendition.bytes);
@@ -2251,7 +2251,7 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
                 Err(e) => store_error_response(e),
             };
         }
-        // 逆引き(INGEST の「逆引き」節): この ID を参照している既知オブジェクトの一覧。
+        // 逆引き(INGEST の「逆引き」セクション): この ID を参照している既知オブジェクトの一覧。
         if let Some(id) = rest.strip_suffix("/referrers") {
             if method != "GET" {
                 return error_response(405, "GET only");
@@ -2423,10 +2423,10 @@ fn handle_with_path_argument(context: &ApiContext, request: &Request) -> Respons
         return handle_graph(context, method, rest, &request.body);
     }
 
-    // 文書の取り込み(INGEST の「CLI と API」節)。本文は生バイト列、種別は
+    // 文書の取り込み(INGEST の「CLI と API」セクション)。本文は生バイト列、種別は
     // {name} の拡張子で判定する。
     if let Some(rest) = path.strip_prefix("/v1/collections/") {
-        // URL からの取り込み(INGEST の「URL からの取り込み」節。node/src/fetch.rs)。
+        // URL からの取り込み(INGEST の「URL からの取り込み」セクション。node/src/fetch.rs)。
         if let Some(collection) = rest.strip_suffix("/fetch") {
             if method != "POST" {
                 return error_response(405, "POST only");
@@ -2591,7 +2591,7 @@ pub fn put_document(
             Err(_) => return error_response(400, "the body is not UTF-8"),
         }
     };
-    // PDF は節見出しの経路も載せる(node/src/outline.rs)。取れなければ理由を記録に
+    // PDF はセクションの見出しの経路も載せる(node/src/outline.rs)。取れなければ理由を記録に
     // 残して、見出しの無いチャンクとして続ける(黙って諦めない。must/0022)。
     let (chunks, outline_reason) =
         crate::ingest::chunk_for_media_with_source(media, text, body);

@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 /// 取りに行き続ける。試験(node/tests/agent_door.rs)はこの定数から待ち時間を組む。
 pub const BIND_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
-/// 束縛できたときに標準出力へ出す 1 行の、アドレスの後ろに付く印。主の口の
-/// `listening on <addr>` と見分けるためのもので、起動スクリプトと試験はこの印で
+/// 束縛できたときに標準出力へ出す 1 行の、アドレスの後ろに付くマーク。主の口の
+/// `listening on <addr>` と見分けるためのもので、起動スクリプトと試験はこのマークで
 /// 2 本目の行を選ぶ(must/0023)。
 pub const LISTENING_LINE_SUFFIX: &str = " (agent door)";
 

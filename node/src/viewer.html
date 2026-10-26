@@ -33,7 +33,7 @@
   input, select, button { font: inherit; padding: .4rem .55rem;
                           border: 1px solid var(--line); border-radius: 6px;
                           background: Canvas; color: CanvasText; }
-  /* 開いた選択肢は別の描画面に出るので、頁の色は継がない。ここでも組で指定する。 */
+  /* 開いた選択肢は別の描画面に出るので、ページの色は継がない。ここでも組で指定する。 */
   option { background: Canvas; color: CanvasText; }
   button { cursor: pointer; background: var(--panel); color: CanvasText; }
   button:disabled { opacity: .5; cursor: default; }
@@ -44,7 +44,7 @@
   .hit { border-top: 1px solid var(--line); padding: .8rem 0;
          display: flex; gap: .8rem; flex-wrap: wrap; }
   .body { flex: 1 1 22rem; min-width: 0; }
-  /* 写し(紙面のサムネと、その頁へ行く道)。参照先はどれも同じ生成元の /v1/objects/… で
+  /* 写し(紙面のサムネと、そのページへ行く道)。参照先はどれも同じ生成元の /v1/objects/… で
      ある。件の左に置き、拡大したときだけ行いっぱいに広げる。 */
   .media { flex: 0 0 9rem; display: flex; flex-direction: column; gap: .25rem;
            font-size: .78rem; }
@@ -262,7 +262,7 @@ function render(body) {
 // 上位の数件だけ引き、残りには同じ形を当てて、画像は loading="lazy" に任せる。
 const RENDITION_PROBE_LIMIT = 3;
 
-// 頁が自分で組み立てる道。ID はそのまま path に置く(全文を取る道と同じ理由で、
+// ページが自分で組み立てる道。ID はそのまま path に置く(全文を取る道と同じ理由で、
 // パーセント符号化しない: 受け側の ID の形の検査に落ちて 404 になる)。
 function renditionUrls(id) {
   return {
@@ -286,7 +286,7 @@ async function loadCatalog(id) {
 }
 
 // serve から来た文言(出せない理由・注記)は、地の文としてその場に出す。値はテキストの
-// 位置にしか入らないので、文言に < が混じっても頁の上では走らない。
+// 位置にしか入らないので、文言に < が混じってもページの上では走らない。
 function why(label, text) {
   const div = document.createElement("div");
   div.className = "why";
@@ -348,8 +348,8 @@ function renditionBox(entry, views) {
 }
 
 // 1 件ぶんの、原本(文書そのもの)への口。道は serve が検索の応答で言ったものをそのまま
-// serve が言った道のうち、頁が開いてよい形だけを通す。応答から来た文字列をそのまま
-// href に置くと、`javascript:` の類が頁の上で走る。組み立てるのは serve だが、頁は
+// serve が言った道のうち、ページが開いてよい形だけを通す。応答から来た文字列をそのまま
+// href に置くと、`javascript:` の類がページの上で走る。組み立てるのは serve だが、ページは
 // 受け取った字面を検めてから使う(本文を escapeText に通すのと同じ規律)。
 function sameOriginPath(url) {
   return typeof url === "string" && url.startsWith("/v1/objects/") ? url : null;

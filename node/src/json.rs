@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(numbers.len(), 3);
         let Json::Number(first) = numbers[0] else { panic!("数のはず") };
         assert!((first - (-0.0015)).abs() < 1e-12, "{first}");
-        // 壊れた入力(閉じない・余りがある・16 進でない \u)は失敗する。
+        // 壊れた入力(閉じない・末尾に余分な文字がある・16 進でない \u)は失敗する。
         assert!(Json::parse("{\"a\":1").is_err());
         assert!(Json::parse("{} {}").is_err());
         assert!(Json::parse("{\"a\":\"\\uZZZZ\"}").is_err());

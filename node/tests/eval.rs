@@ -22,7 +22,7 @@ use uniqnode::store::{Store, StoreConfig};
 
 /// 固定の小コーパス(文書名, 本文)。文書名は資材のファイル名から拡張子を除いたもので、
 /// 正解チャンクの名前 `<文書>#<chunks 列の添字>` の前半になる。前の 3 文書はそれぞれ
-/// 日本語・英語・識別子の場を持ち、日本語と英語の文書は先頭に列挙(目次)の節を持つ。
+/// 日本語・英語・識別子の場を持ち、日本語と英語の文書は先頭に列挙(目次)のセクションを持つ。
 /// eval_gap は語彙の隔たりの場で、クエリと正解が索引語を共有しない対のためにある
 /// (VOCABULARY_GAP_CASES)。
 ///
@@ -35,7 +35,7 @@ const CORPUS: &[(&str, &str)] = &[
     ("eval_gap", include_str!("assets/eval_gap.md")),
 ];
 
-/// 固定コーパスには入れない資材(目次の節と本文の節を 1 つずつ持つ文書)。低情報の
+/// 固定コーパスには入れない資材(目次のセクションと本文のセクションを 1 つずつ持つ文書)。低情報の
 /// 後処理が効くことを見るためだけに、別の索引へ入れて使う。API の試験(node/tests/search.rs)
 /// と同じ資材である。
 const LOW_INFO: &str = include_str!("assets/search_lowinfo.md");
@@ -44,7 +44,7 @@ const LOW_INFO: &str = include_str!("assets/search_lowinfo.md");
 /// 名前(`<文書>#<添字>`)で書く。
 /// チャンクのオブジェクト ID は内容ハッシュなので、コーパスの本文を一字直すだけで
 /// 変わり、固定資材に書けないためである。添字は chunk_markdown が見出しごとに切った
-/// 順で、各文書の 0 番は列挙(目次)の節である。
+/// 順で、各文書の 0 番は列挙(目次)のセクションである。
 ///
 /// [目次] と書いた対は、実データで観察された難所(SEARCH
 /// (uuid:19574e78-9bf5-4f87-a4c2-c4a10222c580) の「既知の癖」)の再現である: クエリの句が
@@ -52,7 +52,7 @@ const LOW_INFO: &str = include_str!("assets/search_lowinfo.md");
 ///
 /// [見出しのみ] と書いた対は、正解チャンクの本文にはクエリの語が一つも無く、見出し
 /// (meta.breadcrumbs)にしかない場合である。索引が本文だけを見ていたころ、この 2 対は
-/// 正解に届かなかった(監査証跡の保全は目次の節だけが返り、token_quarters は空振り)。
+/// 正解に届かなかった(監査証跡の保全は目次のセクションだけが返り、token_quarters は空振り)。
 const CASES: &[(&str, &str)] = &[
     // 日本語。
     ("世代の整合", "eval_ja#1"),                 // [目次] 同じ句が目次にもある
@@ -303,27 +303,27 @@ fn switching_the_method_changes_the_numbers_on_the_same_pairs() {
 }
 
 /// かつての難所(実データで観察された癖)の現状の記録: 同じ句が目次と定義の両方に
-/// あるとき、どちらが上に来るか。見出しを索引語に入れる前は、目次の節が短いぶん文書長
-/// 正規化で得をして 1 位を取り、定義の節は 2 位だった。見出しに重みを付けて数える今は、
-/// 定義の節が自分の題を持つぶん重く、目次の節を上回る。これも達成すべき目標ではなく
+/// あるとき、どちらが上に来るか。見出しを索引語に入れる前は、目次のセクションが短いぶん文書長
+/// 正規化で得をして 1 位を取り、定義のセクションは 2 位だった。見出しに重みを付けて数える今は、
+/// 定義のセクションが自分の題を持つぶん重く、目次のセクションを上回る。これも達成すべき目標ではなく
 /// 現状の記録であり、順位が入れ替わったらこの期待値も実測に合わせて更新する。
 #[test]
 fn the_definition_outranks_the_table_of_contents_today() {
     let index = indexed_corpus("contents");
     let report = bm25_report(&index);
     let outcome = report.outcome_of("世代の整合");
-    assert_eq!(outcome.first_relevant_rank, Some(1), "定義の節が来る順位\n{}", report.detail());
-    // 実測 2026-08-16: 目次の節は 2 位。句を持つ点では同じなので、消えるのではなく下がる。
+    assert_eq!(outcome.first_relevant_rank, Some(1), "定義のセクションが来る順位\n{}", report.detail());
+    // 実測 2026-08-16: 目次のセクションは 2 位。句を持つ点では同じなので、消えるのではなく下がる。
     assert_eq!(
         outcome.ranked.get(1).map(String::as_str),
         Some("eval_ja#0"),
-        "目次の節が来る順位\n{}",
+        "目次のセクションが来る順位\n{}",
         report.detail()
     );
 }
 
-/// 見出しにしかない語で本文の節に届く。索引が chunk の text だけを索引語にしていた
-/// ころ、この 2 対は正解に届かなかった: 日本語の対は目次の節だけが返り(節そのものは
+/// 見出しにしかない語で本文のセクションに届く。索引が chunk の text だけを索引語にしていた
+/// ころ、この 2 対は正解に届かなかった: 日本語の対は目次のセクションだけが返り(セクションそのものは
 /// 圏外)、識別子の対は空振りだった。基準線の平均が動いた理由をここで名指しする。
 #[test]
 fn a_phrase_that_lives_only_in_a_heading_finds_its_section() {
@@ -333,14 +333,14 @@ fn a_phrase_that_lives_only_in_a_heading_finds_its_section() {
     assert_eq!(
         japanese.ranked.first().map(String::as_str),
         Some("eval_ja#6"),
-        "見出しにしかない句で節が 1 位のはず\n{}",
+        "見出しにしかない句でセクションが 1 位のはず\n{}",
         report.detail()
     );
     let identifier = report.outcome_of("token_quarters");
     assert_eq!(
         identifier.ranked.first().map(String::as_str),
         Some("eval_api#4"),
-        "見出しにしかない識別子で節が 1 位のはず\n{}",
+        "見出しにしかない識別子でセクションが 1 位のはず\n{}",
         report.detail()
     );
 }
@@ -436,22 +436,22 @@ fn the_low_information_filter_finds_nothing_to_drop_on_the_fixed_corpus() {
 
     // 後処理が本当に効くことは、低情報チャンクを持つ別の索引で見る(固定コーパスで
     // 0 件だったのが「判定が何も落とさない」ためでないことの確認。should/0137)。
-    // 資材は API の試験と共用する(目次の節と本文の節を 1 つずつ持つ文書)。
+    // 資材は API の試験と共用する(目次のセクションと本文のセクションを 1 つずつ持つ文書)。
     let with_contents =
         indexed_corpus_with("low-information-asset", None, &[("search_lowinfo", LOW_INFO)]).lexical;
     let bm25 = Bm25Retrieval::new(&with_contents, Some("eval"));
     let filtered = LowInformationFiltered::new(&bm25, &with_contents);
-    assert_eq!(filtered.low_information_count(), 1, "目次の節が低情報のはず");
+    assert_eq!(filtered.low_information_count(), 1, "目次のセクションが低情報のはず");
     let query = "索引の構築";
     assert_eq!(
         bm25.ranked(query, 10),
         vec!["search_lowinfo#1".to_string(), "search_lowinfo#0".to_string()],
-        "素の BM25 は目次の節も返す(実測 2026-08-17: 本文の節が 1 位、目次の節が 2 位)"
+        "素の BM25 は目次のセクションも返す(実測 2026-08-17: 本文のセクションが 1 位、目次のセクションが 2 位)"
     );
     assert_eq!(
         filtered.ranked(query, 10),
         vec!["search_lowinfo#1".to_string()],
-        "後処理は目次の節だけを落とす"
+        "後処理は目次のセクションだけを落とす"
     );
 }
 
@@ -665,8 +665,8 @@ fn the_vocabulary_gap_pairs_that_semantics_reaches() {
 /// 語彙が隔たる 6 対は、現在の BM25 では一つも上位 10 件に入らない(圏外)。基準線の
 /// 平均が飽和から下がった理由をここで名指しする。
 ///
-/// 取りこぼしの形は 2 通りある。実測 2026-08-17 では、6 対のうち 5 対は別の節が返り
-/// (語の一致だけを見ると別の節の方が近く見える)、日本語の問いで英語の本文を引く
+/// 取りこぼしの形は 2 通りある。実測 2026-08-17 では、6 対のうち 5 対は別のセクションが返り
+/// (語の一致だけを見ると別のセクションの方が近く見える)、日本語の問いで英語の本文を引く
 /// 1 対(「時計がずれても大丈夫か」)はコーパス全体と語を共有せず空振りになる。どちらも
 /// クエリ自体は索引語を持つので、生産経路の POST /v1/search が 400 で撥ねる形
 /// (索引語が 1 語も無いクエリ)ではない。それも下でいっしょに確かめる。

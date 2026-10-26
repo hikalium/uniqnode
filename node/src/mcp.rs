@@ -73,7 +73,7 @@ const FETCH_URL_TIMEOUT: Duration =
     Duration::from_secs(60 + crate::fetch::DEFAULT_MAX_SECONDS);
 
 /// 転送する形の ingest(`uniqnode ingest … --serve-url`)が PUT 1 件を待つ期限。serve は
-/// PDF なら pdftotext と節見出しの復元が終わるまで答えず、千ページ級の仕様書ではそれが
+/// PDF なら pdftotext とセクションの見出しの復元が終わるまで答えず、千ページ級の仕様書ではそれが
 /// 数十秒かかる(直接開く形の ingest には期限が無い)。add_document の文書は人が書く
 /// 短い本文なので SERVE_TIMEOUT のままにし、ここだけ長く採る(should/0104)。
 const INGEST_PUT_TIMEOUT: Duration = Duration::from_secs(600);
@@ -88,7 +88,7 @@ const ADD_DOCUMENT_MEDIA: [(&str, &str); 2] = [("markdown", "md"), ("text", "txt
 /// 答える側(node/src/main.rs)で同じ文字列を使う(must/0023)。
 pub const SELF_CHECK_COMMAND: &str = "selfcheck";
 
-/// 自己検査が健全なときに標準出力へ書く印。exec の前にこの印を確かめるので、たまたま
+/// 自己検査が健全なときに標準出力へ書くマーク。exec の前にこのマークを確かめるので、たまたま
 /// 終了コード 0 で終わる別の実行ファイル(置き換え事故)を健全とみなさない。
 pub const SELF_CHECK_MARKER: &str = "uniqnode selfcheck ok";
 
@@ -684,7 +684,7 @@ impl BinaryStamp {
     }
 }
 
-/// 自己検査(exec の前の防御)。新しいイメージを子プロセスとして起こし、規定の印を
+/// 自己検査(exec の前の防御)。新しいイメージを子プロセスとして起こし、規定のマークを
 /// 標準出力に出して正常終了することを確かめる。終了コードだけを見ないのは、たまたま 0 で
 /// 終わる別の実行ファイルを健全とみなさないためである。
 fn self_check(path: &Path) -> Result<(), String> {
@@ -734,7 +734,7 @@ fn self_check(path: &Path) -> Result<(), String> {
 
 /// 自己検査が標準出力へ書く 1 行(uniqnode selfcheck)。ツールの記述を実際に組み立てて
 /// 数えるので、新しいイメージがこの層まで動くことを確かめられる。文言の家はここである
-/// (書く側と読む側が同じ印を使う。must/0023)。
+/// (書く側と読む側が同じマークを使う。must/0023)。
 pub fn self_check_report() -> String {
     // 書くツールの記述まで組み立てる(起動の指定に関わらず、この層の全部が動くことを
     // 確かめる)。コレクション名は記述の文言に入るだけで、何にも書かない。

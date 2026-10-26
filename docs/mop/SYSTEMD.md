@@ -826,16 +826,16 @@ vega の上なら、sudo を使えるどの利用者がどのディレクトリ�
    drop-in に `ExecStartPre=+/usr/sbin/nft -f <その道>` を足す(先頭の + は User= に関わらず
    root で走らせる印)ので、nftables.service が無効な機械でも、serve を起こすたびに規則が入る。
    ufw も nft も無ければその旨で赤。
-3. インストールと確認(上の「system 単位で起こす」と同じ。「確認:」が 5 本。`--agent-writable`・
+3. インストールと確認(上の「system 単位で起こす」と同じ。「check:」が 5 本。`--agent-writable`・
    `--agent-collections`・グラフの許し(`--agent-graph` か `--agent-graph-writable`)があれば
    それぞれさらに 1 本、下の「読み口(--listen-agent)の確認」)。
-4. firewall の効果を見て「確認:」を 1 本足す。ufw なら `ufw allow from 10.10.128.4 to 10.10.128.1
+4. firewall の効果を見て「check:」を 1 本足す。ufw なら `ufw allow from 10.10.128.4 to 10.10.128.1
    port 7441 proto tcp` を入れて、`ufw status` の表にその行(10.10.128.1 7441/tcp、ALLOW、
    10.10.128.4)が載ったこと。nft なら `nft list table inet uniqnode_<インスタンス>` にその規則が載っている
    こと(入れたのは serve の起動そのもので、install はここで入れ直さない: 再起動のたびに同じ
    道で入ることの証拠になる)。
-5. /tmp/uniqnode-install-system.log を読む。「確認:」の行が 6 本(`--agent-writable` と
-   `--agent-collections` があれば 8 本、グラフの許しもあれば 9 本)並び、最後に「次の刻み:」があればインストールは完了である。unit の状態は
+5. /tmp/uniqnode-install-system.log を読む。「check:」の行が 6 本(`--agent-writable` と
+   `--agent-collections` があれば 8 本、グラフの許しもあれば 9 本)並び、最後に「next run:」があればインストールは完了である。unit の状態は
    `systemctl status uniqnode-serve@default uniqnode-viewer@default uniqnode-backup@default.timer`。
 6. user 単位の unit ファイル(~/.config/systemd/user/uniqnode-*)は disable しても残る。
    消すなら `rm ~/.config/systemd/user/uniqnode-*@.service ~/.config/systemd/user/uniqnode-*@.timer`
@@ -845,7 +845,7 @@ vega の上なら、sudo を使えるどの利用者がどのディレクトリ�
 
 ### 読み口(--listen-agent)の確認
 
-install が自分で見るのは 2 本で、報告の「確認: 読み口 …」の行がその結果である:
+install が自分で見るのは 2 本で、報告の「check: the agent door ...」の行がその結果である:
 
 ```
 curl http://10.10.128.1:7441/v1/status                      # 主の口と同じ node_id
@@ -856,39 +856,39 @@ curl -X POST http://10.10.128.1:7441/v1/admin/gc -d '{"dry_run":true}'   # 403
 断る(serve の unit が failed に落ちたら待たない)。gc に dry_run を添えるのは、許可表が
 壊れていて通ってしまっても本番の pack を回収しないため。
 
-`--agent-writable <c>` があれば、書く口の確認をもう 1 本(「確認: 読み口の書く口: …」)足す。
+`--agent-writable <c>` があれば、書く口の確認をもう 1 本(「check: agent door writes: ...」)足す。
 試し書きはしない: 許した各コレクションへ拡張子の無い文書名で空の PUT を打ち、門を越えて
 api.rs の 400(文書名に拡張子が要る)で止まること(403 でなく、本文が門の断りでない。何も
 書かれない)、そして許していない名前(uniqnode-install-probe。集合にあれば -x を足す)への
-PUT が「は書けない(--agent-writable で許したのは …)」の 403 で断られることを見る:
+PUT が「cannot be written (--agent-writable allows ...)」の 403 で断られることを見る:
 
 ```
 curl -X PUT http://10.10.128.1:7441/v1/collections/lamalium-notes/documents/uniqnode-install-probe --data-binary ''   # 400(門は越えた。書かない)
-curl -X PUT http://10.10.128.1:7441/v1/collections/uniqnode-install-probe/documents/uniqnode-install-probe --data-binary ''   # 403 「は書けない」
+curl -X PUT http://10.10.128.1:7441/v1/collections/uniqnode-install-probe/documents/uniqnode-install-probe --data-binary ''   # 403 「cannot be written」
 ```
 
-`--agent-collections <c>` があれば、読める集合の確認をもう 1 本(「確認: 読み口の読める集合:
-…」)足す。読むだけの確認で、本番のデータには触らない: 集合に無い名前(uniqnode-install-probe。
-集合にあれば -x を足す)を collection に指した検索が「は読めない(--agent-collections で許した
-のは …)」の 403 で断られることを見る:
+`--agent-collections <c>` があれば、読める集合の確認をもう 1 本(「check: agent door readable set:
+...」)足す。読むだけの確認で、本番のデータには触らない: 集合に無い名前(uniqnode-install-probe。
+集合にあれば -x を足す)を collection に指した検索が「cannot be read (--agent-collections allows
+...)」の 403 で断られることを見る:
 
 ```
-curl -X POST http://10.10.128.1:7441/v1/search -d '{"query":"probe","collection":"uniqnode-install-probe","top_k":1}'   # 403 「は読めない」
+curl -X POST http://10.10.128.1:7441/v1/search -d '{"query":"probe","collection":"uniqnode-install-probe","top_k":1}'   # 403 「cannot be read」
 curl -X POST http://10.10.128.1:7441/v1/search -d '{"query":"xhci","collection":"specs","top_k":1}'                     # 200(集合の中)
 ```
 
 `--agent-graph <g>` か `--agent-graph-writable <g>` があれば、グラフの確認をもう 1 本
-(「確認: 読み口のグラフ: …」)足す。読める各グラフの GET が 200 であること、許していない名
-(uniqnode_install_probe。集合にあれば -x を足す)の GET が「は読めない(--agent-graph …)」の
+(「check: agent door graphs: ...」)足す。読める各グラフの GET が 200 であること、許していない名
+(uniqnode_install_probe。集合にあれば -x を足す)の GET が「cannot be read (--agent-graph ...)」の
 403 であることを見る。書けるグラフがあれば、コレクションの書く口と同じ形で試し書きをしない:
 attrs がオブジェクトでない本文を PUT し、門を越えて api の 400 で止まること(403 でなく、本文が
 門の断りでない。何も書かれない)と、許していないグラフへの PUT が 403 であることを見る:
 
 ```
 curl http://10.10.128.1:7443/v1/graphs/lamalium-plan                              # 200(読める)
-curl http://10.10.128.1:7443/v1/graphs/uniqnode_install_probe                     # 403 「は読めない」
+curl http://10.10.128.1:7443/v1/graphs/uniqnode_install_probe                     # 403 「cannot be read」
 curl -X PUT http://10.10.128.1:7443/v1/graphs/lamalium-plan/nodes/uniqnode-install-probe --data-binary '[]'   # 400(門は越えた。書かない)
-curl -X PUT http://10.10.128.1:7443/v1/graphs/uniqnode_install_probe/nodes/uniqnode-install-probe --data-binary '[]'   # 403 「は書けない」
+curl -X PUT http://10.10.128.1:7443/v1/graphs/uniqnode_install_probe/nodes/uniqnode-install-probe --data-binary '[]'   # 403 「cannot be written」
 ```
 
 firewall は `--firewall-allow <addr>` で install が入れる。<addr> は IPv4 アドレスか CIDR で、
@@ -1007,17 +1007,17 @@ node_id、backup の写し先の fsck の件数)と backup の次の刻みが出
 `--listen 127.0.0.1:7443 --viewer-listen 127.0.0.1:7453`):
 
 ```
-install: インスタンス default(unit は uniqnode-serve@default.service、nft の表は inet uniqnode_default)
-install: バイナリ /home/op/uniqnode-install-probe-bin/uniqnode ← …/target/debug/uniqnode(32219056 bytes)
+install: instance default (unit uniqnode-serve@default.service, nft table inet uniqnode_default)
+install: binary /home/op/uniqnode-install-probe-bin/uniqnode <- .../target/debug/uniqnode (32219056 bytes)
 install: unit /home/op/.config/systemd/user/uniqnode-serve@.service
 …
-install: systemctl --user daemon-reload: 済み
-install: uniqnode-serve@default.service: enable、起こした(直前は inactive)
+install: systemctl --user daemon-reload: done
+install: uniqnode-serve@default.service: enabled, started (was inactive)
 …
-install: loginctl enable-linger: 済み
-install: 確認: http://127.0.0.1:7443/v1/status と viewer http://127.0.0.1:7453 経由が同じ node_id 2dce4e60… を返した(1 ms)
-install: 確認: uniqnode-backup@default.service を 1 回走らせ、写し先 /home/op/uniqnode-install-probe-backup を開いて fsck: objects 0 refs 0 errors 0
-install: 次の刻み: Sun 2026-09-06 00:00:00 JST 6h left … uniqnode-backup@default.timer uniqnode-backup@default.service
+install: loginctl enable-linger: done
+install: check: http://127.0.0.1:7443/v1/status and the same through viewer http://127.0.0.1:7453 returned the same node_id 2dce4e60... (1 ms)
+install: check: ran uniqnode-backup@default.service once, opened the backup /home/op/uniqnode-install-probe-backup and ran fsck: objects 0 refs 0 errors 0
+install: next run: Sun 2026-09-06 00:00:00 JST 6h left ... uniqnode-backup@default.timer uniqnode-backup@default.service
 ```
 
 失敗は理由を標準エラーに出して 1 で終わり、途中まで置いたものはそのまま残る。直して同じ命令
@@ -1046,7 +1046,7 @@ install は次を 1 手順 1 命令で行う。unit は docs/mop/systemd/user/ �
 3. 3 つの service に drop-in `<unit>.d/override.conf` を書く(`<unit>` はインスタンスの
    入った名。`uniqnode-serve@default.service.d/override.conf`)。中身は PATH(install 自身の
    PATH で pdftotext・pdftohtml・pdftoppm・curl を探し、見つかったディレクトリを systemd の
-   既定の前に置く。見つからない道具は「install: <名> は PATH に無い(…)」と 1 行ずつ言うが
+   既定の前に置く。見つからない道具は「install: <名> is not on PATH (...)」と 1 行ずつ言うが
    止まらない: 道具が無くても serve は起き、その機能だけが 503 で答える)、「unit の読み方」の
    環境変数、ReadWritePaths=(ストアと写し先。空の行で unit の値を消してから)、
    ExecStart=(空の行で消してから、`--bin` の道で書き直す。引数の並びは unit の ExecStart=
@@ -1086,7 +1086,7 @@ install は次を 1 手順 1 命令で行う。unit は docs/mop/systemd/user/ �
 9. `systemctl --user list-timers uniqnode-backup@default.timer` の表を載せる。
 
 unit だけを手で置いたときのデータディレクトリの既定は %S/uniqnode/<インスタンス> で、実際にどこへ
-置かれたかは起動時のログの行「ログを <dir>/logs/serve.log に残す」が言う
+置かれたかは起動時のログの行「logging to <dir>/logs/serve.log」が言う
 (`journalctl --user -u uniqnode-serve@default`)。ProtectHome=read-only なので、home の下の別の場所
 を使うなら ReadWritePaths= を添える(上の「unit の読み方」。install はこれを drop-in に書く)。
 
@@ -1104,7 +1104,7 @@ system 単位では、主の口は serve の User= の uid の接続だけを受
 実際の User=(既定は uniqnode で、`install --system` の drop-in が替えていればその利用者)で
 `sudo -u "$(systemctl show -p User --value uniqnode-serve@default)" curl http://127.0.0.1:7440/v1/status`
 の形で叩く(User= と違う利用者のままだと
-「main door: この接続の相手を受け付けない」の 403 になる。それ自体が uid の判定の効いている証である)。
+「main door: refusing the peer of this connection」の 403 になる。それ自体が uid の判定の効いている証である)。
 
 埋め込みを足したなら、起動直後の journal に `uniqnode: embedding: bge-m3 (http://…)` の
 行があること、検索の応答の `method` が hybrid になる(または `degraded` が理由を言う)
@@ -1281,7 +1281,7 @@ apply の間に autodeploy が同じバイナリを置き換えると、install 
 - 行頭の `2026-09-05T04:48:45Z [pid 176927]` は uniqnode 自身が付ける UTC の時刻と pid で、
   journal の時刻(ローカル)と別に付く。2 つの記録を突き合わせるのはこの部分で行う。
 - `listening on <addr>` の 1 行だけは標準出力(起動スクリプトとの取り決め)で、journal に
-  はあるがファイルには無い。ファイルには代わりに「<addr> で待ち受ける」がある。この行は
+  はあるがファイルには無い。ファイルには代わりに「listening on <addr>」がある。この行は
   ストアを開き、埋め込み・リランカーを装備し、アドレスを束縛した後に出るので、出た時点で
   要求を受け付けている(起動確認はこの行を待ってよい)。
 - ファイルの回転(8 MiB × 5 世代)と `--log`・`--no-log` は
@@ -1310,9 +1310,9 @@ a_serve_that_cannot_take_the_store_lock_never_says_listening_on)。
 
 | 状況 | 出る行 | 終了 |
 |---|---|---|
-| 同じストアに 2 本目(アドレスは別) | ロックの判別の 250 ms の後に `uniqnode: ストアを開けない: invalid: <dir> は別プロセスが開いている` | 1 |
-| 同じアドレスに 2 本目(ストアは別) | ストアを開いた後に `uniqnode: serve: 127.0.0.1:7440 に束縛できない: Address already in use (os error 98)` | 1 |
-| 同じストアかつ同じアドレスに 2 本目 | 先に見るのはストアなので、上の「別プロセスが開いている」 | 1 |
+| 同じストアに 2 本目(アドレスは別) | ロックの判別の 250 ms の後に `uniqnode: cannot open the store: invalid: <dir> is open in another process` | 1 |
+| 同じアドレスに 2 本目(ストアは別) | ストアを開いた後に `uniqnode: serve: cannot bind to 127.0.0.1:7440: Address already in use (os error 98)` | 1 |
+| 同じストアかつ同じアドレスに 2 本目 | 先に見るのはストアなので、上の「is open in another process」 | 1 |
 
 - ロックはデータディレクトリの正規化した道から名付けるので、unit と CLI、unit と別の unit の
   どの組でも互いに検出する。閉じ込めの中で走る unit と外の CLI の間でも同じである
@@ -1439,8 +1439,8 @@ journal に載る。
 ```
 
 (どこから打ってもよい。unit は Type=oneshot なので、取り込みが失敗すれば `start` が失敗を返し、timer は有効にしない。journal は成否によらず最後に出す。) 確かめる
-のは journal の 3 種の行である: `木: … の main = <コミット>(書き出し N 件、…)`、1 件ごとの
-`lamalium/<文書名>: updated|no-op …`、締めの `取り込み: N 件(updated N、no-op N)、対象外 N 件`。
+のは journal の 3 種の行である: `tree: main of … = <コミット> (written N, ...)`、1 件ごとの
+`lamalium/<文書名>: updated|no-op …`、締めの `ingested: N (updated N, no-op N), skipped N`。
 2 回目以降は変わった文書だけが updated になる。
 
 git から消えた文書は uniqnode から消えない(取り込みは足すか書き換えるだけで、ref を

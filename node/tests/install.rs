@@ -263,12 +263,12 @@ fn install_without_start_places_the_binary_the_units_and_the_drop_ins() {
 
     // 報告: 置いたものと、起こしていないことを言う。
     assert!(
-        outcome.stdout.contains("daemon-reload: 済み"),
+        outcome.stdout.contains("daemon-reload: done"),
         "{}",
         outcome.stdout
     );
     assert!(
-        outcome.stdout.contains("--no-start なので起こしていない"),
+        outcome.stdout.contains("--no-start given, so nothing was started"),
         "{}",
         outcome.stdout
     );
@@ -353,7 +353,7 @@ fn an_unknown_option_is_refused_with_usage() {
     assert!(outcome.stderr.contains("usage:"), "{}", outcome.stderr);
 }
 
-/// ヘルプの求めは据え付けを実行しない。この行を消すと `uniqnode install --help` が
+/// ヘルプの求めはデプロイを実行しない。この行を消すと `uniqnode install --help` が
 /// --help をデータディレクトリと読んで unit を書き、ストアを作る(2026-09-08 に実際に
 /// 起きた)。使い方は標準出力へ出して 0 で終わる(断りではないので標準エラーではない)。
 #[test]
@@ -374,14 +374,14 @@ fn asking_for_help_prints_the_usage_without_installing() {
 }
 
 /// データディレクトリの位置に指定の字面が来ていたら、走らせずに 2 で断る。この行を消すと
-/// 打ち間違いがそのまま据え付けになる(must/0022)。
+/// 打ち間違いがそのままデプロイになる(must/0022)。
 #[test]
 fn an_option_in_the_data_directory_position_is_refused() {
     let work = work_dir("misplaced-option");
     let outcome = uniqnode_in(&work, &["install", "--sytem", "--no-start"]);
     assert_eq!(outcome.status, 2, "{}\n{}", outcome.stdout, outcome.stderr);
     assert!(
-        outcome.stderr.contains("データディレクトリの位置に --sytem が来ている"),
+        outcome.stderr.contains("--sytem is in the place of the data directory"),
         "何が起きたかを言う: {}",
         outcome.stderr
     );
@@ -458,7 +458,7 @@ fn a_system_install_without_root_is_refused_with_the_sudo_and_tee_form() {
     ]);
     assert_eq!(outcome.status, 1, "{}\n{}", outcome.stdout, outcome.stderr);
     assert!(
-        outcome.stderr.contains("root で走らせる") && outcome.stderr.contains("sudo "),
+        outcome.stderr.contains("as root") && outcome.stderr.contains("sudo "),
         "sudo で走らせることを言う: {}",
         outcome.stderr
     );
@@ -491,7 +491,7 @@ fn a_system_install_needs_a_service_user_and_refuses_root() {
         "{}",
         outcome.stderr
     );
-    assert!(outcome.stderr.contains("root では常駐させない"), "{}", outcome.stderr);
+    assert!(outcome.stderr.contains("services are not run as root"), "{}", outcome.stderr);
     let as_root = uniqnode(&[
         "install",
         store.to_str().expect("utf-8"),
@@ -502,7 +502,7 @@ fn a_system_install_needs_a_service_user_and_refuses_root() {
     ]);
     assert_eq!(as_root.status, 1, "{}\n{}", as_root.stdout, as_root.stderr);
     assert!(
-        as_root.stderr.contains("root は使えない"),
+        as_root.stderr.contains("root cannot be the account"),
         "{}",
         as_root.stderr
     );
@@ -538,14 +538,14 @@ fn after_and_user_are_system_only_and_the_agent_listen_is_checked() {
     let with_user = base(&["--user", "op"]);
     assert_eq!(with_user.status, 1, "{}\n{}", with_user.stdout, with_user.stderr);
     assert!(
-        with_user.stderr.contains("--user op は --system のときだけ"),
+        with_user.stderr.contains("--user op is accepted only with --system"),
         "{}",
         with_user.stderr
     );
     let with_after = base(&["--after", "wg-quick@wg1.service"]);
     assert_eq!(with_after.status, 1, "{}\n{}", with_after.stdout, with_after.stderr);
     assert!(
-        with_after.stderr.contains("user unit は system unit を待てない"),
+        with_after.stderr.contains("a user unit cannot wait for a system unit"),
         "{}",
         with_after.stderr
     );
@@ -554,14 +554,14 @@ fn after_and_user_are_system_only_and_the_agent_listen_is_checked() {
     assert_eq!(zero_port.status, 1, "{}\n{}", zero_port.stdout, zero_port.stderr);
     assert!(
         zero_port.stderr.contains("--listen-agent 127.0.0.1:0")
-            && zero_port.stderr.contains("ポートは固定する"),
+            && zero_port.stderr.contains("give a fixed port"),
         "{}",
         zero_port.stderr
     );
     let same_as_main = base(&["--listen-agent", "127.0.0.1:7440"]);
     assert_eq!(same_as_main.status, 1, "{}\n{}", same_as_main.stdout, same_as_main.stderr);
     assert!(
-        same_as_main.stderr.contains("--listen と同じ"),
+        same_as_main.stderr.contains("is the same as --listen"),
         "{}",
         same_as_main.stderr
     );
@@ -571,14 +571,14 @@ fn after_and_user_are_system_only_and_the_agent_listen_is_checked() {
     let writable_alone = base(&["--agent-writable", "notes"]);
     assert_eq!(writable_alone.status, 1, "{}\n{}", writable_alone.stdout, writable_alone.stderr);
     assert!(
-        writable_alone.stderr.contains("--agent-writable notes は --listen-agent があるときだけ"),
+        writable_alone.stderr.contains("--agent-writable notes is accepted only with --listen-agent"),
         "{}",
         writable_alone.stderr
     );
     let bad_name = base(&["--listen-agent", "127.0.0.1:7441", "--agent-writable", "a b"]);
     assert_eq!(bad_name.status, 1, "{}\n{}", bad_name.stdout, bad_name.stderr);
     assert!(
-        bad_name.stderr.contains("--agent-writable はコレクション名(空でなく / と空白を含まない 1 語): \"a b\""),
+        bad_name.stderr.contains("--agent-writable takes a collection name (one non-empty word without / or whitespace): \"a b\""),
         "{}",
         bad_name.stderr
     );
@@ -586,14 +586,14 @@ fn after_and_user_are_system_only_and_the_agent_listen_is_checked() {
     let readable_alone = base(&["--agent-collections", "notes"]);
     assert_eq!(readable_alone.status, 1, "{}\n{}", readable_alone.stdout, readable_alone.stderr);
     assert!(
-        readable_alone.stderr.contains("--agent-collections notes は --listen-agent があるときだけ"),
+        readable_alone.stderr.contains("--agent-collections notes is accepted only with --listen-agent"),
         "{}",
         readable_alone.stderr
     );
     let bad_readable = base(&["--listen-agent", "127.0.0.1:7441", "--agent-collections", "a b"]);
     assert_eq!(bad_readable.status, 1, "{}\n{}", bad_readable.stdout, bad_readable.stderr);
     assert!(
-        bad_readable.stderr.contains("--agent-collections はコレクション名(空でなく / と空白を含まない 1 語): \"a b\""),
+        bad_readable.stderr.contains("--agent-collections takes a collection name (one non-empty word without / or whitespace): \"a b\""),
         "{}",
         bad_readable.stderr
     );
@@ -603,21 +603,21 @@ fn after_and_user_are_system_only_and_the_agent_listen_is_checked() {
     let take_over = base(&["--take-over-user-units"]);
     assert_eq!(take_over.status, 1, "{}\n{}", take_over.stdout, take_over.stderr);
     assert!(
-        take_over.stderr.contains("--take-over-user-units は --system のときだけ"),
+        take_over.stderr.contains("--take-over-user-units is accepted only with --system"),
         "{}",
         take_over.stderr
     );
     let firewall = base(&["--firewall-allow", "10.10.128.4"]);
     assert_eq!(firewall.status, 1, "{}\n{}", firewall.stdout, firewall.stderr);
     assert!(
-        firewall.stderr.contains("--firewall-allow 10.10.128.4 は --system で --listen-agent が"),
+        firewall.stderr.contains("--firewall-allow 10.10.128.4 is accepted only with --system and --listen-agent"),
         "{}",
         firewall.stderr
     );
     let bad_address = base(&["--firewall-allow", "orion"]);
     assert_eq!(bad_address.status, 1, "{}\n{}", bad_address.stdout, bad_address.stderr);
     assert!(
-        bad_address.stderr.contains("--firewall-allow orion の \"orion\" は IPv4 アドレスでも CIDR でもない"),
+        bad_address.stderr.contains("\"orion\" in --firewall-allow orion is neither an IPv4 address nor a CIDR"),
         "{}",
         bad_address.stderr
     );
@@ -810,8 +810,8 @@ fn the_writable_collections_are_written_to_the_drop_in_as_values_not_expansions(
     };
     assert_eq!(
         refused,
-        "--agent-writable lamalium-notes は --listen-agent があるときだけ受け付ける(書く許可は\
-         読み口に掛かるもので、読み口が無ければ効かせる先が無い)"
+        "--agent-writable lamalium-notes is accepted only with --listen-agent (write permission applies \
+         to the agent door, and without the agent door there is nothing to apply it to)"
     );
     let mut with_door = system_options();
     with_door.agent_writable = vec!["lamalium-notes".to_string()];
@@ -879,8 +879,8 @@ fn the_readable_collections_are_written_to_the_drop_in_as_values_not_expansions(
     };
     assert_eq!(
         refused,
-        "--agent-collections articles は --listen-agent があるときだけ受け付ける(読む許可は\
-         読み口に掛かるもので、読み口が無ければ効かせる先が無い)"
+        "--agent-collections articles is accepted only with --listen-agent (read permission applies \
+         to the agent door, and without the agent door there is nothing to apply it to)"
     );
     let mut with_door = system_options();
     with_door.agent_collections = vec!["articles".to_string()];
@@ -896,7 +896,7 @@ fn after_units_need_a_type_suffix_and_the_system_tool_search_reaches_the_users_l
     assert!(check_after_unit("wg-quick@wg1.service").is_ok());
     assert!(check_after_unit("srv-store.mount").is_ok());
     let no_suffix = check_after_unit("wg-quick@wg1").err().expect("断る");
-    assert!(no_suffix.contains("拡張子"), "{no_suffix}");
+    assert!(no_suffix.contains("suffix"), "{no_suffix}");
     assert!(check_after_unit("").is_err());
     assert!(check_after_unit("a b.service").is_err());
     let options = system_options();
@@ -988,7 +988,7 @@ fn the_take_over_and_firewall_steps_use_fixed_words_and_judge_by_effect() {
         Ok(_) => panic!("読み口が無いのに firewall の指定が通った"),
         Err(message) => message,
     };
-    assert!(refused.contains("--listen-agent があるときだけ"), "{refused}");
+    assert!(refused.contains("is accepted only with --system and --listen-agent"), "{refused}");
     let mut with_door = system_options();
     with_door.firewall_allow = Some("10.10.128.4".to_string());
     with_door.take_over_user_units = true;
@@ -1030,7 +1030,7 @@ fn the_nft_road_writes_one_table_and_lets_the_serve_unit_load_it_on_every_start(
     );
     assert_eq!(table, "inet uniqnode_default");
     // 表の名はインスタンスごとに別である(1 つの名を共有すると、後から起きた serve が
-    // 先の実体の規則を消す。据える前に見つけた 2026-09-08 の件)。
+    // 先の実体の規則を消す。デプロイする前に見つけた 2026-09-08 の件)。
     assert_eq!(nft_table_for("graph"), "inet uniqnode_graph");
 
     // nft list table の答え(counter の数は変わり、集合の並びも変わりうる)。
@@ -1054,7 +1054,7 @@ fn the_nft_road_writes_one_table_and_lets_the_serve_unit_load_it_on_every_start(
         ),
         "{text}"
     );
-    assert!(text.contains("届いてよいのは 10.10.128.4, 10.10.128.2, 10.20.0.0/16 だけ"), "{text}");
+    assert!(text.contains("only 10.10.128.4, 10.10.128.2, 10.20.0.0/16 may reach"), "{text}");
     let many = listing.replace(
         "{ 10.10.128.1, 10.10.128.4 }",
         "{ 10.10.128.1, 10.10.128.2, 10.10.128.4, 10.20.0.0/16 }",
@@ -1144,7 +1144,7 @@ fn a_second_instance_gets_its_own_units_drop_ins_and_firewall_table() {
         assert!(
             outcome
                 .stdout
-                .contains(&format!("install: インスタンス {instance}(unit は uniqnode-serve@{instance}.service、nft の表は inet uniqnode_{instance})")),
+                .contains(&format!("install: instance {instance} (unit uniqnode-serve@{instance}.service, nft table inet uniqnode_{instance})")),
             "{}",
             outcome.stdout
         );
@@ -1208,7 +1208,7 @@ fn an_instance_name_that_does_not_fit_all_three_places_is_refused() {
     for bad in ["graph-b", "a/b", "", "Graph", "a b", &"x".repeat(33)] {
         let message = check_instance(bad).expect_err(&format!("{bad:?} は断る"));
         assert!(
-            message.contains("ASCII の小文字と数字と _ の 1..=32 字"),
+            message.contains("use 1..=32 lowercase ASCII letters, digits and _"),
             "{message}"
         );
     }
@@ -1221,7 +1221,7 @@ fn an_instance_name_that_does_not_fit_all_three_places_is_refused() {
 
 /// 写し先の既定は実体ごとに分かれる(unit のテンプレートの `%h/uniqnode-backup/%i` と同じ
 /// 形)。分かれていないと、2 つ目の実体の backup が毎日「別のノードの写し(node_key が写し元と
-/// 違う)」で失敗する(2026-09-08、2 つ目を据える前の試しで踏んだ)。`--backup-dir` で明示した
+/// 違う)」で失敗する(2026-09-08、2 つ目をデプロイする前の試しで踏んだ)。`--backup-dir` で明示した
 /// 道は名を変えても動かない: main.rs が --instance を先に、--backup-dir を後に置くからである。
 /// should/0137: set_instance の付け替えを消すと 2 つ目の assert が赤になる。
 #[test]
@@ -1242,11 +1242,11 @@ fn the_default_copy_directory_is_split_per_instance() {
     assert_eq!(options.backup_dir, Path::new("/mnt/copies/plan"));
 }
 
-/// テンプレートになる前の名の unit が据え先に残っているとき: インスタンスに依らず何も置かずに
+/// テンプレートになる前の名の unit がデプロイ先に残っているとき: インスタンスに依らず何も置かずに
 /// 断り、外す命令と SYSTEMD (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「旧い名の unit から移る」を
 /// 添える。既定のインスタンスは主の口とストアを取り合い、別の名のインスタンスも全インスタンスが共有する
 /// バイナリを差し替えるので、旧い serve の次の起動が新しいバイナリを旧い unit で走らせる(同じ文書の
-/// 「テンプレートになる前の名の unit から移る」)。断ったとき、据え先のバイナリのバイト列と mtime は前と同じである。旧い名を
+/// 「テンプレートになる前の名の unit から移る」)。断ったとき、デプロイ先のバイナリのバイト列と mtime は前と同じである。旧い名を
 /// 外せばインストールされる(systemctl に触れないよう、経路の sync の後で止める口で確かめる)。
 /// should/0137: legacy_units_present の判定を空の Vec に固定すると、1 つ目の assert が赤に
 /// なる(実験した)。
@@ -1297,7 +1297,7 @@ fn the_units_from_before_the_template_refuse_every_instance_and_keep_the_binary(
             outcome.stderr.contains("uniqnode-serve.service")
                 && outcome.stderr.contains("disable --now")
                 && outcome.stderr.contains("nft delete table inet uniqnode")
-                && outcome.stderr.contains("「旧い名の unit から移る」"),
+                && outcome.stderr.contains("\"旧い名の unit から移る\""),
             "{instance}: 外す命令と古い表の始末と移る手順を添える: {}",
             outcome.stderr
         );
@@ -1314,7 +1314,7 @@ fn the_units_from_before_the_template_refuse_every_instance_and_keep_the_binary(
         assert_eq!(mtime(&binary), binary_mtime, "{instance}: 断ったのにバイナリに触れた");
     }
     let graph = run(&arguments("graph", 7490, "store-graph"));
-    assert!(graph.stderr.contains("共有する"), "別の名のインスタンスの断りの理由: {}", graph.stderr);
+    assert!(graph.stderr.contains("shared by all instances"), "別の名のインスタンスの断りの理由: {}", graph.stderr);
 
     // 旧い名を外せばインストールされる(経路の sync の後、daemon-reload の前で止める)。
     std::fs::remove_file(&legacy_unit).expect("rm");
@@ -1449,7 +1449,7 @@ fn install_fails_with_the_path_when_an_ancestor_cannot_be_opened() {
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     assert_eq!(outcome.status, 1, "{}\n{}", outcome.stdout, outcome.stderr);
     assert!(
-        outcome.stderr.contains(&format!("{} を sync できない", locked.display())),
+        outcome.stderr.contains(&format!("cannot sync {}", locked.display())),
         "開けない要素の道を言っていない: {}",
         outcome.stderr
     );

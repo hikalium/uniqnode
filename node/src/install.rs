@@ -1,4 +1,4 @@
-//! `uniqnode install <data_dir> [options]`: serve・viewer・毎日の backup を systemd に据える
+//! `uniqnode install <data_dir> [options]`: serve・viewer・毎日の backup を systemd にデプロイする
 //! 1 命令。user 単位(既定。~/.config/systemd/user)と、`--system` で system 単位
 //! (/etc/systemd/system。root で走らせ、常駐は `--user`/SUDO_USER の利用者で)の両方を扱う。
 //! 手順は [docs/mop/SYSTEMD.md](uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2) で、この命令は
@@ -40,8 +40,8 @@ pub const VIEWER_TEMPLATE: &str = "uniqnode-viewer@.service";
 pub const BACKUP_TEMPLATE: &str = "uniqnode-backup@.service";
 pub const BACKUP_TIMER_TEMPLATE: &str = "uniqnode-backup@.timer";
 
-/// テンプレート unit になる前の名。据え先に残っていると、同じ主の口と同じストアを 2 つの
-/// unit が取り合うので、既定のインスタンスを据えるときだけ見て断る(run の (5b))。
+/// テンプレート unit になる前の名。デプロイ先に残っていると、同じ主の口と同じストアを 2 つの
+/// unit が取り合うので、既定のインスタンスをデプロイするときだけ見て断る(run の (5b))。
 pub const LEGACY_UNITS: [&str; 4] = [
     "uniqnode-serve.service",
     "uniqnode-viewer.service",
@@ -103,7 +103,7 @@ pub const STARTED_TEMPLATES: [&str; 3] = [SERVE_TEMPLATE, VIEWER_TEMPLATE, BACKU
 pub fn unit_for(template: &str, instance: &str) -> String {
     let (stem, suffix) = template
         .split_once('@')
-        .expect("テンプレート unit の名には @ がある");
+        .expect("a template unit name contains @");
     format!("{stem}@{instance}{suffix}")
 }
 
@@ -121,13 +121,13 @@ pub fn check_instance(name: &str) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "{INSTANCE_FLAG} {name:?} の形が違う(ASCII の小文字と数字と _ の 1..={INSTANCE_MAX_CHARS} 字。         unit の名・nft の表の名・drop-in の道に同じ字が入るので、3 つとも通る字種に限る)"
+        "{INSTANCE_FLAG} {name:?} is malformed (use 1..={INSTANCE_MAX_CHARS} lowercase ASCII letters, digits and _; the same characters go into unit names, nft table names and drop-in paths, so only characters valid in all three are allowed)"
     ))
 }
 
 /// nft の表の名(家族名 inet)。インスタンスごとに別の表にする。1 つの名を共有すると、
 /// 規則ファイルが表ごと消して作り直す形なので、後から起きた serve が先の実体の規則を消し、
-/// その実体の読み口が誰からでも届くようになる(2026-09-08 に据える前に見つけた)。
+/// その実体の読み口が誰からでも届くようになる(2026-09-08 にデプロイする前に見つけた)。
 pub fn nft_table_for(instance: &str) -> String {
     format!("inet uniqnode_{instance}")
 }
@@ -163,7 +163,7 @@ pub const AGENT_COLLECTIONS_FLAG: &str = "--agent-collections";
 /// drop-in は `Environment="UNIQNODE_AGENT_GRAPH=<g1> <g2>"` と ExecStart= 末尾の
 /// `--agent-graph <g>` の並びに写す。指定が無ければ読み口からグラフ層は見えない
 /// (コレクションの既定と逆にしてあるのは、グラフを後から足したからである。既定を開く側に
-/// すると、本番の読み口が据え直しただけでグラフを晒す)。
+/// すると、本番の読み口がデプロイし直しただけでグラフを晒す)。
 pub const AGENT_GRAPH_ENV: &str = "UNIQNODE_AGENT_GRAPH";
 pub const AGENT_GRAPH_FLAG: &str = "--agent-graph";
 /// 読み口から書けるグラフ。書ける名は読めもする。
@@ -237,22 +237,22 @@ pub struct Delegate {
 pub const DELEGATES: [Delegate; 4] = [
     Delegate {
         binary: rendition::Tool::Pdftotext.binary(),
-        lost_without: "PDF の取り込みは 503 になる",
+        lost_without: "ingesting a PDF returns 503",
         poppler: true,
     },
     Delegate {
         binary: outline::PDFTOHTML,
-        lost_without: "PDF のしおりから見出しを取れない(語の高さからの推定に落ちる)",
+        lost_without: "headings cannot be taken from PDF bookmarks (falls back to guessing from word height)",
         poppler: true,
     },
     Delegate {
         binary: rendition::Tool::Pdftoppm.binary(),
-        lost_without: "PDF のページの写しは 503 になる",
+        lost_without: "rendering a PDF page returns 503",
         poppler: true,
     },
     Delegate {
         binary: fetch::CURL,
-        lost_without: "URL の取り込みは 503 になる",
+        lost_without: "ingesting a URL returns 503",
         poppler: false,
     },
 ];
@@ -275,7 +275,7 @@ pub struct ToolPath {
 ///
 /// なぜ要るか: unit の PATH は SYSTEMD_DEFAULT_PATH であり、ログインシェルが足した
 /// ~/.local/bin などを含まない。手で起こした serve が見つけていた pdftotext を unit の serve は
-/// 見つけず、PDF の取り込みが 503 で失敗する(実測 2026-09-05)。install はそれを据える時点で
+/// 見つけず、PDF の取り込みが 503 で失敗する(実測 2026-09-05)。install はそれをデプロイする時点で
 /// 判じ、見つかった場所を drop-in に書く。symlink の先ではなく PATH 上のディレクトリを書く
 /// のは、操作者が置いた場所がそこであり、実体を置き直しても symlink を張り直せば済むため。
 ///
@@ -290,7 +290,7 @@ pub fn tool_path(path_env: &str) -> ToolPath {
         .collect();
     // 絶対の項だけを繋ぎ直す。split_paths が返す項は区切り文字を含まないので join は失敗しない。
     let searchable_env =
-        std::env::join_paths(&searchable).expect("split_paths の項は join_paths で繋げる");
+        std::env::join_paths(&searchable).expect("entries from split_paths can be joined with join_paths");
     let mut wanted: Vec<PathBuf> = Vec::new();
     let mut missing = Vec::new();
     let mut beside_pdftotext = Vec::new();
@@ -321,7 +321,7 @@ pub fn tool_path(path_env: &str) -> ToolPath {
     }
     dirs.extend(default_dirs);
     let value = std::env::join_paths(&dirs)
-        .expect("PATH の項は join_paths で繋げる")
+        .expect("PATH entries can be joined with join_paths")
         .to_string_lossy()
         .into_owned();
     ToolPath {
@@ -343,7 +343,7 @@ pub struct Account {
     pub home: PathBuf,
 }
 
-/// どの systemd に据えるか。user 単位は自分のマネージャ(`systemctl --user`)に、system 単位は
+/// どの systemd にデプロイするか。user 単位は自分のマネージャ(`systemctl --user`)に、system 単位は
 /// 機械のマネージャに unit を置き、Account の利用者で走らせる。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Scope {
@@ -400,19 +400,19 @@ impl Scope {
     }
 }
 
-/// 自分の実効 uid(/proc/self/status の Uid: 行の 2 つ目。Linux の systemd に据える命令なので
+/// 自分の実効 uid(/proc/self/status の Uid: 行の 2 つ目。Linux の systemd にデプロイする命令なので
 /// procfs に頼ってよい)。読めなければ Err(root かどうかを推し量らない。must/0022)。
 pub fn effective_uid() -> Result<u32, String> {
     let status = std::fs::read_to_string("/proc/self/status")
-        .map_err(|e| format!("/proc/self/status を読めない: {e}"))?;
+        .map_err(|e| format!("cannot read /proc/self/status: {e}"))?;
     let line = status
         .lines()
         .find(|line| line.starts_with("Uid:"))
-        .ok_or_else(|| "/proc/self/status に Uid: 行が無い".to_string())?;
+        .ok_or_else(|| "/proc/self/status has no Uid: line".to_string())?;
     line.split_whitespace()
         .nth(2)
         .and_then(|euid| euid.parse().ok())
-        .ok_or_else(|| format!("/proc/self/status の Uid: 行を読めない: {line}"))
+        .ok_or_else(|| format!("cannot read the Uid: line of /proc/self/status: {line}"))
 }
 
 /// `getent <database> <key>` の 1 行を `:` で割って返す。無い鍵は Err。
@@ -420,10 +420,10 @@ fn getent(database: &str, key: &str) -> Result<Vec<String>, String> {
     let output = Command::new("getent")
         .args([database, key])
         .output()
-        .map_err(|e| format!("getent {database} {key} を起こせない: {e}"))?;
+        .map_err(|e| format!("cannot start getent {database} {key}: {e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "getent {database} {key}: 見つからない({})",
+            "getent {database} {key}: not found ({})",
             output.status
         ));
     }
@@ -440,18 +440,18 @@ pub fn lookup_account(name: &str) -> Result<Account, String> {
         passwd
             .get(at)
             .map(String::as_str)
-            .ok_or_else(|| format!("getent passwd {name} の {what} の欄が無い: {passwd:?}"))
+            .ok_or_else(|| format!("getent passwd {name} has no {what} field: {passwd:?}"))
     };
     let uid: u32 = field(2, "uid")?
         .parse()
-        .map_err(|e| format!("getent passwd {name} の uid を読めない: {e}"))?;
+        .map_err(|e| format!("cannot read the uid from getent passwd {name}: {e}"))?;
     let gid: u32 = field(3, "gid")?
         .parse()
-        .map_err(|e| format!("getent passwd {name} の gid を読めない: {e}"))?;
+        .map_err(|e| format!("cannot read the gid from getent passwd {name}: {e}"))?;
     let home = PathBuf::from(field(5, "home")?);
     if !home.is_absolute() {
         return Err(format!(
-            "利用者 {name} の home {} が絶対の道ではない",
+            "the home {} of account {name} is not an absolute path",
             home.display()
         ));
     }
@@ -459,7 +459,7 @@ pub fn lookup_account(name: &str) -> Result<Account, String> {
     let group = getent("group", &gid.to_string())?
         .first()
         .cloned()
-        .ok_or_else(|| format!("getent group {gid} の名の欄が無い"))?;
+        .ok_or_else(|| format!("getent group {gid} has no name field"))?;
     Ok(Account {
         name: name.to_string(),
         uid,
@@ -469,7 +469,7 @@ pub fn lookup_account(name: &str) -> Result<Account, String> {
     })
 }
 
-/// `--system` と `--user` から据え先を決める。判断はここ 1 箇所(should/0135):
+/// `--system` と `--user` からデプロイ先を決める。判断はここ 1 箇所(should/0135):
 /// - `--user` は `--system` のときだけ(user 単位は自分で走る)。
 /// - system 単位の実行ユーザは `--user`、無ければ環境変数 SUDO_USER、それも無ければ断る。
 ///   root では常駐させない。
@@ -487,8 +487,8 @@ pub fn scope(
     if !system {
         return match user {
             Some(name) => Err(format!(
-                "--user {name} は --system のときだけ受け付ける(user 単位は自分の systemd に\
-                 自分で載る)"
+                "--user {name} is accepted only with --system (user units run under \
+                 your own systemd)"
             )),
             None => Ok(Scope::User),
         };
@@ -496,21 +496,21 @@ pub fn scope(
     let name = user
         .or_else(|| sudo_user.filter(|name| !name.is_empty()))
         .ok_or_else(|| {
-            "--system は常駐させる利用者が要る: --user <name> で指すか、その利用者から sudo で\
-             走らせる(SUDO_USER を読む)。root では常駐させない"
+            "--system needs the account to run the service as: name it with --user <name>, or run \
+             with sudo from that account (SUDO_USER is read); services are not run as root"
                 .to_string()
         })?;
     if name == "root" {
-        return Err("--system の実行ユーザに root は使えない(root で常駐させない。--user で\
-                    ストアの所有者を指す)"
+        return Err("root cannot be the account of --system (services are not run as root; name the \
+                    owner of the store with --user)"
             .to_string());
     }
     if euid != 0 {
         return Err(format!(
-            "--system は root で走らせる({SYSTEM_UNIT_DIR} に書き、機械の systemd に掛ける)。\
-             同じ引数を sudo で、出力をファイルに残す形で: \
-             sudo <bin>/uniqnode install <dir> --system … 2>&1 | tee /tmp/uniqnode-install-system.log\
-             (常駐は {name} で走る)"
+            "run --system as root (it writes to {SYSTEM_UNIT_DIR} and uses the machine's systemd); \
+             run the same arguments with sudo, keeping the output in a file: \
+             sudo <bin>/uniqnode install <dir> --system ... 2>&1 | tee /tmp/uniqnode-install-system.log \
+             (the services run as {name})"
         ));
     }
     lookup_account(&name).map(Scope::System)
@@ -547,10 +547,10 @@ pub struct Options {
     pub agent_graph: Vec<String>,
     /// 読み口から書けるグラフ(`--agent-graph-writable`。与えられた順)。
     pub agent_graph_writable: Vec<String>,
-    /// true なら、据える前に実行ユーザの user 単位の常駐(STARTED_TEMPLATES)を止めて外す
+    /// true なら、デプロイする前に実行ユーザの user 単位の常駐(STARTED_TEMPLATES)を止めて外す
     /// (`--take-over-user-units`。system 単位だけ)。
     pub take_over_user_units: bool,
-    /// true なら、据える前に旧い名の unit を退避して外す(`--retire-legacy-units`。system 単位だけ)。
+    /// true なら、デプロイする前に旧い名の unit を退避して外す(`--retire-legacy-units`。system 単位だけ)。
     pub retire_legacy_units: bool,
     /// 読み口へ届いてよい相手(`--firewall-allow`。IPv4 アドレスか CIDR をカンマで並べる)。
     /// ufw が active ならその規則を入れ、載ったことを見る。system 単位で読み口があるときだけ。
@@ -575,7 +575,7 @@ impl Options {
     /// (node/src/main.rs は --backup-dir をこの後に上書きする)。
     ///
     /// 分けるのは、2 つの実体が同じ写し先を取り合うと backup が毎日「別のノードの写し
-    /// (node_key が写し元と違う)」で失敗するからである(2026-09-08、2 つ目を据える前の
+    /// (node_key が写し元と違う)」で失敗するからである(2026-09-08、2 つ目をデプロイする前の
     /// 試しで踏んだ。写しは壊れない: backup は取り合いに気づいて何も書かずに終わる)。
     pub fn set_instance(&mut self, instance: String) {
         if self.backup_dir.file_name() == Some(std::ffi::OsStr::new(&self.instance)) {
@@ -651,7 +651,7 @@ impl Options {
         nft_table_for(&self.instance)
     }
 
-    /// 置く unit(テンプレートの名, 中身)。据え先で user/system を切り替える。
+    /// 置く unit(テンプレートの名, 中身)。デプロイ先で user/system を切り替える。
     pub fn units(&self) -> &'static [(&'static str, &'static str); 4] {
         match self.scope {
             Scope::User => &USER_UNITS,
@@ -669,10 +669,10 @@ pub fn serve_url_of(listen: &str) -> String {
 /// 別の場所を指す)。在るものは symlink も解いておく(PrivateTmp の判定は実体で行う)。
 pub fn absolute(path: &Path) -> Result<PathBuf, String> {
     let absolute = std::path::absolute(path)
-        .map_err(|e| format!("{} を絶対の道にできない: {e}", path.display()))?;
+        .map_err(|e| format!("cannot make {} absolute: {e}", path.display()))?;
     if absolute.exists() {
         std::fs::canonicalize(&absolute)
-            .map_err(|e| format!("{} を正規化できない: {e}", absolute.display()))
+            .map_err(|e| format!("cannot canonicalize {}: {e}", absolute.display()))
     } else {
         Ok(absolute)
     }
@@ -683,9 +683,9 @@ pub fn refuse_private_tmp(path: &Path, what: &str) -> Result<(), String> {
     for root in PRIVATE_TMP_ROOTS {
         if path.starts_with(root) {
             return Err(format!(
-                "{what} {} は {root} の下にある。unit は PrivateTmp=yes で自分だけの空の {root} を\
-                 見るので、そこに置いたストアや写しは unit から見えない。home の下など別の\
-                 場所を指す",
+                "{what} {} is under {root}; the units have PrivateTmp=yes and see their own empty {root}, \
+                 so a store or backup placed there is invisible to them; point to another place, \
+                 such as under home",
                 path.display()
             ));
         }
@@ -698,7 +698,7 @@ pub fn refuse_private_tmp(path: &Path, what: &str) -> Result<(), String> {
 /// `%%` にする。改行は unit の 1 行に収まらないので断る。
 pub fn unit_word(text: &str) -> Result<String, String> {
     if text.contains(['\n', '\r']) {
-        return Err(format!("{text:?}: 改行を含む値は unit に書けない"));
+        return Err(format!("{text:?}: a value with a newline cannot be written to a unit"));
     }
     let plain = |c: char| c.is_ascii_alphanumeric() || "/._-:=+,@~".contains(c);
     let escaped_percent = text.replace('%', "%%");
@@ -730,10 +730,10 @@ pub fn exec_start_with_binary(unit_text: &str, binary_word: &str) -> Result<Stri
     let value = unit_text
         .lines()
         .find_map(|line| line.strip_prefix("ExecStart="))
-        .ok_or_else(|| "unit に ExecStart= が無い".to_string())?;
+        .ok_or_else(|| "the unit has no ExecStart=".to_string())?;
     let (_default_binary, tail) = value
         .split_once(' ')
-        .ok_or_else(|| format!("ExecStart= にバイナリの道の後の引数が無い: {value}"))?;
+        .ok_or_else(|| format!("ExecStart= has no arguments after the binary path: {value}"))?;
     Ok(format!("{binary_word} {tail}"))
 }
 
@@ -743,7 +743,7 @@ fn unit_text(units: &[(&str, &'static str)], name: &str) -> &'static str {
         .iter()
         .find(|(unit, _)| *unit == name)
         .map(|(_, text)| *text)
-        .expect("UNITS に載っている名前")
+        .expect("a name listed in UNITS")
 }
 
 /// ProtectHome= が隠す下にある道(バイナリ・ストア・写し先)。1 つでもあれば system 単位の
@@ -773,8 +773,8 @@ pub fn drop_ins(
     let backup_dir = options.backup_dir.to_string_lossy();
     let binary = unit_word(&options.binary.to_string_lossy())?;
     let mut header = String::from(
-        "# uniqnode install が書いた drop-in。再実行で書き直されるので、手で変えるなら\n\
-         # 別の名前の *.conf を隣に置く。\n",
+        "# drop-in written by uniqnode install; it is rewritten on each run, so to change it by hand,\n\
+         # put a *.conf with another name beside it.\n",
     );
     if !options.after.is_empty() {
         let mut units = Vec::new();
@@ -793,13 +793,13 @@ pub fn drop_ins(
         let under_home = paths_under_protected_home(options);
         if !under_home.is_empty() {
             service_head.push(format!(
-                "# {} は ProtectHome= が隠す下にあるので、unit の yes を read-only に緩める\n\
+                "# {} is under what ProtectHome= hides, so relax the unit's yes to read-only\n\
                  ProtectHome=read-only",
                 under_home
                     .iter()
                     .map(|path| path.display().to_string())
                     .collect::<Vec<_>>()
-                    .join(" と ")
+                    .join(" and ")
             ));
         }
     }
@@ -876,7 +876,7 @@ pub fn drop_ins(
                     // 無効な機械でも再起動で消えない)。先頭の + は User= に関わらず root で
                     // 走らせる印。
                     lines.push(format!(
-                        "# 読み口へ届いてよい相手を nft の表 {} で限る(隣の {NFT_RULES_NAME})\n\
+                        "# limit who may reach the agent door with the nft table {} ({NFT_RULES_NAME} beside this file)\n\
                          ExecStartPre=+{} -f {}",
                         options.nft_table(),
                         unit_word(&nft.to_string_lossy())?,
@@ -922,7 +922,7 @@ pub fn drop_ins(
 /// 通ってしまう前に断る。
 pub fn check_after_unit(unit: &str) -> Result<(), String> {
     if unit.is_empty() || unit.chars().any(char::is_whitespace) {
-        return Err(format!("--after {unit:?}: unit 名は空白を含まない 1 語"));
+        return Err(format!("--after {unit:?}: a unit name is one word without whitespace"));
     }
     let known_suffix = [
         ".service", ".mount", ".target", ".socket", ".device", ".path", ".timer", ".slice",
@@ -930,7 +930,7 @@ pub fn check_after_unit(unit: &str) -> Result<(), String> {
     ];
     if !known_suffix.iter().any(|suffix| unit.ends_with(suffix)) {
         return Err(format!(
-            "--after {unit}: unit の種類の拡張子(.service や .mount)まで書く"
+            "--after {unit}: include the unit type suffix (such as .service or .mount)"
         ));
     }
     Ok(())
@@ -942,11 +942,11 @@ pub fn check_listen(listen: &str, what: &str) -> Result<(), String> {
     use std::net::ToSocketAddrs;
     let mut resolved = listen
         .to_socket_addrs()
-        .map_err(|e| format!("{what} {listen} を解決できない: {e}"))?;
+        .map_err(|e| format!("cannot resolve {what} {listen}: {e}"))?;
     match resolved.next() {
-        None => Err(format!("{what} {listen} を解決できない")),
+        None => Err(format!("cannot resolve {what} {listen}")),
         Some(address) if address.port() == 0 => Err(format!(
-            "{what} {listen}: ポートは固定する(0 の自動割当では viewer の転送先が決まらない)"
+            "{what} {listen}: give a fixed port (with 0, the viewer cannot know where to forward)"
         )),
         Some(_) => Ok(()),
     }
@@ -955,7 +955,7 @@ pub fn check_listen(listen: &str, what: &str) -> Result<(), String> {
 /// 引数を検め、道を絶対にして整える。unit を書く前に、書いても効かない指定を断る。
 pub fn normalize(mut options: Options) -> Result<Options, String> {
     check_instance(&options.instance)?;
-    // 主の口はループバックの IP リテラルだけ(serve が起動時に当てるのと同じ判定を、据え付けの
+    // 主の口はループバックの IP リテラルだけ(serve が起動時に当てるのと同じ判定を、デプロイの
     // 前に早く当てる。docs/plan/API_AUTH.md の 1)。
     crate::main_door::check_listen(&options.listen, "--listen")?;
     check_listen(&options.listen, "--listen")?;
@@ -964,8 +964,8 @@ pub fn normalize(mut options: Options) -> Result<Options, String> {
         check_listen(agent_listen, AGENT_LISTEN_FLAG)?;
         if agent_listen == &options.listen {
             return Err(format!(
-                "{AGENT_LISTEN_FLAG} {agent_listen} が --listen と同じ(読み口は主の口と別の\
-                 アドレスに束縛する)"
+                "{AGENT_LISTEN_FLAG} {agent_listen} is the same as --listen (bind the agent door to an address \
+                 other than the main door's)"
             ));
         }
     }
@@ -974,8 +974,8 @@ pub fn normalize(mut options: Options) -> Result<Options, String> {
     }
     if !options.agent_writable.is_empty() && options.agent_listen.is_none() {
         return Err(format!(
-            "{AGENT_WRITABLE_FLAG} {} は {AGENT_LISTEN_FLAG} があるときだけ受け付ける(書く\
-             許可は読み口に掛かるもので、読み口が無ければ効かせる先が無い)",
+            "{AGENT_WRITABLE_FLAG} {} is accepted only with {AGENT_LISTEN_FLAG} (write permission \
+             applies to the agent door, and without the agent door there is nothing to apply it to)",
             options.agent_writable.join(" ")
         ));
     }
@@ -984,8 +984,8 @@ pub fn normalize(mut options: Options) -> Result<Options, String> {
     }
     if !options.agent_collections.is_empty() && options.agent_listen.is_none() {
         return Err(format!(
-            "{AGENT_COLLECTIONS_FLAG} {} は {AGENT_LISTEN_FLAG} があるときだけ受け付ける(読む\
-             許可は読み口に掛かるもので、読み口が無ければ効かせる先が無い)",
+            "{AGENT_COLLECTIONS_FLAG} {} is accepted only with {AGENT_LISTEN_FLAG} (read permission \
+             applies to the agent door, and without the agent door there is nothing to apply it to)",
             options.agent_collections.join(" ")
         ));
     }
@@ -998,16 +998,16 @@ pub fn normalize(mut options: Options) -> Result<Options, String> {
         }
         if !names.is_empty() && options.agent_listen.is_none() {
             return Err(format!(
-                "{flag} {} は {AGENT_LISTEN_FLAG} があるときだけ受け付ける(グラフの許可は\
-                 読み口に掛かるもので、読み口が無ければ効かせる先が無い)",
+                "{flag} {} is accepted only with {AGENT_LISTEN_FLAG} (graph permission applies to \
+                 the agent door, and without the agent door there is nothing to apply it to)",
                 names.join(" ")
             ));
         }
     }
     if !options.after.is_empty() && !options.scope.is_system() {
         return Err(format!(
-            "--after {} は --system のときだけ受け付ける(user unit は system unit を待てない: \
-             user 単位のマネージャは機械の unit を知らない)",
+            "--after {} is accepted only with --system (a user unit cannot wait for a system unit: \
+             the user manager does not know the machine's units)",
             options.after.join(" ")
         ));
     }
@@ -1016,26 +1016,26 @@ pub fn normalize(mut options: Options) -> Result<Options, String> {
     }
     if options.take_over_user_units && !options.scope.is_system() {
         return Err(format!(
-            "{TAKE_OVER_FLAG} は --system のときだけ受け付ける(user 単位から system 単位へ移る\
-             ときに、止めて外す段を install に含める指定)"
+            "{TAKE_OVER_FLAG} is accepted only with --system (it makes install stop and remove the user units \
+             when moving from user units to system units)"
         ));
     }
     if options.retire_legacy_units && !options.scope.is_system() {
         return Err(format!(
-            "{RETIRE_LEGACY_FLAG} は --system のときだけ受け付ける(旧い名の unit は system 単位に\
-             だけ在る)"
+            "{RETIRE_LEGACY_FLAG} is accepted only with --system (units with old names exist only as \
+             system units)"
         ));
     }
     if options.retire_legacy_units && options.instance != DEFAULT_INSTANCE {
         return Err(format!(
-            "{RETIRE_LEGACY_FLAG} は既定のインスタンス {DEFAULT_INSTANCE} のときだけ受け付ける(旧い名の\
-             unit は主のストアのもので、外した回にそれを据え直すのは既定のインスタンスだけ)"
+            "{RETIRE_LEGACY_FLAG} is accepted only for the default instance {DEFAULT_INSTANCE} (the units with old \
+             names belong to the main store, and only the default instance redeploys it in the run that removes them)"
         ));
     }
     if options.retire_legacy_units && !options.start {
         return Err(format!(
-            "{RETIRE_LEGACY_FLAG} と --no-start は一緒に受け付けない(旧い unit を止めて外したまま、\
-             新しい unit を起こさずに終わる)"
+            "{RETIRE_LEGACY_FLAG} and --no-start are not accepted together (it would stop and remove the old units \
+             and end without starting the new ones)"
         ));
     }
     if let Some(allow) = options.firewall_allow.take() {
@@ -1044,25 +1044,25 @@ pub fn normalize(mut options: Options) -> Result<Options, String> {
         options.firewall_allow = Some(allow.clone());
         if !options.scope.is_system() || options.agent_listen.is_none() {
             return Err(format!(
-                "{FIREWALL_ALLOW_FLAG} {allow} は --system で {AGENT_LISTEN_FLAG} があるときだけ\
-                 受け付ける(規則は読み口のポートに向けて入れ、root で ufw を打つ)"
+                "{FIREWALL_ALLOW_FLAG} {allow} is accepted only with --system and {AGENT_LISTEN_FLAG} \
+                 (the rule targets the agent door's port, and ufw is run as root)"
             ));
         }
     }
     let data_dir = absolute(&options.data_dir)?;
     let backup_dir = absolute(&options.backup_dir)?;
-    refuse_private_tmp(&data_dir, "ストア")?;
-    refuse_private_tmp(&backup_dir, "写し先")?;
+    refuse_private_tmp(&data_dir, "store")?;
+    refuse_private_tmp(&backup_dir, "backup")?;
     if data_dir == backup_dir {
         return Err(format!(
-            "ストアと写し先が同じ場所を指している: {}",
+            "the store and the backup point to the same place: {}",
             data_dir.display()
         ));
     }
     let binary = absolute(&options.binary)?;
     if binary.is_dir() {
         return Err(format!(
-            "--bin {} はディレクトリ(実行ファイルの道を指す)",
+            "--bin {} is a directory (give the path of the executable)",
             binary.display()
         ));
     }
@@ -1102,8 +1102,8 @@ pub fn check_agent_graph(flag: &str, graph: &str) -> Result<(), String> {
     match crate::graph::is_valid_name(graph) {
         true => Ok(()),
         false => Err(format!(
-            "{flag} の値が{}",
-            crate::graph::invalid_name_refusal("グラフ名", graph)
+            "{flag}: {}",
+            crate::graph::invalid_name_refusal("graph name", graph)
         )),
     }
 }
@@ -1125,7 +1125,7 @@ fn check_collection_flag(flag: &str, collection: &str) -> Result<(), String> {
     if collection.is_empty() || collection.contains('/') || collection.chars().any(char::is_whitespace)
     {
         return Err(format!(
-            "{flag} はコレクション名(空でなく / と空白を含まない 1 語): {collection:?}"
+            "{flag} takes a collection name (one non-empty word without / or whitespace): {collection:?}"
         ));
     }
     Ok(())
@@ -1142,21 +1142,21 @@ pub fn firewall_allow_entries(allow: &str) -> Result<Vec<String>, String> {
         let piece = piece.trim();
         let (start, prefix) = parse_ipv4_cidr(piece).ok_or_else(|| {
             format!(
-                "{FIREWALL_ALLOW_FLAG} {allow} の {piece:?} は IPv4 アドレスでも CIDR でもない\
-                 (例 10.10.128.4 や 10.10.128.0/24 を , で並べる)"
+                "{piece:?} in {FIREWALL_ALLOW_FLAG} {allow} is neither an IPv4 address nor a CIDR \
+                 (list values such as 10.10.128.4 or 10.10.128.0/24 separated by ,)"
             )
         })?;
         if prefix == 0 {
             return Err(format!(
-                "{FIREWALL_ALLOW_FLAG} {allow} の {piece} は誰でも許す(/0 は規則の意味が無い)"
+                "{piece} in {FIREWALL_ALLOW_FLAG} {allow} allows anyone (/0 makes the rule meaningless)"
             ));
         }
         let mask = u32::MAX << (32 - prefix);
         let address = std::net::Ipv4Addr::from(start);
         if start & !mask != 0 {
             return Err(format!(
-                "{FIREWALL_ALLOW_FLAG} {allow} の {piece} はホスト部が 0 でない(ネットワークの\
-                 アドレスで書く: {}/{prefix})",
+                "{piece} in {FIREWALL_ALLOW_FLAG} {allow} has a non-zero host part (write the network \
+                 address: {}/{prefix})",
                 std::net::Ipv4Addr::from(start & mask)
             ));
         }
@@ -1190,12 +1190,12 @@ fn ipv4_interval(text: &str) -> Option<(u32, u32)> {
     Some((start, start | span))
 }
 
-/// path を account の所有にする(root で走る system 単位の据え付けが作ったものを、実行ユーザが
+/// path を account の所有にする(root で走る system 単位のデプロイが作ったものを、実行ユーザが
 /// 書ける形で残すため)。
 fn chown_to(path: &Path, account: &Account) -> Result<(), String> {
     std::os::unix::fs::chown(path, Some(account.uid), Some(account.gid)).map_err(|e| {
         format!(
-            "{} を {}:{} の所有にできない: {e}",
+            "cannot change the owner of {} to {}:{}: {e}",
             path.display(),
             account.name,
             account.group
@@ -1204,7 +1204,7 @@ fn chown_to(path: &Path, account: &Account) -> Result<(), String> {
 }
 
 /// dir の下(dir 自身を含む。symlink は辿らない)で uid の所有でないものを集める。
-/// system 単位の据え付けの最後に、root が触ったストアと写し先に root 所有のものが残って
+/// system 単位のデプロイの最後に、root が触ったストアと写し先に root 所有のものが残って
 /// いないことを見るための観測。
 pub fn paths_not_owned_by(dir: &Path, uid: u32) -> Result<Vec<PathBuf>, String> {
     use std::os::unix::fs::MetadataExt;
@@ -1212,15 +1212,15 @@ pub fn paths_not_owned_by(dir: &Path, uid: u32) -> Result<Vec<PathBuf>, String> 
     let mut pending = vec![dir.to_path_buf()];
     while let Some(path) = pending.pop() {
         let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|e| format!("{} の所有者を読めない: {e}", path.display()))?;
+            .map_err(|e| format!("cannot read the owner of {}: {e}", path.display()))?;
         if metadata.uid() != uid {
             found.push(path.clone());
         }
         if metadata.is_dir() {
             let entries = std::fs::read_dir(&path)
-                .map_err(|e| format!("{} を読めない: {e}", path.display()))?;
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             for entry in entries {
-                let entry = entry.map_err(|e| format!("{} の項を読めない: {e}", path.display()))?;
+                let entry = entry.map_err(|e| format!("cannot read an entry of {}: {e}", path.display()))?;
                 pending.push(entry.path());
             }
         }
@@ -1232,9 +1232,9 @@ pub fn paths_not_owned_by(dir: &Path, uid: u32) -> Result<Vec<PathBuf>, String> 
 pub(crate) fn write_file(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| format!("{} を作れない: {e}", parent.display()))?;
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
-    std::fs::write(path, content).map_err(|e| format!("{} を書けない: {e}", path.display()))
+    std::fs::write(path, content).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// 走っている自分自身の実体。/proc/self/exe は、走行中にその名のファイルが置き換えられても
@@ -1250,10 +1250,10 @@ pub fn install_binary(destination: &Path, owner: Option<&Account>) -> Result<Str
         destination.exists(),
     ) {
         let existing = std::fs::canonicalize(destination)
-            .map_err(|e| format!("{} を正規化できない: {e}", destination.display()))?;
+            .map_err(|e| format!("cannot canonicalize {}: {e}", destination.display()))?;
         if existing == current {
             return Ok(format!(
-                "バイナリ {} は走っている自分自身なので写さない",
+                "binary {} is the running executable itself, so not copying it",
                 destination.display()
             ));
         }
@@ -1267,51 +1267,51 @@ pub fn install_binary(destination: &Path, owner: Option<&Account>) -> Result<Str
 /// 要らずに起こし直させるからである。owner があれば(system 単位。root が写す)据える前に
 /// その所有にする。返り値は報告の 1 行。
 pub fn place_binary(source: &Path, destination: &Path, owner: Option<&Account>) -> Result<String, String> {
-    let new = std::fs::read(source).map_err(|e| format!("{} を読めない: {e}", source.display()))?;
+    let new = std::fs::read(source).map_err(|e| format!("cannot read {}: {e}", source.display()))?;
     if std::fs::read(destination).is_ok_and(|old| old == new) {
         // 写さなくても、所有者と許可ビットは写すときと同じに揃える(chown と chmod は inode を
         // 替えないので、常駐を起こし直さない)。
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))
-                .map_err(|e| format!("{} の許可ビット: {e}", destination.display()))?;
+                .map_err(|e| format!("permission bits of {}: {e}", destination.display()))?;
         }
         if let Some(account) = owner {
             chown_to(destination, account)?;
         }
         return Ok(format!(
-            "バイナリ {} は {} と中身が同じなので写さない",
+            "binary {} has the same content as {}, so not copying it",
             destination.display(),
             source.display()
         ));
     }
     let parent = destination
         .parent()
-        .ok_or_else(|| format!("{} に親ディレクトリが無い", destination.display()))?;
-    std::fs::create_dir_all(parent).map_err(|e| format!("{} を作れない: {e}", parent.display()))?;
+        .ok_or_else(|| format!("{} has no parent directory", destination.display()))?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     let name = destination
         .file_name()
-        .ok_or_else(|| format!("{} にファイル名が無い", destination.display()))?
+        .ok_or_else(|| format!("{} has no file name", destination.display()))?
         .to_string_lossy();
     let staging = parent.join(format!(".{name}.install-{}", std::process::id()));
-    std::fs::write(&staging, &new).map_err(|e| format!("{} へ写せない: {e}", staging.display()))?;
+    std::fs::write(&staging, &new).map_err(|e| format!("cannot copy to {}: {e}", staging.display()))?;
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("{} の許可ビット: {e}", staging.display()))?;
+            .map_err(|e| format!("permission bits of {}: {e}", staging.display()))?;
     }
     if let Some(account) = owner {
         chown_to(&staging, account)?;
     }
     std::fs::rename(&staging, destination).map_err(|e| {
         format!(
-            "{} → {} の rename: {e}",
+            "rename {} -> {}: {e}",
             staging.display(),
             destination.display()
         )
     })?;
     Ok(format!(
-        "バイナリ {} ← {}({} bytes)",
+        "binary {} <- {} ({} bytes)",
         destination.display(),
         source.display(),
         new.len()
@@ -1327,10 +1327,10 @@ pub(crate) fn systemctl(scope: &Scope, arguments: &[&str]) -> Result<std::proces
         .output()
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => {
-                "systemctl が PATH に無い(systemd の無い機械では install は使えない)".to_string()
+                "systemctl is not on PATH (install cannot be used on a machine without systemd)".to_string()
             }
             _ => format!(
-                "{}{} を起こせない: {e}",
+                "cannot start {}{}: {e}",
                 scope.systemctl_prefix(),
                 arguments.join(" ")
             ),
@@ -1342,7 +1342,7 @@ pub(crate) fn systemctl_ok(scope: &Scope, arguments: &[&str]) -> Result<String, 
     let output = systemctl(scope, arguments)?;
     if !output.status.success() {
         return Err(format!(
-            "{}{} が {} で終わった: {}",
+            "{}{} ended with {}: {}",
             scope.systemctl_prefix(),
             arguments.join(" "),
             output.status,
@@ -1361,7 +1361,7 @@ fn unit_state(scope: &Scope, unit: &str) -> Result<String, String> {
 /// `<unit> が failed になった` の言い方(journal の読み方を添える)。
 fn failed_unit_message(scope: &Scope, unit: &str) -> String {
     format!(
-        "{unit} が failed になった。理由は {}-u {unit} -n 20",
+        "{unit} failed; see why with {}-u {unit} -n 20",
         scope.journalctl_prefix()
     )
 }
@@ -1377,19 +1377,19 @@ pub const STATUS_PROBE_COMMAND: &str = "install-status-probe";
 /// system の install は root で走るが、主の口は既定で serve 自身の euid(常駐の利用者)しか
 /// 受けず、root の直接の接続は 403 になる(docs/plan/API_AUTH.md の 1)。確認は常駐の利用者の
 /// 接続として行う: 子プロセスの uid・gid・補助グループを常駐の利用者のものにしてから
-/// binary(据え付けた実行ファイル。常駐の利用者が実行できる)を exec する。root でなければ
+/// binary(デプロイした実行ファイル。常駐の利用者が実行できる)を exec する。root でなければ
 /// 権限を落とせないので、自分がその利用者であるときだけそのまま起こし、他は断る。
 pub fn status_node_id_as(binary: &Path, account: &Account, address: &str) -> Result<String, String> {
     let mut command = command_as(binary, account)?;
     let output = command
         .args([STATUS_PROBE_COMMAND, address])
         .output()
-        .map_err(|e| format!("{} を {} として起こせない: {e}", binary.display(), account.name))?;
+        .map_err(|e| format!("cannot start {} as {}: {e}", binary.display(), account.name))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     match output.status.success() && !stdout.is_empty() {
         true => Ok(stdout),
         false => Err(format!(
-            "{} としての確認: {}",
+            "check as {}: {}",
             account.name,
             String::from_utf8_lossy(&output.stderr).trim()
         )),
@@ -1406,7 +1406,7 @@ fn command_as(program: &Path, account: &Account) -> Result<Command, String> {
     }
     if euid != 0 {
         return Err(format!(
-            "uid {euid} から利用者 {}(uid {})へ権限を落とせない(root で走らせる)",
+            "cannot drop privileges from uid {euid} to account {} (uid {}) (run as root)",
             account.name, account.uid
         ));
     }
@@ -1440,7 +1440,7 @@ fn supplementary_groups(account: &Account) -> Result<Vec<u32>, String> {
     let output = Command::new("id")
         .args(["-G", &account.name])
         .output()
-        .map_err(|e| format!("id -G {} を起こせない: {e}", account.name))?;
+        .map_err(|e| format!("cannot start id -G {}: {e}", account.name))?;
     if !output.status.success() {
         return Err(format!("id -G {}: {}", account.name, output.status));
     }
@@ -1449,7 +1449,7 @@ fn supplementary_groups(account: &Account) -> Result<Vec<u32>, String> {
     for word in text.split_whitespace() {
         let gid: u32 = word
             .parse()
-            .map_err(|_| format!("id -G {} の答えを読めない: {text}", account.name))?;
+            .map_err(|_| format!("cannot read the answer of id -G {}: {text}", account.name))?;
         if !groups.contains(&gid) {
             groups.push(gid);
         }
@@ -1474,7 +1474,7 @@ pub fn status_node_id(address: &str) -> Result<String, String> {
     json.field("node_id")
         .and_then(Json::text)
         .map(str::to_string)
-        .ok_or_else(|| format!("応答に node_id が無い: {}", http::body_head(&response.body)))
+        .ok_or_else(|| format!("the response has no node_id: {}", http::body_head(&response.body)))
 }
 
 /// serve と viewer 経由の /v1/status が同じ node_id を返すまで待つ。返り値は (node_id, 掛かった
@@ -1520,8 +1520,8 @@ fn wait_for_matching_status(
                 Err(e) => e.clone(),
             };
             return Err(format!(
-                "{} 秒待っても serve と viewer の /v1/status が揃わない。serve({listen}): {}。\
-                 viewer({viewer_listen}): {}",
+                "/v1/status of serve and viewer did not agree within {} s; serve ({listen}): {}; \
+                 viewer ({viewer_listen}): {}",
                 WAIT_BOUND.as_secs(),
                 describe(&serve),
                 describe(&viewer)
@@ -1561,7 +1561,7 @@ fn wait_for_agent_door(
                 )?;
                 if response.status != 403 {
                     return Err(format!(
-                        "読み口 {agent_listen} が POST {GC_PATH} を 403 で断らず {} を返した: {}",
+                        "the agent door {agent_listen} did not refuse POST {GC_PATH} with 403 but returned {}: {}",
                         response.status,
                         http::body_head(&response.body)
                     ));
@@ -1570,8 +1570,8 @@ fn wait_for_agent_door(
             }
             Ok(seen) => {
                 return Err(format!(
-                    "読み口 {agent_listen} の /v1/status の node_id {seen} が主の口の {node_id} と\
-                     違う(別のものが同じアドレスで答えている)"
+                    "the node_id {seen} from /v1/status on the agent door {agent_listen} differs from {node_id} on the main door \
+                     (something else answers on that address)"
                 ));
             }
             Err(reason) => {
@@ -1580,9 +1580,9 @@ fn wait_for_agent_door(
                 }
                 if started.elapsed() >= WAIT_BOUND {
                     return Err(format!(
-                        "{} 秒待っても読み口 {agent_listen} が /v1/status に答えない: {reason}。\
-                         束縛先のアドレスを持つインターフェースが上がっているか(--after で\
-                         待つ unit の状態)と、{}-u {serve_unit} の bind の行を見る",
+                        "the agent door {agent_listen} did not answer /v1/status within {} s: {reason}; \
+                         check that the interface holding the bound address is up (the state of the units \
+                         waited for with --after), and see the bind line in {}-u {serve_unit}",
                         WAIT_BOUND.as_secs(),
                         scope.journalctl_prefix()
                     ));
@@ -1629,7 +1629,7 @@ fn verify_agent_writable(agent_listen: &str, writable: &[String]) -> Result<Stri
         let body = String::from_utf8_lossy(&response.body).to_string();
         if response.status == 403 || body.contains(crate::agent_door::ERROR_PREFIX) {
             return Err(format!(
-                "読み口 {agent_listen} が {AGENT_WRITABLE_FLAG} {collection} への PUT を門で断った\
+                "the agent door {agent_listen} refused at the gate a PUT to {AGENT_WRITABLE_FLAG} {collection} \
                  ({}: {})",
                 response.status,
                 http::body_head(&response.body)
@@ -1637,8 +1637,8 @@ fn verify_agent_writable(agent_listen: &str, writable: &[String]) -> Result<Stri
         }
         if response.status != 400 {
             return Err(format!(
-                "読み口 {agent_listen} が {collection} への拡張子の無い PUT を 400 で断らず {} を\
-                 返した(何かを書いたかもしれない): {}",
+                "the agent door {agent_listen} did not refuse a PUT without extension to {collection} with 400 but \
+                 returned {} (it may have written something): {}",
                 response.status,
                 http::body_head(&response.body)
             ));
@@ -1648,18 +1648,18 @@ fn verify_agent_writable(agent_listen: &str, writable: &[String]) -> Result<Stri
     let unallowed = name_outside(writable);
     let response = put(&unallowed)?;
     let body = String::from_utf8_lossy(&response.body).to_string();
-    let refusal_mark = format!("は書けない({AGENT_WRITABLE_FLAG} で許したのは");
+    let refusal_mark = format!("cannot be written ({AGENT_WRITABLE_FLAG} allows");
     if response.status != 403 || !body.contains(&refusal_mark) {
         return Err(format!(
-            "読み口 {agent_listen} が許していないコレクション {unallowed} への PUT を 403 の文言で\
-             断らず {} を返した: {}",
+            "the agent door {agent_listen} did not refuse a PUT to the collection {unallowed}, which is not allowed, \
+             with the 403 wording but returned {}: {}",
             response.status,
             http::body_head(&response.body)
         ));
     }
     Ok(format!(
-        "{} への PUT が門を越えて 400 で止まり(何も書かない)、{unallowed} への PUT は 403 で\
-         断られた",
+        "a PUT to {} passed the gate and stopped at 400 (nothing written), and a PUT to {unallowed} \
+         was refused with 403",
         writable.join(", ")
     ))
 }
@@ -1680,14 +1680,14 @@ fn verify_agent_collections(agent_listen: &str, readable: &[String]) -> Result<S
     let seen = String::from_utf8_lossy(&response.body).to_string();
     if response.status != 403 || !seen.contains(&refusal) {
         return Err(format!(
-            "読み口 {agent_listen} が許していないコレクション {unallowed} を指した検索を 403 の\
-             文言で断らず {} を返した: {}",
+            "the agent door {agent_listen} did not refuse a search naming the collection {unallowed}, which is \
+             not allowed, with the 403 wording but returned {}: {}",
             response.status,
             http::body_head(&response.body)
         ));
     }
     Ok(format!(
-        "{} だけが読め、{unallowed} を指した検索は 403 で断られた",
+        "only {} is readable, and a search naming {unallowed} was refused with 403",
         readable.join(", ")
     ))
 }
@@ -1705,7 +1705,7 @@ fn verify_agent_graph(agent_listen: &str, allowed: &crate::agent_door::Allowed) 
         let response = http::request(agent_listen, "GET", &format!("/v1/graphs/{graph}"), None, REQUEST_TIMEOUT)?;
         if response.status != 200 {
             return Err(format!(
-                "読み口 {agent_listen} が {AGENT_GRAPH_FLAG} {graph} の GET に {} を返した: {}",
+                "the agent door {agent_listen} returned {} to GET of {AGENT_GRAPH_FLAG} {graph}: {}",
                 response.status,
                 http::body_head(&response.body)
             ));
@@ -1718,15 +1718,15 @@ fn verify_agent_graph(agent_listen: &str, allowed: &crate::agent_door::Allowed) 
     let seen = String::from_utf8_lossy(&response.body).to_string();
     if response.status != 403 || !seen.contains(&refusal) {
         return Err(format!(
-            "読み口 {agent_listen} が許していないグラフ {unallowed} の GET を 403 の文言で断らず \
-             {} を返した: {}",
+            "the agent door {agent_listen} did not refuse GET of the graph {unallowed}, which is not allowed, with the 403 wording \
+             but returned {}: {}",
             response.status,
             http::body_head(&response.body)
         ));
     }
     if allowed.graphs_writable.is_empty() {
         return Ok(format!(
-            "{} が読め、{unallowed} は 403 で断られた(書ける名は無い)",
+            "{} is readable and {unallowed} was refused with 403 (no writable names)",
             readable.join(", ")
         ));
     }
@@ -1744,7 +1744,7 @@ fn verify_agent_graph(agent_listen: &str, allowed: &crate::agent_door::Allowed) 
         let body = String::from_utf8_lossy(&response.body).to_string();
         if response.status == 403 || body.contains(crate::agent_door::ERROR_PREFIX) {
             return Err(format!(
-                "読み口 {agent_listen} が {AGENT_GRAPH_WRITABLE_FLAG} {graph} への PUT を門で断った\
+                "the agent door {agent_listen} refused at the gate a PUT to {AGENT_GRAPH_WRITABLE_FLAG} {graph} \
                  ({}: {})",
                 response.status,
                 http::body_head(&response.body)
@@ -1752,8 +1752,8 @@ fn verify_agent_graph(agent_listen: &str, allowed: &crate::agent_door::Allowed) 
         }
         if response.status != 400 {
             return Err(format!(
-                "読み口 {agent_listen} が {graph} への形の違う PUT を 400 で断らず {} を返した\
-                 (何かを書いたかもしれない): {}",
+                "the agent door {agent_listen} did not refuse a malformed PUT to {graph} with 400 but returned {} \
+                 (it may have written something): {}",
                 response.status,
                 http::body_head(&response.body)
             ));
@@ -1764,15 +1764,15 @@ fn verify_agent_graph(agent_listen: &str, allowed: &crate::agent_door::Allowed) 
     let seen = String::from_utf8_lossy(&response.body).to_string();
     if response.status != 403 || !seen.contains(&refusal) {
         return Err(format!(
-            "読み口 {agent_listen} が許していないグラフ {unallowed} への PUT を 403 の文言で断らず \
-             {} を返した: {}",
+            "the agent door {agent_listen} did not refuse a PUT to the graph {unallowed}, which is not allowed, with the 403 wording \
+             but returned {}: {}",
             response.status,
             http::body_head(&response.body)
         ));
     }
     Ok(format!(
-        "{} が読め、{} への PUT が門を越えて 400 で止まり(何も書かない)、{unallowed} は読みも\
-         書きも 403 で断られた",
+        "{} is readable, a PUT to {} passed the gate and stopped at 400 (nothing written), and {unallowed} \
+         was refused with 403 for both reading and writing",
         readable.join(", "),
         allowed.graphs_writable.join(", ")
     ))
@@ -1795,10 +1795,10 @@ fn verify_backup(options: &Options) -> Result<String, String> {
     let backup_dir = &options.backup_dir;
     let Some(account) = options.scope.account() else {
         let verification = crate::backup::verify_copy(backup_dir)
-            .map_err(|e| format!("写し先 {} を開けない: {e}", backup_dir.display()))?;
+            .map_err(|e| format!("cannot open the backup {}: {e}", backup_dir.display()))?;
         if !verification.errors.is_empty() {
             return Err(format!(
-                "写し先 {} の fsck が赤: {}",
+                "fsck of the backup {} failed: {}",
                 backup_dir.display(),
                 verification.errors.join("; ")
             ));
@@ -1815,12 +1815,12 @@ fn verify_backup(options: &Options) -> Result<String, String> {
         .arg(backup_dir);
     let output = command
         .output()
-        .map_err(|e| format!("runuser -u {} -- {} fsck を起こせない: {e}", account.name, options.binary.display()))?;
+        .map_err(|e| format!("cannot start runuser -u {} -- {} fsck: {e}", account.name, options.binary.display()))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
         return Err(format!(
-            "写し先 {} の fsck({} で走らせた)が {} で終わった: {} {}",
+            "fsck of the backup {} (run as {}) ended with {}: {} {}",
             backup_dir.display(),
             account.name,
             output.status,
@@ -1828,7 +1828,7 @@ fn verify_backup(options: &Options) -> Result<String, String> {
             stderr.trim()
         ));
     }
-    Ok(format!("{}({} で走らせた)", stdout.trim(), account.name))
+    Ok(format!("{} (run as {})", stdout.trim(), account.name))
 }
 
 /// 外部の道具を探す PATH。user 単位は install 自身の PATH。system 単位はそれに実行ユーザの
@@ -1845,7 +1845,7 @@ pub fn tool_search_path(path_env: &str, scope: &Scope) -> String {
         }
     }
     std::env::join_paths(&dirs)
-        .expect("PATH の項は join_paths で繋げる")
+        .expect("PATH entries can be joined with join_paths")
         .to_string_lossy()
         .into_owned()
 }
@@ -1901,7 +1901,7 @@ fn take_over_user_units(
         .output()
         .map_err(|e| {
             format!(
-                "{} を起こせない: {e}",
+                "cannot start {}: {e}",
                 take_over_command(&account.name, instance)
             )
         })?;
@@ -1916,17 +1916,17 @@ fn take_over_user_units(
             .args(&flags)
             .args(["is-active", unit])
             .output()
-            .map_err(|e| format!("systemctl {} is-active {unit} を起こせない: {e}", flags.join(" ")))?;
+            .map_err(|e| format!("cannot start systemctl {} is-active {unit}: {e}", flags.join(" ")))?;
         let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        writeln!(out, "install: user 単位の {unit}: {state}")
-            .map_err(|e| format!("標準出力に書けない: {e}"))?;
+        writeln!(out, "install: user unit {unit}: {state}")
+            .map_err(|e| format!("cannot write to standard output: {e}"))?;
         if unit_is_running(&state) {
             still_running.push(format!("{unit}={state}"));
         }
     }
     if !still_running.is_empty() {
         return Err(format!(
-            "{} を打ったが user 単位がまだ走っている({})。出力: {transcript}",
+            "ran {} but user units are still running ({}); output: {transcript}",
             take_over_command(&account.name, instance),
             still_running.join(", ")
         ));
@@ -1935,7 +1935,7 @@ fn take_over_user_units(
     loop {
         if !store::opened_by_another_process(data_dir).map_err(|e| e.to_string())? {
             return Ok(format!(
-                "{}: 済み(ストアのロックは {} ms で外れた)",
+                "{}: done (the store lock was released in {} ms)",
                 take_over_command(&account.name, instance),
                 started.elapsed().as_millis()
             ));
@@ -1943,14 +1943,14 @@ fn take_over_user_units(
         let serve_unit = unit_for(SERVE_TEMPLATE, instance);
         if unit_state(scope, &serve_unit)? == "active" {
             return Ok(format!(
-                "{}: 済み(ストアのロックは system 単位の {serve_unit} が持っている。restart が引き継ぐ)",
+                "{}: done (the system unit {serve_unit} holds the store lock; restart takes over)",
                 take_over_command(&account.name, instance)
             ));
         }
         if started.elapsed() >= TAKE_OVER_WAIT {
             return Err(format!(
-                "user 単位は止まったが {} のロックが {} 秒経っても外れない(unit 以外のプロセスが\
-                 開いている)",
+                "the user units stopped, but the lock on {} was not released within {} s (a process other than \
+                 the units has it open)",
                 data_dir.display(),
                 TAKE_OVER_WAIT.as_secs()
             ));
@@ -1974,7 +1974,7 @@ pub fn ufw_status_of(stdout: &str) -> Result<UfwStatus, String> {
             _ => {}
         }
     }
-    Err(format!("ufw status の答えに Status: の行が無い: {}", stdout.trim()))
+    Err(format!("the output of ufw status has no Status: line: {}", stdout.trim()))
 }
 
 /// 読み口の待ち受けから、規則に書く IP とポートを取り出す。
@@ -1983,7 +1983,7 @@ pub fn agent_ip_and_port(agent_listen: &str) -> Result<(String, String), String>
         Some((ip, port)) if !ip.is_empty() && !port.is_empty() => {
             Ok((ip.trim_matches(|c| c == '[' || c == ']').to_string(), port.to_string()))
         }
-        _ => Err(format!("{AGENT_LISTEN_FLAG} {agent_listen} から IP とポートを分けられない")),
+        _ => Err(format!("cannot split {AGENT_LISTEN_FLAG} {agent_listen} into an IP and a port")),
     }
 }
 
@@ -2012,12 +2012,12 @@ pub fn ufw_rule_listed(status: &str, from: &str, agent_listen: &str) -> Result<b
 
 fn command_output(program: &str, arguments: &[String]) -> Result<String, String> {
     let output = Command::new(program).args(arguments).output().map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => format!("{program} が PATH に無い"),
-        _ => format!("{program} {} を起こせない: {e}", arguments.join(" ")),
+        std::io::ErrorKind::NotFound => format!("{program} is not on PATH"),
+        _ => format!("cannot start {program} {}: {e}", arguments.join(" ")),
     })?;
     if !output.status.success() {
         return Err(format!(
-            "{program} {} が {} で終わった: {}{}",
+            "{program} {} ended with {}: {}{}",
             arguments.join(" "),
             output.status,
             String::from_utf8_lossy(&output.stdout).trim(),
@@ -2034,10 +2034,10 @@ pub fn nft_rules_text(table: &str, from: &str, agent_listen: &str) -> Result<Str
     let entries = firewall_allow_entries(from)?;
     let allowed = entries.join(", ");
     Ok(format!(
-        "# uniqnode install が書いた。読み口 {agent_listen} へ届いてよいのは {allowed} だけ。\n\
-         # serve の unit の ExecStartPre= が起動のたびに読む(nft -f)。手で入れるなら同じ命令。\n\
-         # 表はインスタンスごとに別である(1 つの名を共有すると、後から起きた serve が\n\
-         # 先の実体の規則を消してしまう)。\n\
+        "# written by uniqnode install; only {allowed} may reach the agent door {agent_listen}.\n\
+         # ExecStartPre= of the serve unit reads it on every start (nft -f); to load it by hand, use the same command.\n\
+         # each instance has its own table (if they shared one name, the serve that started later\n\
+         # would delete the rules of the earlier one).\n\
          table {table} {{}}\n\
          delete table {table}\n\
          table {table} {{\n\
@@ -2058,7 +2058,7 @@ pub fn nft_rule_listed(listing: &str, from: &str, agent_listen: &str) -> Result<
     let (ip, port) = agent_ip_and_port(agent_listen)?;
     let mut wanted: Vec<(u32, u32)> = Vec::new();
     for entry in firewall_allow_entries(from)?.iter().chain(std::iter::once(&ip)) {
-        wanted.push(ipv4_interval(entry).ok_or_else(|| format!("{entry} は IPv4 でない"))?);
+        wanted.push(ipv4_interval(entry).ok_or_else(|| format!("{entry} is not IPv4"))?);
     }
     let pieces = [format!("ip daddr {ip} "), format!("tcp dport {port} "), " drop".to_string()];
     Ok(listing.lines().any(|line| {
@@ -2115,7 +2115,7 @@ pub fn find_in_path(program: &str, path_env: &str) -> Option<PathBuf> {
 fn firewall_backend(path_env: &str) -> Result<FirewallBackend, String> {
     let ufw_active = match command_output("ufw", &["status".to_string()]) {
         Ok(status) => ufw_status_of(&status)? == UfwStatus::Active,
-        Err(reason) if reason.contains("PATH に無い") => false,
+        Err(reason) if reason.contains("is not on PATH") => false,
         Err(reason) => return Err(reason),
     };
     if ufw_active {
@@ -2124,8 +2124,8 @@ fn firewall_backend(path_env: &str) -> Result<FirewallBackend, String> {
     match find_in_path("nft", path_env) {
         Some(nft) => Ok(FirewallBackend::Nft(nft)),
         None => Err(format!(
-            "{FIREWALL_ALLOW_FLAG}: ufw は active でなく、nft も PATH({path_env})に無い。規則を\
-             入れる先が無い"
+            "{FIREWALL_ALLOW_FLAG}: ufw is not active and nft is not on PATH ({path_env}); there is \
+             nowhere to install the rule"
         )),
     }
 }
@@ -2136,11 +2136,11 @@ fn firewall_backend(path_env: &str) -> Result<FirewallBackend, String> {
 /// ことの証拠になる)。
 fn apply_firewall(options: &Options, out: &mut dyn Write) -> Result<String, String> {
     let say = |out: &mut dyn Write, line: &str| -> Result<(), String> {
-        writeln!(out, "install: {line}").map_err(|e| format!("標準出力に書けない: {e}"))
+        writeln!(out, "install: {line}").map_err(|e| format!("cannot write to standard output: {e}"))
     };
     let (from, agent_listen) = match (&options.firewall_allow, &options.agent_listen) {
         (Some(from), Some(agent_listen)) => (from.as_str(), agent_listen.as_str()),
-        _ => return Err("firewall の確認には --firewall-allow と読み口が要る".to_string()),
+        _ => return Err("checking the firewall needs --firewall-allow and the agent door".to_string()),
     };
     match &options.firewall_backend {
         Some(FirewallBackend::Ufw) => {
@@ -2154,38 +2154,38 @@ fn apply_firewall(options: &Options, out: &mut dyn Write) -> Result<String, Stri
             for entry in &entries {
                 if !ufw_rule_listed(&after, entry, agent_listen)? {
                     return Err(format!(
-                        "ufw allow を打ったが ufw status の表に {entry} の行が載っていない: {}",
+                        "ran ufw allow, but the ufw status table has no line for {entry}: {}",
                         after.trim()
                     ));
                 }
             }
             Ok(format!(
-                "ufw が {from} から読み口 {agent_listen} への TCP を許す規則を持つ(ufw status に載った)"
+                "ufw has a rule allowing TCP from {from} to the agent door {agent_listen} (listed in ufw status)"
             ))
         }
         Some(FirewallBackend::Nft(nft)) => {
             let nft_table = options.nft_table();
             let (family, table) = nft_table
                 .split_once(' ')
-                .expect("nft_table_for は「家族名 表の名」の 2 語を返す");
+                .expect("nft_table_for returns the 2 words family and table name");
             let listing = command_output(
                 &nft.to_string_lossy(),
                 &["list".to_string(), "table".to_string(), family.to_string(), table.to_string()],
             )?;
             if !nft_rule_listed(&listing, from, agent_listen)? {
                 return Err(format!(
-                    "serve の ExecStartPre= が nft の表 {nft_table} を入れたはずだが、規則が載って\
-                     いない: {}",
+                    "ExecStartPre= of serve should have loaded the nft table {nft_table}, but the rule is \
+                     missing: {}",
                     listing.trim()
                 ));
             }
             Ok(format!(
-                "nft の表 {nft_table} が {from} 以外から読み口 {agent_listen} への TCP を落とす\
-                 (規則は {} にあり、serve の起動のたびに入る)",
+                "the nft table {nft_table} drops TCP to the agent door {agent_listen} from anywhere but {from} \
+                 (the rule is in {} and is loaded on every start of serve)",
                 options.nft_rules_path().display()
             ))
         }
-        None => Err("firewall の実物が決まっていない(run の順序の誤り)".to_string()),
+        None => Err("the firewall backend is not decided (a mistake in the order of run)".to_string()),
     }
 }
 
@@ -2194,14 +2194,14 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     let scope = options.scope.clone();
     let scope = &scope;
     let say = |out: &mut dyn Write, line: &str| -> Result<(), String> {
-        writeln!(out, "install: {line}").map_err(|e| format!("標準出力に書けない: {e}"))
+        writeln!(out, "install: {line}").map_err(|e| format!("cannot write to standard output: {e}"))
     };
     if let Some(account) = scope.account() {
         say(
             out,
             &format!(
-                "system 単位。unit は {} に置き、{}:{}(uid {})で走らせる。ストアと写し先に \
-                 root 所有のものは残さない(最後に所有者を見て確かめる)",
+                "system units: placing the units in {} and running them as {}:{} (uid {}); nothing owned by \
+                 root is left in the store or the backup (the owners are checked at the end)",
                 options.unit_dir.display(),
                 account.name,
                 account.group,
@@ -2213,14 +2213,14 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     say(
         out,
         &format!(
-            "インスタンス {}(unit は {}、nft の表は {})",
+            "instance {} (unit {}, nft table {})",
             options.instance,
             options.serve_unit(),
             options.nft_table()
         ),
     )?;
 
-    // (0) テンプレート unit になる前の名が据え先に残っていないか。残っていれば、インスタンスに
+    // (0) テンプレート unit になる前の名がデプロイ先に残っていないか。残っていれば、インスタンスに
     // 依らず何も置かずに断る。既定のインスタンスなら、同じ主の口と同じストアを 2 つの unit が
     // 取り合う。別の名のインスタンスでも、install は全インスタンスが共有するバイナリを
     // 差し替えるので、旧い serve の次の起動(restart・再起動)が新しいバイナリを旧い unit
@@ -2239,23 +2239,25 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     } else if !legacy.is_empty() {
         let conflict = if options.instance == DEFAULT_INSTANCE {
             format!(
-                "既定のインスタンス {DEFAULT_INSTANCE} を据えると、同じ主の口と同じストアを 2 つの \
-                 unit が取り合う"
+                "deploying the default instance {DEFAULT_INSTANCE} would make 2 units compete for the same main door and \
+                 the same store"
             )
         } else {
             format!(
-                "インスタンス {} は旧い名と取り合わないが、install は全インスタンスが共有する \
-                 バイナリ {} を差し替えるので、旧い名の serve の次の起動(restart・再起動)が新しい\
-                 バイナリを旧い unit で走らせる",
+                "instance {} does not compete with the old names, but install replaces the binary {} \
+                 shared by all instances, so the next start of the old-named serve (restart or reboot) would run the new \
+                 binary with the old unit",
                 options.instance,
                 options.binary.display()
             )
         };
         return Err(format!(
-            "据え先 {} にテンプレートになる前の名の unit が残っている({})。{conflict}。\
-             何も置かずに断る(バイナリも差し替えない)。先に外す\
-             (SYSTEMD (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「旧い名の unit から移る」): {}。nft を使っているなら古い表も消す\
-             (nft delete table inet uniqnode)。{RETIRE_LEGACY_FLAG} を足すと、install が退避してから外す",
+            // run-time-text-exempt: 指す先の SYSTEMD.md のセクションの見出しをそのまま引く(should/0141 の範囲外)。
+            "the deploy target {} still has units with the names from before the templates ({}); {conflict}; \
+             refusing without placing anything (the binary is not replaced either); remove them first \
+             (section \"旧い名の unit から移る\" of SYSTEMD (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2)): {}; if you use nft, \
+             delete the old table too (nft delete table inet uniqnode); with {RETIRE_LEGACY_FLAG}, install archives \
+             them and then removes them",
             options.unit_dir.display(),
             legacy.join(" "),
             legacy_units_removal_command(scope, &options.unit_dir, &legacy)
@@ -2284,7 +2286,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     if let (Some(from), Some(agent_listen)) = (&options.firewall_allow, &options.agent_listen) {
         let backend = firewall_backend(&search_path)?;
         match &backend {
-            FirewallBackend::Ufw => say(out, "firewall: ufw が active。規則は ufw に入れる")?,
+            FirewallBackend::Ufw => say(out, "firewall: ufw is active; the rule goes into ufw")?,
             FirewallBackend::Nft(nft) => {
                 let path = options.nft_rules_path();
                 let table = options.nft_table();
@@ -2292,8 +2294,8 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
                 say(
                     out,
                     &format!(
-                        "firewall: ufw は active でない。nft の表 {table} を {} に書き、serve の \
-                         ExecStartPre=+{} -f が起動のたびに入れる",
+                        "firewall: ufw is not active; writing the nft table {table} to {}, and serve's \
+                         ExecStartPre=+{} -f loads it on every start",
                         path.display(),
                         nft.display()
                     ),
@@ -2307,7 +2309,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     say(
         out,
         &format!(
-            "PATH={}(serve が起こす外部の道具の探し先。探したのは {search_path})",
+            "PATH={} (where serve looks for external tools; searched {search_path})",
             tools.value
         ),
     )?;
@@ -2315,7 +2317,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         say(
             out,
             &format!(
-                "{} は PATH に無いが pdftotext の実体の隣({})にあり、serve はそこも探す",
+                "{} is not on PATH but is beside the real pdftotext ({}), where serve also looks",
                 delegate.binary,
                 dir.display()
             ),
@@ -2325,7 +2327,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         say(
             out,
             &format!(
-                "{} は PATH に無い({})",
+                "{} is not on PATH ({})",
                 delegate.binary, delegate.lost_without
             ),
         )?;
@@ -2339,8 +2341,8 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         say(out, &format!("drop-in {}", path.display()))?;
     }
     for (dir, what) in [
-        (&options.data_dir, "ストア"),
-        (&options.backup_dir, "写し先"),
+        (&options.data_dir, "store"),
+        (&options.backup_dir, "backup"),
     ] {
         let existed = dir.exists();
         mkdir_each_element(dir)?;
@@ -2350,7 +2352,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         let owner_note = match scope.account() {
             Some(account) if !existed => {
                 chown_to(dir, account)?;
-                format!("。作ったので {} の所有にした", account.name)
+                format!("; created it, so made it owned by {}", account.name)
             }
             _ => String::new(),
         };
@@ -2361,7 +2363,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         say(
             out,
             &format!(
-                "{what} {}(ReadWritePaths= は無い道を作らないので先に作る{owner_note})",
+                "{what} {} (created in advance because ReadWritePaths= does not create missing paths{owner_note})",
                 dir.display()
             ),
         )?;
@@ -2370,13 +2372,13 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
 
     // (4) daemon-reload。
     systemctl_ok(scope, &["daemon-reload"])?;
-    say(out, &format!("{}daemon-reload: 済み", scope.systemctl_prefix()))?;
+    say(out, &format!("{}daemon-reload: done", scope.systemctl_prefix()))?;
 
     if !options.start {
         say(
             out,
             &format!(
-                "--no-start なので起こしていない。起こすには {}enable --now {}",
+                "--no-start given, so nothing was started; to start, run {}enable --now {}",
                 scope.systemctl_prefix(),
                 options.started_units().join(" ")
             ),
@@ -2387,7 +2389,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     // (5) user 単位からの移行なら、先に止めて外す(--take-over-user-units。指定が無ければ
     // 下の探針が止めて外す命令を添えて断る)。
     if options.take_over_user_units {
-        let account = scope.account().expect("normalize が system 単位に限る");
+        let account = scope.account().expect("normalize restricts this to system units");
         let line = take_over_user_units(scope, account, &options.instance, &options.data_dir, out)?;
         say(out, &line)?;
     }
@@ -2402,15 +2404,15 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
             let migration_hint = match scope {
                 Scope::User => String::new(),
                 Scope::System(account) => format!(
-                    "。user 単位で常駐させていたなら、{} で {} を打って止めて外してから再実行するか、\
-                     {TAKE_OVER_FLAG} を足して install に止めさせる",
+                    "; if it ran as user units, stop and remove them by running {1} as {0} and run again, or \
+                     add {TAKE_OVER_FLAG} to have install stop them",
                     account.name,
                     user_units_disable_command(&options.instance)
                 ),
             };
             return Err(format!(
-                "{} は別プロセスが開いている(unit の serve ではない。{serve_unit} は {serve_state})。\
-                 そのプロセスを止めてから再実行するか、--no-start で unit だけ置く{migration_hint}",
+                "{} is open in another process (not the unit's serve; {serve_unit} is {serve_state}); \
+                 stop that process and run again, or place only the units with --no-start{migration_hint}",
                 options.data_dir.display()
             ));
         }
@@ -2423,11 +2425,11 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         systemctl_ok(scope, &["enable", unit])?;
         systemctl_ok(scope, &["restart", unit])?;
         let verb = if before == "active" {
-            "起こし直した"
+            "restarted"
         } else {
-            "起こした"
+            "started"
         };
-        say(out, &format!("{unit}: enable、{verb}(直前は {before})"))?;
+        say(out, &format!("{unit}: enabled, {verb} (was {before})"))?;
     }
 
     // (7) linger(user 単位だけ)。無ければログアウトで user 単位のマネージャごと止まる。
@@ -2435,19 +2437,19 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     // 起きるので要らない。
     if !scope.is_system() {
         match Command::new("loginctl").arg("enable-linger").output() {
-            Ok(output) if output.status.success() => say(out, "loginctl enable-linger: 済み")?,
+            Ok(output) if output.status.success() => say(out, "loginctl enable-linger: done")?,
             Ok(output) => say(
                 out,
                 &format!(
-                    "警告: loginctl enable-linger が {} で終わった({})。ログアウトすると unit も\
-                     止まるので、手で有効にする",
+                    "warning: loginctl enable-linger ended with {} ({}); logging out also stops the units, \
+                     so enable it by hand",
                     output.status,
                     String::from_utf8_lossy(&output.stderr).trim()
                 ),
             )?,
             Err(e) => say(
                 out,
-                &format!("警告: loginctl を起こせない({e})。linger は手で有効にする"),
+                &format!("warning: cannot start loginctl ({e}); enable linger by hand"),
             )?,
         }
     }
@@ -2464,7 +2466,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     say(
         out,
         &format!(
-            "確認: {}/v1/status と viewer {} 経由が同じ node_id {node_id} を返した({} ms)",
+            "check: {}/v1/status and the same through viewer {} returned the same node_id {node_id} ({} ms)",
             serve_url_of(&options.listen),
             serve_url_of(&options.viewer_listen),
             waited.as_millis()
@@ -2475,19 +2477,19 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         say(
             out,
             &format!(
-                "確認: 読み口 {}/v1/status が同じ node_id {node_id} を返し、POST /v1/admin/gc を \
-                 403 で断った({} ms)",
+                "check: the agent door {}/v1/status returned the same node_id {node_id} and refused POST /v1/admin/gc \
+                 with 403 ({} ms)",
                 serve_url_of(agent_listen),
                 waited.as_millis()
             ),
         )?;
         if !options.agent_writable.is_empty() {
             let seen = verify_agent_writable(agent_listen, &options.agent_writable)?;
-            say(out, &format!("確認: 読み口の書く口: {seen}"))?;
+            say(out, &format!("check: agent door writes: {seen}"))?;
         }
         if !options.agent_collections.is_empty() {
             let seen = verify_agent_collections(agent_listen, &options.agent_collections)?;
-            say(out, &format!("確認: 読み口の読める集合: {seen}"))?;
+            say(out, &format!("check: agent door readable set: {seen}"))?;
         }
         let graph_allowed = crate::agent_door::Allowed {
             graphs: options.agent_graph.clone(),
@@ -2496,13 +2498,13 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
         };
         if !graph_allowed.readable_graphs().is_empty() {
             let seen = verify_agent_graph(agent_listen, &graph_allowed)?;
-            say(out, &format!("確認: 読み口のグラフ: {seen}"))?;
+            say(out, &format!("check: agent door graphs: {seen}"))?;
         }
     }
     let backup_unit = options.backup_unit();
     systemctl_ok(scope, &["start", &backup_unit]).map_err(|e| {
         format!(
-            "{e}。理由は {}-u {backup_unit} -n 20",
+            "{e}; see why with {}-u {backup_unit} -n 20",
             scope.journalctl_prefix()
         )
     })?;
@@ -2510,20 +2512,20 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     say(
         out,
         &format!(
-            "確認: {backup_unit} を 1 回走らせ、写し先 {} を開いて fsck: {verification}",
+            "check: ran {backup_unit} once, opened the backup {} and ran fsck: {verification}",
             options.backup_dir.display()
         ),
     )?;
     if let Some(account) = scope.account() {
         for (dir, what) in [
-            (&options.data_dir, "ストア"),
-            (&options.backup_dir, "写し先"),
+            (&options.data_dir, "store"),
+            (&options.backup_dir, "backup"),
         ] {
             let foreign = paths_not_owned_by(dir, account.uid)?;
             if !foreign.is_empty() {
                 return Err(format!(
-                    "{what} {} に {} 以外の所有のものが {} 件ある(root で触った跡。unit は {} で\
-                     走るので書けなくなる): {}",
+                    "{what} {} has entries owned by someone other than {}: {} (left by root; the units run as {} \
+                     and cannot write them): {}",
                     dir.display(),
                     account.name,
                     foreign.len(),
@@ -2539,7 +2541,7 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
             say(
                 out,
                 &format!(
-                    "確認: {what} {} の下に {} 以外の所有のものは無い",
+                    "check: nothing under {what} {} is owned by anyone but {}",
                     dir.display(),
                     account.name
                 ),
@@ -2550,13 +2552,13 @@ pub fn run(options: Options, out: &mut dyn Write) -> Result<(), String> {
     // (8b) firewall。読み口が答えるのを見た後に、届いてよい相手の規則を入れる。
     if options.firewall_backend.is_some() {
         let line = apply_firewall(options, out)?;
-        say(out, &format!("確認: {line}"))?;
+        say(out, &format!("check: {line}"))?;
     }
 
     // (9) 次の刻み。systemctl の表は見出しと行の後に空行と件数の脚注が付くので、表だけを載せる。
     let timers = systemctl_ok(scope, &["list-timers", &options.backup_timer(), "--no-pager"])?;
     for line in timers.lines().take_while(|line| !line.trim().is_empty()) {
-        say(out, &format!("次の刻み: {line}"))?;
+        say(out, &format!("next run: {line}"))?;
     }
     Ok(())
 }
@@ -2573,7 +2575,7 @@ fn mkdir_each_element(dir: &Path) -> Result<(), String> {
         match std::fs::create_dir(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {}
-            Err(error) => return Err(format!("{} を作れない: {error}", path.display())),
+            Err(error) => return Err(format!("cannot create {}: {error}", path.display())),
         }
     }
     Ok(())
@@ -2581,14 +2583,14 @@ fn mkdir_each_element(dir: &Path) -> Result<(), String> {
 
 /// ディレクトリから根までの全ての要素を、下から順に開いて sync する(各要素の sync が、その
 /// 中の子の名前を永続させる)。開けない要素があれば飛ばさず、その道と理由を言って失敗にする:
-/// 据えた後に serve が「親を sync できない」で起きない形を、先に install で言う
+/// デプロイした後に serve が「親を sync できない」で起きない形を、先に install で言う
 /// (APPEND_FAILURE の方針 1a)。
 pub fn sync_path_to_root(dir: &Path) -> Result<(), String> {
     for element in dir.ancestors() {
         crate::store::sync_dir(element).map_err(|error| {
             format!(
-                "{} を sync できない(ストア {} の名前を根まで永続させるため、経路の全ての要素を\
-                 開いて sync する): {error}",
+                "cannot sync {} (to persist the name of the store {} up to the root, every element of the path \
+                 is opened and synced): {error}",
                 element.display(),
                 dir.display()
             )
@@ -2621,8 +2623,8 @@ fn install_abort_point(point: InstallAbort) -> Result<(), String> {
             Some(INSTALL_ABORT_AFTER_SYNCED) => Some(InstallAbort::AfterSync),
             Some(other) => {
                 return Err(format!(
-                    "{INSTALL_ABORT_ENV}={other:?} が読めない\
-                     ({INSTALL_ABORT_AFTER_MKDIR} か {INSTALL_ABORT_AFTER_SYNCED})"
+                    "cannot read {INSTALL_ABORT_ENV}={other:?} \
+                     (expected {INSTALL_ABORT_AFTER_MKDIR} or {INSTALL_ABORT_AFTER_SYNCED})"
                 ))
             }
             None => None,
@@ -2632,7 +2634,7 @@ fn install_abort_point(point: InstallAbort) -> Result<(), String> {
                 InstallAbort::AfterMkdir => INSTALL_ABORT_AFTER_MKDIR,
                 InstallAbort::AfterSync => INSTALL_ABORT_AFTER_SYNCED,
             };
-            return Err(format!("{INSTALL_ABORT_ENV}={name} により、ここで止める(テスト用)"));
+            return Err(format!("stopping here because of {INSTALL_ABORT_ENV}={name} (for tests)"));
         }
     }
     #[cfg(not(debug_assertions))]
@@ -2642,7 +2644,7 @@ fn install_abort_point(point: InstallAbort) -> Result<(), String> {
     Ok(())
 }
 
-/// テンプレート unit になる前の名の unit で、据え先に残っているもの。
+/// テンプレート unit になる前の名の unit で、デプロイ先に残っているもの。
 pub fn legacy_units_present(unit_dir: &Path) -> Vec<&'static str> {
     LEGACY_UNITS
         .into_iter()
@@ -2697,7 +2699,7 @@ pub fn legacy_unit_paths(unit_dir: &Path, legacy: &[&str]) -> Vec<PathBuf> {
 fn retire_legacy_units(options: &Options, legacy: &[&str], out: &mut dyn Write) -> Result<(), String> {
     let scope = &options.scope;
     let say = |out: &mut dyn Write, line: &str| -> Result<(), String> {
-        writeln!(out, "install: {line}").map_err(|e| format!("標準出力に書けない: {e}"))
+        writeln!(out, "install: {line}").map_err(|e| format!("cannot write to standard output: {e}"))
     };
     // 旧い表を起動のたびに入れていたのは旧い drop-in なので、外すと表は次の再起動で消える。
     // 読み口を開くのに規則が無くなるなら、何かを止める前に断る。
@@ -2710,9 +2712,9 @@ fn retire_legacy_units(options: &Options, legacy: &[&str], out: &mut dyn Write) 
     };
     if old_table && options.agent_listen.is_some() && options.firewall_allow.is_none() {
         return Err(format!(
-            "nft の旧い表 inet uniqnode が読み口を絞っているが、{FIREWALL_ALLOW_FLAG} が無い。旧い unit を\
-             外すとその規則は次の起動から入らず、読み口がどこからでも届く。何も外さずに断る\
-             ({FIREWALL_ALLOW_FLAG} を足して打ち直す)"
+            "the old nft table inet uniqnode restricts the agent door, but {FIREWALL_ALLOW_FLAG} is not given; once the old units \
+             are removed, that rule is not loaded from the next start and the agent door becomes reachable from anywhere; refusing without removing anything \
+             (add {FIREWALL_ALLOW_FLAG} and run again)"
         ));
     }
     if legacy.contains(&"uniqnode-backup.timer") {
@@ -2720,7 +2722,7 @@ fn retire_legacy_units(options: &Options, legacy: &[&str], out: &mut dyn Write) 
     }
     let before_removal = |e: String| {
         format!(
-            "{e}。何も外さずに断る。旧い timer は止めたままである。毎日の backup を戻すなら \
+            "{e}; refusing without removing anything; the old timer stays stopped; to bring back the daily backup, run \
              {}start uniqnode-backup.timer",
             scope.systemctl_prefix()
         )
@@ -2733,11 +2735,11 @@ fn retire_legacy_units(options: &Options, legacy: &[&str], out: &mut dyn Write) 
         }
         if started.elapsed() >= LEGACY_BACKUP_WAIT {
             return Err(before_removal(format!(
-                "旧い uniqnode-backup.service が {} 秒たっても終わらない(状態 {state})",
+                "the old uniqnode-backup.service did not finish within {} s (state {state})",
                 LEGACY_BACKUP_WAIT.as_secs()
             )));
         }
-        say(out, &format!("旧い backup の終わりを待つ(状態 {state})"))?;
+        say(out, &format!("waiting for the old backup to finish (state {state})"))?;
         std::thread::sleep(Duration::from_secs(10));
     }
     let archive = archive_legacy_units(Path::new(LEGACY_ARCHIVE_ROOT), options, legacy)
@@ -2745,15 +2747,15 @@ fn retire_legacy_units(options: &Options, legacy: &[&str], out: &mut dyn Write) 
     say(
         out,
         &format!(
-            "退避: {}(unit と drop-in は units.tar.gz、実行ファイルは uniqnode)",
+            "archived: {} (units and drop-ins in units.tar.gz, the executable as uniqnode)",
             archive.display()
         ),
     )?;
     // 外し始めた後の失敗。打ち直すと残った分だけの新しい退避ができるので、戻すにはこの退避を使う。
     let after_removal = |e: String| {
         format!(
-            "{e}。旧い名の unit を外す途中で止まった。戻すときはこの回の退避 {} を使う \
-             (打ち直すと残った分だけの別の退避ができる)",
+            "{e}; stopped while removing the units with old names; to restore, use this run's archive {} \
+             (running again makes another archive of only what remains)",
             archive.display()
         )
     };
@@ -2766,14 +2768,14 @@ fn retire_legacy_units(options: &Options, legacy: &[&str], out: &mut dyn Write) 
         } else {
             std::fs::remove_file(&path)
         };
-        removed.map_err(|e| after_removal(format!("{} を消せない: {e}", path.display())))?;
+        removed.map_err(|e| after_removal(format!("cannot remove {}: {e}", path.display())))?;
     }
     systemctl_ok(scope, &["daemon-reload"]).map_err(after_removal)?;
-    say(out, &format!("旧い名の unit を外した: {}", legacy.join(" ")))?;
+    say(out, &format!("removed the units with old names: {}", legacy.join(" ")))?;
     if old_table {
         let delete = ["delete", "table", "inet", "uniqnode"].map(String::from);
         command_output("nft", &delete).map_err(after_removal)?;
-        say(out, "nft の旧い表 inet uniqnode を消した")?;
+        say(out, "deleted the old nft table inet uniqnode")?;
     }
     Ok(())
 }
@@ -2787,7 +2789,7 @@ fn archive_legacy_units(root: &Path, options: &Options, legacy: &[&str]) -> Resu
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&archive)
-        .map_err(|e| format!("退避の置き場 {} を作れない: {e}", archive.display()))?;
+        .map_err(|e| format!("cannot create the archive directory {}: {e}", archive.display()))?;
     let filled = (|| -> Result<(), String> {
         let names: Vec<String> = legacy_unit_paths(&options.unit_dir, legacy)
             .iter()
@@ -2806,19 +2808,19 @@ fn archive_legacy_units(root: &Path, options: &Options, legacy: &[&str]) -> Resu
         for name in &names {
             let dir_entry = format!("{name}/");
             if !listing.lines().any(|line| line == name || line == dir_entry) {
-                return Err(format!("退避の {tarball} に {name} が無い"));
+                return Err(format!("the archive {tarball} lacks {name}"));
             }
         }
         if options.binary.exists() {
             let copy = archive.join("uniqnode");
             let read = |path: &Path| {
-                std::fs::read(path).map_err(|e| format!("{} を読めない: {e}", path.display()))
+                std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
             };
             std::fs::copy(&options.binary, &copy).map_err(|e| {
-                format!("{} を {} へ写せない: {e}", options.binary.display(), copy.display())
+                format!("cannot copy {} to {}: {e}", options.binary.display(), copy.display())
             })?;
             if read(&options.binary)? != read(&copy)? {
-                return Err(format!("{} の写しが元と違う", copy.display()));
+                return Err(format!("the copy {} differs from the original", copy.display()));
             }
         }
         Ok(())
@@ -2899,14 +2901,14 @@ mod tests {
         let mut options = sample_options();
         options.retire_legacy_units = true;
         let refused = normalize(options).err().expect("user 単位では断る");
-        assert!(refused.contains("--system のときだけ"), "{refused}");
+        assert!(refused.contains("is accepted only with --system"), "{refused}");
 
         let mut options = sample_options();
         options.scope = Scope::System(sample_account());
         options.retire_legacy_units = true;
         options.set_instance("graph_a".to_string());
         let refused = normalize(options).err().expect("既定でないインスタンスでは断る");
-        assert!(refused.contains("既定のインスタンス"), "{refused}");
+        assert!(refused.contains("default instance"), "{refused}");
 
         let mut options = sample_options();
         options.scope = Scope::System(sample_account());
@@ -2997,7 +2999,7 @@ mod tests {
                         ExecStart=/home/op/.local/bin/uniqnode serve ${UNIQNODE_DATA_DIR} ${UNIQNODE_LISTEN} $UNIQNODE_SERVE_OPTIONS\n";
         assert!(text.ends_with(expected), "serve の drop-in:\n{text}");
         assert!(
-            text.starts_with("# uniqnode install が書いた drop-in"),
+            text.starts_with("# drop-in written by uniqnode install"),
             "{text}"
         );
     }
@@ -3080,7 +3082,7 @@ mod tests {
         let mut options = sample_options();
         options.backup_dir = PathBuf::from("/var/tmp/copy");
         let message = normalize(options).err().expect("断る");
-        assert!(message.contains("写し先 /var/tmp/copy"), "{message}");
+        assert!(message.contains("backup /var/tmp/copy"), "{message}");
         // home の下は通る(在れば正規化し、無ければそのまま)。
         assert!(normalize(sample_options()).is_ok());
     }
@@ -3091,7 +3093,7 @@ mod tests {
         let mut options = sample_options();
         options.listen = "127.0.0.1:0".to_string();
         let message = normalize(options).err().expect("断る");
-        assert!(message.contains("ポートは固定する"), "{message}");
+        assert!(message.contains("give a fixed port"), "{message}");
     }
 
     /// テスト用の道具(実行できる空のファイル)を置いた一時ディレクトリ。
@@ -3196,7 +3198,7 @@ mod tests {
         std::fs::remove_dir_all(&linked).expect("cleanup");
     }
 
-    /// 据え先の判断: user 単位に --user は付かず、system 単位は --user → SUDO_USER の順で
+    /// デプロイ先の判断: user 単位に --user は付かず、system 単位は --user → SUDO_USER の順で
     /// 実行ユーザを決め、root は断り、root で走っていなければ断る(順序は「利用者が要る」が
     /// 先。root でなくても文言を観測できるように)。実在する利用者の引き当ては最後なので、
     /// ここまでの判断は実在しない名でも見られる。
@@ -3219,15 +3221,15 @@ mod tests {
         let user_with_user = scope(false, Some("op".to_string()), None, 1000)
             .err()
             .expect("断る");
-        assert!(user_with_user.contains("--system のときだけ"), "{user_with_user}");
+        assert!(user_with_user.contains("is accepted only with --system"), "{user_with_user}");
         let no_user = system(None, None, 0).err().expect("断る");
         assert!(no_user.contains("--user <name>"), "{no_user}");
         let empty_sudo_user = system(None, Some(""), 0).err().expect("断る");
         assert!(empty_sudo_user.contains("--user <name>"), "{empty_sudo_user}");
         let root_user = system(Some("root"), None, 0).err().expect("断る");
-        assert!(root_user.contains("root は使えない"), "{root_user}");
+        assert!(root_user.contains("root cannot be the account"), "{root_user}");
         let root_sudo = system(None, Some("root"), 0).err().expect("断る");
-        assert!(root_sudo.contains("root は使えない"), "{root_sudo}");
+        assert!(root_sudo.contains("root cannot be the account"), "{root_sudo}");
         let not_root = system(Some("no-such-user"), None, 1000).err().expect("断る");
         assert!(
             not_root.contains("sudo ") && not_root.contains("tee /tmp/uniqnode-install-system.log"),

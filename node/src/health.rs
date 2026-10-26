@@ -278,8 +278,8 @@ impl HealthEngine {
         if !*recorded {
             *recorded = true;
             crate::log_line!(
-                "uniqnode: health: ストアが書けない状態({kind})なので、伝播交換・修復・降格の\
-                 書き込みを飛ばす"
+                "uniqnode: health: the store cannot be written ({kind}), so the writes of gossip, repair and demotion \
+                 are skipped"
             );
             self.push_event(HealthEvent {
                 elapsed_ms: self.started.elapsed().as_millis() as u64,
@@ -383,8 +383,8 @@ impl HealthEngine {
                             Some(expected) if *expected == view.node_id => true,
                             Some(expected) => {
                                 crate::log_line!(
-                                    "uniqnode: ピア {address} の node_id が設定と一致しない\
-                                     (設定 {expected}, 実際 {})",
+                                    "uniqnode: the node_id of peer {address} does not match the configuration \
+                                     (configured {expected}, actual {})",
                                     view.node_id
                                 );
                                 false
@@ -408,7 +408,7 @@ impl HealthEngine {
                 self.note_action(WriterAction::Exchange, address);
                 let mut report = SyncReport::default();
                 if let Err(e) = sync::sync_records(&self.store, &peer, &mut report) {
-                    crate::log_line!("uniqnode: 伝播交換({address}): {e}");
+                    crate::log_line!("uniqnode: gossip ({address}): {e}");
                 }
             }
         }
@@ -437,7 +437,7 @@ impl HealthEngine {
                             .entry(root.clone())
                             .and_modify(|r| r.last_tier_change = Some(Instant::now()));
                     }
-                    Err(e) => crate::log_line!("uniqnode: 降格に失敗({root}): {e}"),
+                    Err(e) => crate::log_line!("uniqnode: demotion failed ({root}): {e}"),
                 }
             }
         }
@@ -521,7 +521,7 @@ impl HealthEngine {
     /// 遷移でのみイベントを記録する(should/0129)。
     fn record_transition(&self, root: &str, assessment: &RootAssessment) {
         let mut roots = self.roots.lock().expect("roots lock");
-        let runtime = roots.get_mut(root).expect("assess_root が作成済み");
+        let runtime = roots.get_mut(root).expect("assess_root has created the entry");
         if runtime.state != assessment.state || runtime.reason != assessment.reason {
             runtime.state = assessment.state;
             runtime.reason = assessment.reason;
@@ -571,7 +571,7 @@ impl HealthEngine {
                             break;
                         }
                     }
-                    Err(e) => crate::log_line!("uniqnode: 修復の取り寄せ({address}): {e}"),
+                    Err(e) => crate::log_line!("uniqnode: repair fetch ({address}): {e}"),
                 }
             }
         }
@@ -585,7 +585,7 @@ impl HealthEngine {
                         .entry(root.to_string())
                         .and_modify(|r| r.last_tier_change = Some(Instant::now()));
                 }
-                Err(e) => crate::log_line!("uniqnode: 保持表明に失敗({root}): {e}"),
+                Err(e) => crate::log_line!("uniqnode: retention claim failed ({root}): {e}"),
             }
         }
         // 取り寄せ元が見つからない場合は何もしない。時間経過で ALERT(unknown) が拾う。
@@ -605,7 +605,7 @@ pub fn read_node_config(data_dir: &std::path::Path) -> (Option<u64>, HealthParam
     let value = match crate::c1::parse(&text) {
         Ok(v) => v,
         Err(e) => {
-            crate::log_line!("uniqnode: node.json が読めない(既定値で続行): {e}");
+            crate::log_line!("uniqnode: cannot read node.json (continuing with defaults): {e}");
             return (None, params);
         }
     };

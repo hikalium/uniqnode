@@ -58,14 +58,14 @@ pub fn spawn_watcher(role: &str) {
             None => path,
         },
         Err(error) => {
-            crate::log_line!("uniqnode: {role}: 自分のバイナリの道が分からず、自己再起動を見張らない: {error}");
+            crate::log_line!("uniqnode: {role}: cannot find the path of its own binary, so not watching for self-reload: {error}");
             return;
         }
     };
     let running = match running_identity() {
         Ok(running) => running,
         Err(error) => {
-            crate::log_line!("uniqnode: {role}: /proc/self/exe を読めず、自己再起動を見張らない: {error}");
+            crate::log_line!("uniqnode: {role}: cannot read /proc/self/exe, so not watching for self-reload: {error}");
             return;
         }
     };
@@ -73,7 +73,7 @@ pub fn spawn_watcher(role: &str) {
     std::thread::spawn(move || loop {
         if replaced(&path, running) {
             crate::log_line!(
-                "uniqnode: {role}: バイナリ {} が置き換えられた。新しい版で起こし直してもらうため {SELF_RELOAD_EXIT} で終わる",
+                "uniqnode: {role}: the binary {} was replaced; exiting with {SELF_RELOAD_EXIT} to be restarted with the new version",
                 path.display()
             );
             std::process::exit(SELF_RELOAD_EXIT);

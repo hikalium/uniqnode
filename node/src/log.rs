@@ -105,16 +105,16 @@ pub fn open_default(data_dir: &Path, role: &str, max_bytes: u64) -> Result<PathB
     };
     let Some(fallback) = fallback_path(role) else {
         return Err(format!(
-            "{}: {refused}。倒す先も無い(XDG_STATE_HOME も HOME も取れない)",
+            "{}: {refused}; there is no fallback either (neither XDG_STATE_HOME nor HOME is set)",
             preferred.display()
         ));
     };
     let destination = Destination::open(fallback.clone(), max_bytes, Parent::CreateAll).map_err(|error| {
-        format!("{}: {refused}。倒す先 {}: {error}", preferred.display(), fallback.display())
+        format!("{}: {refused}; fallback {}: {error}", preferred.display(), fallback.display())
     })?;
     *lock() = Some(destination);
     write_line(format_args!(
-        "uniqnode: {role}: 既定のログ先 {} に書けない({refused})ので {} に残す",
+        "uniqnode: {role}: cannot write the default log {} ({refused}), so logging to {}",
         preferred.display(),
         fallback.display()
     ));
@@ -158,7 +158,7 @@ pub fn write_line(arguments: std::fmt::Arguments) {
         // 直接標準エラーへ書く。書けなくなった事実を黙って飲まず、以後は標準エラー
         // だけに出す(毎行同じ苦情を繰り返さない。must/0022)。
         eprintln!(
-            "{} uniqnode: ログを {} に書けない: {error}。以後は標準エラーだけに出す",
+            "{} uniqnode: cannot write the log to {}: {error}; from now on writing to standard error only",
             prefix(),
             opened.path.display()
         );
@@ -201,7 +201,7 @@ impl Destination {
                     if !parent.is_dir() {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::NotFound,
-                            format!("親のディレクトリ {} が無い(作らない)", parent.display()),
+                            format!("the parent directory {} does not exist (not creating it)", parent.display()),
                         ));
                     }
                 }

@@ -79,7 +79,7 @@ fn an_edge_needs_both_ends_and_survives_node_updates() {
     let dangling = simple(&server.address, "PUT", "/v1/graphs/plan/edges/blocks/n_a/n_b", b"");
     assert_eq!(dangling.status, 400, "{}", body_text(&dangling));
     assert!(
-        body_text(&dangling).contains("ノード n_b がグラフ plan に無い"),
+        body_text(&dangling).contains("node n_b is not in graph plan"),
         "何が足りないかを言う: {}",
         body_text(&dangling)
     );
@@ -227,7 +227,7 @@ fn malformed_requests_are_refused_with_what_would_pass() {
     let server = start_server("graph-refusals");
     let bad_name = put_node(&server, "plan", "n%20a", "{}");
     assert_eq!(bad_name.status, 400, "{}", body_text(&bad_name));
-    assert!(body_text(&bad_name).contains("ノード名"), "{}", body_text(&bad_name));
+    assert!(body_text(&bad_name).contains("node name"), "{}", body_text(&bad_name));
 
     let bad_body = put_node(&server, "plan", "n_a", "[1,2]");
     assert_eq!(bad_body.status, 400, "{}", body_text(&bad_body));
@@ -262,16 +262,16 @@ fn a_name_in_the_query_is_checked_like_a_name_in_the_path() {
     simple(&server.address, "PUT", "/v1/graphs/plan/edges/blocks/n_a/n_b", b"");
 
     for (path, what) in [
-        ("/v1/graphs/plan/nodes/n_a/neighbors?type=a/b", "辺の型"),
-        ("/v1/graphs/plan/edges?type=a/b", "辺の型"),
-        ("/v1/graphs/plan/edges?from=n%20a", "ノード名"),
-        ("/v1/graphs/plan/edges?to=n%20a", "ノード名"),
+        ("/v1/graphs/plan/nodes/n_a/neighbors?type=a/b", "edge type"),
+        ("/v1/graphs/plan/edges?type=a/b", "edge type"),
+        ("/v1/graphs/plan/edges?from=n%20a", "node name"),
+        ("/v1/graphs/plan/edges?to=n%20a", "node name"),
     ] {
         let refused = get(&server, path);
         assert_eq!(refused.status, 400, "{path}: {}", body_text(&refused));
         let text = body_text(&refused);
         assert!(text.contains(what), "{path}: 何の名前かを言う: {text}");
-        assert!(text.contains("ASCII の英数字"), "{path}: 何が通るかを言う: {text}");
+        assert!(text.contains("ASCII letters, digits"), "{path}: 何が通るかを言う: {text}");
     }
 
     // 形の正しい名で 1 本も当たらないのは誤りではない(型は自由に生えるもので、一覧は無い)。

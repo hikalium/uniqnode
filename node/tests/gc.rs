@@ -309,7 +309,7 @@ fn the_threshold_option_changes_which_packs_are_targets() {
     let out_of_range = gc(&dir, &["--dry-run", "--threshold", "1.5"]);
     assert_eq!(out_of_range.status, 2, "範囲外の閾値は usage で落ちる");
     assert!(
-        out_of_range.stderr.contains("0 以上 1 以下"),
+        out_of_range.stderr.contains("a ratio from 0 to 1"),
         "{}",
         out_of_range.stderr
     );
@@ -584,7 +584,7 @@ fn a_dry_run_against_a_store_held_by_serve_exits_1() {
         outcome.stdout, outcome.stderr
     );
     assert!(
-        outcome.stderr.contains("別プロセスが開いている"),
+        outcome.stderr.contains("is open in another process"),
         "理由を言う: {}",
         outcome.stderr
     );
@@ -607,7 +607,7 @@ fn a_dry_run_on_a_directory_that_is_not_a_store_refuses_and_creates_nothing() {
     assert!(
         outcome
             .stderr
-            .contains("ストアのデータディレクトリではない"),
+            .contains("is not a store data directory"),
         "{}",
         outcome.stderr
     );

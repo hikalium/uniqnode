@@ -432,7 +432,7 @@ fn systemd_doc_carries_the_legacy_units_removal_command() {
 // その次の行は飛ばす。リテラルが全て範囲の外にあるファイルは、理由と共に
 // `RUN_TIME_TEXT_EXEMPT_FILES` に載せる。
 
-/// 自分の行と次の行を除くコメントの印。後ろに理由を書く。
+/// 自分の行と次の行を除くコメントのマーク。後ろに理由を書く。
 const RUN_TIME_TEXT_EXEMPT_MARK: &str = "run-time-text-exempt:";
 
 /// 文字列リテラルが条項の範囲の外にあるファイルと、その理由。

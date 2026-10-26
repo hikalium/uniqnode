@@ -98,7 +98,7 @@ fn the_log_rotates_by_size_and_keeps_a_bounded_number_of_generations() {
         let logged = std::fs::read_to_string(&oldest).expect("read log");
         logged.lines().next().expect("起動の記録").to_string()
     };
-    assert!(first_line.contains("ログを"), "起動の記録が読めない: {first_line}");
+    assert!(first_line.contains("logging to"), "起動の記録が読めない: {first_line}");
 
     for _ in 0..40 {
         search(&server.address);
@@ -262,7 +262,7 @@ fn an_unwritable_default_log_falls_back_to_the_users_state_directory() {
     let first = logged.lines().next().expect("倒れ先のログが空");
     assert_stamped_now(first);
     assert!(
-        first.contains("既定のログ先") && first.contains("書けない"),
+        first.contains("cannot write the default log") && first.contains("so logging to"),
         "最初の行が倒した理由を言っていない: {first}"
     );
     let refused = default_path(&store, MCP_ROLE);
@@ -279,7 +279,7 @@ fn an_unwritable_default_log_falls_back_to_the_users_state_directory() {
     // 続く起動の記録も、倒れ先を「残す先」として言う(既定の道を名乗らない)。
     let second = logged.lines().nth(1).expect("起動の記録が無い");
     assert!(
-        second.contains("ログを") && second.contains(fallen.to_str().expect("utf-8")),
+        second.contains("logging to") && second.contains(fallen.to_str().expect("utf-8")),
         "起動の記録が倒れ先を残す先として言っていない: {second}"
     );
     // 前景(標準エラー)にも同じ行がある(2 つの記録を突き合わせられる)。
@@ -319,7 +319,7 @@ fn an_unopenable_log_is_reported_and_serve_keeps_serving() {
     let stderr = server.finish();
 
     assert!(
-        stderr.contains("ログをファイルに残せない"),
+        stderr.contains("cannot keep the log in a file"),
         "ログを開けなかったことを黙っている: {stderr}"
     );
     assert!(
@@ -366,7 +366,7 @@ fn a_data_directory_without_a_parent_is_refused_before_the_log_is_opened() {
             .expect("run uniqnode");
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         assert_eq!(output.status.code(), Some(1), "{role}: {stderr}");
-        assert!(stderr.contains("が無い"), "{role}: 親の無いことを言っていない: {stderr}");
+        assert!(stderr.contains("does not exist"), "{role}: 親の無いことを言っていない: {stderr}");
         assert!(stderr.contains(dir.to_str().expect("utf-8")), "{role}: 道を言っていない: {stderr}");
         assert!(!root.exists(), "{role}: データのディレクトリの祖先を作った");
         assert!(!state_home.exists(), "{role}: ログを倒す先に書いた(ログを開く前に断るはず)");

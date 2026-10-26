@@ -235,7 +235,7 @@ fn a_corrupted_sealed_pack_in_the_backup_turns_fsck_red_and_is_recopied_after_re
     );
     assert!(
         fsck.stderr
-            .contains("封印済み pack 1 が壊れている(バックアップからの復元が必要)"),
+            .contains("sealed pack 1 is corrupt (restore it from a backup)"),
         "診断が復元の必要を言う: {}",
         fsck.stderr
     );
@@ -250,7 +250,7 @@ fn a_corrupted_sealed_pack_in_the_backup_turns_fsck_red_and_is_recopied_after_re
     assert!(
         again
             .stderr
-            .contains("封印済み pack 1 が壊れている(バックアップからの復元が必要)"),
+            .contains("sealed pack 1 is corrupt (restore it from a backup)"),
         "{}",
         again.stderr
     );

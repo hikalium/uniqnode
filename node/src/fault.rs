@@ -92,32 +92,32 @@ impl Fault {
     pub(crate) fn parse(spec: &str) -> Result<Fault, String> {
         let bad = |why: &str| {
             format!(
-                "{APPEND_FAULT_ENV}={spec:?} が読めない({why})。形は <種類>[@pack|@reflog]:<何回目> で、\
-                 種類は before・torn:<n>・sync・sync-keep・manifest・manifest-dirsync・dirsync・\
-                 nospace-sync・crash-before-dirsync・gc-dirsync・crash-before-sync・crash-in-node-key・\
+                "cannot read {APPEND_FAULT_ENV}={spec:?} ({why}); the form is <kind>[@pack|@reflog]:<nth>, \
+                 where kind is one of before, torn:<n>, sync, sync-keep, manifest, manifest-dirsync, dirsync, \
+                 nospace-sync, crash-before-dirsync, gc-dirsync, crash-before-sync, crash-in-node-key, \
                  open-sync"
             )
         };
         let (kind_text, segment, nth_text) = match spec.split_once('@') {
             Some((kind_text, rest)) => {
                 let (segment_text, nth_text) =
-                    rest.split_once(':').ok_or_else(|| bad("何回目が無い"))?;
+                    rest.split_once(':').ok_or_else(|| bad("the count is missing"))?;
                 let segment = match segment_text {
                     "pack" => crate::store::PACK.directory,
                     "reflog" => crate::store::REFLOG.directory,
-                    _ => return Err(bad("@ の後は pack か reflog")),
+                    _ => return Err(bad("@ must be followed by pack or reflog")),
                 };
                 (kind_text, Some(segment), nth_text)
             }
             None => {
                 let (kind_text, nth_text) =
-                    spec.rsplit_once(':').ok_or_else(|| bad("何回目が無い"))?;
+                    spec.rsplit_once(':').ok_or_else(|| bad("the count is missing"))?;
                 (kind_text, None, nth_text)
             }
         };
-        let nth: u64 = nth_text.parse().map_err(|_| bad("何回目が数でない"))?;
+        let nth: u64 = nth_text.parse().map_err(|_| bad("the count is not a number"))?;
         if nth == 0 {
-            return Err(bad("何回目は 1 から"));
+            return Err(bad("the count starts at 1"));
         }
         let kind = match kind_text {
             "before" => FaultKind::Before,
@@ -133,12 +133,12 @@ impl Fault {
             "crash-in-node-key" => FaultKind::CrashInNodeKey,
             "open-sync" => FaultKind::OpenSync,
             other => match other.strip_prefix("torn:") {
-                Some(n) => FaultKind::Torn(n.parse().map_err(|_| bad("torn:<n> の n が数でない"))?),
-                None => return Err(bad("知らない種類")),
+                Some(n) => FaultKind::Torn(n.parse().map_err(|_| bad("the n of torn:<n> is not a number"))?),
+                None => return Err(bad("unknown kind")),
             },
         };
         if segment.is_some() && !(kind.is_append() || kind.is_new_segment()) {
-            return Err(bad("@pack・@reflog は追記の種類にだけ付く"));
+            return Err(bad("@pack and @reflog apply only to the append kinds"));
         }
         Ok(Fault { kind, segment, nth, seen: 0 })
     }
@@ -202,7 +202,7 @@ impl Fault {
 
 /// abort する(試験が実プロセスを途中で落とすための口)。
 fn crash(name: &str) -> ! {
-    eprintln!("uniqnode: store: {APPEND_FAULT_ENV}={name} なので abort する(テスト用の口)");
+    eprintln!("uniqnode: store: aborting because {APPEND_FAULT_ENV}={name} (a hook for tests)");
     std::process::abort();
 }
 

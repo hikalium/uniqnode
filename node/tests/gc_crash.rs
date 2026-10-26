@@ -183,7 +183,7 @@ fn a_crash_after_any_phase_recovers_green_with_every_live_object_readable() {
             "{phase}: abort で落ちる(シグナル終了)はず: {stderr}"
         );
         assert!(
-            stderr.contains("abort する"),
+            stderr.contains("aborting because"),
             "{phase}: 落とした理由を言う: {stderr}"
         );
         let remaining = recover_and_check(&dir, &filled, phase);
@@ -340,7 +340,7 @@ fn a_crash_after_the_manifest_leaves_old_packs_that_open_removes_as_leftovers() 
         String::from_utf8_lossy(&output.stdout)
     );
     assert!(
-        stderr.contains("回収済みの残骸") && stderr.contains("削除する"),
+        stderr.contains("a leftover of collection") && stderr.contains("deleting"),
         "残骸の削除をログに言う: {stderr}"
     );
     let after = pack_files(&dir);

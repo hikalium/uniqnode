@@ -52,14 +52,14 @@ pub const WAIT_AFTER_COPY_ENV: &str = "UNIQNODE_GC_WAIT_AFTER_B";
 pub const WAIT_READY_SUFFIX: &str = ".ready";
 
 /// 同じストアで回収が走っている間に 2 つ目を頼まれたときの断りの文(admin の 409 が見る)。
-pub const GC_ALREADY_RUNNING: &str = "gc は既に走っている";
+pub const GC_ALREADY_RUNNING: &str = "gc is already running";
 
 /// 相の直後に落とす(テスト用。上の CRASH_AFTER_ENV)。
 pub(crate) fn crash_point(phase: &str) {
     #[cfg(debug_assertions)]
     {
         if std::env::var(CRASH_AFTER_ENV).is_ok_and(|value| value == phase) {
-            eprintln!("uniqnode: gc: {CRASH_AFTER_ENV}={phase} なので abort する(テスト用の口)");
+            eprintln!("uniqnode: gc: aborting because {CRASH_AFTER_ENV}={phase} (a hook for tests)");
             std::process::abort();
         }
     }
@@ -82,7 +82,7 @@ fn wait_after_copy() -> Result<()> {
         while !go.exists() {
             if Instant::now() > deadline {
                 return Err(StoreError::Invalid(format!(
-                    "{WAIT_AFTER_COPY_ENV}: {path} が 30 秒現れない(テストの合図が来ない)"
+                    "{WAIT_AFTER_COPY_ENV}: {path} did not appear within 30 seconds (the test's signal did not come)"
                 )));
             }
             std::thread::sleep(Duration::from_millis(1));
@@ -268,7 +268,7 @@ fn load_or_build_table(
     let scanned = scan_pack_references(dir, max_record_bytes, number)?;
     if scanned.truncated {
         return Err(StoreError::Corruption(format!(
-            "封印済み pack {number} が壊れている(バックアップからの復元が必要)"
+            "sealed pack {number} is corrupt (restore it from a backup)"
         )));
     }
     let entries: ReferenceEntries = scanned
@@ -581,7 +581,7 @@ pub fn run(store: &Mutex<Store>, options: GcOptions) -> Result<GcReport> {
             if tmp_path.exists() {
                 if let Err(remove_error) = std::fs::remove_file(&tmp_path) {
                     crate::log_line!(
-                        "uniqnode: gc: 書きかけの {} を消せない: {remove_error}",
+                        "uniqnode: gc: cannot remove the partly written {}: {remove_error}",
                         tmp_path.display()
                     );
                 }
@@ -629,7 +629,7 @@ fn compact(
         let actual = crate::c1::id_for_bytes(&payload);
         if actual != *id {
             return Err(StoreError::Corruption(format!(
-                "pack {} のオブジェクト {id} の内容が一致しない(実際 {actual})",
+                "the content of object {id} in pack {} does not match (actual {actual})",
                 location.pack_number
             )));
         }
@@ -674,7 +674,7 @@ fn compact(
             .collect();
         for id in &revive {
             let payload = guard.get_object(id)?.ok_or_else(|| {
-                StoreError::Corruption(format!("生き返った {id} が読めない"))
+                StoreError::Corruption(format!("cannot read the revived {id}"))
             })?;
             writer.append(id, &payload)?;
         }

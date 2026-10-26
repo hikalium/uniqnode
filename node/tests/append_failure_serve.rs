@@ -181,7 +181,7 @@ fn every_append_fault_on_pack_and_reflog_answers_503_and_keeps_reads() {
 fn nospace_sync_and_dirsync_answer_503_as_io_with_their_op_and_reason() {
     let cases = [
         ("nospace-sync@pack:1", "sync", "os error 28"),
-        ("dirsync@pack:1", "dir_sync", "の親の sync"),
+        ("dirsync@pack:1", "dir_sync", "sync of the parent of"),
     ];
     for (fault, op, reason) in cases {
         let name = format!("af-serve-{}", fault.replace(['@', ':'], "-"));

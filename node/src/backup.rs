@@ -97,7 +97,7 @@ fn copy_into_place(source: &Path, destination_dir: &Path, relative: &Path) -> st
         output.sync_all()?;
     }
     std::fs::rename(&tmp_path, &target)?;
-    std::fs::File::open(target.parent().expect("親ディレクトリがある"))?.sync_all()?;
+    std::fs::File::open(target.parent().expect("the target has a parent directory"))?.sync_all()?;
     Ok(written)
 }
 
@@ -117,7 +117,7 @@ fn copy_segments(
     for number in sealed {
         if !present.contains(number) {
             return Err(StoreError::Corruption(format!(
-                "写し元の MANIFEST が封印済みと言う {} が無い",
+                "{}, which the source MANIFEST lists as sealed, is missing",
                 kind.file_name(*number)
             )));
         }
@@ -195,7 +195,7 @@ fn refuse_wrong_destination(source: &Path, destination: &Path) -> store::Result<
         let same_place = std::fs::canonicalize(source)? == std::fs::canonicalize(destination)?;
         if same_place {
             return Err(StoreError::Invalid(format!(
-                "写し元と写し先が同じ場所を指している: {}",
+                "the source and the destination point to the same place: {}",
                 source.display()
             )));
         }
@@ -205,7 +205,7 @@ fn refuse_wrong_destination(source: &Path, destination: &Path) -> store::Result<
         && std::fs::read(&destination_key)? != std::fs::read(source.join(NODE_KEY_NAME))?
     {
         return Err(StoreError::Invalid(format!(
-            "{} は別のノードの写し(node_key が写し元と違う)",
+            "{} is a copy of another node (its node_key differs from the source)",
             destination.display()
         )));
     }
@@ -242,7 +242,7 @@ pub fn run(source: &Path, destination: &Path) -> store::Result<BackupReport> {
     };
     if manifest.is_none() && destination.join(MANIFEST_NAME).exists() {
         return Err(StoreError::Invalid(format!(
-            "写し先 {} には MANIFEST があるが写し元には無い(別のストアの写し先ではないか)",
+            "the destination {} has a MANIFEST but the source has none (is it a copy of another store?)",
             destination.display()
         )));
     }
@@ -332,7 +332,7 @@ mod tests {
         drop(Store::open(StoreConfig::new(&other)).expect("open other"));
         match run(&source, &other) {
             Err(StoreError::Invalid(message)) => {
-                assert!(message.contains("別のノード"), "{message}")
+                assert!(message.contains("a copy of another node"), "{message}")
             }
             other_outcome => panic!("別のノードの写しへは断るべき: {other_outcome:?}"),
         }
@@ -346,7 +346,7 @@ mod tests {
         let source = temp_dir("refuse-same");
         drop(Store::open(StoreConfig::new(&source)).expect("open source"));
         match run(&source, &source) {
-            Err(StoreError::Invalid(message)) => assert!(message.contains("同じ場所"), "{message}"),
+            Err(StoreError::Invalid(message)) => assert!(message.contains("the same place"), "{message}"),
             other_outcome => panic!("同じ場所へは断るべき: {other_outcome:?}"),
         }
         std::fs::remove_dir_all(&source).expect("cleanup");
@@ -360,7 +360,7 @@ mod tests {
         let destination = temp_dir("refuse-not-store-destination");
         match run(&source, &destination) {
             Err(StoreError::Invalid(message)) => {
-                assert!(message.contains("データディレクトリではない"), "{message}")
+                assert!(message.contains("is not a store data directory"), "{message}")
             }
             other_outcome => panic!("ストアでない写し元は断るべき: {other_outcome:?}"),
         }

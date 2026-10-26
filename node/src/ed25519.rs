@@ -336,7 +336,7 @@ impl EdwardsPoint {
         let y = FieldElement::from_u64(4) * FieldElement::from_u64(5).invert();
         let mut bytes = y.to_bytes();
         bytes[31] &= 0x7f; // 符号ビット 0 = 偶数の x
-        EdwardsPoint::decompress(&bytes).expect("基底点の復元は常に成功する")
+        EdwardsPoint::decompress(&bytes).expect("decompressing the base point always succeeds")
     }
 
     /// RFC 8032 §5.1.4 の完備な加算式(倍加にもそのまま使える)。

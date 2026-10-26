@@ -54,7 +54,7 @@ pub fn read_groups(data_dir: &Path) -> Vec<GroupConfig> {
     let value = match c1::parse(&text) {
         Ok(v) => v,
         Err(e) => {
-            crate::log_line!("uniqnode: groups.json が読めない(無視して空扱い): {e}");
+            crate::log_line!("uniqnode: cannot read groups.json (ignoring it and treating it as empty): {e}");
             return Vec::new();
         }
     };
@@ -169,36 +169,36 @@ pub fn verify_membership(
     now_unix: i64,
 ) -> Result<String, String> {
     let c1::Value::Object(map) = certificate else {
-        return Err("証明書がオブジェクトでない".into());
+        return Err("the certificate is not an object".into());
     };
     if text_of(map, "type").as_deref() != Some("membership") {
-        return Err("type が membership でない".into());
+        return Err("type is not membership".into());
     }
-    let node_id = text_of(map, "node_id").ok_or("node_id がない")?;
-    let group_id = text_of(map, "group_id").ok_or("group_id がない")?;
-    let issued_at = integer_of(map, "issued_at").ok_or("issued_at がない")?;
-    let expires_at = integer_of(map, "expires_at").ok_or("expires_at がない")?;
+    let node_id = text_of(map, "node_id").ok_or("node_id is missing")?;
+    let group_id = text_of(map, "group_id").ok_or("group_id is missing")?;
+    let issued_at = integer_of(map, "issued_at").ok_or("issued_at is missing")?;
+    let expires_at = integer_of(map, "expires_at").ok_or("expires_at is missing")?;
     if now_unix < issued_at {
-        return Err("まだ有効期間前".into());
+        return Err("not yet valid".into());
     }
     if now_unix >= expires_at {
-        return Err("有効期限切れ".into());
+        return Err("expired".into());
     }
     // group_id はラベルにすぎない: 検証ノードのローカル設定でその名を持つグループの
     // 鍵集合に対してのみ意味を持つ。
     let group = groups
         .iter()
         .find(|g| g.group_id == group_id)
-        .ok_or_else(|| format!("グループ {group_id} は信頼設定にない"))?;
+        .ok_or_else(|| format!("group {group_id} is not in the trust settings"))?;
     let required = group.threshold("enroll") as usize;
     let valid = count_valid_signatures(certificate, &group.keys);
     if valid < required {
         return Err(format!(
-            "署名不足: 有効 {valid} / 必要 {required}(enroll, グループ {group_id})"
+            "not enough signatures: {valid} valid of {required} required (enroll, group {group_id})"
         ));
     }
     if is_revoked(&node_id, group) {
-        return Err(format!("node {node_id} は失効済み"));
+        return Err(format!("node {node_id} is revoked"));
     }
     Ok(group_id)
 }
@@ -344,7 +344,7 @@ mod tests {
         // key2 を外す → 有効署名 1 < 2。
         let after = vec![group(&[&key1], 2, Vec::new())];
         let rejected = verify_membership(&cert, &after, now).expect_err("失効するはず");
-        assert!(rejected.contains("署名不足"), "{rejected}");
+        assert!(rejected.contains("not enough signatures"), "{rejected}");
     }
 
     /// 有効期間と改竄。
@@ -380,7 +380,7 @@ mod tests {
         let groups = vec![group(&[&key1, &key2], 2, vec![revocation])];
         let cert = certificate(&[&seed1, &seed2], now);
         let rejected = verify_membership(&cert, &groups, now).expect_err("失効で拒否");
-        assert!(rejected.contains("失効済み"), "{rejected}");
+        assert!(rejected.contains("is revoked"), "{rejected}");
 
         // 非メンバー鍵だけの失効文は数えられない。
         let mut fake_revocation = make_statement("revocation", "node-x", "family", now, None);

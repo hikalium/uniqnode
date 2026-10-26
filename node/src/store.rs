@@ -118,13 +118,13 @@ pub struct WriteFailure {
 }
 
 /// kind が no_space のときの戻し方の案内(方針 5)。試験はこの定数で照らす(must/0023)。
-pub const NO_SPACE_GUIDANCE: &str = "ストアを置いたファイルシステムに空きを作ってから serve を再起動する\
-     (空きを足しても自動では戻らない)";
+pub const NO_SPACE_GUIDANCE: &str = "free space on the file system that holds the store, then restart serve \
+     (adding space does not recover on its own)";
 
 /// kind が io のときの戻し方の案内(方針 5)。
-pub const IO_GUIDANCE: &str = "ホストを再起動する(できなければ、ストアを置いたファイルシステムを umount して \
-     fsck し、mount し直してから起こす)。serve の再起動だけでは、page cache に残った\
-     書けなかった末尾の後ろに書くことになりうる";
+pub const IO_GUIDANCE: &str = "restart the host (if that is not possible, umount the file system that holds the store, \
+     fsck it and mount it again before starting); restarting only serve may write after \
+     an unwritten tail left in the page cache";
 
 impl WriteFailure {
     /// 戻し方の案内(方針 5)。
@@ -300,7 +300,7 @@ impl SegmentKind {
                         Ok(n) => numbers.push(n),
                         Err(_) => {
                             return Err(StoreError::Corruption(format!(
-                                "解釈できないファイル名: {name}"
+                                "unrecognized file name: {name}"
                             )))
                         }
                     }
@@ -485,12 +485,12 @@ pub struct WriteCursor {
 /// バックアップが同じ読み方をする(should/0135)。
 pub(crate) fn parse_manifest(bytes: &[u8]) -> Result<(Vec<u64>, Vec<u64>)> {
     let text = std::str::from_utf8(bytes)
-        .map_err(|_| StoreError::Corruption("MANIFEST が UTF-8 でない".into()))?;
+        .map_err(|_| StoreError::Corruption("MANIFEST is not UTF-8".into()))?;
     let value = c1::parse(text)
-        .map_err(|e| StoreError::Corruption(format!("MANIFEST が読めない: {e}")))?;
+        .map_err(|e| StoreError::Corruption(format!("cannot read MANIFEST: {e}")))?;
     let map = match &value {
         c1::Value::Object(m) => m,
-        _ => return Err(StoreError::Corruption("MANIFEST がオブジェクトでない".into())),
+        _ => return Err(StoreError::Corruption("MANIFEST is not an object".into())),
     };
     let numbers = |key: &str| -> Result<Vec<u64>> {
         match map.get(key) {
@@ -499,10 +499,10 @@ pub(crate) fn parse_manifest(bytes: &[u8]) -> Result<(Vec<u64>, Vec<u64>)> {
                 .iter()
                 .map(|v| match v {
                     c1::Value::Integer(n) if *n >= 0 => Ok(*n as u64),
-                    _ => Err(StoreError::Corruption(format!("MANIFEST {key} が不正"))),
+                    _ => Err(StoreError::Corruption(format!("invalid MANIFEST {key}"))),
                 })
                 .collect(),
-            Some(_) => Err(StoreError::Corruption(format!("MANIFEST {key} が不正"))),
+            Some(_) => Err(StoreError::Corruption(format!("invalid MANIFEST {key}"))),
         }
     };
     Ok((numbers("sealed_packs")?, numbers("sealed_reflogs")?))
@@ -595,7 +595,7 @@ fn atomic_write_steps(
     })();
     if let Err(error) = written {
         let _ = std::fs::remove_file(&tmp_path);
-        return Err(("tmp への書き込み", error));
+        return Err(("write to tmp", error));
     }
     if let Err(error) = hook(AtomicStep::BeforeRename).and_then(|_| std::fs::rename(&tmp_path, target)) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -603,8 +603,8 @@ fn atomic_write_steps(
     }
     // rename を含むディレクトリエントリの永続化。
     hook(AtomicStep::BeforeDirSync)
-        .and_then(|_| sync_dir(target.parent().expect("親ディレクトリがある")))
-        .map_err(|error| ("rename の後のディレクトリの sync", error))
+        .and_then(|_| sync_dir(target.parent().expect("the target has a parent directory")))
+        .map_err(|error| ("directory sync after rename", error))
 }
 
 /// ストアのロックを取るファイルの名前(データディレクトリの直下)。ロックはこのファイルへの
@@ -662,7 +662,7 @@ pub fn require_store_dir(dir: &Path) -> Result<()> {
         return Ok(());
     }
     Err(StoreError::Invalid(format!(
-        "{} はストアのデータディレクトリではない({NODE_KEY_NAME} と {}/ が要る)",
+        "{} is not a store data directory ({NODE_KEY_NAME} and {}/ are required)",
         dir.display(),
         PACK.directory
     )))
@@ -674,7 +674,7 @@ fn data_dir_parent(dir: &Path) -> Result<PathBuf> {
         Some(parent) if parent.as_os_str().is_empty() => Ok(PathBuf::from(".")),
         Some(parent) => Ok(parent.to_path_buf()),
         None => Err(StoreError::Invalid(format!(
-            "{} はデータのディレクトリにできない(親が無い)",
+            "{} cannot be the data directory (it has no parent)",
             dir.display()
         ))),
     }
@@ -690,15 +690,15 @@ pub fn prepare_data_dir(dir: &Path) -> Result<()> {
     }
     if dir.exists() {
         return Err(StoreError::Invalid(format!(
-            "{} はディレクトリでない",
+            "{} is not a directory",
             dir.display()
         )));
     }
     let parent = data_dir_parent(dir)?;
     if !parent.is_dir() {
         return Err(StoreError::Invalid(format!(
-            "{} の親 {} が無い(データのディレクトリの親と、根からそこまでの経路は、既に在って\
-             永続しているものとし、作らない。先に作ってから打ち直す)",
+            "the parent {1} of {0} does not exist (the parent of the data directory and the path from the root to it \
+             must already exist and persist, and are not created; create them first and run the command again)",
             dir.display(),
             parent.display()
         )));
@@ -708,7 +708,7 @@ pub fn prepare_data_dir(dir: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
         Err(error) => Err(StoreError::Io(std::io::Error::new(
             error.kind(),
-            format!("{} を作れない: {error}", dir.display()),
+            format!("cannot create {}: {error}", dir.display()),
         ))),
     }
 }
@@ -726,7 +726,7 @@ fn mkdir_if_missing(path: &Path) -> Result<()> {
 fn open_sync_error(what: &str, path: &Path, error: std::io::Error) -> StoreError {
     StoreError::Io(std::io::Error::new(
         error.kind(),
-        format!("開くときの sync: {what} {} を sync できない: {error}", path.display()),
+        format!("sync on open: cannot sync {what} {}: {error}", path.display()),
     ))
 }
 
@@ -819,7 +819,7 @@ impl Store {
         self.open_sync_fault()
             .and_then(|_| std::fs::File::open(&key_path))
             .and_then(|file| sync_file_all(&file, &key_path))
-            .map_err(|error| open_sync_error("鍵", &key_path, error))?;
+            .map_err(|error| open_sync_error("key", &key_path, error))?;
         for number in PACK.numbers(&dir)? {
             if self.sealed_packs.contains(&number) {
                 continue;
@@ -842,7 +842,7 @@ impl Store {
         {
             self.open_sync_fault()
                 .and_then(|_| sync_dir(&directory))
-                .map_err(|error| open_sync_error("ディレクトリ", &directory, error))?;
+                .map_err(|error| open_sync_error("directory", &directory, error))?;
         }
         Ok(())
     }
@@ -930,7 +930,7 @@ impl Store {
         let before = match file.metadata() {
             Ok(metadata) => metadata.len(),
             Err(error) => {
-                let context = format!("{} の fstat", path.display());
+                let context = format!("fstat of {}", path.display());
                 return Err(self.enter_writes_disabled(
                     WriteOp::Write,
                     &context,
@@ -942,10 +942,10 @@ impl Store {
         if segment == PACK && before != self.active_pack_length {
             // errno の無い誤り(io::Error::other は raw_os_error が None)。kind は Io になる。
             let error = std::io::Error::other(format!(
-                "ファイルの長さ {before} がメモリの数え値 {} と違う",
+                "the file length {before} differs from the count in memory {}",
                 self.active_pack_length
             ));
-            let context = format!("{} の書く前の検算", path.display());
+            let context = format!("check of {} before writing", path.display());
             return Err(self.enter_writes_disabled(
                 WriteOp::LengthMismatch,
                 &context,
@@ -990,18 +990,18 @@ impl Store {
                     Err(_) => Cleanup::Failed,
                 }
             };
-            let context = format!("{} への追記", path.display());
+            let context = format!("append to {}", path.display());
             return Err(self.enter_writes_disabled(op, &context, &error, cleanup));
         }
         drop(file);
         if new_file {
-            let parent = path.parent().expect("セグメントには親がある").to_path_buf();
+            let parent = path.parent().expect("a segment has a parent").to_path_buf();
             #[cfg(debug_assertions)]
             let synced = crate::fault::dirsync_stage(fired, &parent);
             #[cfg(not(debug_assertions))]
             let synced = sync_dir(&parent);
             if let Err(error) = synced {
-                let context = format!("新しいセグメント {} の親の sync", path.display());
+                let context = format!("sync of the parent of the new segment {}", path.display());
                 return Err(self.enter_writes_disabled(
                     WriteOp::DirSync,
                     &context,
@@ -1041,7 +1041,7 @@ impl Store {
                 Err(std::fs::TryLockError::WouldBlock) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(StoreError::Invalid(format!(
-                            "{} は別プロセスが開いている",
+                            "{} is open in another process",
                             dir.display()
                         )));
                     }
@@ -1059,7 +1059,7 @@ impl Store {
             let bytes = std::fs::read(&key_path)?;
             if bytes.len() != 32 {
                 return Err(StoreError::Corruption(format!(
-                    "node_key は32バイトのはずが {} バイト",
+                    "node_key should be 32 bytes but is {} bytes",
                     bytes.len()
                 )));
             }
@@ -1115,7 +1115,7 @@ impl Store {
         match written {
             Ok(()) => Ok(()),
             Err((step, error)) => {
-                let context = format!("MANIFEST の{step}");
+                let context = format!("MANIFEST: {step}");
                 Err(self.enter_writes_disabled(op, &context, &error, Cleanup::NotTried))
             }
         }
@@ -1169,7 +1169,7 @@ impl Store {
                 if !self.sealed_packs.contains(&number) && !is_active_candidate {
                     let path = pack_path(&dir, number);
                     crate::log_line!(
-                        "uniqnode: store: {} は MANIFEST に無く最後でもない(回収済みの残骸)ので削除する",
+                        "uniqnode: store: deleting {}, which is neither in MANIFEST nor the last one (a leftover of collection)",
                         path.display()
                     );
                     std::fs::remove_file(&path)?;
@@ -1187,7 +1187,7 @@ impl Store {
             if scan.truncated {
                 if sealed || !is_last {
                     return Err(StoreError::Corruption(format!(
-                        "封印済み pack {number} が壊れている(バックアップからの復元が必要)"
+                        "sealed pack {number} is corrupt (restore it from a backup)"
                     )));
                 }
                 // アクティブ末尾の torn write。有効部分まで切り詰める。
@@ -1220,8 +1220,8 @@ impl Store {
                 // 重複の分が二度と回収されない。
                 if manifest_present && !scan.records.is_empty() && added == 0 {
                     crate::log_line!(
-                        "uniqnode: store: {} は MANIFEST に無く中身が全部前の pack の重複(回収が \
-                         MANIFEST を書く前に落ちた新 pack)なので削除する",
+                        "uniqnode: store: deleting {}, which is not in MANIFEST and only duplicates earlier packs (a new pack \
+                         left when collection stopped before writing MANIFEST)",
                         path.display()
                     );
                     std::fs::remove_file(&path)?;
@@ -1251,7 +1251,7 @@ impl Store {
             if scan.truncated {
                 if sealed || !is_last {
                     return Err(StoreError::Corruption(format!(
-                        "封印済み reflog {number} が壊れている(バックアップからの復元が必要)"
+                        "sealed reflog {number} is corrupt (restore it from a backup)"
                     )));
                 }
                 let file = std::fs::OpenOptions::new().write(true).open(&path)?;
@@ -1279,23 +1279,23 @@ impl Store {
     /// reflog レコード(c1 JSON)を検証する。メモリ状態は変更しない。
     fn verify_ref_record(&self, payload: &[u8]) -> Result<Verified> {
         let text = std::str::from_utf8(payload)
-            .map_err(|_| StoreError::Corruption("reflog レコードが UTF-8 でない".into()))?;
+            .map_err(|_| StoreError::Corruption("a reflog record is not UTF-8".into()))?;
         let value = c1::parse(text)
-            .map_err(|e| StoreError::Corruption(format!("reflog レコードが c1 でない: {e}")))?;
+            .map_err(|e| StoreError::Corruption(format!("a reflog record is not c1: {e}")))?;
         let map = match &value {
             c1::Value::Object(m) => m,
-            _ => return Err(StoreError::Corruption("reflog レコードが object でない".into())),
+            _ => return Err(StoreError::Corruption("a reflog record is not an object".into())),
         };
         let text_field = |key: &str| -> Result<String> {
             match map.get(key) {
                 Some(c1::Value::Text(t)) => Ok(t.clone()),
-                _ => Err(StoreError::Corruption(format!("reflog レコードに {key} がない"))),
+                _ => Err(StoreError::Corruption(format!("a reflog record has no {key}"))),
             }
         };
         let integer_field = |key: &str| -> Result<i64> {
             match map.get(key) {
                 Some(c1::Value::Integer(n)) => Ok(*n),
-                _ => Err(StoreError::Corruption(format!("reflog レコードに {key} がない"))),
+                _ => Err(StoreError::Corruption(format!("a reflog record has no {key}"))),
             }
         };
         let record_type = text_field("type")?;
@@ -1316,11 +1316,11 @@ impl Store {
         unsigned.remove("sig");
         let message = c1::to_canonical_bytes(&c1::Value::Object(unsigned));
         let public_bytes = sha2::from_hex(&signer)
-            .ok_or_else(|| StoreError::Corruption("signer が16進でない".into()))?;
+            .ok_or_else(|| StoreError::Corruption("signer is not hexadecimal".into()))?;
         let signature_bytes = sha2::from_hex(&signature_hex)
-            .ok_or_else(|| StoreError::Corruption("sig が16進でない".into()))?;
+            .ok_or_else(|| StoreError::Corruption("sig is not hexadecimal".into()))?;
         if public_bytes.len() != 32 || signature_bytes.len() != 64 {
-            return Err(StoreError::Corruption("signer/sig の長さが不正".into()));
+            return Err(StoreError::Corruption("invalid signer/sig length".into()));
         }
         let mut public = [0u8; 32];
         public.copy_from_slice(&public_bytes);
@@ -1328,7 +1328,7 @@ impl Store {
         signature.copy_from_slice(&signature_bytes);
         if !ed25519::verify(&public, &message, &signature) {
             return Err(StoreError::Corruption(format!(
-                "reflog レコード(seq={seq})の署名が不正"
+                "invalid signature on the reflog record (seq={seq})"
             )));
         }
         let body = match record_type.as_str() {
@@ -1336,14 +1336,14 @@ impl Store {
                 let name = text_field("name")?;
                 if !name.starts_with(&format!("{signer}/")) {
                     return Err(StoreError::Corruption(format!(
-                        "ref {name} は signer の名前空間でない(single writer 違反)"
+                        "ref {name} is not in the signer's namespace (single writer violation)"
                     )));
                 }
                 let target = match map.get("target") {
                     Some(c1::Value::Text(t)) => Some(t.clone()),
                     Some(c1::Value::Null) => None,
                     _ => {
-                        return Err(StoreError::Corruption("レコードの target が不正".into()))
+                        return Err(StoreError::Corruption("invalid target in a record".into()))
                     }
                 };
                 RecordBody::SetRef { name, target }
@@ -1351,7 +1351,7 @@ impl Store {
             "pin" => {
                 let min_replicas = integer_field("min_replicas")?;
                 if !(0..=1024).contains(&min_replicas) {
-                    return Err(StoreError::Corruption("min_replicas が範囲外".into()));
+                    return Err(StoreError::Corruption("min_replicas is out of range".into()));
                 }
                 RecordBody::Pin {
                     root: text_field("root")?,
@@ -1361,17 +1361,17 @@ impl Store {
             "attest" => {
                 let held = match map.get("held") {
                     Some(c1::Value::Bool(b)) => *b,
-                    _ => return Err(StoreError::Corruption("attest の held が不正".into())),
+                    _ => return Err(StoreError::Corruption("invalid held in attest".into())),
                 };
                 RecordBody::Attest { root: text_field("root")?, held }
             }
             other => {
-                return Err(StoreError::Corruption(format!("未知のレコード種別 {other}")))
+                return Err(StoreError::Corruption(format!("unknown record kind {other}")))
             }
         };
         if seq != last + 1 {
             return Err(StoreError::Corruption(format!(
-                "signer {signer} の seq が飛んでいる: 期待 {} 実際 {seq}",
+                "the seq of signer {signer} skips: expected {} actual {seq}",
                 last + 1
             )));
         }
@@ -1424,7 +1424,7 @@ impl Store {
         self.check_writable()?;
         if bytes.len() as u64 > self.config.max_record_bytes as u64 {
             return Err(StoreError::Invalid(format!(
-                "オブジェクトが大きすぎる({} bytes)",
+                "the object is too large ({} bytes)",
                 bytes.len()
             )));
         }
@@ -1438,7 +1438,7 @@ impl Store {
         if let Some(capacity) = self.config.capacity_bytes {
             if self.used_bytes + bytes.len() as u64 > capacity {
                 return Err(StoreError::Invalid(format!(
-                    "容量超過: used {} + {} > {capacity}",
+                    "over capacity: used {} + {} > {capacity}",
                     self.used_bytes,
                     bytes.len()
                 )));
@@ -1518,7 +1518,7 @@ impl Store {
         match synced {
             Ok(()) => Ok(()),
             Err(error) => {
-                let context = format!("GC の D の {} の sync", packs.display());
+                let context = format!("sync of {} in step D of GC", packs.display());
                 Err(self.enter_writes_disabled(WriteOp::DirSync, &context, &error, Cleanup::NotTried))
             }
         }
@@ -1573,7 +1573,7 @@ impl Store {
             let scan = scan_records_from(&path, self.config.max_record_bytes, from)?;
             if scan.truncated {
                 return Err(StoreError::Corruption(format!(
-                    "pack {number} の末尾が不完全(ロックの中で見えてはならない)"
+                    "the tail of pack {number} is incomplete (must not be visible while holding the lock)"
                 )));
             }
             for (_, payload) in &scan.records {
@@ -1616,7 +1616,7 @@ impl Store {
         for target in targets {
             if !self.sealed_packs.contains(target) {
                 return Err(StoreError::Invalid(format!(
-                    "pack {target} は封印済みでないので回収できない"
+                    "pack {target} is not sealed, so it cannot be collected"
                 )));
             }
         }
@@ -1630,7 +1630,7 @@ impl Store {
                 let target = pack_path(&self.config.data_dir, number);
                 // C-1 より後の誤りは全部書けない状態に入れる(APPEND_FAILURE の方針 2)。
                 if let Err(error) = std::fs::rename(tmp_path, &target) {
-                    let context = format!("GC の新 pack の {} への rename", target.display());
+                    let context = format!("rename of the new GC pack to {}", target.display());
                     return Err(self.enter_writes_disabled(
                         WriteOp::GcCommit,
                         &context,
@@ -1638,9 +1638,9 @@ impl Store {
                         Cleanup::NotTried,
                     ));
                 }
-                let packs = target.parent().expect("packs/ がある").to_path_buf();
+                let packs = target.parent().expect("packs/ exists").to_path_buf();
                 if let Err(error) = sync_dir(&packs) {
-                    let context = format!("GC の新 pack の rename の後の {} の sync", packs.display());
+                    let context = format!("sync of {} after renaming the new GC pack", packs.display());
                     return Err(self.enter_writes_disabled(
                         WriteOp::GcCommit,
                         &context,
@@ -1693,7 +1693,7 @@ impl Store {
                     );
                 }
                 _ => {
-                    let location = self.object_index.remove(&id).expect("索引にある");
+                    let location = self.object_index.remove(&id).expect("it is in the index");
                     self.used_bytes -= location.payload_length as u64;
                     reclaimed_bytes += location.payload_length as u64;
                     removed_objects += 1;
@@ -1714,12 +1714,12 @@ impl Store {
         // 書けない状態は引数の検査より先に言う(不正な引数でも 400 でなく 503 と復旧の案内)。
         self.check_writable()?;
         if path.is_empty() || path.starts_with('/') {
-            return Err(StoreError::Invalid("ref パスが不正".into()));
+            return Err(StoreError::Invalid("invalid ref path".into()));
         }
         if let Some(t) = target {
             if !self.object_index.contains_key(t) {
                 return Err(StoreError::Invalid(format!(
-                    "target {t} が存在しない(先に put_object する)"
+                    "target {t} does not exist (put_object it first)"
                 )));
             }
         }
@@ -1742,7 +1742,7 @@ impl Store {
     pub fn set_pin(&mut self, root: &str, min_replicas: u32) -> Result<u64> {
         self.check_writable()?;
         if min_replicas > 0 && !self.object_index.contains_key(root) {
-            return Err(StoreError::Invalid(format!("root {root} が存在しない")));
+            return Err(StoreError::Invalid(format!("root {root} does not exist")));
         }
         let mut map = BTreeMap::new();
         map.insert("v".to_string(), c1::Value::Integer(1));
@@ -1757,7 +1757,7 @@ impl Store {
         self.check_writable()?;
         if held && !self.object_index.contains_key(root) {
             return Err(StoreError::Invalid(format!(
-                "保持していない root {root} に held=true は表明できない"
+                "cannot claim held=true for root {root}, which is not held"
             )));
         }
         let mut map = BTreeMap::new();
@@ -1784,7 +1784,7 @@ impl Store {
         let verified = match self.verify_ref_record(&payload)? {
             Verified::New(v) => v,
             Verified::AlreadyKnown => {
-                return Err(StoreError::Corruption("自レコードの seq が既知になっている".into()))
+                return Err(StoreError::Corruption("the seq of our own record is already known".into()))
             }
         };
         self.append_durable(REFLOG, self.active_reflog_number, &payload)?;
@@ -2046,7 +2046,7 @@ impl Store {
             if actual != *id {
                 report
                     .errors
-                    .push(format!("オブジェクト {id} の内容が一致しない(実際 {actual})"));
+                    .push(format!("the content of object {id} does not match (actual {actual})"));
             }
         }
         for (name, state) in &self.refs {
@@ -2057,7 +2057,7 @@ impl Store {
                         // 自分の ref は書き込み時に存在を強制しているので、欠けは破損。
                         report
                             .errors
-                            .push(format!("ref {name} の target {target} が存在しない"));
+                            .push(format!("the target {target} of ref {name} does not exist"));
                     } else {
                         // 他DBノードの ref の対象は未取得であり得る(レプリケーション未完了
                         // または開世界の忘却)。エラーではなく事実として数える。
@@ -2280,7 +2280,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         match Store::open_existing(StoreConfig::new(&dir)) {
             Err(StoreError::Invalid(message)) => {
-                assert!(message.contains("データディレクトリではない"), "{message}")
+                assert!(message.contains("is not a store data directory"), "{message}")
             }
             Ok(_) => panic!("空のディレクトリを開いてはならない(初期化してしまう)"),
             Err(other) => panic!("断りの種類が違う: {other}"),
@@ -2423,7 +2423,7 @@ mod tests {
         }
         match Store::open(small_config(&dir)) {
             Err(StoreError::Corruption(message)) => {
-                assert!(message.contains("署名"), "署名エラーであるべき: {message}")
+                assert!(message.contains("signature"), "署名エラーであるべき: {message}")
             }
             Err(other) => panic!("改竄は Corruption になるべき: {other}"),
             Ok(_) => panic!("改竄を見逃して開けてしまった"),
@@ -2496,14 +2496,14 @@ mod tests {
         assert!(b.ingest_ref_record(&records[0]).expect("seq 1"));
         match b.ingest_ref_record(&records[2]) {
             Err(StoreError::Corruption(message)) => {
-                assert!(message.contains("飛んでいる"), "{message}")
+                assert!(message.contains("skips"), "{message}")
             }
             other => panic!("seq の飛びは Corruption になるべき: {other:?}"),
         }
         let mut tampered = records[1].clone();
         tamper_at_field(&mut tampered);
         match b.ingest_ref_record(&tampered) {
-            Err(StoreError::Corruption(message)) => assert!(message.contains("署名"), "{message}"),
+            Err(StoreError::Corruption(message)) => assert!(message.contains("signature"), "{message}"),
             other => panic!("改竄は Corruption になるべき: {other:?}"),
         }
         std::fs::remove_dir_all(&dir_a).expect("cleanup");
@@ -2515,7 +2515,7 @@ mod tests {
         let dir = temp_dir("lock");
         let first = Store::open(small_config(&dir)).expect("open");
         match Store::open(small_config(&dir)) {
-            Err(StoreError::Invalid(message)) => assert!(message.contains("開いている"), "{message}"),
+            Err(StoreError::Invalid(message)) => assert!(message.contains("is open in another process"), "{message}"),
             Err(other) => panic!("二重オープンは Invalid になるべき: {other}"),
             Ok(_) => panic!("二重オープンできてしまった"),
         }

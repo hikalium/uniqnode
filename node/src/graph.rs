@@ -46,8 +46,8 @@ pub fn is_valid_name(name: &str) -> bool {
 /// 名前を断る理由の文面。応答も試験もここから作る(must/0023)。
 pub fn invalid_name_refusal(what: &str, name: &str) -> String {
     format!(
-        "{what} {name:?} の形が違う(ASCII の英数字と _ - . の 1..={NAME_MAX_CHARS} 字。\
-         / と空白は使えない)"
+        "{what} {name:?} is malformed (use 1..={NAME_MAX_CHARS} ASCII letters, digits, _, - and .; \
+         / and spaces are not allowed)"
     )
 }
 
@@ -285,12 +285,12 @@ fn node_view(
 ) -> Result<NodeView> {
     let Some(bytes) = store.get_object(target)? else {
         return Err(StoreError::Invalid(format!(
-            "ノード {node} の状態 {target} をこのDBノードは持っていない"
+            "this DB node does not hold the state {target} of node {node}"
         )));
     };
     let Some((identity, attrs, _)) = read_state(&bytes) else {
         return Err(StoreError::Invalid(format!(
-            "ノード {node} の状態 {target} が状態ノードの形ではない"
+            "the state {target} of node {node} is not shaped as a state node"
         )));
     };
     Ok(NodeView {
@@ -407,7 +407,7 @@ pub fn put_node(store: &mut Store, graph: &str, node: &str, attrs: &Value) -> Re
     let canonical = c1::to_canonical_bytes(attrs);
     if canonical.len() > ATTRS_MAX_BYTES {
         return Err(StoreError::Invalid(format!(
-            "attrs が大きすぎる({} バイト。上限 {ATTRS_MAX_BYTES})",
+            "attrs is too large ({} bytes; the limit is {ATTRS_MAX_BYTES})",
             canonical.len()
         )));
     }
@@ -450,7 +450,7 @@ pub fn delete_node(store: &mut Store, graph: &str, node: &str) -> Result<bool> {
             .map(|edge| format!("{}/{}/{}", edge.edge_type, edge.from, edge.to))
             .collect();
         return Err(StoreError::Invalid(format!(
-            "ノード {node} には辺が {} 本ある(先に消す: {})",
+            "node {node} has {} edges (delete them first: {})",
             names.len(),
             names.join(", ")
         )));
@@ -471,7 +471,7 @@ pub fn put_edge(
     for end in [from, to] {
         if get_node(store, graph, end)?.is_none() {
             return Err(StoreError::Invalid(format!(
-                "ノード {end} がグラフ {graph} に無い(辺の両端は先に作る)"
+                "node {end} is not in graph {graph} (create both ends of an edge first)"
             )));
         }
     }

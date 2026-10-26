@@ -96,7 +96,7 @@ fn two_of_two_ceremony_and_keyset_removal() {
     let (accepted, _, reject_reason) =
         run_with_stdin(&["cert-verify", work.to_str().expect("utf-8")], &once_signed);
     assert!(!accepted, "1署名で受理されてはならない");
-    assert!(reject_reason.contains("署名不足"), "{reject_reason}");
+    assert!(reject_reason.contains("not enough signatures"), "{reject_reason}");
 
     // 2署名で受理。
     let (accepted, verdict, err) =
@@ -109,7 +109,7 @@ fn two_of_two_ceremony_and_keyset_removal() {
     let (accepted, _, reject_reason) =
         run_with_stdin(&["cert-verify", work.to_str().expect("utf-8")], &fully_signed);
     assert!(!accepted, "鍵除去後は失効するはず");
-    assert!(reject_reason.contains("署名不足"), "{reject_reason}");
+    assert!(reject_reason.contains("not enough signatures"), "{reject_reason}");
 
     // 失効文でも拒否できる(revoke は 1-of-n)。鍵集合を戻して失効文を差し込む。
     let revocation_body = run_ok(&["revoke-make", "node-under-test", "family"]);
@@ -134,7 +134,7 @@ fn two_of_two_ceremony_and_keyset_removal() {
     let (accepted, _, reject_reason) =
         run_with_stdin(&["cert-verify", work.to_str().expect("utf-8")], &fully_signed);
     assert!(!accepted, "失効文で拒否されるはず");
-    assert!(reject_reason.contains("失効済み"), "{reject_reason}");
+    assert!(reject_reason.contains("is revoked"), "{reject_reason}");
 
     std::fs::remove_dir_all(&work).expect("cleanup");
 }

@@ -238,11 +238,11 @@ impl HttpPeer {
         let value = self.get_json("/v1/status")?;
         let map = match &value {
             c1::Value::Object(m) => m,
-            _ => return Err(SyncError::Peer("status 応答がオブジェクトでない".into())),
+            _ => return Err(SyncError::Peer("the status response is not an object".into())),
         };
         let node_id = match map.get("node_id") {
             Some(c1::Value::Text(t)) => t.clone(),
-            _ => return Err(SyncError::Peer("status に node_id がない".into())),
+            _ => return Err(SyncError::Peer("status has no node_id".into())),
         };
         let free_bytes = match map.get("free_bytes") {
             Some(c1::Value::Integer(n)) if *n >= 0 => Some(*n as u64),
@@ -254,11 +254,11 @@ impl HttpPeer {
     fn get_json(&self, path: &str) -> Result<c1::Value, SyncError> {
         let (status, body) = self.get(path)?;
         if status != 200 {
-            return Err(SyncError::Peer(format!("{path} が {status} を返した")));
+            return Err(SyncError::Peer(format!("{path} returned {status}")));
         }
         let text = std::str::from_utf8(&body)
-            .map_err(|_| SyncError::Peer(format!("{path} の応答が UTF-8 でない")))?;
-        c1::parse(text).map_err(|e| SyncError::Peer(format!("{path} の応答が JSON でない: {e}")))
+            .map_err(|_| SyncError::Peer(format!("the response from {path} is not UTF-8")))?;
+        c1::parse(text).map_err(|e| SyncError::Peer(format!("the response from {path} is not JSON: {e}")))
     }
 }
 
@@ -268,20 +268,20 @@ impl PeerSource for HttpPeer {
         let items = match &value {
             c1::Value::Object(map) => match map.get("signers") {
                 Some(c1::Value::Array(items)) => items.clone(),
-                _ => return Err(SyncError::Peer("signers 配列がない".into())),
+                _ => return Err(SyncError::Peer("no signers array".into())),
             },
-            _ => return Err(SyncError::Peer("応答がオブジェクトでない".into())),
+            _ => return Err(SyncError::Peer("the response is not an object".into())),
         };
         let mut out = Vec::new();
         for item in items {
             if let c1::Value::Object(map) = item {
                 let signer = match map.get("signer") {
                     Some(c1::Value::Text(t)) => t.clone(),
-                    _ => return Err(SyncError::Peer("signer がない".into())),
+                    _ => return Err(SyncError::Peer("no signer".into())),
                 };
                 let last_seq = match map.get("last_seq") {
                     Some(c1::Value::Integer(n)) => *n as u64,
-                    _ => return Err(SyncError::Peer("last_seq がない".into())),
+                    _ => return Err(SyncError::Peer("no last_seq".into())),
                 };
                 out.push((signer, last_seq));
             }
@@ -295,9 +295,9 @@ impl PeerSource for HttpPeer {
         let items = match &value {
             c1::Value::Object(map) => match map.get("records") {
                 Some(c1::Value::Array(items)) => items.clone(),
-                _ => return Err(SyncError::Peer("records 配列がない".into())),
+                _ => return Err(SyncError::Peer("no records array".into())),
             },
-            _ => return Err(SyncError::Peer("応答がオブジェクトでない".into())),
+            _ => return Err(SyncError::Peer("the response is not an object".into())),
         };
         // レコードは c1 正規形で運ばれるので、再直列化 = 元の署名対象バイト列。
         Ok(items.iter().map(c1::to_canonical_bytes).collect())
@@ -308,7 +308,7 @@ impl PeerSource for HttpPeer {
         match status {
             200 => Ok(Some(body)),
             404 => Ok(None),
-            other => Err(SyncError::Peer(format!("objects/{id} が {other} を返した"))),
+            other => Err(SyncError::Peer(format!("objects/{id} returned {other}"))),
         }
     }
 
@@ -318,21 +318,21 @@ impl PeerSource for HttpPeer {
             404 => Ok(None),
             200 => {
                 let text = std::str::from_utf8(&body)
-                    .map_err(|_| SyncError::Peer("refs 応答が UTF-8 でない".into()))?;
+                    .map_err(|_| SyncError::Peer("the refs response is not UTF-8".into()))?;
                 let value = c1::parse(text)
-                    .map_err(|e| SyncError::Peer(format!("refs 応答が JSON でない: {e}")))?;
+                    .map_err(|e| SyncError::Peer(format!("the refs response is not JSON: {e}")))?;
                 let map = match &value {
                     c1::Value::Object(m) => m,
-                    _ => return Err(SyncError::Peer("refs 応答がオブジェクトでない".into())),
+                    _ => return Err(SyncError::Peer("the refs response is not an object".into())),
                 };
                 let target = match map.get("target") {
                     Some(c1::Value::Text(t)) => Some(t.clone()),
                     Some(c1::Value::Null) => None,
-                    _ => return Err(SyncError::Peer("refs 応答の target が不正".into())),
+                    _ => return Err(SyncError::Peer("invalid target in the refs response".into())),
                 };
                 let seq = match map.get("seq") {
                     Some(c1::Value::Integer(n)) => *n as u64,
-                    _ => return Err(SyncError::Peer("refs 応答の seq が不正".into())),
+                    _ => return Err(SyncError::Peer("invalid seq in the refs response".into())),
                 };
                 let at = match map.get("at") {
                     Some(c1::Value::Integer(n)) => *n,
@@ -346,7 +346,7 @@ impl PeerSource for HttpPeer {
                     signer: name.split('/').next().unwrap_or("").to_string(),
                 }))
             }
-            other => Err(SyncError::Peer(format!("refs/{name} が {other} を返した"))),
+            other => Err(SyncError::Peer(format!("refs/{name} returned {other}"))),
         }
     }
 }
@@ -357,9 +357,9 @@ pub fn handle_sync_request(store: &std::sync::Mutex<Store>, request: &Request) -
     let peer_address = match parse_body(&request.body) {
         Ok(c1::Value::Object(map)) => match map.get("peer") {
             Some(c1::Value::Text(t)) => t.clone(),
-            _ => return error_response(400, "peer がない"),
+            _ => return error_response(400, "no peer"),
         },
-        Ok(_) => return error_response(400, "JSON オブジェクトを期待した"),
+        Ok(_) => return error_response(400, "expected a JSON object"),
         Err(response) => return response,
     };
     let peer = HttpPeer::new(peer_address);

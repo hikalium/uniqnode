@@ -16,287 +16,321 @@ fn usage_text() -> String {
     format!(
         "usage: uniqnode <command> <data_dir> [args]\n\
          commands:\n\
-           init <dir>                 ストアを初期化し node id を表示する\n\
-           status <dir>               件数・seq・node id を表示する(在るストアだけ)\n\
-           put <dir>                  標準入力をオブジェクトとして投入し id を表示する\n\
-           get <dir> <id>             オブジェクトを標準出力へ書く\n\
-           set-ref <dir> <path> <id>  自名前空間の ref を設定する(id が '-' なら tombstone)\n\
-           refs <dir>                 ref を一覧する\n\
-           fsck <dir>                 全再ハッシュ検査(異常があれば非0で終了。在るストア\n\
-                                      だけを開き、ストアでない場所は初期化せず断る)\n\
-           backup <dir> <backup_dir>  封印済みセグメント・MANIFEST・node_key・設定を\n\
-                                      backup_dir へ写し(増分: 写し済みの封印済みセグメントは\n\
-                                      写さない)、写し先を開いて fsck まで通す。ロックを取らない\n\
-                                      ので serve と同時に走れる(異常があれば非0で終了)\n\
-           gc <dir> [--dry-run] [--threshold <割合>]\n\
-                                      pack ごとに、生きているバイト数と孤児(どの ref・pin・\n\
-                                      保持表明からも辿れないオブジェクト)のバイト数を数え、\n\
-                                      孤児率が閾値(既定 {default_gc_threshold})を超えた封印済み\n\
-                                      pack を、生きているものだけを写した新しい pack で置き\n\
-                                      換えて孤児のバイト列をディスクから取り戻す。--dry-run は\n\
-                                      数えるだけで、ストアのデータには何も書かない(参照表\n\
-                                      derived/refs/ だけは作る)。ロックを取るので serve が\n\
-                                      開いているストアには走れない(走っている serve には\n\
-                                      POST /v1/admin/gc を打つ。docs/design/GC.md)\n\
-           pin <dir> <root> <min>     root の到達閉包に min_replicas を要求する(0 で解除)\n\
-           admin-keygen <keyfile>     グループ管理者鍵を生成する(公開鍵を表示)\n\
+           init <dir>                 initialize a store and print its node id\n\
+           status <dir>               print counts, seq and node id (existing stores only)\n\
+           put <dir>                  store standard input as an object and print its id\n\
+           get <dir> <id>             write an object to standard output\n\
+           set-ref <dir> <path> <id>  set a ref in our own namespace (id '-' writes a tombstone)\n\
+           refs <dir>                 list the refs\n\
+           fsck <dir>                 rehash everything (exits non-zero on a problem; opens only\n\
+                                      an existing store and refuses a place that is not a store\n\
+                                      instead of initializing it)\n\
+           backup <dir> <backup_dir>  copy the sealed segments, MANIFEST, node_key and settings\n\
+                                      to backup_dir (incremental: sealed segments already copied\n\
+                                      are not copied again), then open the copy and run fsck on\n\
+                                      it. Takes no lock, so it can run alongside serve (exits\n\
+                                      non-zero on a problem)\n\
+           gc <dir> [--dry-run] [--threshold <ratio>]\n\
+                                      for each pack, count the live bytes and the orphan bytes\n\
+                                      (objects no ref, pin or retention claim reaches), and\n\
+                                      replace each sealed pack whose orphan ratio exceeds the\n\
+                                      threshold (default {default_gc_threshold}) with a new pack\n\
+                                      holding only the live objects, reclaiming the orphan bytes\n\
+                                      from disk. --dry-run only counts and writes nothing to the\n\
+                                      store's data (it only builds the reference table\n\
+                                      derived/refs/). Takes the lock, so it cannot run on a store\n\
+                                      that serve has open (for a running serve, send\n\
+                                      POST /v1/admin/gc; docs/design/GC.md)\n\
+           pin <dir> <root> <min>     require min_replicas for the closure reachable from root\n\
+                                      (0 removes it)\n\
+           admin-keygen <keyfile>     generate a group admin key (prints the public key)\n\
            cert-make <node_id> <group_id> <days>\n\
-                                      メンバーシップ証明書の本体を標準出力へ(署名なし)\n\
-           cert-sign <keyfile>        標準入力の証明書/失効文に管理者署名を1つ追記する\n\
-           cert-verify <dir>          標準入力の証明書を <dir>/groups.json で検証する\n\
+                                      write the body of a membership certificate to standard\n\
+                                      output (unsigned)\n\
+           cert-sign <keyfile>        append one admin signature to the certificate or\n\
+                                      revocation on standard input\n\
+           cert-verify <dir>          verify the certificate on standard input against\n\
+                                      <dir>/groups.json\n\
            revoke-make <node_id> <group_id>\n\
-                                      失効文の本体を標準出力へ(署名なし)\n\
+                                      write the body of a revocation to standard output (unsigned)\n\
            serve <dir> <addr> [--embed <url>] [--embedder <id>] [--rerank <url>]\n\
                               [--reranker <id>] [--listen-agent <addr>]\n\
-                              [--agent-writable <コレクション名>]...\n\
-                              [--agent-collections <コレクション名>]...\n\
-                              [--agent-graph <グラフ名>]...\n\
-                              [--agent-graph-writable <グラフ名>]...\n\
+                              [--agent-writable <collection>]...\n\
+                              [--agent-collections <collection>]...\n\
+                              [--agent-graph <graph>]...\n\
+                              [--agent-graph-writable <graph>]...\n\
                               [--main-allow-uid <uid,...>]... [--main-allow-host <host:port>]...\n\
-                              [ログの指定]\n\
-                                      HTTP API を提供する(例: 127.0.0.1:7440、:0 で自動割当)。\n\
-                                      <addr>(主の口)はループバックの IP リテラル(127.0.0.0/8\n\
-                                      か [::1])だけを受け、名前・0.0.0.0・[::]・IPv4 射影は\n\
-                                      断る。主の口は接続の相手のソケットの uid を確かめ\n\
-                                      (Linux の sock_diag)、許す集合(既定は serve 自身の\n\
-                                      euid だけ)に無ければ 403 で断る。--main-allow-uid は\n\
-                                      その集合を置き換える(root も許すなら常駐の利用者と\n\
-                                      並べて 1000,0 のように書く)。ブラウザからの要求は\n\
-                                      断る: Host が束縛の字面か localhost:<port> でなければ\n\
-                                      421(--main-allow-host で足せる)、Origin 付きは 403、\n\
-                                      text/plain・form の型と、JSON の道の application/json\n\
-                                      以外は 415(docs/plan/API_AUTH.md)。\n\
-                                      --listen-agent を与えると、そのアドレスに第 2 の口\n\
-                                      (読み口)を束縛する。読み口は許可表(healthz・status・\n\
-                                      search・objects のチャンク・citation・collections)の\n\
-                                      要求だけを通し、他は 403 で断る。束縛できなければ主の\n\
-                                      口はそのまま上げ、裏で再試行する(docs/design/AGENT_DOOR.md)。\n\
-                                      --agent-writable は読み口から書けるコレクション(繰り\n\
-                                      返せる。--listen-agent があるときだけ)。許した\n\
-                                      コレクションへの PUT /v1/collections/{{c}}/documents/{{name}}\n\
-                                      だけを読み口に通し、他のコレクションは許した一覧を\n\
-                                      言って 403 で断る。PUT の query ?meta.<key>=<value> は\n\
-                                      doc_rev.meta に写る(主の口でも同じ)。\n\
-                                      --agent-collections は読み口から読めるコレクション\n\
-                                      (繰り返せる。--listen-agent があるときだけ)。与えな\n\
-                                      ければ全コレクションが読める。与えると search・\n\
-                                      collections・objects・citation の 4 か所に効き、集合の\n\
-                                      外は 403 で断る。\n\
-                                      --agent-graph は読み口から読めるグラフ、\n\
-                                      --agent-graph-writable は読み書きできるグラフ(どちらも\n\
-                                      繰り返せる。--listen-agent があるときだけ)。コレクション\n\
-                                      と逆で、どちらも与えなければグラフ層は読み口に現れない。\n\
-                                      許したグラフの /v1/graphs/{{g}}/... だけを通し、外の名は\n\
-                                      403 で断る(docs/design/GRAPH.md)。\n\
-                                      --embed を与えると POST /v1/search の既定が BM25 と\n\
-                                      埋め込みの RRF 融合になる。ベクトルはキャッシュから\n\
-                                      読むので検索が模型の計算を待つことはなく、無いぶんは\n\
-                                      起動直後と書き込みの後に裏で埋める(検索はそれを\n\
-                                      待たない)。届かなければ BM25 だけに劣化して答え、\n\
-                                      応答の method と degraded がそれを言う。\n\
-                                      --rerank を与えると上位候補の順位をリランカー\n\
-                                      (--reranker で模型名、既定 {default_reranker})で\n\
-                                      取り直す。届かなければ融合の順位のまま答え、\n\
-                                      degraded がそれを言う。\n\
-                                      ログは既定で <dir>/logs/serve.log にも残す(下記)\n\
-           mcp <dir> [--serve-url <url>] [--writable <コレクション名>]... [--embed <url>]\n\
-                     [--embedder <id>] [--rerank <url>] [--reranker <id>] [ログの指定]\n\
-                                      標準入出力で MCP(Model Context Protocol)を話す。\n\
-                                      LLM エージェント(Claude Code など)に、読む 2 ツール\n\
-                                      (search・fetch)と、--writable で許したコレクション\n\
-                                      へ書く 2 ツール(add_document: テキスト知識の追加、\n\
-                                      fetch_url: URL の取り込み)を出す。--writable は繰り\n\
-                                      返せる。1 つも無ければ読むだけで、書くツールは一覧に\n\
-                                      載らない。許していないコレクションへの書き込みは\n\
-                                      ツールの失敗として断る。標準出力はプロトコル専用で、\n\
-                                      ログは標準エラーと <dir>/logs/mcp.log へ出す(登録\n\
-                                      した相手が標準エラーを吸うので、ファイルが唯一\n\
-                                      読める記録になる)。--serve-url を与えると、\n\
-                                      自分でストアを開かず、走っている serve の REST へ\n\
-                                      転送する(ストアの排他ロックを取らないので、常駐した\n\
-                                      まま ingest・embed が通る。埋め込みと順位の取り直し\n\
-                                      を装備するのは転送先の serve なので、--embed・\n\
-                                      --embedder・--rerank・--reranker とは併用しない)。\n\
-                                      無指定ならストアを直接開く(serve 停止中のストア用。\n\
-                                      --embed・--embedder・--rerank・--reranker は serve\n\
-                                      と同じ意味で、この形だけが受ける)。\n\
-                                      登録例:\n\
+                              [log options]\n\
+                                      serve the HTTP API (for example 127.0.0.1:7440; :0 picks a\n\
+                                      port). <addr> (the main door) accepts only a loopback IP\n\
+                                      literal (127.0.0.0/8 or [::1]) and refuses names, 0.0.0.0,\n\
+                                      [::] and IPv4-mapped addresses. The main door checks the\n\
+                                      uid of the peer's socket (Linux sock_diag) and refuses it\n\
+                                      with 403 unless it is in the allowed set (by default only\n\
+                                      serve's own euid). --main-allow-uid replaces that set (to\n\
+                                      allow root too, list it beside the service user, as in\n\
+                                      1000,0). Browser requests are refused: 421 unless Host is\n\
+                                      the bound address or localhost:<port> (add more with\n\
+                                      --main-allow-host), 403 with Origin, and 415 for\n\
+                                      text/plain and form types and for anything but\n\
+                                      application/json on the JSON paths (docs/plan/API_AUTH.md).\n\
+                                      --listen-agent binds a second door (the agent door) to that\n\
+                                      address. The agent door passes only the allowed requests\n\
+                                      (healthz, status, search, chunk objects, citation,\n\
+                                      collections) and refuses the rest with 403. If it cannot\n\
+                                      bind, the main door still comes up and the agent door\n\
+                                      retries in the background (docs/design/AGENT_DOOR.md).\n\
+                                      --agent-writable names a collection writable through the\n\
+                                      agent door (repeatable; only with --listen-agent). Only\n\
+                                      PUT /v1/collections/{{c}}/documents/{{name}} to an allowed\n\
+                                      collection passes the agent door; other collections are\n\
+                                      refused with 403 and the allowed list. The query\n\
+                                      ?meta.<key>=<value> of a PUT goes into doc_rev.meta (the\n\
+                                      main door does the same).\n\
+                                      --agent-collections names a collection readable through\n\
+                                      the agent door (repeatable; only with --listen-agent).\n\
+                                      Without it every collection is readable. With it, search,\n\
+                                      collections, objects and citation are limited to the set,\n\
+                                      and anything outside is refused with 403.\n\
+                                      --agent-graph names a graph readable through the agent\n\
+                                      door, --agent-graph-writable a graph readable and writable\n\
+                                      (both repeatable; only with --listen-agent). Unlike\n\
+                                      collections, the graph layer does not appear on the agent\n\
+                                      door unless one of them is given. Only\n\
+                                      /v1/graphs/{{g}}/... of an allowed graph passes, and other\n\
+                                      names are refused with 403 (docs/design/GRAPH.md).\n\
+                                      --embed makes the default of POST /v1/search an RRF fusion\n\
+                                      of BM25 and embeddings. Vectors are read from the cache, so\n\
+                                      a search never waits for the model; missing ones are filled\n\
+                                      in the background at startup and after writes (searches do\n\
+                                      not wait for that). If the embedder cannot be reached, the\n\
+                                      answer degrades to BM25 alone, and method and degraded in\n\
+                                      the response say so.\n\
+                                      --rerank reorders the top candidates with a reranker\n\
+                                      (model name in --reranker, default {default_reranker}). If\n\
+                                      it cannot be reached, the fused order is kept and degraded\n\
+                                      says so.\n\
+                                      By default the log is also kept in <dir>/logs/serve.log\n\
+                                      (see below)\n\
+           mcp <dir> [--serve-url <url>] [--writable <collection>]... [--embed <url>]\n\
+                     [--embedder <id>] [--rerank <url>] [--reranker <id>] [log options]\n\
+                                      speak MCP (Model Context Protocol) on standard input and\n\
+                                      output. Offers an LLM agent (such as Claude Code) 2 tools\n\
+                                      that read (search, fetch) and 2 tools that write to the\n\
+                                      collections allowed with --writable (add_document: add\n\
+                                      text knowledge; fetch_url: ingest a URL). --writable is\n\
+                                      repeatable. Without it the server only reads and the write\n\
+                                      tools are not listed. A write to a collection not allowed\n\
+                                      is refused as a tool failure. Standard output is for the\n\
+                                      protocol only; the log goes to standard error and to\n\
+                                      <dir>/logs/mcp.log (the client that registered it swallows\n\
+                                      standard error, so the file is the only readable record).\n\
+                                      With --serve-url it does not open the store but forwards to\n\
+                                      the REST API of a running serve (it takes no store lock, so\n\
+                                      ingest and embed work while it stays running; embedding and\n\
+                                      reranking belong to that serve, so --embed, --embedder,\n\
+                                      --rerank and --reranker are not used with it). Without it\n\
+                                      the store is opened directly (for a store with serve\n\
+                                      stopped; --embed, --embedder, --rerank and --reranker mean\n\
+                                      the same as for serve and are accepted only in this form).\n\
+                                      Registration example:\n\
                                       claude mcp add --transport stdio uniqnode --\n\
-                                      <この実行ファイル> mcp <dir>\n\
+                                      <this executable> mcp <dir>\n\
                                       --serve-url http://127.0.0.1:7440\n\
                                       --writable notes --writable web\n\
-           viewer <dir> <addr> [--serve-url <url>] [ログの指定]\n\
-                                      RAG ビューワ(1枚のHTML)をブラウザへ出す\n\
-                                      (例: 127.0.0.1:7450、:0 で自動割当)。頁が呼ぶ\n\
-                                      /v1/* は走っている serve へ転送するので、自分では\n\
-                                      ストアを開かない(排他ロックを取らないため、serve が\n\
-                                      常駐したまま起こせる)。--serve-url の既定は\n\
-                                      http://127.0.0.1:7440。ログは既定で\n\
-                                      <dir>/logs/viewer.log にも残す(下記)\n\
-           selfcheck                  この実行ファイルが健全であることを標準出力の1行で\n\
-                                      言う(mcp が自分を exec で差し替える前に、新しい\n\
-                                      イメージを子プロセスとして起こして確かめる用)\n\
+           viewer <dir> <addr> [--serve-url <url>] [log options]\n\
+                                      serve the RAG viewer (a single HTML page) to a browser\n\
+                                      (for example 127.0.0.1:7450; :0 picks a port). The /v1/*\n\
+                                      calls of the page are forwarded to a running serve, so the\n\
+                                      viewer does not open the store itself (it takes no store\n\
+                                      lock, so it can start while serve stays running). The\n\
+                                      default --serve-url is http://127.0.0.1:7440. By default\n\
+                                      the log is also kept in <dir>/logs/viewer.log (see below)\n\
+           selfcheck                  report on one line of standard output that this executable\n\
+                                      is sound (used to start a new image as a child process and\n\
+                                      check it before mcp replaces itself with exec)\n\
            embed <dir> [--embed <url>] [--embedder <id>]\n\
-                                      見えのチャンクのうちベクトルの無いものを埋め込み、\n\
-                                      <dir>/derived/embeddings/<id>.vec に足す(導出データ。\n\
-                                      消しても作り直せる)。まとまりごとに fsync するので\n\
-                                      途中で止めても続きから再開できる。serve 停止中の\n\
-                                      ストア用(serve 中は serve 自身が裏で埋める)\n\
-           sync <dir> <peer_addr>     相手から pull で同期する(serve 停止中のストア用。\n\
-                                      serve 中は POST /v1/sync を使う)\n\
+                                      embed the visible chunks that have no vector and add them\n\
+                                      to <dir>/derived/embeddings/<id>.vec (derived data; it can\n\
+                                      be rebuilt if deleted). Each batch is fsynced, so a stopped\n\
+                                      run resumes where it left off. For a store with serve\n\
+                                      stopped (while serve runs, serve fills them itself)\n\
+           sync <dir> <peer_addr>     pull from a peer to synchronize (for a store with serve\n\
+                                      stopped; while serve runs, use POST /v1/sync)\n\
            ingest <dir> <collection> <path> [--pdftotext <exe>]\n\
            ingest <dir> <collection> <path> --serve-url <url>\n\
-                                      文書を取り込む(.md/.markdown/.txt/.html/.htm/.pdf。ディレクトリ\n\
-                                      は再帰。対象外は一覧で言い、最後に件数を 1 行で\n\
-                                      言う)。無指定ならストアを直接開く(serve 停止中の\n\
-                                      ストア用。PDF の抽出は pdftotext に委譲し、\n\
-                                      --pdftotext の明示指定が優先、無指定なら PATH を引く)。\n\
-                                      --serve-url を与えると、ストアを開かず(ロックを\n\
-                                      取らない)、走っている serve へ 1 件ずつ\n\
-                                      PUT /v1/collections/{{c}}/documents/{{name}} で送る\n\
-                                      (例 --serve-url http://127.0.0.1:7440)。選び方・\n\
-                                      文書名・べき等は同じで、serve が誤りを返せばその\n\
-                                      理由を言ってそこで止まる。PDF を抽出するのは serve\n\
-                                      なので --pdftotext とは併用しない。空白・制御文字・?\n\
-                                      を含む名前は送れず、1 件も送る前に断る\n\
-           ingest-git <dir> <collection> <tree> --paths <道,道,...> [--ref <ref>]\n\
+                                      ingest documents (.md/.markdown/.txt/.html/.htm/.pdf;\n\
+                                      directories are walked recursively; files left out are\n\
+                                      listed, and a final line gives the counts). Without\n\
+                                      --serve-url the store is opened directly (for a store with\n\
+                                      serve stopped; PDF text is extracted by pdftotext, taken\n\
+                                      from --pdftotext if given and from PATH otherwise).\n\
+                                      With --serve-url the store is not opened (no lock is\n\
+                                      taken) and each document is sent to a running serve with\n\
+                                      PUT /v1/collections/{{c}}/documents/{{name}}\n\
+                                      (for example --serve-url http://127.0.0.1:7440). Selection,\n\
+                                      document names and idempotence are the same; if serve\n\
+                                      returns an error, the reason is printed and ingest stops\n\
+                                      there. serve extracts PDFs, so --pdftotext is not used\n\
+                                      with it. Names containing whitespace, control characters\n\
+                                      or ? cannot be sent, and they are refused before anything\n\
+                                      is sent\n\
+           ingest-git <dir> <collection> <tree> --paths <path,path,...> [--ref <ref>]\n\
                       [--serve-url <url> | --pdftotext <exe>]\n\
-                                      手元の git の木 <tree> の ref(既定 main)に追跡されて\n\
-                                      いるファイルのうち --paths の下のもの(カンマ区切り、\n\
-                                      木の根からの相対パス)だけを一時の置き場へ書き出し、\n\
-                                      それを起点に ingest と同じ取り込みをする(文書名は木の\n\
-                                      根からの相対パス)。作業ディレクトリは読まないので、\n\
-                                      追跡していないファイルも書きかけも入らない。シンボ\n\
-                                      リックリンクとサブモジュールは書き出さず一覧で言う。\n\
-                                      git の外へは取りに行かない(fetch・clone しない)。木が\n\
-                                      無い・ref が無い・道の 1 つがその ref に無いときは何も\n\
-                                      送らずに断る。git から消えた文書は消さない\n\
-           fetch <dir> <collection> <url> [--name <名>] [--pdftotext <exe>]\n\
-                                      URL を取って取り込む(http/https のみ。取りに行くのは\n\
-                                      curl で、版を doc_rev.meta.fetcher に残す。転送は 10 回\n\
-                                      まで、{fetch_max_seconds} 秒・{fetch_max_bytes} バイトが\n\
-                                      上限)。取れたものが HTML なら外部への依存(スクリプト・\n\
-                                      画像・フォント・外部スタイル)を落として自足した 1 枚に\n\
-                                      してから、PDF なら pdftotext で、素文はそのまま取り込む。\n\
-                                      --name を省くと文書名は URL から導き(ホストとパスを\n\
-                                      1 語に。拡張子は残さない)、同じ URL の再取得は同じ\n\
-                                      文書名への上書きになる。serve 停止中のストア用。serve\n\
-                                      中は POST /v1/collections/{{c}}/fetch を使う\n\
-           ingest-annotations <dir> <collection> <data.md> [--manual <承認リスト>]\n\
-                                      注釈索引を取り込む(先に PDF を ingest しておく。\n\
-                                      タイトルとページ本文の照合に一致した注釈だけが\n\
-                                      annotates 辺として入り、不一致は一致率とともに\n\
-                                      報告される。承認リストは「spec_id ページ番号」の\n\
-                                      行の並びで、載っている注釈は照合に落ちても\n\
-                                      manual の検証記録付きで入る。serve 停止中の\n\
-                                      ストア用)\n\
-           correct <dir> <collection> <誤った言明ID> <新しい言明ID> <理由>\n\
-                                      ストアにある言明の誤りを訂正する corrects 辺を\n\
-                                      発行する(新しい言明は取り込みと同じトークン照合で\n\
-                                      再照合され、根拠行つきの検証記録が付く。索引 ref\n\
-                                      annotations/<collection> に訂正の項が足される。\n\
-                                      serve 停止中のストア用)\n\
-           install <dir> [--instance <名>] [--listen <addr>] [--viewer-listen <addr>]\n\
-                         [--serve-options \"<引数列>\"] [--backup-dir <dir>] [--bin <path>]\n\
+                                      write the files tracked at the ref (default main) of the\n\
+                                      local git tree <tree> under --paths (comma separated,\n\
+                                      relative to the root of the tree) to a temporary staging\n\
+                                      directory, then ingest from there as ingest does (document\n\
+                                      names are paths relative to the root of the tree). The\n\
+                                      working directory is not read, so untracked files and\n\
+                                      unfinished edits are not included. Symbolic links and\n\
+                                      submodules are not written out and are listed instead.\n\
+                                      Nothing is fetched from outside git (no fetch or clone).\n\
+                                      If the tree or the ref is missing, or one of the paths is\n\
+                                      not in that ref, nothing is sent and the command refuses.\n\
+                                      Documents removed from git are not deleted\n\
+           fetch <dir> <collection> <url> [--name <name>] [--pdftotext <exe>]\n\
+                                      fetch a URL and ingest it (http/https only; curl fetches\n\
+                                      it and its version is kept in doc_rev.meta.fetcher; up to\n\
+                                      10 redirects, {fetch_max_seconds} seconds and\n\
+                                      {fetch_max_bytes} bytes). HTML is made self-contained by\n\
+                                      dropping external dependencies (scripts, images, fonts,\n\
+                                      external styles) before ingesting; PDF goes through\n\
+                                      pdftotext; plain text is ingested as is. Without --name\n\
+                                      the document name is derived from the URL (host and path\n\
+                                      as one word, without the extension), and fetching the same\n\
+                                      URL again overwrites the same document. For a store with\n\
+                                      serve stopped; while serve runs, use\n\
+                                      POST /v1/collections/{{c}}/fetch\n\
+           ingest-annotations <dir> <collection> <data.md> [--manual <approval list>]\n\
+                                      ingest an annotation index (ingest the PDF first). Only\n\
+                                      annotations whose title matches the page text go in as\n\
+                                      annotates edges; mismatches are reported with their match\n\
+                                      ratio. The approval list is lines of \"spec_id page-number\";\n\
+                                      annotations listed there go in with a manual verification\n\
+                                      record even if they fail matching. For a store with serve\n\
+                                      stopped\n\
+           correct <dir> <collection> <wrong-statement-id> <new-statement-id> <reason>\n\
+                                      issue a corrects edge that corrects a statement in the\n\
+                                      store (the new statement is re-matched with the same token\n\
+                                      matching as ingest and gets a verification record with\n\
+                                      the evidence lines; an entry for the correction is added\n\
+                                      to the index ref annotations/<collection>. For a store\n\
+                                      with serve stopped)\n\
+           install <dir> [--instance <name>] [--listen <addr>] [--viewer-listen <addr>]\n\
+                         [--serve-options \"<arguments>\"] [--backup-dir <dir>] [--bin <path>]\n\
                          [--unit-dir <dir>] [--no-start] [--listen-agent <addr>]\n\
-                         [--agent-writable <コレクション名>]...\n\
-                         [--agent-collections <コレクション名>]...\n\
-                         [--agent-graph <グラフ名>]... [--agent-graph-writable <グラフ名>]...\n\
+                         [--agent-writable <collection>]...\n\
+                         [--agent-collections <collection>]...\n\
+                         [--agent-graph <graph>]... [--agent-graph-writable <graph>]...\n\
                          [--system [--user <name>] [--after <unit>]...\n\
                           [--take-over-user-units] [--retire-legacy-units]\n\
                           [--firewall-allow <addr>[,<addr>]...]]\n\
-                                      serve・viewer・毎日の backup を systemd に据える\n\
-                                      (docs/mop/SYSTEMD.md)。走っている自分自身を\n\
-                                      --bin(既定 ~/.local/bin/uniqnode)へ写し、unit 4 本と\n\
-                                      drop-in 3 本を --unit-dir(既定 ~/.config/systemd/user)\n\
-                                      に書き、daemon-reload、enable と restart、\n\
-                                      loginctl enable-linger の後、serve と viewer 経由の\n\
-                                      /v1/status が同じ node_id を返すことと、backup を 1 回\n\
-                                      走らせた写し先(--backup-dir、既定 ~/uniqnode-backup)\n\
-                                      が fsck で緑であることまで確かめる。--listen の既定は\n\
-                                      {default_listen}、--viewer-listen は {default_viewer_listen}。\n\
-                                      --serve-options は serve の追加の引数(--embed など)を\n\
-                                      1 つの文字列で。--no-start は daemon-reload までで\n\
-                                      止める。再実行は更新(写し直し・書き直し・restart)。\n\
-                                      <dir> は /tmp の下に置けない(unit の PrivateTmp)。\n\
-                                      --instance は同じ機械に何組も置くための名(既定\n\
-                                      {default_instance})。unit はテンプレートで、名が\n\
-                                      uniqnode-serve@<名>.service になり、既定のストアも\n\
-                                      写し先も nft の表も名ごとに分かれる。ASCII の小文字と\n\
-                                      数字と _ の {instance_max} 字まで。\n\
-                                      --listen-agent は serve の読み口(第 2 の待ち受け。\n\
-                                      許可表の外は 403)で、drop-in に UNIQNODE_AGENT_LISTEN\n\
-                                      を書き、確認に「読み口の /v1/status が同じ node_id」\n\
-                                      「読み口の POST /v1/admin/gc が 403」を足す。\n\
-                                      --agent-writable は読み口から書けるコレクション(繰り\n\
-                                      返せる。--listen-agent のときだけ)で、drop-in に\n\
-                                      UNIQNODE_AGENT_WRITABLE を書き ExecStart= の末尾に\n\
-                                      --agent-writable <c> を並べ、確認に「許したコレクション\n\
-                                      への PUT が門を越え、許していないものは 403」を足す\n\
-                                      (試し書きはしない)。\n\
-                                      --agent-collections は読み口から読めるコレクション\n\
-                                      (繰り返せる。--listen-agent のときだけ)で、drop-in に\n\
-                                      UNIQNODE_AGENT_COLLECTIONS を書き ExecStart= の末尾に\n\
-                                      --agent-collections <c> を並べ、確認に「許していない\n\
-                                      名を指した検索が 403」を足す。\n\
-                                      --agent-graph は読み口から読めるグラフ、\n\
-                                      --agent-graph-writable は読み書きできるグラフ(どちらも\n\
-                                      繰り返せる。--listen-agent のときだけ)で、drop-in に\n\
-                                      UNIQNODE_AGENT_GRAPH と UNIQNODE_AGENT_GRAPH_WRITABLE を\n\
-                                      書き ExecStart= の末尾に並べ、確認に「許したグラフが\n\
-                                      読め、外の名は 403」「許したグラフへの PUT が門を越え、\n\
-                                      許していないものは 403」を足す(試し書きはしない)。\n\
-                                      --system は system 単位(/etc/systemd/system)に据える:\n\
-                                      root で走らせ(sudo)、unit は --user の利用者(無ければ\n\
-                                      SUDO_USER。root は不可)で走る。既定の置き場もその\n\
-                                      利用者の home の下。backup と fsck もその利用者で走らせ、\n\
-                                      ストアと写し先に root 所有のものを残さない。--after は\n\
-                                      drop-in の After=/Wants= に書く unit(wg-quick@wg1.service\n\
-                                      など。複数可。--system のときだけ)。既に user 単位で\n\
-                                      常駐しているなら --take-over-user-units で install に\n\
-                                      止めて外させる(user 単位の 3 つの unit を disable --now\n\
-                                      し、止まったこととロックが外れたことを見る)。\n\
-                                      旧い名の unit(テンプレートになる前の\n\
-                                      uniqnode-serve.service など)が残っているなら\n\
-                                      --retire-legacy-units で install に退避させてから\n\
-                                      外させる(/var/backups/uniqnode-legacy-<時刻>。既定の\n\
-                                      インスタンスだけ)。\n\
-                                      --firewall-allow <addr> は <addr> からだけ読み口へ届く\n\
-                                      (<addr> は IPv4 アドレスか CIDR。, で並べられる)\n\
-                                      規則を入れて効果を見る(ufw が active なら ufw allow、\n\
-                                      そうでなければ nft の表 inet uniqnode_<名> を serve の\n\
-                                      ExecStartPre= が起動のたびに入れる。--system と\n\
-                                      --listen-agent のときだけ)。手順は SYSTEMD.md の移行\n\
+                                      deploy serve, viewer and a daily backup with systemd\n\
+                                      (docs/mop/SYSTEMD.md). Copies the running executable to\n\
+                                      --bin (default ~/.local/bin/uniqnode), writes 4 units and\n\
+                                      3 drop-ins to --unit-dir (default ~/.config/systemd/user),\n\
+                                      runs daemon-reload, enable and restart, and\n\
+                                      loginctl enable-linger, then checks that /v1/status\n\
+                                      through serve and through viewer returns the same node_id\n\
+                                      and that one backup run leaves a copy (--backup-dir,\n\
+                                      default ~/uniqnode-backup) that passes fsck. The default\n\
+                                      --listen is {default_listen} and --viewer-listen is\n\
+                                      {default_viewer_listen}. --serve-options gives extra serve\n\
+                                      arguments (such as --embed) as one string. --no-start\n\
+                                      stops after daemon-reload. Running it again updates (copy,\n\
+                                      rewrite, restart). <dir> cannot be under /tmp (the units\n\
+                                      use PrivateTmp).\n\
+                                      --instance names one of several sets on the same machine\n\
+                                      (default {default_instance}). The units are templates\n\
+                                      named uniqnode-serve@<name>.service, and the default store,\n\
+                                      backup and nft table are separate per name. Up to\n\
+                                      {instance_max} lowercase ASCII letters, digits and _.\n\
+                                      --listen-agent is serve's agent door (a second listener;\n\
+                                      requests outside the allowed list get 403); it writes\n\
+                                      UNIQNODE_AGENT_LISTEN to the drop-in and adds the checks\n\
+                                      \"/v1/status on the agent door returns the same node_id\"\n\
+                                      and \"POST /v1/admin/gc on the agent door gets 403\".\n\
+                                      --agent-writable names a collection writable through the\n\
+                                      agent door (repeatable; only with --listen-agent); it\n\
+                                      writes UNIQNODE_AGENT_WRITABLE to the drop-in, appends\n\
+                                      --agent-writable <c> to ExecStart=, and adds the check\n\
+                                      \"a PUT to an allowed collection passes the gate and one to\n\
+                                      any other gets 403\" (without writing anything).\n\
+                                      --agent-collections names a collection readable through\n\
+                                      the agent door (repeatable; only with --listen-agent); it\n\
+                                      writes UNIQNODE_AGENT_COLLECTIONS to the drop-in, appends\n\
+                                      --agent-collections <c> to ExecStart=, and adds the check\n\
+                                      \"a search naming a collection not allowed gets 403\".\n\
+                                      --agent-graph names a graph readable through the agent\n\
+                                      door, --agent-graph-writable a graph readable and writable\n\
+                                      (both repeatable; only with --listen-agent); they write\n\
+                                      UNIQNODE_AGENT_GRAPH and UNIQNODE_AGENT_GRAPH_WRITABLE to\n\
+                                      the drop-in, append to ExecStart=, and add the checks \"an\n\
+                                      allowed graph is readable and other names get 403\" and \"a\n\
+                                      PUT to an allowed graph passes the gate and one to any\n\
+                                      other gets 403\" (without writing anything).\n\
+                                      --system deploys system units (/etc/systemd/system): run\n\
+                                      it as root (sudo); the units run as the --user account\n\
+                                      (SUDO_USER if omitted; root is not allowed), and the\n\
+                                      default places are under that account's home. backup and\n\
+                                      fsck also run as that account, so nothing owned by root is\n\
+                                      left in the store or the backup. --after names a unit for\n\
+                                      After=/Wants= in the drop-in (such as\n\
+                                      wg-quick@wg1.service; repeatable; only with --system). If\n\
+                                      user units are already running, --take-over-user-units has\n\
+                                      install stop and remove them (disable --now on the 3 user\n\
+                                      units, then check that they stopped and released the\n\
+                                      lock). If units with old names (such as\n\
+                                      uniqnode-serve.service from before the templates) remain,\n\
+                                      --retire-legacy-units has install move them aside and\n\
+                                      remove them (/var/backups/uniqnode-legacy-<time>; default\n\
+                                      instance only).\n\
+                                      --firewall-allow <addr> installs a rule that lets only\n\
+                                      <addr> reach the agent door (<addr> is an IPv4 address or\n\
+                                      CIDR; list several with ,) and checks its effect (ufw\n\
+                                      allow if ufw is active; otherwise serve's ExecStartPre=\n\
+                                      installs the nft table inet uniqnode_<name> on every\n\
+                                      start; only with --system and --listen-agent). See the\n\
+                                      migration steps in SYSTEMD.md\n\
            autodeploy <checkout> --bin <path> [--state-dir <dir>] [--publish-branch <name>]\n\
-                                      自動更新の 1 回(SYSTEMD.md の「自動更新」。常駐と同じ\n\
-                                      利用者で走り、sudo を使わない)。<checkout> で origin の\n\
-                                      main を追い、新しい SHA なら組み直して <path> を置き換え、\n\
-                                      動いている serve と viewer が自己再起動で新しい版に替わる\n\
-                                      まで見る。落ち着かなければ以前のバージョン(<path>.prev)へ戻す。\n\
-                                      据えたら --publish-branch へ SHA を push する。状態は\n\
-                                      --state-dir(既定 ~/.local/state/uniqnode-autodeploy)に\n\
-                                      置き、そこに hold があれば何もしない\n\
+                                      one run of automatic updates (\"automatic updates\" in\n\
+                                      SYSTEMD.md; runs as the service account, without sudo).\n\
+                                      Follows main of origin in <checkout>; for a new SHA it\n\
+                                      rebuilds, replaces <path>, and watches until the running\n\
+                                      serve and viewer switch to the new version by restarting\n\
+                                      themselves. If they do not settle, it rolls back to the\n\
+                                      previous version (<path>.prev). After deploying it pushes\n\
+                                      the SHA to --publish-branch. State is kept in --state-dir\n\
+                                      (default ~/.local/state/uniqnode-autodeploy); if a file\n\
+                                      named hold is there, it does nothing\n\
            install-autodeploy <checkout> [--user <name>] [--bin <path>]\n\
                               [--publish-branch <name>] [--unit-dir <dir>] [--no-start]\n\
-                                      autodeploy を 1 分ごとに起こす system 単位の service と\n\
-                                      timer を据える(root で走らせる。利用者は --user か\n\
-                                      SUDO_USER、--bin の既定は ~/.local/bin/uniqnode)\n\
-           apply <ファイル> [--log-dir <dir>]\n\
-                                      ファイルの空行で区切った塊を 1 つずつ uniqnode の命令として\n\
-                                      走らせ(塊の中は 1 行 1 引数)、最初の失敗で止まる。出力は\n\
-                                      時刻つきで --log-dir(既定 /var/log)の\n\
-                                      uniqnode-apply-<時刻>-<pid>.log にも残す(docs/mop/vega/vega.apply)\n\
+                                      deploy a system service and timer that run autodeploy\n\
+                                      every minute (run as root; the account is --user or\n\
+                                      SUDO_USER, and --bin defaults to ~/.local/bin/uniqnode)\n\
+           apply <file> [--log-dir <dir>]\n\
+                                      run each blank-line-separated block of the file as one\n\
+                                      uniqnode command (one argument per line within a block),\n\
+                                      stopping at the first failure. The output is also kept,\n\
+                                      with timestamps, in uniqnode-apply-<time>-<pid>.log under\n\
+                                      --log-dir (default /var/log) (docs/mop/vega/vega.apply)\n\
          \n\
-         serve・mcp・viewer のログの指定(常駐する命令だけが持つ。既定は保存する):\n\
-           --log <path>               保存先を変える(既定 <dir>/logs/<serve|mcp|viewer>.log。\n\
-                                      既定の道に書けなければ $XDG_STATE_HOME/uniqnode/logs/、\n\
-                                      無ければ ~/.local/state/uniqnode/logs/ へ倒し、その旨を\n\
-                                      最初の行で言う。--log で指した道は倒さない)\n\
-           --no-log                   ファイルへ残さず標準エラーだけに出す\n\
-           --log-max-bytes <n>        1 世代の上限(既定 {default_max_bytes})。越えたら\n\
-                                      <path>.1 へ送って新しい世代を開き、{generations} 世代\n\
-                                      まで残す(それより古いものは消える)\n\
-         ログは標準エラーとファイルの両方に同じ行が出る。行頭は UTC の時刻と pid",
+         log options of serve, mcp and viewer (only the long-running commands have them; by\n\
+         default the log is kept):\n\
+           --log <path>               change where the log is kept (default\n\
+                                      <dir>/logs/<serve|mcp|viewer>.log; if the default cannot\n\
+                                      be written, fall back to $XDG_STATE_HOME/uniqnode/logs/,\n\
+                                      or ~/.local/state/uniqnode/logs/ without it, and say so on\n\
+                                      the first line; a path given with --log does not fall\n\
+                                      back)\n\
+           --no-log                   keep no file and write to standard error only\n\
+           --log-max-bytes <n>        the limit of one generation (default {default_max_bytes});\n\
+                                      beyond it the file moves to <path>.1 and a new generation\n\
+                                      starts, keeping {generations} generations (older ones are\n\
+                                      removed)\n\
+         the same lines go to both standard error and the file; each line starts with the UTC\n\
+         time and the pid",
         default_reranker = uniqnode::rerank::DEFAULT_RERANKER_ID,
         default_gc_threshold = uniqnode::gc::DEFAULT_THRESHOLD,
         fetch_max_seconds = uniqnode::fetch::DEFAULT_MAX_SECONDS,
@@ -347,7 +381,7 @@ struct IngestPlan {
 fn plan_ingest(root: &str) -> Result<IngestPlan, StoreError> {
     let root_path = std::path::Path::new(root);
     if !root_path.exists() {
-        return Err(StoreError::Invalid(format!("{root}: 存在しない")));
+        return Err(StoreError::Invalid(format!("{root}: does not exist")));
     }
     let mut files = Vec::new();
     collect_files(root_path, &mut files)?;
@@ -398,10 +432,10 @@ impl IngestTally {
     /// 対象外の一覧と締めの 1 行。対象外は黙って捨てず、ここで必ず言う(must/0022 の同型)。
     fn report(&self, skipped: &[String]) {
         for path in skipped {
-            println!("対象外(拡張子): {path}");
+            println!("skipped (extension): {path}");
         }
         println!(
-            "取り込み: {} 件(updated {}、no-op {})、対象外 {} 件",
+            "ingested: {} (updated {}, no-op {}), skipped {}",
             self.updated + self.unchanged,
             self.updated,
             self.unchanged,
@@ -435,7 +469,7 @@ fn run_ingest(
                 .map_err(StoreError::Invalid)?;
                 pdf_extractor = Some(located);
             }
-            let extractor = pdf_extractor.as_ref().expect("直前に確保した");
+            let extractor = pdf_extractor.as_ref().expect("ensured just above");
             extracted = extractor.extract(&bytes)?;
             &extracted
         } else {
@@ -443,7 +477,7 @@ fn run_ingest(
                 Ok(text) => text,
                 Err(_) => {
                     return Err(StoreError::Invalid(format!(
-                        "{}: UTF-8 でない({media} として取り込めない)",
+                        "{}: not UTF-8 (cannot be ingested as {media})",
                         file.display()
                     )));
                 }
@@ -454,7 +488,7 @@ fn run_ingest(
         let (chunks, outline_reason) =
             uniqnode::ingest::chunk_for_media_with_source(media, text, &bytes);
         if let Some(reason) = outline_reason {
-            uniqnode::log_line!("uniqnode: ingest: {name} の節見出し: {reason}");
+            uniqnode::log_line!("uniqnode: ingest: section headings of {name}: {reason}");
         }
         let extractor_label = if media == "pdf" {
             pdf_extractor.as_ref().map(|e| e.extractor.as_str())
@@ -511,7 +545,7 @@ fn run_ingest_via_serve(
     // 入れてから断ることもしない(must/0022)。
     if unsendable_in_path(collection) {
         return Err(StoreError::Invalid(format!(
-            "コレクション名 {collection:?} は --serve-url では送れない(空白・制御文字・? を含む)"
+            "collection name {collection:?} cannot be sent with --serve-url (it contains whitespace, control characters or ?)"
         )));
     }
     let refused: Vec<&str> = plan
@@ -522,8 +556,8 @@ fn run_ingest_via_serve(
         .collect();
     if !refused.is_empty() {
         return Err(StoreError::Invalid(format!(
-            "文書名に空白・制御文字・? を含むものは --serve-url では送れない(何も送って\
-             いない。名前を変えるか、serve を止めて直接開く形で取り込む): {refused:?}"
+            "document names containing whitespace, control characters or ? cannot be sent with --serve-url (nothing \
+             was sent; rename them, or stop serve and ingest by opening the store directly): {refused:?}"
         )));
     }
     let mut tally = IngestTally::default();
@@ -574,16 +608,16 @@ fn run_ingest_git(
     )
     .map_err(StoreError::Invalid)?;
     println!(
-        "木: {tree} の {reference} = {}(書き出し {} 件、書き出さなかったもの {} 件)",
+        "tree: {reference} of {tree} = {} (written {}, left out {})",
         staged.commit,
         staged.written,
         staged.left_out.len()
     );
     for item in &staged.left_out {
-        println!("書き出さない({item})");
+        println!("not written ({item})");
     }
     let root = staged.dir.to_str().ok_or_else(|| {
-        StoreError::Invalid(format!("置き場の道が UTF-8 でない: {}", staged.dir.display()))
+        StoreError::Invalid(format!("the staging path is not UTF-8: {}", staged.dir.display()))
     })?;
     match serve_url {
         Some(url) => run_ingest_via_serve(dir, collection, root, url),
@@ -616,7 +650,7 @@ fn run_fetch(
     let document = uniqnode::fetch::fetch_document(&request, &mut extract_pdf)
         .map_err(|error| StoreError::Invalid(error.to_string()))?;
     if let Some(reason) = &document.outline_reason {
-        uniqnode::log_line!("uniqnode: ingest: {} の節見出し: {reason}", document.name);
+        uniqnode::log_line!("uniqnode: ingest: section headings of {}: {reason}", document.name);
     }
     let mut store = open(dir);
     let outcome = uniqnode::ingest::ingest_document(&mut store, &document.input(collection))?;
@@ -654,14 +688,14 @@ fn run_ingest_annotations(
     manual: Option<&str>,
 ) -> Result<(), StoreError> {
     let text = std::fs::read_to_string(data_md)
-        .map_err(|error| StoreError::Invalid(format!("{data_md}: 読めない: {error}")))?;
+        .map_err(|error| StoreError::Invalid(format!("{data_md}: cannot read: {error}")))?;
     let entries = uniqnode::ingest::parse_annotation_index(&text)
         .map_err(|error| StoreError::Invalid(format!("{data_md}: {error}")))?;
     let approvals = match manual {
         None => Default::default(),
         Some(path) => {
             let text = std::fs::read_to_string(path)
-                .map_err(|error| StoreError::Invalid(format!("{path}: 読めない: {error}")))?;
+                .map_err(|error| StoreError::Invalid(format!("{path}: cannot read: {error}")))?;
             uniqnode::ingest::parse_manual_approvals(&text)
                 .map_err(|error| StoreError::Invalid(format!("{path}: {error}")))?
         }
@@ -671,7 +705,7 @@ fn run_ingest_annotations(
         uniqnode::ingest::ingest_annotations(&mut store, collection, &entries, &approvals)?;
     for accepted in &outcome.accepted {
         println!(
-            "取り込み: {} p.{} {} (method={}, 一致 {}/{})",
+            "accepted: {} p.{} {} (method={}, matched {}/{})",
             accepted.spec_id,
             accepted.page,
             accepted.title,
@@ -682,7 +716,7 @@ fn run_ingest_annotations(
     }
     for rejected in &outcome.rejected {
         println!(
-            "不一致: {} p.{} {} (一致 {}/{})",
+            "mismatch: {} p.{} {} (matched {}/{})",
             rejected.spec_id,
             rejected.page,
             rejected.title,
@@ -692,7 +726,7 @@ fn run_ingest_annotations(
     }
     let state = if outcome.ref_updated { "updated" } else { "no-op" };
     println!(
-        "annotations/{collection}: {state} 取り込み={} 不一致={} new_objects={} index={}",
+        "annotations/{collection}: {state} accepted={} mismatched={} new_objects={} index={}",
         outcome.accepted.len(),
         outcome.rejected.len(),
         outcome.new_objects,
@@ -722,7 +756,7 @@ fn exit_unless_opened(opened: Result<Store, StoreError>) -> Store {
     match opened {
         Ok(s) => s,
         Err(e) => {
-            uniqnode::log_line!("uniqnode: ストアを開けない: {e}");
+            uniqnode::log_line!("uniqnode: cannot open the store: {e}");
             std::process::exit(1);
         }
     }
@@ -751,7 +785,7 @@ fn main() {
     }
     // ヘルプの求めは、どの位置にあっても使い方だけを出して 0 で終わる。位置引数の数を
     // 数えるより前に見るのは、`uniqnode install --help` が --help をデータディレクトリと
-    // 読んで据え付けを実行してしまうからである(2026-09-08 に実際に起きた)。
+    // 読んでデプロイを実行してしまうからである(2026-09-08 に実際に起きた)。
     if arguments[1..].iter().any(|argument| argument == "--help" || argument == "-h") {
         println!("{}", usage_text());
         return;
@@ -766,8 +800,8 @@ fn main() {
     // 別のことをしない)。`-` で始まる道を本当に指したいときは ./-dir と書く。
     if dir.starts_with('-') {
         eprintln!(
-            "uniqnode: {command}: データディレクトリの位置に {dir} が来ている\
-             (<command> <data_dir> [args] の順)。使い方は uniqnode --help"
+            "uniqnode: {command}: {dir} is in the place of the data directory \
+             (the order is <command> <data_dir> [args]); see uniqnode --help"
         );
         std::process::exit(2);
     }
@@ -843,7 +877,7 @@ fn parse_gc_options(rest: &[String]) -> uniqnode::gc::GcOptions {
                 match text.parse::<f64>() {
                     Ok(value) if (0.0..=1.0).contains(&value) => options.threshold = value,
                     _ => {
-                        eprintln!("uniqnode: --threshold は 0 以上 1 以下の割合: {text}");
+                        eprintln!("uniqnode: --threshold must be a ratio from 0 to 1: {text}");
                         usage();
                     }
                 }
@@ -1123,7 +1157,7 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
                     Ok(bytes) if bytes > 0 => bytes,
                     // 誤った指定を既定で埋めて黙って進まない(must/0022)。
                     _ => {
-                        eprintln!("uniqnode: --log-max-bytes は正の整数: {text}");
+                        eprintln!("uniqnode: --log-max-bytes must be a positive integer: {text}");
                         std::process::exit(2);
                     }
                 };
@@ -1139,8 +1173,8 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
         // 書く許可は読み口に掛かるもの。読み口が無ければ効かせる先が無いので、黙って捨てずに
         // 断る(must/0022。install の normalize と同じ判断)。
         eprintln!(
-            "uniqnode: {} {} は {} があるときだけ受け付ける(書く許可は読み口に掛かるもので、\
-             読み口が無ければ効かせる先が無い)",
+            "uniqnode: {} {} is accepted only with {} (write permission applies to the agent door, \
+             and without the agent door there is nothing to apply it to)",
             uniqnode::install::AGENT_WRITABLE_FLAG,
             agent_writable.join(" "),
             uniqnode::install::AGENT_LISTEN_FLAG
@@ -1150,8 +1184,8 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
     if !agent_collections.is_empty() && listen_agent.is_none() {
         // 読む許可も読み口に掛かるもの(書く許可と同じ理由で、黙って捨てない)。
         eprintln!(
-            "uniqnode: {} {} は {} があるときだけ受け付ける(読む許可は読み口に掛かるもので、\
-             読み口が無ければ効かせる先が無い)",
+            "uniqnode: {} {} is accepted only with {} (read permission applies to the agent door, \
+             and without the agent door there is nothing to apply it to)",
             uniqnode::install::AGENT_COLLECTIONS_FLAG,
             agent_collections.join(" "),
             uniqnode::install::AGENT_LISTEN_FLAG
@@ -1168,8 +1202,8 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
         if !names.is_empty() && listen_agent.is_none() {
             // グラフの許可も読み口に掛かるもの(コレクションの 2 つと同じ理由)。
             eprintln!(
-                "uniqnode: {flag} {} は {} があるときだけ受け付ける(グラフの許可は読み口に\
-                 掛かるもので、読み口が無ければ効かせる先が無い)",
+                "uniqnode: {flag} {} is accepted only with {} (graph permission applies to the agent door, \
+                 and without the agent door there is nothing to apply it to)",
                 names.join(" "),
                 uniqnode::install::AGENT_LISTEN_FLAG
             );
@@ -1196,8 +1230,8 @@ fn parse_run_options(rest: &[String]) -> RunOptions {
 fn refuse_misplaced_listen_agent(role: &str, options: &RunOptions) {
     if options.listen_agent.is_some() {
         uniqnode::log_line!(
-            "uniqnode: {role}: --listen-agent は {role} の引数ではない(読み口を束縛するのは \
-             serve である)"
+            "uniqnode: {role}: --listen-agent is not an argument of {role} (the agent door is bound \
+             by serve)"
         );
         std::process::exit(2);
     }
@@ -1209,7 +1243,7 @@ fn refuse_misplaced_listen_agent(role: &str, options: &RunOptions) {
     };
     if let Some(flag) = main_flag {
         uniqnode::log_line!(
-            "uniqnode: {role}: {flag} は {role} の引数ではない(主の口を持つのは serve である)"
+            "uniqnode: {role}: {flag} is not an argument of {role} (the main door belongs to serve)"
         );
         std::process::exit(2);
     }
@@ -1229,7 +1263,7 @@ fn prepare_data_dir_or_exit(dir: &str, role: &str, log: &LogOptions) {
         return;
     }
     if let Err(error) = uniqnode::store::prepare_data_dir(std::path::Path::new(dir)) {
-        eprintln!("uniqnode: {role}: ストアを開けない: {error}");
+        eprintln!("uniqnode: {role}: cannot open the store: {error}");
         std::process::exit(1);
     }
 }
@@ -1241,7 +1275,7 @@ fn prepare_data_dir_or_exit(dir: &str, role: &str, log: &LogOptions) {
 /// 都合で断る方が損である(should/0114)。
 fn start_logging(dir: &str, role: &str, options: &LogOptions) {
     if !options.enabled {
-        eprintln!("uniqnode: {role}: --no-log によりログはファイルに残さない(標準エラーだけ)");
+        eprintln!("uniqnode: {role}: --no-log given, so the log is not kept in a file (standard error only)");
         return;
     }
     let opened = match &options.path {
@@ -1253,14 +1287,14 @@ fn start_logging(dir: &str, role: &str, options: &LogOptions) {
     };
     match opened {
         Ok(path) => uniqnode::log_line!(
-            "uniqnode: {role}: ログを {} に残す(1 世代 {} バイト、{} 世代まで保持)",
+            "uniqnode: {role}: logging to {} ({} bytes per generation, keeping up to {} generations)",
             path.display(),
             options.max_bytes,
             uniqnode::log::RETAINED_GENERATIONS
         ),
         Err(message) => eprintln!(
-            "uniqnode: {role}: ログをファイルに残せない({message})。\
-             標準エラーだけに出して続ける(--log で別の道を指せる)"
+            "uniqnode: {role}: cannot keep the log in a file ({message}); \
+             continuing with standard error only (--log can name another path)"
         ),
     }
 }
@@ -1294,7 +1328,7 @@ fn parse_mcp_options(rest: &[String]) -> McpOptions {
                 let collection = rest.get(at + 1).cloned().unwrap_or_else(|| usage());
                 if collection.is_empty() || collection.contains('/') {
                     eprintln!(
-                        "uniqnode: --writable はコレクション名(空でなく / を含まない 1 語): \
+                        "uniqnode: --writable takes a collection name (one non-empty word without /): \
                          {collection:?}"
                     );
                     std::process::exit(2);
@@ -1346,14 +1380,14 @@ fn parse_autodeploy_options(dir: &str, rest: &[String]) -> uniqnode::autodeploy:
         (Some(dir), _) => std::path::PathBuf::from(dir),
         (None, Some(home)) => std::path::Path::new(home).join(uniqnode::autodeploy::STATE_SUBDIR),
         (None, None) => {
-            eprintln!("uniqnode: autodeploy: HOME が無いので --state-dir の既定を決められない");
+            eprintln!("uniqnode: autodeploy: HOME is not set, so the default --state-dir cannot be decided");
             std::process::exit(2);
         }
     };
     let binary = match found.get("--bin") {
         Some(binary) => std::path::PathBuf::from(binary),
         None => {
-            eprintln!("uniqnode: autodeploy: 置き換えるバイナリを --bin で指す");
+            eprintln!("uniqnode: autodeploy: name the binary to replace with --bin");
             std::process::exit(2);
         }
     };
@@ -1376,7 +1410,7 @@ fn parse_install_autodeploy_options(dir: &str, rest: &[String]) -> uniqnode::aut
         std::process::exit(1);
     };
     let euid = uniqnode::install::effective_uid().unwrap_or_else(|e| fail(e));
-    // 据え先と利用者の決め方は install --system と同じ(root で走らせ、--user か SUDO_USER)。
+    // デプロイ先と利用者の決め方は install --system と同じ(root で走らせ、--user か SUDO_USER)。
     let scope = uniqnode::install::scope(
         true,
         found.get("--user").cloned(),
@@ -1384,7 +1418,7 @@ fn parse_install_autodeploy_options(dir: &str, rest: &[String]) -> uniqnode::aut
         euid,
     )
     .unwrap_or_else(|e| fail(e));
-    let account = scope.account().cloned().unwrap_or_else(|| fail("利用者が決まらない".to_string()));
+    let account = scope.account().cloned().unwrap_or_else(|| fail("the account cannot be determined".to_string()));
     let binary = found
         .get("--bin")
         .map(std::path::PathBuf::from)
@@ -1403,11 +1437,11 @@ fn parse_install_autodeploy_options(dir: &str, rest: &[String]) -> uniqnode::aut
 }
 
 /// install の指定。既定は home の下(node/src/install.rs の Options::defaults。--system なら
-/// 実行ユーザの home)。知らない引数は黙って捨てず usage で落とす。据え先(user/system と
+/// 実行ユーザの home)。知らない引数は黙って捨てず usage で落とす。デプロイ先(user/system と
 /// 実行ユーザ)の判断は install::scope にあり、ここは環境(HOME・SUDO_USER・実効 uid)を
 /// 読んで渡すだけ。
 fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Options {
-    // 1 巡目: 引数を集める(既定は据え先が決まってから組む)。
+    // 1 巡目: 引数を集める(既定はデプロイ先が決まってから組む)。
     let mut system = false;
     let mut instance: Option<String> = None;
     let mut user: Option<String> = None;
@@ -1507,13 +1541,13 @@ fn parse_install_options(dir: &str, rest: &[String]) -> uniqnode::install::Optio
     )
     .unwrap_or_else(|e| fail(e));
     // 既定の置き場の根。system 単位なら実行ユーザの home(sudo は HOME を root のものに
-    // 替えるので、HOME は据える相手の home ではない)。
+    // 替えるので、HOME はデプロイする相手の home ではない)。
     let home = match scope.account() {
         Some(account) => account.home.clone(),
         None => match std::env::var_os("HOME") {
             Some(home) if !home.is_empty() => std::path::PathBuf::from(home),
             _ => {
-                eprintln!("uniqnode: install: HOME が無いので既定の置き場を決められない");
+                eprintln!("uniqnode: install: HOME is not set, so the default places cannot be decided");
                 std::process::exit(2);
             }
         },
@@ -1664,8 +1698,8 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                     // 同型。mcp の --serve-url と --embed の扱いと同じ)。
                     if pdftotext.is_some() {
                         eprintln!(
-                            "uniqnode: ingest: --serve-url と --pdftotext は併用しない\
-                             (PDF を抽出するのは転送先の serve で、serve が PATH から引く)"
+                            "uniqnode: ingest: --serve-url and --pdftotext are not used together \
+                             (the serve forwarded to extracts PDFs and finds pdftotext on its PATH)"
                         );
                         std::process::exit(2);
                     }
@@ -1699,14 +1733,14 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             if paths.is_empty() {
                 // 既定の道の一覧は持たない(どの木の何を入れるかは呼び手の決めること)。
                 eprintln!(
-                    "uniqnode: ingest-git: --paths で取り込む道を与える(例 --paths DESIGN.md,docs/design)"
+                    "uniqnode: ingest-git: give the paths to ingest with --paths (for example --paths DESIGN.md,docs/design)"
                 );
                 std::process::exit(2);
             }
             if serve_url.is_some() && pdftotext.is_some() {
                 eprintln!(
-                    "uniqnode: ingest-git: --serve-url と --pdftotext は併用しない\
-                     (PDF を抽出するのは転送先の serve で、serve が PATH から引く)"
+                    "uniqnode: ingest-git: --serve-url and --pdftotext are not used together \
+                     (the serve forwarded to extracts PDFs and finds pdftotext on its PATH)"
                 );
                 std::process::exit(2);
             }
@@ -1758,7 +1792,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 &mut store, collection, wrong_id, new_id, reason,
             )?;
             println!(
-                "corrects: {} (再照合 一致 {}/{}, verification={})",
+                "corrects: {} (re-matched {}/{}, verification={})",
                 outcome.corrects_edge_id,
                 outcome.matched_tokens,
                 outcome.total_tokens,
@@ -1781,7 +1815,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             );
             if !report.unlisted_packs.is_empty() {
                 println!(
-                    "unlisted packs (MANIFEST に無く最後でもない。事実であってエラーではない): {}",
+                    "unlisted packs (neither in MANIFEST nor the last one; a fact, not an error): {}",
                     report
                         .unlisted_packs
                         .iter()
@@ -1819,16 +1853,16 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 println!("copied {name}");
             }
             for name in &report.settings_only_in_backup {
-                println!("only in backup {name} (写し元には無い。消していない)");
+                println!("only in backup {name} (not in the source; not deleted)");
             }
             for name in &report.packs_removed {
                 println!("removed {name} (not in source MANIFEST)");
             }
             for name in &report.segments_only_in_backup {
-                println!("only in backup {name} (写し元には無い。消していない)");
+                println!("only in backup {name} (not in the source; not deleted)");
             }
             for (name, bytes) in &report.torn_tails_cut {
-                println!("cut {name} ({bytes} bytes の書き込み途中の尻尾を検証で切り詰めた)");
+                println!("cut {name} ({bytes} bytes: a partly written tail truncated by verification)");
             }
             println!(
                 "backup: sealed copied {} unchanged {}, active {}, removed {}, settings {}, \
@@ -1889,7 +1923,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
         "admin-keygen" => {
             let path = std::path::Path::new(dir);
             if path.exists() {
-                return Err(StoreError::Invalid(format!("{dir} は既に存在する")));
+                return Err(StoreError::Invalid(format!("{dir} already exists")));
             }
             let seed = uniqnode::ed25519::generate_secret_seed()?;
             std::fs::write(path, uniqnode::sha2::hex(&seed))?;
@@ -1911,7 +1945,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                     .get(1)
                     .and_then(|d| d.parse().ok())
                     .filter(|d| (1..=3650).contains(d))
-                    .ok_or_else(|| StoreError::Invalid("days は 1..=3650".into()))?;
+                    .ok_or_else(|| StoreError::Invalid("days must be in 1..=3650".into()))?;
                 uniqnode::groups::make_statement(
                     "membership",
                     node_id,
@@ -1923,28 +1957,28 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 uniqnode::groups::make_statement("revocation", node_id, group_id, now, None)
             };
             let bytes = uniqnode::c1::to_canonical_bytes(&statement);
-            println!("{}", String::from_utf8(bytes).expect("c1 は UTF-8"));
+            println!("{}", String::from_utf8(bytes).expect("c1 is UTF-8"));
         }
         "cert-sign" => {
             let seed_hex = std::fs::read_to_string(dir)?;
             let seed_bytes = uniqnode::sha2::from_hex(seed_hex.trim())
                 .filter(|b| b.len() == 32)
-                .ok_or_else(|| StoreError::Invalid("鍵ファイルが32バイトの16進でない".into()))?;
+                .ok_or_else(|| StoreError::Invalid("the key file is not 32 bytes of hex".into()))?;
             let mut seed = [0u8; 32];
             seed.copy_from_slice(&seed_bytes);
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
             let mut statement = uniqnode::c1::parse(&input)
-                .map_err(|e| StoreError::Invalid(format!("入力が JSON でない: {e}")))?;
+                .map_err(|e| StoreError::Invalid(format!("the input is not JSON: {e}")))?;
             uniqnode::groups::add_signature(&mut statement, &seed);
             let bytes = uniqnode::c1::to_canonical_bytes(&statement);
-            println!("{}", String::from_utf8(bytes).expect("c1 は UTF-8"));
+            println!("{}", String::from_utf8(bytes).expect("c1 is UTF-8"));
         }
         "cert-verify" => {
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
             let certificate = uniqnode::c1::parse(&input)
-                .map_err(|e| StoreError::Invalid(format!("入力が JSON でない: {e}")))?;
+                .map_err(|e| StoreError::Invalid(format!("the input is not JSON: {e}")))?;
             let groups = uniqnode::groups::read_groups(std::path::Path::new(dir));
             match uniqnode::groups::verify_membership(&certificate, &groups, unix_now()) {
                 Ok(group_id) => println!("ok: group {group_id}"),
@@ -1961,8 +1995,8 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // (must/0022 の同型)。ストアを開く前に言う。
             if let Some(flag) = options.rerank_flag() {
                 eprintln!(
-                    "uniqnode: embed: {flag} は embed の引数ではない(順位の取り直しは検索の\
-                     層のもので、装備するのは serve と、ストアを直接開く形の mcp である)"
+                    "uniqnode: embed: {flag} is not an argument of embed (reranking belongs to the search \
+                     layer, which serve and mcp opening the store directly carry)"
                 );
                 std::process::exit(2);
             }
@@ -1985,12 +2019,12 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             };
             if cache.discarded_tail_bytes() > 0 {
                 eprintln!(
-                    "uniqnode: {} の末尾 {} バイトを捨てた(追記の途中で止まった記録)",
+                    "uniqnode: discarded the last {1} bytes of {0} (a record cut off in the middle of an append)",
                     path.display(),
                     cache.discarded_tail_bytes()
                 );
             }
-            println!("cache: {} ({} ベクトル)", path.display(), cache.vector_count());
+            println!("cache: {} ({} vectors)", path.display(), cache.vector_count());
             println!("model: {} ({})", embedder.embedder_id(), embedder.endpoint());
             let mut last = 0usize;
             let report = uniqnode::embed::fill_cache(&store, &embedder, &mut cache, &mut |progress| {
@@ -2043,8 +2077,8 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                     // (must/0022 の同型)。
                     if let Some(flag) = options.run.embed.misplaced_equipment_flag() {
                         uniqnode::log_line!(
-                            "uniqnode: mcp: --serve-url と {flag} は併用しない\
-                             (埋め込みと順位の取り直しを装備するのは転送先の serve である)"
+                            "uniqnode: mcp: --serve-url and {flag} are not used together \
+                             (embedding and reranking belong to the serve forwarded to)"
                         );
                         std::process::exit(2);
                     }
@@ -2106,7 +2140,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             let stdout = std::io::stdout();
             // 終わりの理由もログに残す(標準エラーだけに出すと、登録した相手の中で消える)。
             if let Err(error) = server.serve(&mut input, &mut stdout.lock()) {
-                uniqnode::log_line!("uniqnode: mcp: 標準入出力が壊れた: {error}");
+                uniqnode::log_line!("uniqnode: mcp: standard input or output broke: {error}");
                 std::process::exit(1);
             }
         }
@@ -2152,19 +2186,19 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // 受け付ける」と信じてよい。だから束縛の後でも、ストアを開いて装備し終えるまでは
             // この行を出さず accept もしない。その間に落ちるもの(ロックを持つ別プロセス、
             // 誤った URL)は、行を出さないうちに理由を言って終わる。行を出してから開くと、
-            // 待つ側は騙され、その後で exit 1 する(2026-09-05 に systemd の据え付けで観測)。
+            // 待つ側は騙され、その後で exit 1 する(2026-09-05 に systemd のデプロイで観測)。
             let listener = match std::net::TcpListener::bind(address) {
                 Ok(listener) => listener,
                 Err(error) => {
-                    uniqnode::log_line!("uniqnode: serve: {address} に束縛できない: {error}");
+                    uniqnode::log_line!("uniqnode: serve: cannot bind to {address}: {error}");
                     std::process::exit(1);
                 }
             };
             let hooks = main_door.test_hooks_in_use();
             if !hooks.is_empty() {
                 uniqnode::log_line!(
-                    "uniqnode: serve: 主の口のテスト用の口が効いている({})。debug ビルドの試験用で、\
-                     常駐には置かない",
+                    "uniqnode: serve: the main door's test hook is active ({}); it is for tests of debug builds \
+                     and must not be used in a deployment",
                     hooks.join(", ")
                 );
             }
@@ -2183,7 +2217,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             let store = match uniqnode::store::Store::open(store_config) {
                 Ok(s) => std::sync::Arc::new(std::sync::Mutex::new(s)),
                 Err(e) => {
-                    uniqnode::log_line!("uniqnode: ストアを開けない: {e}");
+                    uniqnode::log_line!("uniqnode: cannot open the store: {e}");
                     std::process::exit(1);
                 }
             };
@@ -2223,7 +2257,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             std::io::stdout().flush()?;
             // 標準出力の 1 行は起動スクリプトとの取り決めなので形を変えない。ログにも
             // 残すのは、後から「いつ、どのアドレスで起きたか」を読めるようにするため。
-            uniqnode::log_line!("uniqnode: serve: {bound} で待ち受ける");
+            uniqnode::log_line!("uniqnode: serve: listening on {bound}");
             let mut main_hosts = uniqnode::main_door::default_hosts(bound);
             for host in &options.main_allow_host {
                 if !main_hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
@@ -2232,7 +2266,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             }
             let gate = uniqnode::http::BrowserGate::new(&main_hosts);
             uniqnode::log_line!(
-                "uniqnode: serve: 主の口が許す uid は {}、Host は {}",
+                "uniqnode: serve: the main door allows uid {} and Host {}",
                 uniqnode::sock_diag::uid_list(main_door.allowed_uids()),
                 gate.allowed_hosts().join(", ")
             );
@@ -2261,7 +2295,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 let writable = options.agent_writable.clone();
                 if !writable.is_empty() {
                     uniqnode::log_line!(
-                        "uniqnode: serve: 読み口から書けるコレクション: {}",
+                        "uniqnode: serve: collections writable through the agent door: {}",
                         writable.join(", ")
                     );
                 }
@@ -2269,7 +2303,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 let readable = options.agent_collections.clone();
                 if !readable.is_empty() {
                     uniqnode::log_line!(
-                        "uniqnode: serve: 読み口から読めるコレクション: {}",
+                        "uniqnode: serve: collections readable through the agent door: {}",
                         readable.join(", ")
                     );
                 }
@@ -2283,10 +2317,10 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
                 };
                 if !allowed.readable_graphs().is_empty() {
                     uniqnode::log_line!(
-                        "uniqnode: serve: 読み口から読めるグラフ: {}(書けるのは {})",
+                        "uniqnode: serve: graphs readable through the agent door: {} (writable: {})",
                         allowed.readable_graphs().join(", "),
                         match allowed.graphs_writable.is_empty() {
-                            true => "何も無い".to_string(),
+                            true => "none".to_string(),
                             false => allowed.graphs_writable.join(", "),
                         }
                     );
@@ -2326,15 +2360,15 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             // 通るが、効かせる先の無い指定は黙って捨てずに断る(must/0022 の同型)。
             if !options.writable.is_empty() {
                 uniqnode::log_line!(
-                    "uniqnode: viewer: --writable はビューワの引数ではない(書き込みを許すのは \
-                     mcp の指定である)"
+                    "uniqnode: viewer: --writable is not an argument of viewer (write permission is \
+                     an option of mcp)"
                 );
                 std::process::exit(2);
             }
             if let Some(flag) = options.run.embed.misplaced_equipment_flag() {
                 uniqnode::log_line!(
-                    "uniqnode: viewer: {flag} はビューワの引数ではない\
-                     (埋め込みと順位の取り直しを装備するのは転送先の serve である)"
+                    "uniqnode: viewer: {flag} is not an argument of viewer \
+                     (embedding and reranking belong to the serve forwarded to)"
                 );
                 std::process::exit(2);
             }
@@ -2352,7 +2386,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             let listener = match std::net::TcpListener::bind(address) {
                 Ok(listener) => listener,
                 Err(error) => {
-                    uniqnode::log_line!("uniqnode: viewer: {address} に束縛できない: {error}");
+                    uniqnode::log_line!("uniqnode: viewer: cannot bind to {address}: {error}");
                     std::process::exit(1);
                 }
             };
@@ -2362,7 +2396,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             println!("listening on {bound}");
             std::io::stdout().flush()?;
             uniqnode::log_line!(
-                "uniqnode: viewer: http://{bound} で待ち受ける(検索は {} へ転送する)",
+                "uniqnode: viewer: listening on http://{bound} (searches are forwarded to {})",
                 viewer.serve_url()
             );
             let handler: std::sync::Arc<uniqnode::http::Handler> =
@@ -2376,7 +2410,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             let mut store = open(dir);
             let root = rest[0].as_str();
             let min_replicas: u32 = rest[1].parse().map_err(|_| {
-                StoreError::Invalid("min_replicas は非負整数".into())
+                StoreError::Invalid("min_replicas must be a non-negative integer".into())
             })?;
             let seq = store.set_pin(root, min_replicas)?;
             if min_replicas > 0 && !store.own_attested_roots().contains(&root.to_string()) {
@@ -2384,7 +2418,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             }
             println!("seq: {seq}");
         }
-        // systemd に据える(SYSTEMD (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2))。手順ごとに
+        // systemd にデプロイする(SYSTEMD (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2))。手順ごとに
         // 1 行を出し、失敗は理由を言って 1 で終わる(途中まで置いたものはそのまま残る。
         // 再実行が更新になるので、直して同じ命令を打てばよい)。
         "install" => {
@@ -2395,7 +2429,7 @@ fn run(command: &str, dir: &str, rest: &[String]) -> Result<(), StoreError> {
             }
         }
         // 自動更新の 1 回のループ(SYSTEMD (uuid:7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「自動
-        // 更新」)。据えなかった回と前のバージョンへ戻した回は理由を言って 1 で終わる。
+        // 更新」)。デプロイしなかった回と前のバージョンへ戻した回は理由を言って 1 で終わる。
         "autodeploy" => {
             let options = parse_autodeploy_options(dir, rest);
             if let Err(message) = uniqnode::autodeploy::run(&options) {

@@ -62,7 +62,7 @@ fn fsck_on_an_empty_directory_refuses_and_creates_nothing() {
     assert!(
         outcome
             .stderr
-            .contains("ストアのデータディレクトリではない"),
+            .contains("is not a store data directory"),
         "断りの理由を言う: {}",
         outcome.stderr
     );
@@ -92,7 +92,7 @@ fn fsck_on_a_missing_directory_refuses_and_does_not_create_it() {
     assert!(
         outcome
             .stderr
-            .contains("ストアのデータディレクトリではない"),
+            .contains("is not a store data directory"),
         "断りの理由を言う: {}",
         outcome.stderr
     );

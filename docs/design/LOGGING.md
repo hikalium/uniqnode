@@ -49,7 +49,7 @@ SPEC §5.1 との関係。§5.1 の「ディスク上のファイルは 2 種類
 ## 行の形
 
 ```
-2026-08-17T03:22:08Z [pid 1536836] uniqnode: search: 低情報チャンク 1 件を応答から落とした(…)
+2026-08-17T03:22:08Z [pid 1536836] uniqnode: search: low-information chunks dropped from the response: 1 (...)
 ```
 
 - 先頭は UTC の時刻(`2026-08-17T03:22:08Z`)。機械や時間帯をまたいでも突き合わせられる。
@@ -132,10 +132,10 @@ serve・mcp・viewer が持つ(常駐する命令だけがログをファイル�
   として標準エラーとファイルの双方に出す(どちらの記録からも、どこに残したかが読める):
 
   ```
-  2026-09-05T08:55:52Z [pid 856878] uniqnode: mcp: 既定のログ先 /var/lib/uniqnode/logs/mcp.log に書けない(Permission denied (os error 13))ので /home/op/.local/state/uniqnode/logs/mcp.log に残す
+  2026-09-05T08:55:52Z [pid 856878] uniqnode: mcp: cannot write the default log /var/lib/uniqnode/logs/mcp.log (Permission denied (os error 13)), so logging to /home/op/.local/state/uniqnode/logs/mcp.log
   ```
 
-  続く起動の記録「ログを … に残す」も倒れ先を言う。動機は system 単位のストア(0750、所有者
+  続く起動の記録「logging to ...」も倒れ先を言う。動機は system 単位のストア(0750、所有者
   uniqnode)に人間の権限で mcp を起こす形([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2))
   で、既定の道には書けず、標準エラーは LLM クライアントが吸うので、倒さなければ誰も読めない
   記録になる。

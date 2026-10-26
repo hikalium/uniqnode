@@ -35,7 +35,7 @@ impl Json {
         let value = reader.value(0)?;
         reader.skip_whitespace();
         if reader.at != reader.bytes.len() {
-            return Err(format!("JSON の末尾に余りがある(位置 {})", reader.at));
+            return Err(format!("trailing data after the JSON (at {})", reader.at));
         }
         Ok(value)
     }
@@ -93,12 +93,12 @@ impl JsonReader<'_> {
     }
 
     fn peek(&self) -> Result<u8, String> {
-        self.bytes.get(self.at).copied().ok_or_else(|| "JSON が途中で終わった".to_string())
+        self.bytes.get(self.at).copied().ok_or_else(|| "the JSON ended early".to_string())
     }
 
     fn expect(&mut self, byte: u8) -> Result<(), String> {
         if self.peek()? != byte {
-            return Err(format!("位置 {} に {:?} を期待した", self.at, char::from(byte)));
+            return Err(format!("expected {1:?} at {0}", self.at, char::from(byte)));
         }
         self.at += 1;
         Ok(())
@@ -109,13 +109,13 @@ impl JsonReader<'_> {
             self.at += word.len();
             Ok(())
         } else {
-            Err(format!("位置 {} が {word} でない", self.at))
+            Err(format!("not {word} at {}", self.at))
         }
     }
 
     fn value(&mut self, depth: usize) -> Result<Json, String> {
         if depth > JSON_MAX_DEPTH {
-            return Err(format!("入れ子が深すぎる(上限 {JSON_MAX_DEPTH})"));
+            return Err(format!("nesting is too deep (the limit is {JSON_MAX_DEPTH})"));
         }
         self.skip_whitespace();
         match self.peek()? {
@@ -143,7 +143,7 @@ impl JsonReader<'_> {
                         }
                         other => {
                             return Err(format!(
-                                "位置 {} に , か }} を期待した(実際は {:?})",
+                                "expected , or }} at {} (found {:?})",
                                 self.at,
                                 char::from(other)
                             ))
@@ -170,7 +170,7 @@ impl JsonReader<'_> {
                         }
                         other => {
                             return Err(format!(
-                                "位置 {} に , か ] を期待した(実際は {:?})",
+                                "expected , or ] at {} (found {:?})",
                                 self.at,
                                 char::from(other)
                             ))
@@ -223,14 +223,14 @@ impl JsonReader<'_> {
                                 Some(character) => out.push(character),
                                 None => {
                                     return Err(format!(
-                                        "位置 {} の \\u{code:04x} が文字にならない",
+                                        "\\u{code:04x} at {} is not a character",
                                         self.at
                                     ))
                                 }
                             }
                         }
                         other => {
-                            return Err(format!("未対応のエスケープ \\{}", char::from(other)))
+                            return Err(format!("unsupported escape \\{}", char::from(other)))
                         }
                     }
                 }
@@ -242,7 +242,7 @@ impl JsonReader<'_> {
                     }
                     match std::str::from_utf8(&self.bytes[start..self.at]) {
                         Ok(fragment) => out.push_str(fragment),
-                        Err(_) => return Err(format!("位置 {start} の文字が UTF-8 でない")),
+                        Err(_) => return Err(format!("the character at {start} is not UTF-8")),
                     }
                 }
             }
@@ -258,7 +258,7 @@ impl JsonReader<'_> {
             let byte = self.peek()?;
             let digit = char::from(byte)
                 .to_digit(16)
-                .ok_or_else(|| format!("位置 {} の \\u が 16 進 4 桁でない", start))?;
+                .ok_or_else(|| format!("\\u at {} is not followed by 4 hex digits", start))?;
             code = code * 16 + digit;
             self.at += 1;
         }
@@ -275,10 +275,10 @@ impl JsonReader<'_> {
             }
         }
         let text = std::str::from_utf8(&self.bytes[start..self.at])
-            .map_err(|_| format!("位置 {start} の数が UTF-8 でない"))?;
+            .map_err(|_| format!("the number at {start} is not UTF-8"))?;
         text.parse::<f64>()
             .map(Json::Number)
-            .map_err(|_| format!("位置 {start} の {text:?} が数でない"))
+            .map_err(|_| format!("{text:?} at {start} is not a number"))
     }
 }
 

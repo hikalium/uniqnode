@@ -40,7 +40,7 @@ pub fn parse(input: &str) -> Result<Value, ParseError> {
     let value = parser.parse_value(0)?;
     parser.skip_whitespace();
     if parser.position != bytes.len() {
-        return Err(parser.error("値の後に余分な入力がある"));
+        return Err(parser.error("extra input after the value"));
     }
     Ok(value)
 }
@@ -74,7 +74,7 @@ impl<'a> Parser<'a> {
             self.position += 1;
             Ok(())
         } else {
-            Err(self.error(&format!("'{}' を期待した", expected as char)))
+            Err(self.error(&format!("expected '{}'", expected as char)))
         }
     }
 
@@ -89,36 +89,36 @@ impl<'a> Parser<'a> {
 
     fn parse_value(&mut self, depth: usize) -> Result<Value, ParseError> {
         if depth > MAX_DEPTH {
-            return Err(self.error("入れ子が深すぎる"));
+            return Err(self.error("nesting is too deep"));
         }
         match self.peek() {
-            None => Err(self.error("値を期待したが入力が尽きた")),
+            None => Err(self.error("expected a value but the input ended")),
             Some(b'n') => {
                 if self.consume_literal("null") {
                     Ok(Value::Null)
                 } else {
-                    Err(self.error("null を期待した"))
+                    Err(self.error("expected null"))
                 }
             }
             Some(b't') => {
                 if self.consume_literal("true") {
                     Ok(Value::Bool(true))
                 } else {
-                    Err(self.error("true を期待した"))
+                    Err(self.error("expected true"))
                 }
             }
             Some(b'f') => {
                 if self.consume_literal("false") {
                     Ok(Value::Bool(false))
                 } else {
-                    Err(self.error("false を期待した"))
+                    Err(self.error("expected false"))
                 }
             }
             Some(b'"') => Ok(Value::Text(self.parse_string()?)),
             Some(b'[') => self.parse_array(depth),
             Some(b'{') => self.parse_object(depth),
             Some(b'-') | Some(b'0'..=b'9') => self.parse_integer(),
-            Some(other) => Err(self.error(&format!("解釈できないバイト 0x{other:02x}"))),
+            Some(other) => Err(self.error(&format!("unexpected byte 0x{other:02x}"))),
         }
     }
 
@@ -132,21 +132,21 @@ impl<'a> Parser<'a> {
             self.position += 1;
         }
         if self.position == digits_start {
-            return Err(self.error("数字を期待した"));
+            return Err(self.error("expected a digit"));
         }
         // 小数・指数は仕様で禁止(SPEC §4.1)。
         if matches!(self.peek(), Some(b'.') | Some(b'e') | Some(b'E')) {
-            return Err(self.error("浮動小数点は c1 では使えない(整数のみ)"));
+            return Err(self.error("floating point is not allowed in c1 (integers only)"));
         }
         let text = std::str::from_utf8(&self.bytes[start..self.position])
-            .expect("数字と'-'のみなので常に UTF-8");
+            .expect("only digits and '-', so always UTF-8");
         let digits = &self.bytes[digits_start..self.position];
         if digits.len() > 1 && digits[0] == b'0' {
-            return Err(self.error("先頭ゼロは許されない"));
+            return Err(self.error("leading zeros are not allowed"));
         }
         match text.parse::<i64>() {
             Ok(v) => Ok(Value::Integer(v)),
-            Err(_) => Err(self.error("64bit 符号付き整数の範囲外")),
+            Err(_) => Err(self.error("out of the range of a 64-bit signed integer")),
         }
     }
 
@@ -155,7 +155,7 @@ impl<'a> Parser<'a> {
         let mut out = String::new();
         loop {
             let b = match self.peek() {
-                None => return Err(self.error("文字列が閉じていない")),
+                None => return Err(self.error("unterminated string")),
                 Some(b) => b,
             };
             match b {
@@ -166,7 +166,7 @@ impl<'a> Parser<'a> {
                 b'\\' => {
                     self.position += 1;
                     let escaped = match self.peek() {
-                        None => return Err(self.error("エスケープが途切れた")),
+                        None => return Err(self.error("truncated escape")),
                         Some(e) => e,
                     };
                     self.position += 1;
@@ -184,46 +184,46 @@ impl<'a> Parser<'a> {
                             if (0xd800..0xdc00).contains(&unit) {
                                 // サロゲートペアの結合。
                                 if !(self.consume_literal("\\u")) {
-                                    return Err(self.error("上位サロゲートに続きがない"));
+                                    return Err(self.error("high surrogate without a continuation"));
                                 }
                                 let low = self.parse_hex4()?;
                                 if !(0xdc00..0xe000).contains(&low) {
-                                    return Err(self.error("下位サロゲートが不正"));
+                                    return Err(self.error("invalid low surrogate"));
                                 }
                                 let code =
                                     0x10000 + ((unit - 0xd800) << 10) + (low - 0xdc00);
                                 match char::from_u32(code) {
                                     Some(c) => out.push(c),
-                                    None => return Err(self.error("不正なコードポイント")),
+                                    None => return Err(self.error("invalid code point")),
                                 }
                             } else if (0xdc00..0xe000).contains(&unit) {
-                                return Err(self.error("孤立した下位サロゲート"));
+                                return Err(self.error("lone low surrogate"));
                             } else {
                                 match char::from_u32(unit) {
                                     Some(c) => out.push(c),
-                                    None => return Err(self.error("不正なコードポイント")),
+                                    None => return Err(self.error("invalid code point")),
                                 }
                             }
                         }
                         other => {
                             return Err(
-                                self.error(&format!("不明なエスケープ \\{}", other as char))
+                                self.error(&format!("unknown escape \\{}", other as char))
                             )
                         }
                     }
                 }
-                0x00..=0x1f => return Err(self.error("文字列中の生の制御文字")),
+                0x00..=0x1f => return Err(self.error("raw control character in a string")),
                 _ => {
                     // UTF-8 のマルチバイト列をそのまま写す。
                     let rest = &self.bytes[self.position..];
                     let text = match std::str::from_utf8(rest) {
                         Ok(t) => t,
                         Err(e) if e.valid_up_to() > 0 => {
-                            std::str::from_utf8(&rest[..e.valid_up_to()]).expect("検証済み")
+                            std::str::from_utf8(&rest[..e.valid_up_to()]).expect("already validated")
                         }
-                        Err(_) => return Err(self.error("不正な UTF-8")),
+                        Err(_) => return Err(self.error("invalid UTF-8")),
                     };
-                    let ch = text.chars().next().expect("少なくとも1文字ある");
+                    let ch = text.chars().next().expect("there is at least one character");
                     out.push(ch);
                     self.position += ch.len_utf8();
                 }
@@ -233,12 +233,12 @@ impl<'a> Parser<'a> {
 
     fn parse_hex4(&mut self) -> Result<u32, ParseError> {
         if self.position + 4 > self.bytes.len() {
-            return Err(self.error("\\u の16進4桁が足りない"));
+            return Err(self.error("\\u needs 4 hex digits"));
         }
         let text = std::str::from_utf8(&self.bytes[self.position..self.position + 4])
-            .map_err(|_| self.error("\\u の16進が不正"))?;
+            .map_err(|_| self.error("invalid hex after \\u"))?;
         let value =
-            u32::from_str_radix(text, 16).map_err(|_| self.error("\\u の16進が不正"))?;
+            u32::from_str_radix(text, 16).map_err(|_| self.error("invalid hex after \\u"))?;
         self.position += 4;
         Ok(value)
     }
@@ -263,7 +263,7 @@ impl<'a> Parser<'a> {
                     self.position += 1;
                     return Ok(Value::Array(items));
                 }
-                _ => return Err(self.error("',' か ']' を期待した")),
+                _ => return Err(self.error("expected ',' or ']'")),
             }
         }
     }
@@ -284,7 +284,7 @@ impl<'a> Parser<'a> {
             self.skip_whitespace();
             let value = self.parse_value(depth + 1)?;
             if map.insert(key, value).is_some() {
-                return Err(self.error("重複キーは許されない"));
+                return Err(self.error("duplicate keys are not allowed"));
             }
             self.skip_whitespace();
             match self.peek() {
@@ -295,7 +295,7 @@ impl<'a> Parser<'a> {
                     self.position += 1;
                     return Ok(Value::Object(map));
                 }
-                _ => return Err(self.error("',' か '}' を期待した")),
+                _ => return Err(self.error("expected ',' or '}'")),
             }
         }
     }

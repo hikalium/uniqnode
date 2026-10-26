@@ -194,7 +194,7 @@ pub fn read_peer_entries(data_dir: &Path) -> Vec<PeerEntry> {
     let value = match c1::parse(&text) {
         Ok(v) => v,
         Err(e) => {
-            crate::log_line!("uniqnode: peers.json が読めない(無視して空扱い): {e}");
+            crate::log_line!("uniqnode: cannot read peers.json (ignoring it and treating it as empty): {e}");
             return Vec::new();
         }
     };
@@ -215,8 +215,8 @@ pub fn read_peer_entries(data_dir: &Path) -> Vec<PeerEntry> {
                     None => DEFAULT_TRUST_LEVEL,
                     Some(_) => {
                         crate::log_line!(
-                            "uniqnode: ピア {address} の trust_level が整数でない(既定 \
-                             {DEFAULT_TRUST_LEVEL} として扱う)"
+                            "uniqnode: the trust_level of peer {address} is not an integer (treating it as the default \
+                             {DEFAULT_TRUST_LEVEL})"
                         );
                         DEFAULT_TRUST_LEVEL
                     }
@@ -235,7 +235,7 @@ pub fn read_peer_entries(data_dir: &Path) -> Vec<PeerEntry> {
                             },
                             Err(reason) => {
                                 crate::log_line!(
-                                    "uniqnode: ピア {address} の証明書を受け入れない: {reason}"
+                                    "uniqnode: not accepting the certificate of peer {address}: {reason}"
                                 );
                                 // 証明書付きのエントリは、証明書が通らなければスコープに
                                 // 入らない(SPEC §6.3)。
@@ -249,8 +249,8 @@ pub fn read_peer_entries(data_dir: &Path) -> Vec<PeerEntry> {
                 if let (Some(declared), Some(certified)) = (&declared_node_id, &certified_node_id) {
                     if declared != certified {
                         crate::log_line!(
-                            "uniqnode: ピア {address} の node_id が証明書と食い違う\
-                             (設定 {declared}, 証明書 {certified})。このエントリは使わない"
+                            "uniqnode: the node_id of peer {address} differs from its certificate \
+                             (configured {declared}, certificate {certified}); not using this entry"
                         );
                         continue;
                     }
@@ -284,8 +284,8 @@ fn read_share(address: &str, share: Option<&c1::Value>) -> crate::search::Collec
                     c1::Value::Text(name) => names.push(name.clone()),
                     _ => {
                         crate::log_line!(
-                            "uniqnode: ピア {address} の share.collections に文字列でない\
-                             要素がある。このエントリへは何も共有しない"
+                            "uniqnode: the share.collections of peer {address} has an element that is not a \
+                             string; sharing nothing with this entry"
                         );
                         return crate::search::CollectionScope::Only(Vec::new());
                     }
@@ -295,8 +295,8 @@ fn read_share(address: &str, share: Option<&c1::Value>) -> crate::search::Collec
         }
         _ => {
             crate::log_line!(
-                "uniqnode: ピア {address} の share が \
-                 {{\"collections\":[…]}} の形でない。このエントリへは何も共有しない"
+                "uniqnode: the share of peer {address} is not of the form \
+                 {{\"collections\":[...]}}; sharing nothing with this entry"
             );
             crate::search::CollectionScope::Only(Vec::new())
         }
@@ -317,7 +317,7 @@ pub fn random_hex_id() -> String {
         Ok(()) => {}
         Err(e) => {
             // ID はセキュリティ境界ではない(ハンドルの識別子)ので、失敗は時刻で代用する。
-            crate::log_line!("uniqnode: /dev/urandom が読めない({e})。時刻で代用する");
+            crate::log_line!("uniqnode: cannot read /dev/urandom ({e}); using the time instead");
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
@@ -500,12 +500,12 @@ fn peer_worker(
                                 return;
                             }
                             Err(e) => {
-                                crate::log_line!("uniqnode: query の保存に失敗: {e}");
+                                crate::log_line!("uniqnode: failed to save the query: {e}");
                                 Err(())
                             }
                         }
                     } else {
-                        crate::log_line!("uniqnode: {address} が {target} と異なる内容を返した(破棄)");
+                        crate::log_line!("uniqnode: {address} returned content that differs from {target} (discarded)");
                         Err(())
                     }
                 }

@@ -594,7 +594,7 @@ fn opening_a_store_whose_parent_is_missing_creates_nothing() {
     let dir = base.join("missing").join("store");
     match Store::open(StoreConfig::new(&dir)) {
         Err(StoreError::Invalid(message)) => {
-            assert!(message.contains("親"), "{message}");
+            assert!(message.contains("parent"), "{message}");
         }
         Err(other) => panic!("Invalid のはずが {other:?}"),
         Ok(_) => panic!("親の無い道を開いた"),
@@ -619,7 +619,7 @@ fn opening_fails_when_the_parent_cannot_be_synced() {
         Err(StoreError::Io(error)) => {
             let message = error.to_string();
             assert!(message.contains(&parent.display().to_string()), "{message}");
-            assert!(message.contains("開くときの sync"), "{message}");
+            assert!(message.contains("sync on open"), "{message}");
         }
         Err(other) => panic!("Io のはずが {other:?}"),
         Ok(_) => panic!("親を sync できないのに開いた"),
@@ -904,7 +904,7 @@ fn a_failed_sync_on_open_fails_the_open_and_writes_nothing() {
             body,
         );
         assert_eq!(status, Some(1), "{spec}: 開くことが失敗する: {stderr}");
-        assert!(stderr.contains("開くときの sync"), "{spec}: 理由を言う: {stderr}");
+        assert!(stderr.contains("sync on open"), "{spec}: 理由を言う: {stderr}");
         assert_eq!(
             lines,
             open_syncs[..n - 1].to_vec(),

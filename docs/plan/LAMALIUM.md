@@ -277,7 +277,7 @@ vega に立て、A は B から pull する。
 | A(複製) | graph_a | /work2/llm_playground_host_dir/uniqnode-graph-replica | 127.0.0.1:7444 | 10.10.128.1:7445 | 127.0.0.1:7454 | コンテナの chat タスクが読む(server-proxy 経由) |
 
 A は B の主の口から `POST /v1/sync {"peer":"127.0.0.1:7442"}` で取り寄せる。刻みは vega の
-system の timer(uniqnode-graph-pull.timer。1 分ごと)で、install が据えるものではない。
+system の timer(uniqnode-graph-pull.timer。1 分ごと)で、install がインストールするものではない。
 複製の口ではなく主の口を指すのは、replication の口が読み口の許可表に無いからである。
 
 読み書きが分かれるのは口ではなく経路である。A には書ける集合を与えず、B への転送を
@@ -379,15 +379,15 @@ PUT と同じ規律。[docs/design/INGEST.md](#47d69a3e-c39a-4e76-9814-e9c242402
 
 | 段 | 内容 | 粒度 |
 |---|---|---|
-| 0 | テンプレート unit 化(`uniqnode-serve@.service`)と install の複数実体対応。これが無いと 2 つ目の実体を据える 1 つの命令が書けない([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「2 つ目のストアを同じ機械で」。should/0118)。読み口の firewall の表名も実体ごとに分ける(下記)。2026-09-08 着地 | M |
+| 0 | テンプレート unit 化(`uniqnode-serve@.service`)と install の複数実体対応。これが無いと 2 つ目の実体をインストールする 1 つの命令が書けない([docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「2 つ目のストアを同じ機械で」。should/0118)。読み口の firewall の表名も実体ごとに分ける(下記)。2026-09-08 着地 | M |
 | 1 | グラフ層の中核と主の口(恒等・状態・ref、ノードの PUT / GET / DELETE / history、辺の PUT / DELETE、一覧、全件の GET)。2026-09-08 着地 | M |
 | 2 | 読み口の許可表(`--agent-graph` / `--agent-graph-writable`)。2026-09-08 着地 | S |
 | 3 | 部分グラフの深さ指定と batch。要ると分かってから | S |
 
 段 0 と段 1 は独立なので順序を入れ替えてよい。段 2 は段 1 に依存する。段 1 が着地するまで、
 また段 2 が着地するまでは、棚卸し担当は口に届かない。グラフの口は主の口(127.0.0.1)にしか
-無く、orion のホストから届くのは読み口だけだからである。3 つとも着地したので、あとは据え
-付けだけが残る。
+無く、orion のホストから届くのは読み口だけだからである。3 つとも着地したので、あとは
+インストールだけが残る。
 
 段 2 から referrers と closure を落とした。相談の初めには「グラフの実体に限って読み口に
 出す」と書いていたが、呼び手が無い。棚卸し担当が引くのはノード・辺・neighbors・全件の 4 つで、
@@ -432,7 +432,7 @@ nft の表は `inet uniqnode_graph_b`(7443)と `inet uniqnode_graph_a`(7445)に�
   GET で足りる。要るとなってから足す。
 
 実行ファイルは 3 実体で 1 つ(`/home/hikalium/.local/bin/uniqnode`)にする裁定だったので、
-本番も次の restart から同じ build になる。据える前に予行した: 本番の写し(55,455 オブジェ
+本番も次の restart から同じ build になる。デプロイする前に予行した: 本番の写し(55,455 オブジェ
 クト / 207 ref)を別の場所に複製し、fsck が errors 0、本番と同じ引数の serve が索引
 31,233 チャンクを 10.5 秒で組んで検索を返し、読み口の断りも従来どおりであることを見た
 (should/0116)。

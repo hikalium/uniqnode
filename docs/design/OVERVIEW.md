@@ -107,9 +107,9 @@ fsck まで通す。何を写して何を写さないかは SPEC §5.1 の「ス
 作業場 `tmp/` は写さない。復元は写しをそのまま serve に渡すか逆向きに backup することで、
 手順は [docs/mop/BACKUP.md](#e026a5e7-1ece-4f4e-b6b8-ee96c62883a2) にある。
 
-据え付けは `uniqnode install <dir>` の 1 命令で、unit と drop-in を置いて起こし、serve と
+インストールは `uniqnode install <dir>` の 1 命令で、unit と drop-in を置いて起こし、serve と
 viewer 経由の `/v1/status` が同じ node_id を返すことと、backup を 1 回走らせた写し先が fsck で
-緑であることを見てから戻る。user 単位(既定)と system 単位(`--system`。root で据え、常駐は
+緑であることを見てから戻る。user 単位(既定)と system 単位(`--system`。root でインストールし、常駐は
 sudo を打った利用者で走り、`--after` で wg1 のような機械の unit を待て、`--listen-agent` で
 LLM エージェント向けの読み口を持てる)の両方を同じ命令が扱う。設定は編集した時点ではなく
 効果を見た時点で完了、という should/0116 をそのまま命令にした形である。手順も手で同じことを

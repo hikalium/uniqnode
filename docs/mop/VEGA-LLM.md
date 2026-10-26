@@ -2,7 +2,7 @@
 
 <a id="71cc086a-cf00-4bb8-bddb-ef5aa68562fe"></a>
 
-読み手は、vega の LLM のサーバーを据え付け、更新し、止める担当 (vega の Claude のセッションなど)。
+読み手は、vega の LLM のサーバーをインストールし、更新し、止める担当 (vega の Claude のセッションなど)。
 unit ファイルは docs/mop/vega-llm/ にある。uniqnode のバイナリには埋め込まない (node/src/install.rs
 の unit とは別)。
 
@@ -32,7 +32,7 @@ systemd が起動し直す。
   nft と CORS で絞る部分は採らない。
 - system 単位ではなく、hikalium の user 単位の unit にする。hikalium は linger が有効
   (`loginctl show-user hikalium -p Linger` が yes) なので、user 単位の unit も vega の起動で
-  起動する。据え付けに root が要らず、プロセスの持ち主も手で起動していたときと同じである。
+  起動する。インストールに root が要らず、プロセスの持ち主も手で起動していたときと同じである。
 - gpt-oss と bge-m3 の引数は、/work2/llm の起動のスクリプト (run-gptoss120b.sh と
   run-bge-m3.sh) が決める。unit はスクリプトを呼ぶだけなので、引数を変えるときはスクリプトを
   直して unit を再起動する。gpt-oss は環境変数 HOST=0.0.0.0 だけを与える (スクリプトの既定は
@@ -46,7 +46,7 @@ systemd が起動し直す。
 - 落ちたら 30 秒後に起動し直し、30 分に 3 回失敗したら諦める (gpt-oss は 1 回の起動で 63 GB を読むため)。
 - 出力は /work2/llm の下のログへ追記する (server-gptoss.log、server-bge-m3.log、server-rerank.log)。
 
-## 据え付けと切り替え
+## インストールと切り替え
 
 vega で hikalium として、uniqnode のチェックアウトの根から実行する。sudo は要らない。
 

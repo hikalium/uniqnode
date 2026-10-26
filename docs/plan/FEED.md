@@ -56,12 +56,12 @@
     うち最後に揃うものより後に終わる分だけである(先に終われば遅れない)。ありそうな形は、S1d(L)も S1c(M。
     裁定が C なら無くなり、B なら縮む)も S1b の後に始まるので S1d が最後に終わり、遅れはおよそ L と M の差、S1c の
     裁定が C なら L の全部である。S1d をゲートに残す案 1 では、反映の直後の vega での受け入れの確かめ(数分と、
-    通らなければ直して据え直すまで)もそれに加わる(APPEND_FAILURE 第 31 版。第 30 版への Claude のレビューの低 2)。
+    通らなければ直して再インストールするまで)もそれに加わる(APPEND_FAILURE 第 31 版。第 30 版への Claude のレビューの低 2)。
     S1d を反映のゲートから外す案は APPEND_FAILURE の「操作者への問い」にあり、裁定待ちである(APPEND_FAILURE
     第 30 版。第 29 版への Claude のレビューの中 2)。
-  - 操作者の作業: F4 で vega に据え付け直しの sudo の 1 ブロック(今の本番の引数を全部残し、`--listen-feed`
+  - 操作者の作業: F4 で vega に再インストールの sudo の 1 ブロック(今の本番の引数を全部残し、`--listen-feed`
     ほかを足す)と、wg1 の AllowedIPs の確認。crystal 側の送り手と外向きの nft は lamalium 側が用意する。
-  - 止まる間: F4 の据え付け直しの間、serve の起こし直しと索引の温め(本番の規模で 10 秒ほど)だけ、主の口・
+  - 止まる間: F4 の再インストールの間、serve の起こし直しと索引の温め(本番の規模で 10 秒ほど)だけ、主の口・
     読み口・viewer が止まる。運用に入った後は、毎時の公開のたびに変わった文書の数だけの fsync と索引の作り直し
     (約 10 秒)の間、検索が待つ(「ロックの長さ」)。待つのは serve のプロセスの中のストアの `Mutex`
     (api.rs の `ApiContext.store`。公開の 1〜8 が持ち、索引の温めの `warm_search_index` もそれを取ったまま
@@ -191,7 +191,7 @@ uniqnode serve … --listen-feed 10.10.128.1:7446 --feed-collection lamalium
 install と firewall:
 
 - `--listen-feed <addr>`・`--feed-collection <c>`・`--feed-firewall-allow <addr,...>` を足し、
-  drop-in の ExecStart に写す。本番の据え付けの 1 行は、今の本番の引数(`--serve-options`・
+  drop-in の ExecStart に写す。本番のインストールの 1 行は、今の本番の引数(`--serve-options`・
   `--listen-agent`・`--agent-writable`・`--agent-collections` の全部・`--after`・
   `--firewall-allow`)をそのまま残し、そこに足す形で書く(Claude 14)。
 - nft は同じ実体の表 `inet uniqnode_<インスタンス>` の同じ chain に、口ごとに 1 規則を足す。
@@ -205,7 +205,7 @@ install と firewall:
   束縛したという記録の行、(2) `nft list table` にその 2 規則が載っていること、の 2 つに限る。
   口が答えることの確認は F4 で crystal から行う(`GET /v1/feeds/lamalium` が 200、許していない
   コレクション名への PUT が 403、検索が 403)。
-- 本番の据え付けは sudo が要るので、操作者に 1 つのコードブロック(実行するホストを明記し、
+- 本番のインストールは sudo が要るので、操作者に 1 つのコードブロック(実行するホストを明記し、
   `2>&1 | ts … | tee /tmp/uniqnode-install-feed.log` 付き)で渡す。
 
 ## 名前の文法(Claude 4・5)
@@ -278,7 +278,7 @@ feed を退役させる(管理下から外す)ときは、主の口にだけ置�
 を tombstone する(pending の target が null でなければ 409。先に下の rollback か前進で片付ける)。
 コレクションの ref はそのまま残り、以後は普通のコレクションとして主の口から書ける
 (Claude N4・D)。退役の手順は、retire を打った後に serve の引数から `--listen-feed` と
-`--feed-collection` を外して据え付け直すところまでを言う(書き口を残すと、送り手の次の run が
+`--feed-collection` を外してインストールし直すところまでを言う(書き口を残すと、送り手の次の run が
 また最初の公開として管理下に戻しうる。最初の公開は target の在る ref があれば 409 なので、
 退役した c では実際には断られる)。
 
@@ -557,7 +557,7 @@ POST /v1/feeds/lamalium/runs/<C>/commit {base, documents}
 | F1 | `DELETE /v1/collections/{c}/documents/{name}`(主の口。管理下なら 409) | S |
 | F2 | 見える ref の判定の関数と、それを通す全ての読む道(索引の走査・世代の束縛・読み出し・出典・読み口の screen・`degraded`)、rollback、「c が見えない」の健全性の集計、feed の 3 本(読む・置く・公開する)と edit・allow-shrink・retire、名前の文法、閉包の検査、管理下の判定(`Store::set_ref` の中)と feed 専用の入口、前進の関数(ストアを開く共通の道と要求の中)、status の欄と 503 の理由、空き容量を読む statvfs の FFI(依存を足さない)、SPEC(§4.3 の previous の形)と design(INGEST・GC・新しい FEED)と SYSTEMD.md の更新 | L |
 | F3 | serve の `--listen-feed`・`--feed-collection` と門・本文の上限、install の引数・nft の 2 規則・確認 | M |
-| F4 | 本番の据え付け(操作者に sudo の 1 ブロック。今の本番の引数を全部残す)、wg1 の AllowedIPs の確認、crystal からの疎通と初回の run の確認 | S |
+| F4 | 本番のインストール(操作者に sudo の 1 ブロック。今の本番の引数を全部残す)、wg1 の AllowedIPs の確認、crystal からの疎通と初回の run の確認 | S |
 
 F2 の完了条件(テストで固定する):
 

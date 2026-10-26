@@ -34,7 +34,7 @@ ENOENT だけを「一致なし」とし、ACK は誤りとする)、照会の�
 数え(/v1/status の main_door.refused_unlogged)、断りのログを待ち行列(256)越しの別スレッドで
 書いて、埋まっていれば書かずに数え(main_door.refusal_logs_dropped)、keep-alive の次の要求を
 待つのを 5 秒にした(主の口に限らずすべての待ち受けで同じ)。
-A3・A4 は未着手。実際の unit の制限の下での確認(完了条件)は、据え付け直しの後に
+A3・A4 は未着手。実際の unit の制限の下での確認(完了条件)は、再インストールの後に
 操作者の sudo で行う。
 出所は lamalium の健全性点検(2026-09-30)の項目 12。SPEC.md §10 は「認証は当面固定トークン」と
 言うが、コードにトークンは無い。表にも実装済みの口が載っていない。FEED の F2 は、主の口にだけ
@@ -69,9 +69,9 @@ A3・A4 は未着手。実際の unit の制限の下での確認(完了条件)�
 - コスト:
   - 大きさ: A1 M、A2 S、A4 S、A5 S。A3 は取り下げた。
   - 操作者の作業: A2 を本番へ入れる前に、vega で旧い名の unit から `@default` へ移す sudo の 1 ブロック
-    (APPEND_FAILURE の S1 と共通で、1 回で両方の前提を満たす)と、据え付け直しの 1 ブロック。
+    (APPEND_FAILURE の S1 と共通で、1 回で両方の前提を満たす)と、再インストールの 1 ブロック。
   - 止まる間: 移行の間(ビルドを先に済ませれば数分)、主の口 7440・読み口 7441・viewer 7450 が止まり、
-    lamalium の検索と保存が失敗する。据え付け直しでは serve の起こし直しと索引の温めの間止まる。
+    lamalium の検索と保存が失敗する。再インストールでは serve の起こし直しと索引の温めの間止まる。
   - 危険: 許す uid の設定を誤るか、unit に `AF_NETLINK` が無いまま A2 のバイナリが走ると、主の口の全ての
     接続が 403 になり、Claude Code の MCP(Forward)・viewer・`--serve-url` の CLI が止まる(「A2 の本番への
     反映の前提」)。読み口 7441 は A2 の判定の外なので、lamalium の検索と保存はこの形でも続く。
@@ -125,7 +125,7 @@ distributed_search.rs の 185 行付近)。署名された要求者に対する�
 - 束縛はループバックの IP リテラルだけ(`127.0.0.0/8` と `[::1]`)。`localhost` のような名前・
   unspecified(`0.0.0.0`・`[::]`)・IPv4 射影(`[::ffff:127.0.0.1]`)は断る(Claude 低 7)。serve 自身が
   起動時に断る。例外のフラグは置かない: 認証の無い主の口を網へ出す道を作らない。網越しに要るもの
-  (ピアの要求)は 4 のピア口で受ける(crystal の Codex H1)。install は同じ判定を据え付けの前に
+  (ピアの要求)は 4 のピア口で受ける(crystal の Codex H1)。install は同じ判定をインストールの前に
   早く当てる(Claude 中 5)。
 - uid の制限は serve の中で行う(crystal の Codex H2、vega の Codex 1)。主の口が接続を受けたら、
   要求を 1 バイトも読む前に、相手のソケットを NETLINK_SOCK_DIAG(inet_diag)で 1 件照会し、その
@@ -177,7 +177,7 @@ distributed_search.rs の 185 行付近)。署名された要求者に対する�
     する。root は既定で許されないので、確認は常駐の利用者へ権限を落とした子プロセス(uid・gid・
     補助グループを常駐の利用者のものにしてから繋ぐ)から行う(第 7 版への Codex の再レビューの中)。テストはこれで自分の uid を外し、実際の接続が 403 になることを見る。
   - 配る unit(system と user の uniqnode-serve@.service)の `RestrictAddressFamilies=AF_UNIX AF_INET
-    AF_INET6` に `AF_NETLINK` を足す。無いと照会のソケットを作れず、据え付けた serve が正規の接続まで
+    AF_INET6` に `AF_NETLINK` を足す。無いと照会のソケットを作れず、インストールした serve が正規の接続まで
     403 にする(第 8 版への Codex の再レビューの中)。A2 はこの unit の変更を含む。実装では、serve は
     束縛の後の自己試験(自分から主の口へ繋いで判定する)でこれを見つけ、listening on を出さずに
     2 で終わる(実装への Claude のレビューの高 1。当時の unit は RestartPreventExitStatus= で 2 を起こし直さなかったが、2026-10-26 から自動更新のために起こし直す。docs/mop/SYSTEMD.md)。
@@ -449,7 +449,7 @@ std を呼ばず、子プロセス `getent ahosts -- <host>`(std と同じ NSS �
   指す最初の URL を理由を言って断る(第 14 版。5 の「自分の機械のアドレスも断る」)。
 - root で走る system の install の起動の確認が、root の直接の接続は断る serve に対して通る。
 - `--main-allow-uid` に overflowuid を入れた serve が理由を言って起動を断り、写せない uid の接続が 403 になる。
-- 実際の unit の制限の下(install で据え付けた serve)で、許す uid の接続が通り、許さない uid は断られ、
+- 実際の unit の制限の下(install でインストールした serve)で、許す uid の接続が通り、許さない uid は断られ、
   install の起動の確認が通る。
 - 主の口が、一覧に無い Host に 421、Origin 付きの要求に 403、単純な要求の 3 つの型に 415、JSON の道で
   Content-Type の無い要求に 415 を返すテストがある。http.rs のクライアント・MCP・viewer の転送・install
@@ -476,12 +476,12 @@ A1・A2・A4・A5 はレビューで高の指摘が無いと確かめてから�
 絞ることにしたら、vega の Codex の 2(`collection` を省いた検索は admit を素通りし、主の口は全部を検索する)、
 4(`--agent-collections` の「空は全部」を写すと既定で全公開になる)、7(viewer は rendition を使うが
 読み口の許可表には無い)、8(VIEWER.md の暗号化の要求との関係)を満たす形で改めて設計する。FEED の F2 は A1 と
-A2 の後にする。本番への反映は serve の据え付け直しで、操作者への sudo の依頼として渡す。
+A2 の後にする。本番への反映は serve の再インストールで、操作者への sudo の依頼として渡す。
 
 A2 の本番への反映の前提(第 10 版への Claude のレビューの中 5): vega の主のストアの serve は、今も
 旧い名の unit `uniqnode-serve.service` で動いている(2026-10-01 に `systemctl cat` と
 /etc/systemd/system/ の一覧で確かめた。その `RestrictAddressFamilies=` は `AF_UNIX AF_INET AF_INET6`
-のまま)。`AF_NETLINK` を足すのは `@` のテンプレートだけで、install は旧い名が据え先に残っていると何も
+のまま)。`AF_NETLINK` を足すのは `@` のテンプレートだけで、install は旧い名がインストール先に残っていると何も
 置かずに断る(install.rs の 43〜50 行付近の LEGACY_UNITS)。バイナリだけを差し替えると、sock_diag の
 照会のソケットを作れず、主の口の全ての接続が 403 になる(MCP の Forward・viewer・`--serve-url` の CLI が全部
 止まる)。A2 を本番へ入れる前に、docs/mop/SYSTEMD.md の「旧い名の unit から移る」で
@@ -491,7 +491,7 @@ A2 の本番への反映の前提(第 10 版への Claude のレビューの中 
 vega のバイナリの共有(第 11 版への Claude のレビューの中 5): 旧い `uniqnode-serve.service` と graph_a・
 graph_b の serve は同じ /home/hikalium/.local/bin/uniqnode を走らせる(2026-10-01 に /etc/systemd/system/ の
 drop-in の ExecStart= で確かめた)。共有のバイナリを差し替えると、旧い serve の次の起動(restart・再起動)が
-AF_NETLINK の無い unit で A2 のバイナリを走らせ、主の口の全ての接続が 403 になる。install は据え先に旧い名の
+AF_NETLINK の無い unit で A2 のバイナリを走らせ、主の口の全ての接続が 403 になる。install はインストール先に旧い名の
 unit が残っている間は、インスタンスに依らず何も置かずに断り、共有のバイナリも差し替えない(今の挙動は
 [docs/mop/SYSTEMD.md](#7de68e4a-e6a6-4930-8cc7-a56f90f522e2) の「テンプレートになる前の名の unit から移る」)。
 したがって vega では、どのインスタンスの install も `@default` への移行の後に打つ(同じ文書の「旧い名の

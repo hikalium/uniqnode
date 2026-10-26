@@ -21,7 +21,7 @@ timer が毎日 1 回起こす一回きりの命令である。
 
 unit はテンプレートである。`@` の後がインスタンス名で、同じ機械に何組でも置ける。名前を
 決めるのは `uniqnode install <dir> --instance <名>` で、省くと `default` になる。以下は
-既定のインスタンスで書いてあるので、別の名で据えたなら `default` をその名に読み替える。
+既定のインスタンスで書いてあるので、別の名でインストールしたなら `default` をその名に読み替える。
 
 | unit | 中身 | 待ち受け(既定) | ストアのロック |
 |---|---|---|---|
@@ -150,7 +150,7 @@ unit ファイルは差し替えても drop-in は残る。
   `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` で、~/.local/bin を含まない。
   そこに symlink した pdftotext を手で起こした serve は見つけ、unit の serve は見つけず、
   `POST /v1/collections/web/fetch` の PDF が 503「PDF の取り込みには pdftotext コマンドが
-  必要」で失敗した(実測 2026-09-05。HTML は通る)。install は据える時点の自分の PATH で
+  必要」で失敗した(実測 2026-09-05。HTML は通る)。install はインストールする時点の自分の PATH で
   4 つの道具を探し、見つかったディレクトリを既定の前に置いた `Environment=PATH=…` を
   drop-in に書く(下の表の PATH)。手で置いた unit や、後から別の場所に道具を置いたときは、
   同じ 1 行を drop-in に書く:
@@ -223,17 +223,17 @@ PrivateUsers= なしで効く)と、drop-in に足す行、確認の走らせ方
   写し先を開くと、未封印の尻尾の切り詰めで root 所有のファイルができる)。install が root で
   作ったもの(バイナリの写し、無ければ作るストアと写し先のディレクトリ)は実行ユーザの所有に
   する。最後にストアと写し先の木を歩き、実行ユーザ以外の所有のものが 1 つでもあれば赤で
-  止まる: 据え付けの後にストアと写し先に root 所有のものは残らない。
+  止まる: インストールの後にストアと写し先に root 所有のものは残らない。
 
 root で走らせないと、sudo で走らせる形と tee の例を言って断る。ストアを別のプロセスが開いて
 いれば(user 単位の serve が典型)、止めて外す命令を添えて断り、黙って止めはしない。
 
 ### 旧い名の unit から移る
 
-vega の主のストアは、テンプレートになる前(2026-09-07)に据えた旧い名の unit で動いている:
+vega の主のストアは、テンプレートになる前(2026-09-07)にインストールした旧い名の unit で動いている:
 `uniqnode-serve.service`・`uniqnode-viewer.service`・`uniqnode-backup.service` と
 `uniqnode-backup.timer`(2026-10-01 に `systemctl cat` と /etc/systemd/system/ の一覧で確かめた。
-graph_a・graph_b は既に `@` の名)。install は旧い名が据え先に残っていれば、どのインスタンスを据える
+graph_a・graph_b は既に `@` の名)。install は旧い名がインストール先に残っていれば、どのインスタンスをインストールする
 ときも(`@default` でも graph_a・graph_b でも)何も置かずに断り、全インスタンスが共有するバイナリも
 差し替えない。既定のインスタンスなら、旧い unit と `uniqnode-serve@default.service` が同じ主の口
 (127.0.0.1:7440)と同じストアを取り合い、後から起きた方が束縛かストアのロックで exit 1 になって、
@@ -243,8 +243,8 @@ graph_a・graph_b は既に `@` の名)。install は旧い名が据え先に残
 下の「テンプレートになる前の名の unit から移る」が同じ規則の一般形で、ここは vega の実物に当てた手順。
 
 2026-10-25 から、既定のインスタンスの install に `--retire-legacy-units` を足すと、install 自身が下の外す命令の
-要の部分を行ってから据える(既定でないインスタンスと `--no-start` では断る。旧い unit は主のストアのもので、
-外した回に据え直すのは既定のインスタンスだけだから)。順は、旧い timer を止めて走っている旧い backup の終わりを
+要の部分を行ってからインストールする(既定でないインスタンスと `--no-start` では断る。旧い unit は主のストアのもので、
+外した回に再インストールするのは既定のインスタンスだけだから)。順は、旧い timer を止めて走っている旧い backup の終わりを
 30 分まで待つ、在る旧い unit と drop-in を /var/backups/uniqnode-legacy-<時刻>/units.tar.gz へ、共有のバイナリを
 同じ置き場の uniqnode へ写して確かめる、旧い unit を `disable --now` して消し daemon-reload する、nft に旧い表
 `inet uniqnode` があれば消す、である。旧い表があり読み口(`--listen-agent`)もあるのに `--firewall-allow` が無ければ、
@@ -272,7 +272,7 @@ uniqnode-backup@default.timer` で止める(旧い unit と同じ主の口とス
 ([docs/plan/API_AUTH.md](#abde9b3c-75f8-453b-988e-bfb1e178c771)・
 [docs/plan/APPEND_FAILURE.md](#d973833f-4e2b-4fc8-8a49-42f6821b6a7a) の段取り)。
 
-旧い unit が持っているもの(外すと消えるので、据え直す install の引数で全部作り直されることを確かめて
+旧い unit が持っているもの(外すと消えるので、再インストールする install の引数で全部作り直されることを確かめて
 から外す):
 
 - `uniqnode-serve.service.d/override.conf`: 本番の引数(ストアの道、`--embed`・`--rerank`、読み口
@@ -313,9 +313,9 @@ Claude のレビュー):
   ものが次の起動から戻らない)、一部でも消えていれば打ち直して外し終える(APPEND_FAILURE 第 22 版への Codex と Claude の
   レビューの Codex 低 7。第 22 版は外す行の前に案内を空にしていて、その行の失敗を案内しなかった)。
 - 共有のバイナリ /home/hikalium/.local/bin/uniqnode も同じ退避のディレクトリへ写す(同じレビューの中 4)。
-  install の据え付け(install.rs の 1216〜1255 行付近の `install_binary`)はバイナリを rename で置き換え、
+  install によるデプロイ(install.rs の 1216〜1255 行付近の `install_binary`)はバイナリを rename で置き換え、
   前のものを残さないので、unit だけを戻すと旧い unit が新しいバイナリを走らせる(API_AUTH の A2 のバイナリ
-  なら AF_NETLINK が無く、主の口が全部 403 になる)。戻す命令はこのバイナリも据え直す。
+  なら AF_NETLINK が無く、主の口が全部 403 になる)。戻す命令はこのバイナリも再デプロイする。
 - 最初に確かめ終えた退避を /var/backups/uniqnode-legacy-pinned(退避のディレクトリへの symlink)で固定し、
   戻す命令はこれだけを使う(最新の退避ではない)。`rm -rf` の途中で止まった後にこの命令を打ち直すと、残った
   一部だけの退避が新しく作られるが、固定は既に在るので上書きしない(第 18 版の APPEND_FAILURE への Codex の
@@ -391,7 +391,7 @@ EOF
 
 注意:
 
-- 外してから据え直すまでの間、主の口 7440・読み口 7441・viewer 7450 は止まり、毎日の backup の刻みも
+- 外してから再インストールするまでの間、主の口 7440・読み口 7441・viewer 7450 は止まり、毎日の backup の刻みも
   無い(graph_a・graph_b は別の unit なので動き続ける)。lamalium の読み口への書き込みはこの間
   失敗する。
 - 順は、この外す命令 → 下の「user 単位から移る」の install の命令、でなければならない。逆に打つと、
@@ -401,7 +401,7 @@ EOF
 - vega では、graph_a・graph_b を含むどのインスタンスの install も、この移行の後に打つ(第 17 版の
   APPEND_FAILURE への Claude のレビューの中 5)。旧い `uniqnode-serve.service` と graph_a・graph_b の serve は
   同じ /home/hikalium/.local/bin/uniqnode を走らせ、install は既定でないインスタンスでは旧い名を残した
-  まま共有のバイナリを差し替える(install.rs の 2087〜2096 行付近)。先に graph_* を据え直すと、旧い
+  まま共有のバイナリを差し替える(install.rs の 2087〜2096 行付近)。先に graph_* を再インストールすると、旧い
   serve の次の起動が新しいバイナリを旧い unit で走らせる(API_AUTH の A2 なら AF_NETLINK が無く主の口が
   全部 403、APPEND_FAILURE の S1 なら ExecStop が無い)。install がこの形を断るようにする直しは、
   API_AUTH の A1 か APPEND_FAILURE の S1a(S1 の最初の段)のうち先に入る方に含める。
@@ -410,7 +410,7 @@ EOF
   時刻つきで残る)。続く /tmp/uniqnode-install-system.log も、最後の `exit status: 0` を確かめる。
 - 戻すときは、固定した退避(/var/backups/uniqnode-legacy-pinned。最新の退避ではない)を使う。退避に
   uniqnode-serve.service とバイナリが入っていることを、何かを変える前に確かめる(第 18 版の APPEND_FAILURE への
-  Codex のレビューの中 7、Claude のレビューの低 6)。共有のバイナリを退避のものへ据え直し(同じレビューの中 4)、
+  Codex のレビューの中 7、Claude のレビューの低 6)。共有のバイナリを退避のものへ再デプロイし(同じレビューの中 4)、
   unit の退避を /etc/systemd/system に展開して daemon-reload し、旧い 3 つを enable --now する(同じ主の口を
   取り合うので、`@default` と同時には置かない)。バイナリは graph_a・graph_b の serve と共有なので、それらも次の
   起動から移行の前のバイナリで走る(移行の前と同じ形)。
@@ -433,7 +433,7 @@ EOF
     install しない(第 29 版の APPEND_FAILURE の低 1。検め手として名を出すのも S1d 以後のビルドだけである)。
     S1d をこの反映のゲートに残すかは操作者の裁定待ちである(APPEND_FAILURE の「操作者への問い」)。S1d を main に入れる
     条件は据え物の試験と vega の実物の JSON の据え物で、vega での `--stage running` の 0 は本番への 1 回の反映の直後の
-    受け入れの確かめである。受け入れが 1 なら、直して据え直すまで下の命令は使えない(第 31 版の APPEND_FAILURE)。下の命令はこの命令を前提に
+    受け入れの確かめである。受け入れが 1 なら、直して再インストールするまで下の命令は使えない(第 31 版の APPEND_FAILURE)。下の命令はこの命令を前提に
     するので、S1d がそれを実装するまでは手順の仕様であって、打てる命令としては確定していない(S1d の実装と
     一緒に、試験の通った出力の形に合わせて確定する)。
   - 検めの中身(要点): 数える unit は読み込みの状態に依らない(第 28 版。第 27 版は読み込み済みの unit の一覧
@@ -507,7 +507,7 @@ EOF
     「2 でない」を確かめとして扱い、写した候補を応答を見る前に検め手の名へ rename していた)。採ったときは
     検め手の sha256 と mtime を記録へ出し、今の共有のバイナリとバイト列が違えばそう言って止まる(前の回が既に
     退避のものへ差し替えた後は比べない)。検め手は、vega で最後に
-    打った install と同じコミットの S1d 以後のビルドでなければならない(やめる道の 1 はそれを共有のバイナリに据え、
+    打った install と同じコミットの S1d 以後のビルドでなければならない(やめる道の 1 はそれを共有のバイナリにデプロイし、
     2 の install もそのコミットの checkout から打つ。第 29 版の低 2)。手で置くときも、そのビルドを置く。共有の
     バイナリが退避と同じか、比べられない(`cmp` が 2 以上)ときは、候補を写さずに止まる。検め手は、戻し
     終えたとき、またはやめる道の最後に状態と一緒に消える(前の回の古い検め手が残り続けない)。
@@ -543,7 +543,7 @@ EOF
     どれかが /etc/systemd/system にあれば、上の外す命令と、下の「user 単位から移る」の install の命令を打つ。install は
     S1d 以後で、検め手と同じコミットの checkout から打つ(install は共有のバイナリもそのビルドへ替える)。1. 共有の
     バイナリがまだ退避と同じ(2 を打たずに差し替えた後)なら、確かめた検め手を `install -m 0755 -o hikalium -g hikalium`
-    で /home/hikalium/.local/bin/uniqnode に据える(差し替える前か 2 の install の後なら飛ばす。この回に検め手を
+    で /home/hikalium/.local/bin/uniqnode にデプロイする(差し替える前か 2 の install の後なら飛ばす。この回に検め手を
     確かめていなければ `<確認済みの S1d 以後のビルド>` と書く)。3. 打ったときに次を確かめ、どれかが言えなければ何も
     変えずに止まる: 固定した退避を解けること、共有のバイナリが退避と違うこと(`cmp` の一致・不一致・比べられないを
     分け、一致なら 2 と 1 を打つよう言い、比べられなければ断る)、共有のバイナリが `--probe` に答える S1d 以後の版で
@@ -579,7 +579,7 @@ EOF
     (第 31 版)。共有のバイナリを走らせる service をそこに足したなら、戻す前に外す。vega には unattended-upgrades が
     入っていて(jammy-security を自動で入れる。2026-10-01 に /etc/apt/apt.conf.d を読んで確かめた)、wireguard-tools の
     更新で wg-quick@.service のバイト列か Exec* の行が変わると、wg1 の項目が一致せず、戻したいそのときに検めが断る
-    (第 31 版)。断りの標準エラーはそれを言い、直し方を 2 つ挙げる: 定数を改めた S1d 以後のビルドを据え直す(コードの
+    (第 31 版)。断りの標準エラーはそれを言い、直し方を 2 つ挙げる: 定数を改めた S1d 以後のビルドを再デプロイする(コードの
     変更・レビュー・ビルドの時間がかかる)か、`--after` を外して install を打ち直す(serve が wg1 より先に起きうるので、
     読み口 7441 の束縛が wg1 のアドレスより先に走って失敗し、2 秒おきの起き直しが起動の回数の上限 5 回/10 秒に
     当たれば、手で起こすまで読み口が答えない)。
@@ -715,7 +715,7 @@ preflight() {
     if /usr/bin/cmp -s "$binary" "$saved/uniqnode"; then
       echo "共有のバイナリは既に退避のもの(前の回が差し替えた)なので、検め手と比べない"
     elif ! /usr/bin/cmp -s "$binary" "$checker"; then
-      echo "検め手 $checker は今の共有のバイナリ $binary とバイト列が違う(または比べられない)。検め手は vega で最後に打った install と同じコミットのビルドでなければならない(やめる道の 1 がこれを共有のバイナリに据える)。そのビルドを置き直すか、検め手を消して今の共有のバイナリを候補にしてから打ち直す"
+      echo "検め手 $checker は今の共有のバイナリ $binary とバイト列が違う(または比べられない)。検め手は vega で最後に打った install と同じコミットのビルドでなければならない(やめる道の 1 がこれを共有のバイナリにデプロイする)。そのビルドを置き直すか、検め手を消して今の共有のバイナリを候補にしてから打ち直す"
       exit 1
     fi
     return 0
@@ -784,7 +784,7 @@ echo "旧い名の unit に戻し終えた(状態と検め手も消した)"
 EOF
 ```
 
-  `@default` の unit の現物(テンプレート)と drop-in は残るが、disable したので動かない。据え直すときは上の
+  `@default` の unit の現物(テンプレート)と drop-in は残るが、disable したので動かない。再インストールするときは上の
   外す命令から打ち直す。検め手 /var/backups/uniqnode-legacy-checker と状態のディレクトリ
   /var/backups/uniqnode-legacy-rollback-state(restart・default-enabled・default-active)は、打ち直しとやめる道に
   使うので途中では残り、全部が起きたと確かめたとき、またはやめる道の 3 が全部通ったときに一緒に消える。済んだかは、
@@ -826,7 +826,7 @@ vega の上なら、sudo を使えるどの利用者がどのディレクトリ�
    drop-in に `ExecStartPre=+/usr/sbin/nft -f <その道>` を足す(先頭の + は User= に関わらず
    root で走らせる印)ので、nftables.service が無効な機械でも、serve を起こすたびに規則が入る。
    ufw も nft も無ければその旨で赤。
-3. 据え付けと確認(上の「system 単位で起こす」と同じ。「確認:」が 5 本。`--agent-writable`・
+3. インストールと確認(上の「system 単位で起こす」と同じ。「確認:」が 5 本。`--agent-writable`・
    `--agent-collections`・グラフの許し(`--agent-graph` か `--agent-graph-writable`)があれば
    それぞれさらに 1 本、下の「読み口(--listen-agent)の確認」)。
 4. firewall の効果を見て「確認:」を 1 本足す。ufw なら `ufw allow from 10.10.128.4 to 10.10.128.1
@@ -835,7 +835,7 @@ vega の上なら、sudo を使えるどの利用者がどのディレクトリ�
    こと(入れたのは serve の起動そのもので、install はここで入れ直さない: 再起動のたびに同じ
    道で入ることの証拠になる)。
 5. /tmp/uniqnode-install-system.log を読む。「確認:」の行が 6 本(`--agent-writable` と
-   `--agent-collections` があれば 8 本、グラフの許しもあれば 9 本)並び、最後に「次の刻み:」があれば据え付けは完了である。unit の状態は
+   `--agent-collections` があれば 8 本、グラフの許しもあれば 9 本)並び、最後に「次の刻み:」があればインストールは完了である。unit の状態は
    `systemctl status uniqnode-serve@default uniqnode-viewer@default uniqnode-backup@default.timer`。
 6. user 単位の unit ファイル(~/.config/systemd/user/uniqnode-*)は disable しても残る。
    消すなら `rm ~/.config/systemd/user/uniqnode-*@.service ~/.config/systemd/user/uniqnode-*@.timer`
@@ -912,7 +912,7 @@ crystal 10.10.128.2 へ移すため)。次の 3 つの規則ファイルの集�
 | /etc/systemd/system/uniqnode-serve@graph_a.service.d/agent-door.nft | 7445(graph_a の読み口) | 2026-09-29 |
 | /etc/systemd/system/uniqnode-serve@graph_b.service.d/agent-door.nft | 7443(graph_b の読み口) | 2026-09-30 |
 
-どれも今の集合は `{ 10.10.128.4, 10.10.128.2, 10.10.128.1 }` である。install で据え付け直すと
+どれも今の集合は `{ 10.10.128.4, 10.10.128.2, 10.10.128.1 }` である。install でインストールし直すと
 規則ファイルは `--firewall-allow` の値で書き直されるので、移行の間は 3 つとも
 `--firewall-allow 10.10.128.4,10.10.128.2` を渡す(上の「user 単位から移る」の命令はそうしてある)。
 移行が済んで orion を外すときは `--firewall-allow 10.10.128.2` にする。
@@ -943,7 +943,7 @@ REST(`PUT /v1/collections/{c}/documents/{name}`)か、それを 1 件ずつ打�
 serve を止めずに打てる。ただし主の口は serve の uid の接続だけを受けるので、serve の実行ユーザーで
 打つ)で行い、CLI が要るそれ以外の作業は serve を止めて
 `sudo -u uniqnode /usr/local/bin/uniqnode ingest /var/lib/uniqnode/default …` のように実行ユーザーで
-行う(install --system で据えたなら、その利用者で普通に打つ)。root で走らせると root 所有の
+行う(install --system でインストールしたなら、その利用者で普通に打つ)。root で走らせると root 所有の
 ファイルがストアに残り、次の serve が書けなくなる。
 
 LLM クライアントから使うときの mcp は、それを起こす人間の権限で走る。転送する形は
@@ -995,11 +995,11 @@ uniqnode install <dir> [--listen <addr>] [--viewer-listen <addr>] [--serve-optio
 | `--agent-graph` | 無し(グラフ層は読み口に現れない) | 読み口から読めるグラフ(複数可。`--listen-agent` があるときだけ)。drop-in に `Environment="UNIQNODE_AGENT_GRAPH=<g1> <g2>"` を書き、ExecStart= の末尾に `--agent-graph <g>` を集合の数だけ並べる。確認に「許したグラフが読め、外の名は 403」を足す |
 | `--agent-graph-writable` | 無し | 読み口から読み書きできるグラフ(複数可。`--listen-agent` があるときだけ)。書ける名は読めもする。drop-in に `Environment="UNIQNODE_AGENT_GRAPH_WRITABLE=<g1> <g2>"` を書き、ExecStart= の末尾に `--agent-graph-writable <g>` を集合の数だけ並べる。確認に「許したグラフへの PUT が門を越え、許していないものは 403」を足す(試し書きはしない) |
 | `--instance` | default | 同じ機械に何組も置くための名(下の「2 つ目のストアを同じ機械で」)。unit の名・drop-in の置き場・既定のストアと写し先・nft の表がこの名で分かれる。ASCII の小文字と数字と `_` の 32 字まで |
-| `--system` | — | system 単位に据える(上の「system 単位で起こす」)。root で走らせる |
+| `--system` | — | system 単位にインストールする(上の「system 単位で起こす」)。root で走らせる |
 | `--user` | SUDO_USER | `--system` の実行ユーザ(unit の User=/Group=)。root は断る。`--system` のときだけ |
 | `--after` | 無し | drop-in の `[Unit]` に After= と Wants= で書く unit(複数可。`--system` のときだけ) |
-| `--take-over-user-units` | — | 据える前に実行ユーザの user 単位の常駐を止めて外す(`--system` のときだけ。上の「user 単位から移る」) |
-| `--retire-legacy-units` | — | 据える前に旧い名の unit を退避してから外す(`--system` の既定のインスタンスで、`--no-start` が無いときだけ。上の「旧い名の unit から移る」) |
+| `--take-over-user-units` | — | インストールする前に実行ユーザの user 単位の常駐を止めて外す(`--system` のときだけ。上の「user 単位から移る」) |
+| `--retire-legacy-units` | — | インストールする前に旧い名の unit を退避してから外す(`--system` の既定のインスタンスで、`--no-start` が無いときだけ。上の「旧い名の unit から移る」) |
 | `--firewall-allow` | 無し | このアドレス(IPv4 アドレスか CIDR。カンマで並べられる)からだけ読み口へ届く規則を入れて効果を見る。ufw が active なら ufw allow、そうでなければ nft の表 inet uniqnode_<インスタンス>(規則ファイルを drop-in の隣に置き、serve の ExecStartPre=+nft -f が起動のたびに入れる)。`--system` で `--listen-agent` があるときだけ |
 
 出力は手順ごとに 1 行で、最後に確認した観測(serve と viewer 経由の /v1/status が返した
@@ -1144,11 +1144,11 @@ backup を止めるのは timer である(`systemctl --user stop uniqnode-backup
 
 ## 更新
 
-自動更新を据えた機械(vega)では、バイナリだけの変更に手は要らない。main に入れれば、下の
+自動更新をインストールした機械(vega)では、バイナリだけの変更に手は要らない。main に入れれば、下の
 「自動更新」が数分のうちに常駐を新しい版へ替える。unit・drop-in・nft の規則・インスタンスの増減の
 ように /etc を変える変更だけ、main に入れた後に操作者が `apply` を打ち直す(下の「自動更新」)。
 
-自動更新を据えていない機械では、ビルドしてから同じ引数で `uniqnode install` を打ち直す(バイナリを
+自動更新をインストールしていない機械では、ビルドしてから同じ引数で `uniqnode install` を打ち直す(バイナリを
 写し直し、unit と drop-in を書き直し、restart し、確認まで通す)。system 単位なら同じく sudo で
 `… install … --system … 2>&1 | tee /tmp/uniqnode-install-system.log`。install を使わず
 専用ユーザーで置いた形なら手で:
@@ -1172,7 +1172,7 @@ serve を restart する前に、同じストアを開いているほかのプ�
 
 vega では、uniqnode の main に入った版を、エージェントの手も操作者の手も借りずに常駐へ届ける
 (2026-10-26 の操作者の指示。lamalium の crystal の自動デプロイと同じ形)。日々の更新の経路は常駐と
-同じ利用者(vega では hikalium)だけで走り、sudo を使わない。root を使うのは、据え付けと /etc を
+同じ利用者(vega では hikalium)だけで走り、sudo を使わない。root を使うのは、インストールと /etc を
 変える変更のときに操作者が打つ `apply` だけである。
 
 仕組みは 3 つの部品からなる。
@@ -1183,11 +1183,11 @@ vega では、uniqnode の main に入った版を、エージェントの手も
   (node/src/selfreload.rs)。手で走らせた serve やテストは見張らない。
 - `uniqnode autodeploy <checkout> --bin <path>`(1 回のループ。node/src/autodeploy.rs)。
   1. 状態の置き場(既定 ~/.local/state/uniqnode-autodeploy)に `hold` があれば何もしない。
-  2. `git fetch origin main`。origin/main が、記録(置き場の `record`)の据えた SHA か失敗した SHA と
-     同じなら何もしない(据えたのに publish branch への push が残っていれば、それだけやり直す)。
+  2. `git fetch origin main`。origin/main が、記録(置き場の `record`)のデプロイした SHA か失敗した SHA と
+     同じなら何もしない(デプロイしたのに publish branch への push が残っていれば、それだけやり直す)。
      fetch の失敗は記録せず、次の回にやり直す。
   3. checkout が main のブランチにあり、commit していない変更が無く、origin/main へ fast-forward
-     できることを見る(違えば据えずに 1 で終わる。記録はしない)。fast-forward して
+     できることを見る(違えばデプロイせずに 1 で終わる。記録はしない)。fast-forward して
      `cargo build --release --locked -p uniqnode`、組んだバイナリの `--help` が 0 で終わることを見る。
   4. 今の `<path>` を走らせている uniqnode-serve@* と uniqnode-viewer@* を挙げる(MainPID の
      /proc/<pid>/exe で見る。別のバイナリで動く unit は対象にしない)。組んだバイナリの中身が
@@ -1196,14 +1196,14 @@ vega では、uniqnode の main に入った版を、エージェントの手も
      `<path>` へ、どちらも隣に書いて rename で置く。
   5. 挙げた unit が全て、120 秒のうちに active になり、MainPID の /proc/<pid>/exe が新しい版を指し、
      serve は UNIQNODE_LISTEN の /v1/status に答え、そのまま 15 秒 MainPID が変わらないことを見る。
-  6. 通れば記録の据えた SHA を進め、`--publish-branch`(vega では deployed_on_vega)へその SHA を
+  6. 通れば記録のデプロイした SHA を進め、`--publish-branch`(vega では deployed_on_vega)へその SHA を
      push する。ビルドか確かめが失敗したら、`<path>.prev` を rename で戻し(常駐は自己再起動で以前のバージョンへ
      戻る。戻した版で落ち着いたかはログに残す)、失敗した SHA と戻したことを記録して 1 で終わる。
      その SHA は試し直さない。main が進めば次の SHA を試す。systemctl や写しの一時の失敗は記録せず、
      次の回にやり直す。
   7. 何かを試した回だけ、置き場の `logs/<UTC 時刻>-<SHA>.log` に出力を残す。何もしない回は書かない。
 - `uniqnode-autodeploy.service` と `.timer`(docs/mop/systemd/system/)。service は Type=oneshot で、
-  drop-in の User= の利用者で走る。timer は前の回が終わってから 1 分ごとに起こす。据えるのは
+  drop-in の User= の利用者で走る。timer は前の回が終わってから 1 分ごとに起こす。インストールするのは
   `uniqnode install-autodeploy <checkout> --user <name>`(root で一回)で、checkout がその利用者の
   持ち物で `.git` と `Cargo.toml` を持ち、cargo がその利用者の ~/.cargo/bin か PATH にあることだけを
   見る(root では git を走らせない。利用者の書ける .git/config を root で実行しないため)。
@@ -1212,9 +1212,9 @@ vega では、uniqnode の main に入った版を、エージェントの手も
 起こし直し、回数に上限を置かない(上の「unit の読み方」)。壊れた版が起動で落ちても、autodeploy が
 前のバージョンへ戻せば、sudo 無しで常駐が戻る。
 
-### 据え付け(vega で一回)と、/etc を変える変更
+### インストール(vega で一回)と、/etc を変える変更
 
-vega の据え付けは docs/mop/vega/vega.apply に書いてある。主の知識ストア・graph_b・graph_a の
+vega のインストールは docs/mop/vega/vega.apply に書いてある。主の知識ストア・graph_b・graph_a の
 install と、install-autodeploy の 4 つの命令である。`uniqnode apply <ファイル>`(node/src/apply.rs)は
 空行で区切った塊を 1 つずつ、走っている自分自身(/proc/self/exe)を子にして走らせ、最初の失敗で止まり、
 出力を時刻つきで /var/log/uniqnode-apply-<時刻>-<pid>.log にも残す。前提として、vega のセッションが
@@ -1226,7 +1226,7 @@ sudo /work2/llm_playground_host_dir/uniqnode-deploy/target/release/uniqnode appl
 ```
 
 最初の 1 回は、旧い名の unit を退避して外し(`--retire-legacy-units`)、3 つのインスタンスを新しい
-unit(自己再起動つき)で据え直し、自動更新の timer を据える。再実行してよい。unit・drop-in・nft の
+unit(自己再起動つき)で再インストールし、自動更新の timer をインストールする。再実行してよい。unit・drop-in・nft の
 規則・インスタンスの増減を変える変更は、vega.apply か unit のテンプレートを直して main に入れ、
 deployed_on_vega がその commit に進んだのを見てから、デプロイされた版のバイナリで打つ次の 1 行を
 操作者に渡す(デプロイ用の checkout の target/release には、確かめで落ちて戻した版が残りうるので
@@ -1323,7 +1323,7 @@ a_serve_that_cannot_take_the_store_lock_never_says_listening_on)。
 ## 2 つ目のストアを同じ機械で
 
 unit はテンプレートなので、増えるのは設定の 1 項目であって、ファイルの写しではない
-(should/0118)。2 つ目を据えるのは `--instance` を変えた install 1 回である。
+(should/0118)。2 つ目をインストールするのは `--instance` を変えた install 1 回である。
 
 ```
 sudo /usr/local/bin/uniqnode install /srv/uniqnode-graph --system \
@@ -1347,13 +1347,13 @@ sudo /usr/local/bin/uniqnode install /srv/uniqnode-graph --system \
 
 nft の表を名ごとに分けるのは、規則ファイルが表ごと消して作り直す形だからである。1 つの名を
 共有すると、後から起きた serve が先の実体の規則を消し、その実体の読み口が誰からでも
-届くようになる(2026-09-08 に、2 つ目を据える前に見つけた)。
+届くようになる(2026-09-08 に、2 つ目をインストールする前に見つけた)。
 
 写し先の既定も名ごとに分かれる(`<home>/uniqnode-backup/<名>`)。分けていないと、2 つ目の
 実体の backup が毎日「別のノードの写し(node_key が写し元と違う)」で失敗する。写しは壊れない
 (backup は取り合いに気づいて何も書かずに 1 で終わる)が、毎日 failed が積まれる。
 
-2026-09-08 より前に据えた実体は、写し先が `<home>/uniqnode-backup`(名の付かない道)を
+2026-09-08 より前にインストールした実体は、写し先が `<home>/uniqnode-backup`(名の付かない道)を
 指している。install を打ち直すと既定が `<home>/uniqnode-backup/default` に移り、初回は全件の
 写しになる(増分の起点が無いため)。古い写しはそのまま残るので、確かめてから消す。動かし
 たくなければ `--backup-dir <home>/uniqnode-backup` を明示する(明示した道は名を変えても
@@ -1365,8 +1365,8 @@ nft の表を名ごとに分けるのは、規則ファイルが表ごと消し�
 
 ### テンプレートになる前の名の unit から移る
 
-2026-09-08 より前に据えた機械には、`uniqnode-serve.service` のように `@` の無い名の unit が
-残っている。それが据え先に残っている間、install はどのインスタンスを据えるときも何も置かずに断り、
+2026-09-08 より前にインストールした機械には、`uniqnode-serve.service` のように `@` の無い名の unit が
+残っている。それがインストール先に残っている間、install はどのインスタンスをインストールするときも何も置かずに断り、
 全インスタンスが共有するバイナリも差し替えず(バイト列も mtime も前のまま)、外す命令を出力に添える。
 既定のインスタンスなら、同じ主の口と同じストアを 2 つの unit が取り合う。別の名のインスタンスなら
 取り合いは無いが、バイナリを差し替えると、旧い名の serve の次の起動(restart・再起動)が新しい
@@ -1388,7 +1388,7 @@ drop-in の `UNIQNODE_DATA_DIR` が指したままなので、動かす必要は
 
 別の名のインスタンスを足すだけのつもりでも、古い名の unit が残っている間は同じく断られる
 (上の理由で、共有のバイナリを差し替えられないため)。先に古い名を外し、既定のインスタンスを
-テンプレートで据え直してから、別の名を足す。vega の主のストアに当てた手順(残る drop-in と nft の
+テンプレートで再インストールしてから、別の名を足す。vega の主のストアに当てた手順(残る drop-in と nft の
 中身、止まる間、install との順)は上の「旧い名の unit から移る」。
 
 ## git の木を定期に取り込む

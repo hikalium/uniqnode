@@ -152,7 +152,9 @@ vega の上で動くエージェント(vega のセッションと、vega の上�
    `git rev-parse HEAD` が先頭と一致し、終了コードが 0 で、全てのテストのバイナリが最後まで走り終え、
    落ちたテストが 1 つも無いことを確かめる。
 5. `git push origin <先頭の SHA>:refs/heads/main` で、main を検査したその先頭へ fast-forward する。
-   force push はしない。検査した先頭と違う commit を push しない。
+   force push はしない。検査した先頭と違う commit を push しない。手順 4 の判定を機械で行うなら、
+   判定のコマンドと push を 1 つのコマンド列にして `&&` でつなぎ、判定が 0 以外で終わったら push が
+   走らない形にする。`;` でつなぐと、表に無いテストが落ちたまま push が走る(2026-10-26 に実例がある)。
 6. main が動いて push が拒まれたら、push 済みの commit を rebase しない(must/0011)。新しい
    `origin/main` から新しいブランチを切り、自分の commit を古い順に `git cherry-pick -x` で積み直して、
    手順 3 からやり直す。進んだ main を自分のブランチへ merge しない。

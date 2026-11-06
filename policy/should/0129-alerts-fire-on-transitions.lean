@@ -31,7 +31,7 @@ structure Alert where
   occasion : Occasion
   /-- 出したか。 -/
   fired : Bool
-  /-- 消費者 (誰が読んで何をするか) を設計時に名指したか (should/0111)。 -/
+  /-- 消費者 (誰が読んで何をするか) を設計時に挙げたか (should/0111)。 -/
   consumerNamed : Bool
   /-- 遷移の表をテストで留めてあるか (同じ状態は黙る、段階の越えは出す、クールダウンの中は黙る、
       思い出させるのは間隔の後だけ)。 -/
@@ -65,7 +65,7 @@ def TransitionRule (a : Alert) : Prop :=
 def DiscreteEventNoted (a : Alert) : Prop :=
   a.discreteEvent = true -> a.notedAtEmittingSite = true
 
-/-- 消費者を設計時に名指す。 -/
+/-- 消費者を設計時に挙げる。 -/
 def ConsumerNamed (a : Alert) : Prop :=
   a.consumerNamed = true
 
@@ -109,7 +109,7 @@ theorem untested_transition_table_fails :
   intro h
   cases (h trivial).2.2.2
 
-/-- 要求を満たす例。log_volume_alarm が 1 GB の段階を越えたときに、名指した消費者へ 1 回出し、
+/-- 要求を満たす例。log_volume_alarm が 1 GB の段階を越えたときに、設計時に挙げた消費者へ 1 回出し、
     遷移の表はテストで留めてある。 -/
 theorem tier_crossing_complies :
     Complies { occasion := Occasion.tierCrossed, fired := true, consumerNamed := true,

@@ -22,7 +22,7 @@ structure Ledger where
   reasonAtSite : Bool
   /-- 境界をテストで留めてあるか (1 件を処理済みにし、本番のリセットを走らせ、二度目が無いことを検証する)。 -/
   pinnedByTest : Bool
-  /-- パスを選ぶ前に、主題を消す掃除と台帳を消す掃除の両方を名指したか。 -/
+  /-- パスを選ぶ前に、主題を消す掃除と台帳を消す掃除の両方を挙げたか。 -/
   bothResetsNamed : Bool
 
 /-- 適用のテスト。全ての台帳に当たる。 -/
@@ -36,11 +36,11 @@ def Placement (l : Ledger) : Prop :=
 def Pinned (l : Ledger) : Prop :=
   l.pinnedByTest = true
 
-/-- パスを選ぶ前に両方のリセットを名指す。違う掃除なら置き場所が誤りで、食い違いの向きがどの失敗を買うかを示す。 -/
+/-- パスを選ぶ前に両方のリセットを挙げる。違う掃除なら置き場所が誤りで、食い違いの向きがどの失敗を買うかを示す。 -/
 def ResetsNamed (l : Ledger) : Prop :=
   l.bothResetsNamed = true
 
-/-- 要求。置き場所の規則、テストによる固定、両方のリセットの名指し。 -/
+/-- 要求。置き場所の規則、テストによる固定、両方のリセットを挙げること。 -/
 def Complies (l : Ledger) : Prop :=
   Applies l -> Placement l /\ Pinned l /\ ResetsNamed l
 
@@ -84,7 +84,7 @@ theorem reasoned_crossing_complies :
   intro _
   exact And.intro (Or.inr rfl) (And.intro rfl rfl)
 
-/-- 両方のリセットを名指さずに置き場所を選んだ台帳は、同じ領域にあっても要求を満たさない。 -/
+/-- 両方のリセットを挙げずに置き場所を選んだ台帳は、同じ領域にあっても要求を満たさない。 -/
 theorem unnamed_resets_fails :
     Not (Complies { lifetime := Lifetime.together, reasonAtSite := false, pinnedByTest := true,
                     bothResetsNamed := false }) := by

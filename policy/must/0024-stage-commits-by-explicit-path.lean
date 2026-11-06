@@ -1,14 +1,14 @@
 /-
   must/0024-stage-commits-by-explicit-path の Lean 版。
   条項の本文は同じ名前の .md にあり、食い違ったら .md が優先する。
-  コミットに入れるファイルを選ぶ形を型にし、パスを名指して stage すること、コミット前に
-  確認すること、要る変更だけを入れること、削除も名指すことを要求として表す。
+  コミットに入れるファイルを選ぶ形を型にし、パスを明示して stage すること、コミット前に
+  確認すること、要る変更だけを入れること、削除も明示することを要求として表す。
 -/
 namespace StageCommitsByExplicitPath
 
 /-- コミットに入れるファイルを選んだ形。 -/
 inductive StagingForm where
-  /-- `git add <path> ...` で各ファイルを名指した。 -/
+  /-- `git add <path> ...` で各ファイルを指定した。 -/
   | namedPaths
   /-- `git add -A` か `git add --all`。 -/
   | addAll
@@ -38,18 +38,18 @@ structure Commit where
   onlyRequiredFiles : Bool
   /-- 削除を含むか。 -/
   hasDeletion : Bool
-  /-- 削除も `git rm <path>` か `git add <deleted-path>` で名指したか。 -/
+  /-- 削除も `git rm <path>` か `git add <deleted-path>` で指定したか。 -/
   deletionNamed : Bool
 
 /-- 適用のテスト。このリポジトリで作るコミットの全て。 -/
 def Applies (_c : Commit) : Prop :=
   True
 
-/-- 削除は、その消したパスを名指して stage する。 -/
+/-- 削除は、その消したパスを指定して stage する。 -/
 def DeletionNamed (c : Commit) : Prop :=
   c.hasDeletion = true -> c.deletionNamed = true
 
-/-- 要求。パスを名指して選び、確認し、要るものだけを入れ、削除も名指す。 -/
+/-- 要求。パスを明示して選び、確認し、要るものだけを入れ、削除も明示する。 -/
 def Complies (c : Commit) : Prop :=
   Applies c ->
     c.form.explicit /\ c.stagedFilesConfirmed = true /\ c.onlyRequiredFiles = true /\
@@ -72,7 +72,7 @@ theorem commit_all_fails :
   intro h
   exact (h trivial).1
 
-/-- 名指しで選んでも、確認を省くと要求を満たさない。 -/
+/-- パスを明示して選んでも、確認を省くと要求を満たさない。 -/
 theorem unconfirmed_fails :
     Not (Complies { form := StagingForm.namedPaths, stagedFilesConfirmed := false,
                     onlyRequiredFiles := true, hasDeletion := false,
@@ -81,7 +81,7 @@ theorem unconfirmed_fails :
   have e : false = true := (h trivial).2.1
   cases e
 
-/-- 要求を満たす例。2 つのファイルを名指して add し、status と cached diff を見てからコミットする。 -/
+/-- 要求を満たす例。2 つのファイルを指定して add し、status と cached diff を見てからコミットする。 -/
 theorem named_paths_complies :
     Complies { form := StagingForm.namedPaths, stagedFilesConfirmed := true,
                onlyRequiredFiles := true, hasDeletion := true, deletionNamed := true } := by

@@ -21,7 +21,7 @@ use crate::search::{CollectionScope, SearchIndex};
 /// position から `<文書>#<chunks 列の添字>` を組む。
 ///
 /// チャンクのオブジェクト ID(内容ハッシュ)を使わないのは、コーパスの本文を一字直す
-/// だけで ID が変わり、固定資材に正解として書けなくなるからである。位置で指せば、
+/// だけで ID が変わり、固定資材に正解として書けなくなるからである。位置で表せば、
 /// どの方式が返した結果も同じ名前で突き合わせられる。
 pub fn chunk_name(document: &str, position: usize) -> String {
     format!("{document}#{position}")

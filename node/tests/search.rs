@@ -208,7 +208,7 @@ fn a_paraphrased_query_reaches_its_section_through_the_search_api() {
     );
     // 正解は eval_gap の 0 番(電源断からの復帰)。問いと索引語を一つも共有しないので、
     // BM25 では返らない(評価ハーネスの bm25_cannot_reach_any_vocabulary_gap_pair が
-    // 原理として確かめている対である)。本文の一部で名指しする。
+    // 原理として確かめている対である)。本文の一部で特定する。
     let answer = "無停電電源が尽きて";
     let query = "{\"query\":\"急に電気が消えたときの立ち上げ\",\"top_k\":3";
     let body = body_text(&search(&server.address, &format!("{query},\"method\":\"bm25\"}}")));

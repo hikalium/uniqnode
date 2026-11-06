@@ -2,7 +2,7 @@
   should/0135-one-implementation-per-judgement の Lean 版。
   条項の本文は同じ名前の .md にあり、食い違ったら .md が優先する。
   複数の場所で同じ答えを要る判定を構造にし、実装が 1 か所にあること、意図して残した 2 つ目は
-  一致のテストと理由を持つこと、設計文書が 1 つの置き場を名指すことを要求として表す。
+  一致のテストと理由を持つこと、設計文書が 1 つの置き場を示すことを要求として表す。
 -/
 namespace OneImplementationPerJudgement
 
@@ -30,7 +30,7 @@ structure Judgement where
   reasonRecordedAtDeviatingSite : Bool
   /-- 設計文書がこの判定の置き場を記しているか。 -/
   designDocPlacesJudgement : Bool
-  /-- その設計文書が 1 つの置き場 (toolset::tool_is_usable など) を名指しているか。 -/
+  /-- その設計文書が 1 つの置き場 (toolset::tool_is_usable など) を示しているか。 -/
   designDocNamesSingleHome : Bool
 
 /-- 適用のテスト。複数の場所が要る答えで、マーカーの文字列でもインポートの経路でもないもの。 -/
@@ -48,11 +48,11 @@ def HomeWellPlaced (j : Judgement) : Prop :=
   j.homeNamedForQuestion = true /\ j.homeLivesWithOwningCode = true /\
     j.callersReachItByName = true
 
-/-- 判定の置き場を記す設計文書は、1 つの置き場を名指す。 -/
+/-- 判定の置き場を記す設計文書は、1 つの置き場を示す。 -/
 def DesignDocNamesHome (j : Judgement) : Prop :=
   j.designDocPlacesJudgement = true -> j.designDocNamesSingleHome = true
 
-/-- 要求。条項が当たる判定は、実装が 1 か所にあり、置き場が名前と場所を持ち、設計文書が 1 つの置き場を名指す。 -/
+/-- 要求。条項が当たる判定は、実装が 1 か所にあり、置き場が名前と場所を持ち、設計文書が 1 つの置き場を示す。 -/
 def Complies (j : Judgement) : Prop :=
   Applies j -> SingleHome j /\ HomeWellPlaced j /\ DesignDocNamesHome j
 

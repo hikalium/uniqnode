@@ -2,7 +2,7 @@
   should/0130-new-state-is-the-last-resort の Lean 版。
   条項の本文は同じ名前の .md にあり、食い違ったら .md が優先する。
   異常の扱いの案を構造にし、新しい状態を足すのは 4 つの安い道を順に検討して足りないと示した
-  後に限り、そのときは遷移と消費側を名指すことを要求として表す。
+  後に限り、そのときは遷移と消費側を挙げることを要求として表す。
 -/
 namespace NewStateIsTheLastResort
 
@@ -23,9 +23,9 @@ structure Proposal where
   reuseShownInsufficient : Bool
   /-- どの道がどう足りなかったかを書いたか。 -/
   failedRouteNamed : Bool
-  /-- 足す遷移を名指しているか。 -/
+  /-- 足す遷移を挙げているか。 -/
   namesTransitions : Bool
-  /-- 触る消費側を名指しているか。 -/
+  /-- 触る消費側を挙げているか。 -/
   namesConsumers : Bool
 
 /-- 適用のテスト。状態機械の異常を扱う案。 -/
@@ -37,7 +37,7 @@ def CheaperRoutesExhausted (p : Proposal) : Prop :=
   p.inputFixShownInsufficient = true /\ p.absorbShownInsufficient = true /\
     p.observeShownInsufficient = true /\ p.reuseShownInsufficient = true
 
-/-- 新しい状態を足す案は、安い道を尽くし、失敗した道と遷移と消費側を名指す。 -/
+/-- 新しい状態を足す案は、安い道を尽くし、失敗した道と遷移と消費側を挙げる。 -/
 def NewStateJustified (p : Proposal) : Prop :=
   p.addsNewState = true ->
     CheaperRoutesExhausted p /\ p.failedRouteNamed = true /\ p.namesTransitions = true /\
@@ -69,7 +69,7 @@ theorem reuse_existing_complies :
   intro _ e
   cases e
 
-/-- 4 つの道を尽くして失敗した道と遷移と消費側を名指した案は、新しい状態を足してよい。 -/
+/-- 4 つの道を尽くして失敗した道と遷移と消費側を挙げた案は、新しい状態を足してよい。 -/
 theorem exhausted_routes_complies :
     Complies { handlesAnomalyInStateMachine := true, addsNewState := true,
                inputFixShownInsufficient := true, absorbShownInsufficient := true,

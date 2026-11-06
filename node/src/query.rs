@@ -170,7 +170,7 @@ pub struct PeerEntry {
     /// このエントリが主張する相手の DBノードID(明示の node_id か、証明書の node_id)。
     /// 出ていく側では実際の接触で照合され(健全性エンジン)、入ってくる側では要求者の
     /// 認証に使う(DISTRIBUTED_SEARCH (uuid:e577f6db-659e-4eb8-a152-3b7780e4a9d1))。
-    /// 書かなければ相手を名指しで認証できないので、そのピアからの kind:search には
+    /// 書かなければ相手を特定して認証できないので、そのピアからの kind:search には
     /// 答えられない。
     pub node_id: Option<String>,
     /// 信頼度(SPEC §6.3 の trust_level)。0 は「このピアには答えない」で、それ以外の

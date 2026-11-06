@@ -11,7 +11,7 @@ structure PerformanceChange where
   isPerformanceWork : Bool
   /-- ハーネス、viewer、ホストの道具のどれかの中の仕事か。 -/
   inHarnessViewerOrHostTooling : Bool
-  /-- 直しを書く前に、疑った機構を名指して直接測り、コストを帰属させたか。 -/
+  /-- 直しを書く前に、疑った機構を特定して直接測り、コストを帰属させたか。 -/
   costAttributedBeforeFix : Bool
   /-- 主な根拠の測定を稼働系の上で取ったか。 -/
   primaryFromLiveSystem : Bool

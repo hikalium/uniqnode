@@ -16,12 +16,12 @@
 use crate::embed::{Embedder, HybridSearch, QueryEmbedding, SearchMethod};
 use crate::search::{CollectionScope, SearchIndex};
 
-/// 評価の中でチャンクを名指す名前(この作り方の家はここだけ。should/0135)。引用
+/// 評価の中でチャンクを指す名前(この作り方の家はここだけ。should/0135)。引用
 /// (INGEST (uuid:47d69a3e-c39a-4e76-9814-e9c24240293b) の「文書モデル」セクション)の document と
 /// position から `<文書>#<chunks 列の添字>` を組む。
 ///
 /// チャンクのオブジェクト ID(内容ハッシュ)を使わないのは、コーパスの本文を一字直す
-/// だけで ID が変わり、固定資材に正解として書けなくなるからである。位置で名指せば、
+/// だけで ID が変わり、固定資材に正解として書けなくなるからである。位置で指せば、
 /// どの方式が返した結果も同じ名前で突き合わせられる。
 pub fn chunk_name(document: &str, position: usize) -> String {
     format!("{document}#{position}")
@@ -286,7 +286,7 @@ impl EvalReport {
             .count()
     }
 
-    /// 取りこぼしたクエリの名前(どれが落ちたのかを名指しするため)。
+    /// 取りこぼしたクエリの名前(どれが落ちたのかを示すため)。
     pub fn missed_queries(&self, k: usize) -> Vec<&str> {
         self.queries
             .iter()
@@ -298,8 +298,8 @@ impl EvalReport {
             .collect()
     }
 
-    /// クエリ 1 件の内訳を引く(基準線が動いたときに、どのクエリが動いたのかを名指し
-    /// で調べるため)。
+    /// クエリ 1 件の内訳を引く(基準線が動いたときに、どのクエリが動いたのかを特定し
+    /// て調べるため)。
     pub fn outcome_of(&self, query: &str) -> &QueryOutcome {
         self.queries
             .iter()
@@ -476,7 +476,7 @@ mod tests {
         );
     }
 
-    /// 失敗時に読む内訳が、クエリ・正解・実際の並び・正解の順位を名指しで語る
+    /// 失敗時に読む内訳が、クエリ・正解・実際の並び・正解の順位を挙げて語る
     /// (should/0125)。これが無いと、数値が動いたときにどのクエリが動いたのかを
     /// 読み手が再発見しなければならない。
     #[test]

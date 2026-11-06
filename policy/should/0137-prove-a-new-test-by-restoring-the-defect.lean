@@ -22,7 +22,7 @@ structure TestAddition where
   resultRecordedWithRepair : Bool
   /-- 欠陥が無いとき、代わりに何を変えて走らせたかをテストの脇に記したか。 -/
   variationRecordedAtTest : Bool
-  /-- 所見が名指した機構の数。 -/
+  /-- 所見が挙げた機構の数。 -/
   mechanismsNamed : Nat
   /-- 欠陥を戻す実験で赤を見た機構の数。 -/
   mechanismsProven : Nat
@@ -55,7 +55,7 @@ def ResultTravels (c : TestAddition) : Prop :=
 def VariationRecorded (c : TestAddition) : Prop :=
   c.hasDefectToRestore = false -> c.variationRecordedAtTest = true
 
-/-- 名指された機構の数だけ実験を繰り返す。 -/
+/-- 所見が挙げた機構の数だけ実験を繰り返す。 -/
 def OnePerMechanism (c : TestAddition) : Prop :=
   c.mechanismsProven = c.mechanismsNamed
 
@@ -86,7 +86,7 @@ theorem green_against_restored_defect_fails (recorded : Bool) (n : Nat) :
   have hr := h rfl
   cases And.left (hr.1 rfl)
 
-/-- 5 つの経路を名指した監査の所見に 3 回の実験しか無いと、要求を満たさない。 -/
+/-- 5 つの経路を挙げた監査の所見に 3 回の実験しか無いと、要求を満たさない。 -/
 theorem unproven_mechanisms_fail :
     Not (Complies { reportsTestAdded := true, hasDefectToRestore := true,
                     failedAgainstRestoredDefect := true, passesAfterFixRestored := true,

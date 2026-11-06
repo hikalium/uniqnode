@@ -10,7 +10,7 @@ namespace NoSilentDiscardOfModelOutput
 inductive OnMismatch where
   /-- 開いて失敗する。生の文をそのまま下流へ渡す (要れば未解析とマークを付ける)。 -/
   | failOpen
-  /-- 見える形で拒否する。期待した形を名指す拒否をモデルへ返し、ログの事象を出す。 -/
+  /-- 見える形で拒否する。期待した形を示す拒否をモデルへ返し、ログの事象を出す。 -/
   | rejectVisibly
   /-- 静かに空の結果を返す。内容が消える。 -/
   | quietEmpty
@@ -68,7 +68,7 @@ theorem fail_open_write_complies :
   intro _
   exact And.intro (Or.inl rfl) rfl
 
-/-- 要求を満たす例。期待した形を名指す拒否をモデルへ返すツール呼び出しの解析。 -/
+/-- 要求を満たす例。期待した形を示す拒否をモデルへ返すツール呼び出しの解析。 -/
 theorem reject_visibly_complies :
     Complies { machineReadsModelOutput := true, onMismatch := OnMismatch.rejectVisibly,
                nonconformingInputTested := true } := by

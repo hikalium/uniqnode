@@ -298,8 +298,8 @@ impl EvalReport {
             .collect()
     }
 
-    /// クエリ 1 件の内訳を引く(基準線が動いたときに、どのクエリが動いたのかを特定し
-    /// て調べるため)。
+    /// クエリ 1 件の内訳を引く(基準線が動いたときに、どのクエリが動いたのかを特定して
+    /// 調べるため)。
     pub fn outcome_of(&self, query: &str) -> &QueryOutcome {
         self.queries
             .iter()

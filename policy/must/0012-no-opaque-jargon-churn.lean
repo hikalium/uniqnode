@@ -28,7 +28,7 @@ def ReaderRecoversBehaviour (t : Term) : Prop :=
 def NotACatchAll (t : Term) : Prop :=
   t.isVagueCatchAll = false /\ t.isTheWordChurn = false
 
-/-- 要求。振る舞いを平易で具体的な語で名指す。 -/
+/-- 要求。振る舞いを平易で具体的な語で呼ぶ。 -/
 def Complies (t : Term) : Prop :=
   Applies t -> ReaderRecoversBehaviour t /\ NotACatchAll t
 
@@ -48,7 +48,7 @@ theorem in_house_shorthand_fails :
   have e : false = true := (h rfl).1
   cases e
 
-/-- 要求を満たす例。「空回り」(busy but making no progress) と振る舞いを名指した語。 -/
+/-- 要求を満たす例。「空回り」(busy but making no progress) と振る舞いを具体的に表した語。 -/
 theorem named_behaviour_complies :
     Complies { inCoveredText := true, readerWithoutInternalsUnderstands := true,
                isVagueCatchAll := false, isTheWordChurn := false } := by

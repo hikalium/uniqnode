@@ -610,7 +610,7 @@ fn agent_writable_without_a_door_is_refused_with_exit_2() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// peers を名指しした search は 400 で断る(ストアに届かない)。admit の peers の検査を
+/// peers を指定した search は 400 で断る(ストアに届かない)。admit の peers の検査を
 /// 消すと、この 400 の assert が落ちる(主の口の解釈で 200 か 400 の別の本文になる)。
 #[test]
 fn a_search_that_names_peers_is_refused_with_400() {

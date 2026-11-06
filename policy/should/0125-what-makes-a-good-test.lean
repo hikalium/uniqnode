@@ -12,9 +12,9 @@ structure Test where
   probesObservableBehavior : Bool
   /-- 内部の変数名や関数名を断定しているか。 -/
   assertsInternalNames : Bool
-  /-- 識別子 (セレクタ、id) を名指しているか。 -/
+  /-- 識別子 (セレクタ、id) を指定しているか。 -/
   namesIdentifier : Bool
-  /-- 名指した識別子を失敗の詳細に明記しているか。 -/
+  /-- 指定した識別子を失敗の詳細に明記しているか。 -/
   identifierStatedInFailureDetail : Bool
   /-- 失敗が、破られた期待を 1 文で述べるメッセージを持つか。 -/
   failureHasMessage : Bool
@@ -29,7 +29,7 @@ structure Test where
 def Applies (_t : Test) : Prop :=
   True
 
-/-- 実装ではなく振る舞いを調べる。識別子を名指すなら、失敗の詳細に明記する。 -/
+/-- 実装ではなく振る舞いを調べる。識別子を指定するなら、失敗の詳細に明記する。 -/
 def TestsBehavior (t : Test) : Prop :=
   t.probesObservableBehavior = true /\ t.assertsInternalNames = false /\
     (t.namesIdentifier = true -> t.identifierStatedInFailureDetail = true)

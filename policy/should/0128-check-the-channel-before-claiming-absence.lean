@@ -41,7 +41,7 @@ def ChannelNamed (c : Claim) : Prop :=
 def TentativeInExploratoryNote (c : Claim) : Prop :=
   c.inExploratoryNote = true /\ c.markedUnverified = true
 
-/-- 要求。事実として述べるなら経路を検証して名指す。探索の覚え書きの仮の 0 は、未検証とマークを付ければよい。 -/
+/-- 要求。事実として述べるなら経路を検証して示す。探索の覚え書きの仮の 0 は、未検証とマークを付ければよい。 -/
 def Complies (c : Claim) : Prop :=
   Applies c -> (TentativeInExploratoryNote c \/ (ChannelChecked c /\ ChannelNamed c))
 
@@ -60,7 +60,7 @@ theorem zero_from_truncated_view_fails :
     have e : false = true := k.1.1
     cases e
 
-/-- 計画の文書に書いた 0 は、未検証とマークを付けても、経路を検証して名指さなければ要求を満たさない。 -/
+/-- 計画の文書に書いた 0 は、未検証とマークを付けても、経路を検証して示さなければ要求を満たさない。 -/
 theorem marked_zero_in_plan_document_fails :
     Not (Complies { isAbsenceClaim := true, derivedFromChannel := true,
                     channelObservabilityConfirmed := false, blindSpotCouldSwallow := true,
@@ -82,7 +82,7 @@ theorem positive_claim_outside (c : Claim) (pos : c.isAbsenceClaim = false) :
   have e : false = true := pos.symm.trans a.1
   cases e
 
-/-- 要求を満たす例。死角を生のペイロードで検証し、経路を名指した 0。 -/
+/-- 要求を満たす例。死角を生のペイロードで検証し、経路を示した 0。 -/
 theorem raw_payload_verified_zero_complies :
     Complies { isAbsenceClaim := true, derivedFromChannel := true,
                channelObservabilityConfirmed := true, blindSpotCouldSwallow := true,

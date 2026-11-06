@@ -22,7 +22,7 @@ structure Probe where
   fieldsCopiedFromBuilder : Bool
   /-- 各値を、艦隊が取る元 (resident_context_tokens など) から取ったか。 -/
   valuesFromProductionSource : Bool
-  /-- 所見が、通した組み立て役か呼び出し側を名指しているか。 -/
+  /-- 所見が、通した組み立て役か呼び出し側を挙げているか。 -/
   findingNamesBuilder : Bool
   /-- 所見が、写せなかった欄を列挙しているか。組み立て役を通して省いた欄が無いときも true とする。 -/
   findingListsOmittedFields : Bool
@@ -51,7 +51,7 @@ def RequestFollowsBuilder (p : Probe) : Prop :=
 def RepairDeparturesRecorded (p : Probe) : Prop :=
   p.builderUnderRepair = true -> p.departuresRecordedWithReason = true
 
-/-- 所見は組み立て役を名指し、写せなかった欄を列挙する。 -/
+/-- 所見は組み立て役を挙げ、写せなかった欄を列挙する。 -/
 def FindingNamesBuilder (p : Probe) : Prop :=
   p.findingNamesBuilder = true /\ p.findingListsOmittedFields = true
 

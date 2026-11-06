@@ -150,7 +150,7 @@ pub fn unwritable_graph_refusal(graph: &str, allowed: &Allowed) -> String {
     format!("{ERROR_PREFIX}graph {graph} cannot be written ({allowed})")
 }
 
-/// 読めないコレクションを断る本文。要求が名指しした collection も、オブジェクトの出典の
+/// 読めないコレクションを断る本文。要求が指定した collection も、オブジェクトの出典の
 /// コレクションも、同じ文言で断る(門から見ればどちらも「集合の外を読もうとした」で
 /// ある)。install の確認は期待する本文をこの関数で組む(文言の家は 1 つ。must/0023)。
 pub fn unreadable_refusal(collection: &str, readable: &[String]) -> String {
@@ -165,7 +165,7 @@ pub fn unreadable_refusal(collection: &str, readable: &[String]) -> String {
 /// writable は `--agent-writable` で許したコレクション(与えられた順)。PUT は c がその
 /// 集合にあるときだけ表にあり、集合が空なら PUT は表に無い要求として断る。
 /// readable は `--agent-collections` で許したコレクション(空なら全部)。search が集合の
-/// 外の collection を名指ししていれば、索引を引く前に 403 で断る。
+/// 外の collection を指定していれば、索引を引く前に 403 で断る。
 /// 本文の JSON が壊れているときは断らず通す(壊れた本文を断るのは api::handle の仕事で、
 /// ここで断ると同じ判断が 2 箇所に生える)。
 pub fn admit(
@@ -189,7 +189,7 @@ pub fn admit(
         ("GET", "/v1/collections") => Row::Collections,
         ("GET", _) if object_row(path) == Some(Row::Object) => Row::Object,
         ("GET", _) if object_row(path) == Some(Row::Citation) => Row::Citation,
-        // グラフ層。名指ししたグラフだけを見て、一覧の口(GET /v1/graphs)は開けない:
+        // グラフ層。指定したグラフだけを見て、一覧の口(GET /v1/graphs)は開けない:
         // 許していないグラフの名を知らせないためである(docs/design/GRAPH.md)。
         ("GET", _) if graph_of(path).is_some() => {
             let graph = graph_of(path).expect("the shape checked just above");
@@ -233,7 +233,7 @@ pub fn admit(
     if row == Row::Search && names_peers(body) {
         return Err(api::error_response(400, PEERS_REFUSED));
     }
-    // 集合の外を名指しした検索は、索引を引く前に断る。collection を省いた検索はここを
+    // 集合の外を指定した検索は、索引を引く前に断る。collection を省いた検索はここを
     // 素通りし、handle が渡す share(readable_scope)として run_search の交差に載る。
     if row == Row::Search {
         if let Some(collection) = requested_collection(body) {
@@ -273,7 +273,7 @@ fn object_id_of(path: &str) -> Option<&str> {
     Some(rest.strip_suffix("/citation").unwrap_or(rest))
 }
 
-/// search の本文が名指しした collection。値が文字列でないときと本文が壊れているときは
+/// search の本文が指定した collection。値が文字列でないときと本文が壊れているときは
 /// None である: そこを断るのは api::handle の仕事で、ここで断ると同じ判断が 2 箇所に
 /// 生える(names_peers と同じ規律)。
 fn requested_collection(body: &[u8]) -> Option<String> {
@@ -287,8 +287,8 @@ fn requested_collection(body: &[u8]) -> Option<String> {
     }
 }
 
-/// search の本文が peers を名指ししているか。値が何であれ(true・false・null・配列)
-/// 鍵があれば名指しとみなす: 主の口の解釈(false と null は「散布しない」)を
+/// search の本文が peers を指定しているか。値が何であれ(true・false・null・配列)
+/// 鍵があれば指定とみなす: 主の口の解釈(false と null は「散布しない」)を
 /// ここで写すと、その解釈が変わったときに読み口だけ古い答えを出す。
 fn names_peers(body: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(body) else { return false };
@@ -594,7 +594,7 @@ mod tests {
         assert_eq!(admit("PUT", "/v1/refs/x", b"", &allowed).expect_err("表に無い").status, 403);
     }
 
-    /// 読める集合(--agent-collections): 集合の外を名指しした search は索引を引く前に 403、
+    /// 読める集合(--agent-collections): 集合の外を指定した search は索引を引く前に 403、
     /// 集合の中と collection 省略は通る。出典が集合の外のオブジェクトは応答の側で 403 に
     /// なり、出典が引けない(None)ものは今までどおりの答えが通る。集合が空なら全部読める。
     /// should/0137: admit の readable_scope の検査を消すと最初の 403 が Ok になって落ち、
@@ -623,7 +623,7 @@ mod tests {
             admit("POST", "/v1/search", b"{\"query\":\"x\"}", &reads(&["notes", "papers"])).ok(),
             Some(Row::Search)
         );
-        // 集合が空(指定が無い)なら、どのコレクションを名指ししても通る(既定は全部)。
+        // 集合が空(指定が無い)なら、どのコレクションを指定しても通る(既定は全部)。
         assert_eq!(readable_scope(&[]), crate::search::CollectionScope::All);
         assert_eq!(
             admit("POST", "/v1/search", b"{\"query\":\"x\",\"collection\":\"web\"}", &read_only()).ok(),
@@ -652,7 +652,7 @@ mod tests {
         assert_eq!(unknown.status, 404);
     }
 
-    /// peers を名指しした search は値によらず 400。壊れた JSON はここでは断らない
+    /// peers を指定した search は値によらず 400。壊れた JSON はここでは断らない
     /// (api::handle が断る)。
     #[test]
     fn a_search_that_names_peers_is_refused_before_the_store_sees_it() {

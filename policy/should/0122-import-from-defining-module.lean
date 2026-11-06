@@ -35,7 +35,7 @@ theorem alias_through_main_fails :
   intro h
   cases h rfl
 
-/-- 要求を満たす例。定義するモジュールを名指す `use crate::task::task_field;`。 -/
+/-- 要求を満たす例。定義するモジュールを指す `use crate::task::task_field;`。 -/
 theorem defining_module_path_complies :
     Complies { inNewOrRestructuredCode := true, resolution := Resolution.definingModule } := by
   intro _

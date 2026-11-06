@@ -36,7 +36,7 @@ node/src/agent_door.rs を読む者。この文書は読み口の現在の実装
 
 node/src/agent_door.rs の `admit` の match がこの表そのものである。行の順も同じ。`admit` は
 許した集合(`Allowed`: 書けるコレクション・読めるコレクション・読めるグラフ・書けるグラフ)を
-1 つ受け取り、PUT の行は書ける集合で、search が名指しした `collection` は読める集合で、
+1 つ受け取り、PUT の行は書ける集合で、search が指定した `collection` は読める集合で、
 グラフの行はグラフの 2 つで決まる(どれも判断はこの 1 箇所)。
 
 | method | path | 委ねる先での意味 | 読み口だけの扱い |
@@ -56,7 +56,7 @@ node/src/agent_door.rs の `admit` の match がこの表そのものである�
 既定を開く側にすると、再インストールしただけで本番の読み口がグラフを晒す。
 
 `GET /v1/graphs`(グラフ名の一覧)は表に無い。許していないグラフの名を読み口に知らせない
-ためで、呼び手はグラフを名指しする([docs/design/GRAPH.md](#9d1f73a8-fabd-493e-9003-0a36503c7573))。
+ためで、呼び手はグラフを指定する([docs/design/GRAPH.md](#9d1f73a8-fabd-493e-9003-0a36503c7573))。
 `referrers` と `closure` も表に無いままである: グラフの逆引きは
 `GET /v1/graphs/{g}/nodes/{n}/neighbors` が ref の一覧から直接引くので、汎用の逆引きを読み口に
 出す呼び手が居ない。
@@ -109,10 +109,10 @@ path の別の method(`POST /v1/status` など)。`fetch` は `--agent-writable`
 (空なら `All`、そうでなければ `Only(集合)`)である。効く場所は 4 つで、どれもその 1 つを
 呼ぶ(should/0135):
 
-1. `POST /v1/search`: 要求が `collection` を名指ししていて集合の外なら、索引を引く前に 403。
+1. `POST /v1/search`: 要求が `collection` を指定していて集合の外なら、索引を引く前に 403。
    省略なら、集合を応答側の共有ポリシー(share)として `api::handle_search_within` に渡し、
    要求の絞り込みとの交差は `run_search` の既存の 1 箇所が取る(ピアの QUERY に答える道と
-   同じ仕組みである)。名指しを 403 にするのは、交差に任せると集合の外を指した検索が
+   同じ仕組みである)。集合の外の指定を 403 にするのは、交差に任せると集合の外を指した検索が
    「0 件 + peers.json の share を語る degraded」になり、読み手には一致が無いのか見て
    いないのかが読めないからである。
 2. `GET /v1/collections`: 集合にあるコレクションだけを数えて返す。指しても 403 になる名前を
